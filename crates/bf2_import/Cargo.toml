@@ -1,0 +1,23 @@
+[package]
+name = "bf2_import"
+description = "Converts a Battlefield 2 installation into the game's own formats (glTF, DDS, RON)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bf2-import"
+path = "src/main.rs"
+
+[dependencies]
+bf2_formats.workspace = true
+game_data.workspace = true
+clap = { workspace = true, features = ["env"] }
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+rayon.workspace = true
+serde_json = "1"
+glam = "0.30"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }

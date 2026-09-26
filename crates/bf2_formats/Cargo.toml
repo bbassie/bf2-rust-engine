@@ -1,0 +1,13 @@
+[package]
+name = "bf2_formats"
+description = "Readers for Battlefield 2 file formats (archives, scripts, meshes, terrain). No engine dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zip.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true

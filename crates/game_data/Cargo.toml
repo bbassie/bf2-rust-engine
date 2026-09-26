@@ -1,0 +1,12 @@
+[package]
+name = "game_data"
+description = "The game's own open data formats (levels, terrain, object templates). Written by the importer, read by the game, hand-editable by modders."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+ron.workspace = true
+thiserror.workspace = true

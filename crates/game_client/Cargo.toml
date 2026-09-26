@@ -1,0 +1,35 @@
+[package]
+name = "game_client"
+description = "The game client: rendering, input, prediction, UI. Can also host (listen server / singleplayer)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { workspace = true, features = [
+  "3d",
+  "ui",
+  "audio",
+  "dds",
+  "serialize",
+] }
+avian3d = { workspace = true, features = [
+  "3d",
+  "f32",
+  "parry-f32",
+  "parallel",
+  "simd",
+  "debug-plugin",
+] }
+bevy_replicon = { workspace = true, features = ["client", "server"] }
+bevy_replicon_renet = { workspace = true, features = ["client", "server", "renet_netcode"] }
+game_shared.workspace = true
+game_server.workspace = true
+game_data.workspace = true
+clap.workspace = true
+anyhow.workspace = true

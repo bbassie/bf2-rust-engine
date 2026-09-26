@@ -1,0 +1,9 @@
+/target
+
+# Assets converted from a local Battlefield 2 installation.
+# These are EA's copyrighted data and must never be committed or redistributed.
+/imported/
+
+# Local settings
+/settings.local.ron
+*.log

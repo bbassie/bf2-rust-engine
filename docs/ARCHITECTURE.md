@@ -1,0 +1,113 @@
+# Architecture
+
+## Goals
+
+1. Play Battlefield 2's maps with BF2-style gameplay, multiplayer first, on a modern engine.
+2. Keep EA's content out of the repository: it is imported from the player's own install.
+3. Make it easy to extend: open data formats, plain Bevy ECS, no engine forks.
+
+## The two halves: import time and run time
+
+```
+ BF2 install (zips, .con scripts, meshes)                 imported/ (local, never committed)
+ ┌──────────────────────────────┐   bf2-import   ┌──────────────────────────────────────────┐
+ │ mods/bf2/Objects_client.zip  │ ─────────────▶ │ levels/<name>/level.ron  heightmap.r16   │
+ │ mods/bf2/Levels/X/server.zip │  bf2_formats   │ levels/<name>/colormaps/*.dds            │
+ │ ...                          │                │ templates/<object>.ron                   │
+ └──────────────────────────────┘                │ objects/**/meshes/*.glb, *.collision.glb │
+                                                 │ objects/**/textures/*.dds                │
+                                                 └──────────────────────────────────────────┘
+                                                                     │  game_data (RON schema)
+                                                                     ▼
+                                                        game_shared / game_server / game_client
+```
+
+- **`bf2_formats`** understands BF2: the archive VFS (mounted like the game, first mount
+  wins), the `.con` script interpreter (templates, instances, settings), visible meshes and
+  collision meshes. It has no engine dependency.
+- **`bf2_import`** interprets a level's scripts exactly as the game loads them (`Init.con`,
+  `StaticObjects.con`, `GamePlayObjects.con` per mode/size), converts coordinates
+  (BF2 is left-handed; we mirror Z), writes meshes as glTF and descriptions as RON.
+- **`game_data`** is the schema of our own formats. Nothing BF2-specific: new content can be
+  authored directly in glTF + RON, and that is the intended modding path.
+- **The game never reads BF2 files.** It only reads `game_data` formats. Anything the game
+  needs from BF2 must first go through the importer.
+
+## Run time
+
+### Crates
+
+| crate | runs on | contents |
+|---|---|---|
+| `game_shared` | client + server | protocol registration, `SoldierMotion` + `step_soldier`, level + statics loading (physics) |
+| `game_server` | dedicated server, and inside the client when hosting | connections, players, spawning, input application, bots |
+| `game_client` | client | input, prediction, interpolation, camera, rendering, HUD |
+
+The dedicated server binary uses an explicit headless plugin list (no window, no renderer).
+The client links `game_server` too, so "host" and "singleplayer" are the same code path as a
+dedicated server with a local player (replicon's "listen server" model: server logic runs
+when `ClientState::Disconnected`).
+
+### Networking
+
+- [bevy_replicon](https://github.com/simgine/bevy_replicon) for server-authoritative
+  replication, [renet](https://github.com/lucaspoffo/renet) (netcode) over UDP as transport.
+  Port 16567 by default.
+- The protocol (replicated components, messages) is registered in one place,
+  `game_shared::protocol::ProtocolPlugin`, so client and server always agree; replicon
+  checks a protocol hash on connect.
+- Fixed 60 Hz simulation tick; replication runs on the same tick.
+
+### Player vs soldier
+
+As in BF2, a **`Player`** (name, team, score) outlives the **`Soldier`** bodies it controls.
+`ControlledBy(player)` links them. Players without a soldier respawn after a timer.
+
+### Input, prediction, reconciliation
+
+Every soldier, human or bot, is driven by `InputFrame`s (movement, view angles, buttons,
+sequence number):
+
+1. The client samples input once per fixed tick, keeps a history, and sends the last few
+   frames redundantly (unreliable channel).
+2. The server queues frames per player and applies one per tick with `step_soldier`, then
+   replicates `SoldierMotion` and `InputAck` (the last applied sequence number).
+3. The client runs the same `step_soldier` for its own soldier immediately (prediction).
+   When a server state arrives it rewinds to it, replays unacknowledged inputs, and blends
+   out any difference visually.
+4. Other soldiers are shown ~100 ms in the past, interpolated between received states.
+
+`step_soldier` is a kinematic move-and-slide (avian3d) against the world collision, so it
+is deterministic enough that corrections are normally exactly zero.
+
+Rendering never touches simulated entities: soldier visuals are separate entities placed
+from `SoldierRender` each frame, so smoothing never moves hitboxes.
+
+### Bots
+
+Bots are `Player`s whose `InputBuffer` is filled by a `BotBrain` instead of the network.
+They therefore obey exactly the same movement rules and will later use the same weapons and
+vehicles code. The roadmap has the BF2-style layers (strategic areas, squads, behaviours).
+
+### Levels
+
+`MatchInfo` (replicated) names the level. Client and server both load it from `imported/`:
+heightfield collider, static objects (trimesh colliders from the BF2 soldier collision
+meshes). The client additionally builds terrain chunks (one per BF2 color-map patch),
+water, and loads the glTF meshes of static objects.
+
+## Coordinate conventions
+
+Engine space: meters, right-handed, +Y up, -Z forward (north), +X east.
+BF2 → engine: `(x, y, z) → (x, y, -z)`, rotations
+`yaw/pitch/roll → Ry(-yaw) · Rx(-pitch) · Rz(roll)`, triangle winding reversed.
+See `bf2_import::coords` and [formats/levels-terrain-scripts.md](formats/levels-terrain-scripts.md).
+
+## Reference material
+
+- [formats/meshes.md](formats/meshes.md): visible/collision meshes, skeletons, animations
+- [formats/levels-terrain-scripts.md](formats/levels-terrain-scripts.md): VFS, `.con`, terrain, placement
+- [formats/gameplay-data.md](formats/gameplay-data.md): object templates, vehicles, weapons, damage,
+  game rules, AI, and what needs reverse engineering
+- `tools/reference/*.py`: the tested Python reference parsers these specs were verified with
+  (set `BF2_DIR` to your install)
