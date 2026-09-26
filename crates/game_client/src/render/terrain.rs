@@ -1,7 +1,15 @@
 //! Terrain rendering: the heightfield is cut into chunks so off-screen parts are culled.
 
-use bevy::{asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology};
+use bevy::{
+    asset::RenderAssetUsages,
+    image::{ImageLoaderSettings, ImageSampler},
+    mesh::Indices,
+    prelude::*,
+    render::render_resource::PrimitiveTopology,
+};
 use game_shared::level::{Heightmap, LevelEntity, LoadedLevel, Terrain};
+
+use super::materials::{TerrainLayerParams, TerrainLayers, TerrainMaterial, clamped_sampler};
 
 pub struct TerrainRenderPlugin;
 
@@ -28,6 +36,7 @@ fn build_terrain_visuals(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
 ) {
     for chunk in &old_chunks {
         commands.entity(chunk).despawn();
@@ -43,38 +52,87 @@ fn build_terrain_visuals(
         .filter(|t| !t.color_maps.is_empty())
         .map_or(0, |t| t.color_map_tiles.max(1));
     let chunk_cells = if tiles > 0 { (cells / tiles).max(1) } else { CHUNK_CELLS };
-    let vertex_colored = materials.add(StandardMaterial {
-        perceptual_roughness: 0.95,
-        reflectance: 0.15,
+
+    let level_file = |path: &str| format!("imported://levels/{}/{path}", level.desc.name);
+    let load_patch = |path: &str, srgb: bool| -> Option<Handle<Image>> {
+        (!path.is_empty()).then(|| {
+            asset_server
+                .load_builder()
+                .with_settings(move |s: &mut ImageLoaderSettings| {
+                    s.is_srgb = srgb;
+                    s.sampler = ImageSampler::Descriptor(clamped_sampler());
+                })
+                .load(level_file(path))
+        })
+    };
+    // Detail textures are shared by all patches.
+    let details: Vec<Option<Handle<Image>>> = (0..6)
+        .map(|i| {
+            desc.and_then(|t| t.detail_textures.get(i))
+                .filter(|d| !d.texture.is_empty())
+                .map(|d| asset_server.load(format!("imported://{}", d.texture)))
+        })
+        .collect();
+    let mut params = TerrainLayerParams {
+        side0_fade: Vec4::new(8.0, 16.0, 80.0, 220.0),
         ..default()
-    });
-    let untextured = materials.add(StandardMaterial {
+    };
+    if let Some(t) = desc {
+        let tile = |i: usize| t.detail_textures.get(i).map_or(8.0, |d| d.top_tile_size);
+        params.tile_a = Vec4::new(tile(0), tile(1), tile(2), tile(3));
+        params.tile_b = Vec4::new(tile(4), tile(5), 8.0, 8.0);
+        if let Some(rock) = t.detail_textures.first() {
+            params.side0_fade.x = rock.side_tile_size[0];
+            params.side0_fade.y = rock.side_tile_size[1];
+            if rock.tri_planar {
+                params.flags |= TerrainLayerParams::TRI_PLANAR_0;
+            }
+        }
+    }
+    let untextured = StandardMaterial {
         base_color: Color::srgb(0.35, 0.32, 0.25),
         perceptual_roughness: 0.95,
         ..default()
-    });
+    };
 
     for cz in (0..cells).step_by(chunk_cells as usize) {
         for cx in (0..cells).step_by(chunk_cells as usize) {
             let x1 = (cx + chunk_cells).min(cells);
             let z1 = (cz + chunk_cells).min(cells);
-            let material = if tiles == 0 {
-                vertex_colored.clone()
-            } else {
-                let index = (cz / chunk_cells) * tiles + cx / chunk_cells;
-                match desc.and_then(|t| t.color_maps.get(index as usize)).filter(|p| !p.is_empty()) {
-                    Some(path) => materials.add(StandardMaterial {
-                        base_color_texture: Some(asset_server.load(format!(
-                            "imported://levels/{}/{path}",
-                            level.desc.name
-                        ))),
-                        perceptual_roughness: 0.95,
-                        reflectance: 0.15,
-                        ..default()
-                    }),
-                    None => untextured.clone(),
-                }
+            let index = ((cz / chunk_cells) * tiles.max(1) + cx / chunk_cells) as usize;
+            let color_map = desc
+                .and_then(|t| t.color_maps.get(index))
+                .and_then(|p| load_patch(p, true));
+            let weights = desc.and_then(|t| t.detail_weights.get(index));
+            let mut extension = TerrainLayers {
+                params,
+                weights_a: weights.and_then(|w| load_patch(&w[0], false)),
+                weights_b: weights.and_then(|w| load_patch(&w[1], false)),
+                detail_0: details[0].clone(),
+                detail_1: details[1].clone(),
+                detail_2: details[2].clone(),
+                detail_3: details[3].clone(),
+                detail_4: details[4].clone(),
+                detail_5: details[5].clone(),
             };
+            if extension.weights_a.is_some() {
+                extension.params.flags |= TerrainLayerParams::HAS_WEIGHTS;
+            }
+            let base = match (&color_map, tiles) {
+                (_, 0) => StandardMaterial {
+                    perceptual_roughness: 0.95,
+                    reflectance: 0.15,
+                    ..default()
+                },
+                (Some(texture), _) => StandardMaterial {
+                    base_color_texture: Some(texture.clone()),
+                    perceptual_roughness: 0.95,
+                    reflectance: 0.15,
+                    ..default()
+                },
+                (None, _) => untextured.clone(),
+            };
+            let material = terrain_materials.add(TerrainMaterial { base, extension });
             let mesh = chunk_mesh(heightmap, cx..=x1, cz..=z1, tiles == 0);
             commands.spawn((
                 TerrainChunk,

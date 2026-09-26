@@ -60,6 +60,18 @@ pub struct Cli {
     /// Watch without a soldier (free camera).
     #[arg(long)]
     spectate: bool,
+    /// Spectator camera start: `x,y,z,yaw,pitch` (meters, degrees). For screenshots.
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    camera: Option<Vec<f32>>,
+    /// Start in third-person view (toggle with V).
+    #[arg(long)]
+    third_person: bool,
+    /// Log per-pass render timings every few seconds.
+    #[arg(long)]
+    diagnostics: bool,
+    /// Disable sun shadows (for performance comparisons).
+    #[arg(long)]
+    no_shadows: bool,
     /// Debug: walk in circles and jump without any input, to exercise prediction.
     #[arg(long, hide = true)]
     debug_walk: bool,
@@ -76,14 +88,20 @@ fn main() -> AppExit {
         "imported",
         AssetSourceBuilder::platform_default(&paths.imported.to_string_lossy(), None),
     );
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "bf2-rust-engine".into(),
-            present_mode: PresentMode::AutoNoVsync,
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "bf2-rust-engine".into(),
+                    present_mode: PresentMode::AutoNoVsync,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(ImagePlugin {
+                default_sampler: render::materials::default_sampler(),
+            }),
+    )
     .add_plugins((
         FrameTimeDiagnosticsPlugin::default(),
         SharedPlugin,
@@ -97,6 +115,16 @@ fn main() -> AppExit {
     ))
     .insert_resource(paths);
 
+    if cli.diagnostics {
+        app.add_plugins((
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            bevy::diagnostic::EntityCountDiagnosticsPlugin::default(),
+            bevy::diagnostic::LogDiagnosticsPlugin {
+                wait_duration: std::time::Duration::from_secs(5),
+                ..default()
+            },
+        ));
+    }
     if cli.connect.is_none() {
         app.add_plugins(GameServerPlugin {
             settings: ServerSettings {
@@ -111,6 +139,7 @@ fn main() -> AppExit {
             },
         });
     }
+    app.insert_resource(camera::ThirdPerson(cli.third_person));
     app.insert_resource(cli);
     app.run()
 }

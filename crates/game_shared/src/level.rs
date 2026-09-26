@@ -231,6 +231,16 @@ fn spawn_level(commands: &mut Commands, level: &LoadedLevel, paths: &GamePaths) 
     if !level.desc.statics.is_empty() {
         crate::statics::spawn_statics(commands, &level.desc.statics, paths);
     }
+    for road in &level.desc.roads {
+        commands.spawn((
+            LevelEntity,
+            Transform::from_translation(Vec3::from_array(road.position)),
+            crate::statics::StaticMesh {
+                path: road.mesh.clone(),
+                index: 0,
+            },
+        ));
+    }
 }
 
 pub fn placement_transform(p: &Placement) -> Transform {

@@ -24,6 +24,8 @@ mod dds;
 mod glb;
 mod level;
 mod meshes;
+mod roads;
+mod soldiers;
 mod terrain;
 
 #[derive(Parser)]
@@ -51,6 +53,8 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Import soldier bodies (skinned mesh, skeleton, animations). Also done by `level`.
+    Soldiers,
     /// Parse every mesh and collision mesh of a mod and report failures.
     Check {
         #[arg(long, default_value = "bf2")]
@@ -86,15 +90,17 @@ fn main() -> Result<()> {
             };
             std::fs::create_dir_all(&cli.out)?;
             write_readme(&cli.out)?;
+            import_soldiers(&install, &cli.out);
             for level in levels {
                 let started = Instant::now();
                 log::info!("importing {} ({})", level.name, level.mod_name);
                 match level::import_level(&install, &level, &cli.out) {
                     Ok(report) => {
                         log::info!(
-                            "{}: {} statics, {} templates, {} mesh files, modes [{}] in {:.1}s",
+                            "{}: {} statics, {} roads, {} templates, {} mesh files, modes [{}] in {:.1}s",
                             level.name,
                             report.statics,
+                            report.roads,
                             report.templates,
                             report.meshes,
                             report.game_modes.join(", "),
@@ -111,9 +117,22 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Soldiers => import_soldiers(&install, &cli.out),
         Command::Check { r#mod } => check(&install, &r#mod)?,
     }
     Ok(())
+}
+
+fn import_soldiers(install: &Bf2Install, out: &std::path::Path) {
+    let started = Instant::now();
+    match soldiers::import_all(install, out) {
+        Ok(names) => log::info!(
+            "soldiers: {} in {:.1}s",
+            names.join(", "),
+            started.elapsed().as_secs_f32()
+        ),
+        Err(err) => log::error!("soldiers: {err:#}"),
+    }
 }
 
 fn check(install: &Bf2Install, mod_name: &str) -> Result<()> {

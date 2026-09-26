@@ -14,7 +14,9 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
+        app.insert_resource(ThirdPerson(false))
+            .add_systems(Startup, spawn_camera)
+            .add_systems(Update, toggle_third_person)
             .add_systems(
                 Update,
                 overview_on_level_load.run_if(resource_exists_and_changed::<LoadedLevel>),
@@ -22,6 +24,7 @@ impl Plugin for CameraPlugin {
             .add_systems(
                 PostUpdate,
                 update_camera
+                    .in_set(CameraSystems)
                     .after(RenderStateSystems)
                     .before(TransformSystems::Propagate),
             );
@@ -30,6 +33,10 @@ impl Plugin for CameraPlugin {
 
 #[derive(Component)]
 pub struct PlayerCamera;
+
+/// Positions the camera in `PostUpdate`; things that follow the camera run after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CameraSystems;
 
 /// Position of the spectator camera when we have no soldier.
 #[derive(Component)]
@@ -58,10 +65,17 @@ fn spawn_camera(mut commands: Commands) {
 /// Puts the spectator camera above the level, looking over it.
 fn overview_on_level_load(
     level: Res<LoadedLevel>,
+    cli: Res<crate::Cli>,
     soldier: Query<(), With<LocalSoldier>>,
     mut look: ResMut<LookState>,
     mut spectator: Single<&mut Spectator>,
 ) {
+    if let Some(&[x, y, z, yaw, pitch]) = cli.camera.as_deref() {
+        spectator.position = Vec3::new(x, y, z);
+        look.yaw = yaw.to_radians();
+        look.pitch = pitch.to_radians();
+        return;
+    }
     // Our soldier may already exist (replicated before the level finished loading).
     let Some(heightmap) = level.heightmap.as_ref().filter(|_| soldier.is_empty()) else {
         return;
@@ -74,11 +88,23 @@ fn overview_on_level_load(
     look.pitch = -0.55;
 }
 
+/// Whether the camera follows our soldier from behind instead of through its eyes.
+#[derive(Resource, Default)]
+pub struct ThirdPerson(pub bool);
+
+fn toggle_third_person(keys: Res<ButtonInput<KeyCode>>, mut third_person: ResMut<ThirdPerson>) {
+    if keys.just_pressed(KeyCode::KeyV) {
+        third_person.0 = !third_person.0;
+    }
+}
+
 fn update_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     cursor: Single<&CursorOptions>,
     look: Res<LookState>,
+    third_person: Res<ThirdPerson>,
+    spatial: avian3d::prelude::SpatialQuery,
     soldier: Query<&SoldierRender, With<LocalSoldier>>,
     camera: Single<(&mut Transform, &mut Spectator), With<PlayerCamera>>,
 ) {
@@ -86,7 +112,28 @@ fn update_camera(
     let rotation = look.rotation();
 
     if let Ok(render) = soldier.single() {
-        transform.translation = render.eye_position();
+        let eye = render.eye_position();
+        transform.translation = if third_person.0 {
+            // Over the shoulder, pulled in if a wall is in the way.
+            let offset = rotation * Vec3::new(0.6, 0.3, 3.2);
+            let distance = Dir3::new(offset)
+                .ok()
+                .and_then(|dir| {
+                    spatial.cast_ray(
+                        eye,
+                        dir,
+                        offset.length(),
+                        true,
+                        &avian3d::prelude::SpatialQueryFilter::from_mask(
+                            game_shared::physics::GameLayer::World,
+                        ),
+                    )
+                })
+                .map_or(offset.length(), |hit| (hit.distance - 0.2).max(0.3));
+            eye + offset.normalize_or_zero() * distance
+        } else {
+            eye
+        };
         transform.rotation = rotation;
         spectator.position = transform.translation;
         return;

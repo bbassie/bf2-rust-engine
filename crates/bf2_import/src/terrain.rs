@@ -3,10 +3,14 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use bf2_formats::{Vfs, con::World, con::parse_vec3};
-use game_data::{TerrainDesc, WaterDesc};
+use bf2_formats::{
+    Vfs,
+    con::{World, parse_vec3},
+    terrain::TerrainDataHeader,
+};
+use game_data::{TerrainDesc, TerrainDetailDesc, WaterDesc};
 
-use crate::dds;
+use crate::{dds, meshes::MeshConverter};
 
 /// Settings of one heightmap in the heightmap cluster.
 #[derive(Default, Debug)]
@@ -20,7 +24,13 @@ struct HeightmapSettings {
 ///
 /// BF2 heightmaps have row 0 at the south edge (min Z); ours has row 0 at the north edge
 /// (-Z in engine space), so rows are flipped. Color maps are flipped the same way.
-pub fn import(vfs: &Vfs, world: &World, level_name: &str, level_dir: &Path) -> Result<(TerrainDesc, Option<WaterDesc>)> {
+pub fn import(
+    vfs: &Vfs,
+    world: &World,
+    converter: &MeshConverter,
+    level_name: &str,
+    level_dir: &Path,
+) -> Result<(TerrainDesc, Option<WaterDesc>)> {
     let mut primary = HeightmapSettings::default();
     let mut current_is_primary = false;
     let mut water_level = None;
@@ -66,35 +76,56 @@ pub fn import(vfs: &Vfs, world: &World, level_name: &str, level_dir: &Path) -> R
     std::fs::create_dir_all(level_dir)?;
     std::fs::write(level_dir.join("heightmap.r16"), &flipped)?;
 
-    // Color maps: one per 128-cell patch, `txXXxZZ.dds` with XX along +X and ZZ along
-    // BF2 +Z (north). Our grid row 0 is north.
+    // Per-patch images: `txXXxZZ*.dds` with XX along +X and ZZ along BF2 +Z (north).
+    // Our grid row 0 is north, and images are flipped to be north-up.
+    let header = vfs
+        .read(&format!("levels/{level_name}/terraindata.raw"))
+        .ok()
+        .and_then(|data| TerrainDataHeader::parse(&data).map_err(|e| log::warn!("terraindata.raw: {e}")).ok());
+    let base = |name: Option<&String>, fallback: &str| {
+        name.filter(|n| !n.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("levels/{level_name}/{fallback}/tx"))
+    };
+    let colormap_base = base(header.as_ref().map(|h| &h.colormap_base), "colormaps");
+    let detailmap_base = base(header.as_ref().map(|h| &h.detailmap_base), "detailmaps");
+    let lightmap_base = base(header.as_ref().map(|h| &h.lightmap_base), "lightmaps");
+
     let cells = size - 1;
     let patches = (cells / 128).max(1);
     let mut color_maps = Vec::with_capacity(patches * patches);
-    let colormap_dir = level_dir.join("colormaps");
+    let mut detail_weights = Vec::with_capacity(patches * patches);
+    let mut lightmaps = Vec::with_capacity(patches * patches);
     for pz in 0..patches {
         for px in 0..patches {
-            let bf2_row = patches - 1 - pz;
-            let source = format!("levels/{level_name}/colormaps/tx{px:02}x{bf2_row:02}.dds");
-            let Ok(data) = vfs.read(&source) else {
-                // Patches entirely under water have no color map.
-                color_maps.push(String::new());
-                continue;
-            };
-            let name = format!("colormaps/tx{px:02}x{pz:02}.dds");
-            match dds::flip_vertical(&data) {
-                Ok(flipped) => {
-                    std::fs::create_dir_all(&colormap_dir)?;
-                    std::fs::write(level_dir.join(&name), flipped)?;
-                    color_maps.push(name);
-                }
-                Err(err) => {
-                    log::warn!("{source}: {err}");
-                    color_maps.push(String::new());
-                }
-            }
+            let bf2 = format!("{px:02}x{:02}", patches - 1 - pz);
+            let ours = format!("{px:02}x{pz:02}");
+            color_maps.push(patch_image(vfs, &format!("{colormap_base}{bf2}.dds"), level_dir, &format!("colormaps/tx{ours}.dds"))?);
+            detail_weights.push([
+                patch_image(vfs, &format!("{detailmap_base}{bf2}_1.dds"), level_dir, &format!("detailmaps/tx{ours}_1.dds"))?,
+                patch_image(vfs, &format!("{detailmap_base}{bf2}_2.dds"), level_dir, &format!("detailmaps/tx{ours}_2.dds"))?,
+            ]);
+            lightmaps.push(patch_image(vfs, &format!("{lightmap_base}{bf2}.dds"), level_dir, &format!("lightmaps/tx{ours}.dds"))?);
         }
     }
+
+    // Tiling is given in repeats per 256 m patch.
+    let patch_world = 128.0 * scale[0];
+    let detail_textures = header
+        .iter()
+        .flat_map(|h| &h.detail_textures)
+        .map(|d| {
+            // Keep empty slots: a texture's index selects its weight channel.
+            let texture = converter.texture(&d.texture).unwrap_or_default();
+            let per = |repeats: f32| if repeats > 0.0 { patch_world / repeats } else { 8.0 };
+            TerrainDetailDesc {
+                texture,
+                top_tile_size: per(d.top_tiling),
+                side_tile_size: [per(d.side_tiling[0]), per(d.side_tiling[1])],
+                tri_planar: d.tri_planar,
+            }
+        })
+        .collect();
 
     let half = cells as f32 * scale[0] * 0.5;
     let terrain = TerrainDesc {
@@ -105,13 +136,37 @@ pub fn import(vfs: &Vfs, world: &World, level_name: &str, level_dir: &Path) -> R
         origin: [-half, 0.0, -half],
         color_maps,
         color_map_tiles: patches as u32,
-        detail_map: None,
+        detail_textures,
+        detail_weights,
+        lightmaps,
     };
     let water = water_level.filter(|&h| h > -50.0).map(|height| WaterDesc {
         height,
         color: water_color(world),
     });
     Ok((terrain, water))
+}
+
+/// Copies one per-patch image into the level folder, flipped north-up and in a format the GPU
+/// can sample. Returns its path relative to the level folder, or an empty string if the
+/// level has no such image (patches fully under water have none).
+fn patch_image(vfs: &Vfs, source: &str, level_dir: &Path, name: &str) -> Result<String> {
+    let Ok(data) = vfs.read(source) else {
+        return Ok(String::new());
+    };
+    let data = dds::rgb565_to_bgra8(&data).unwrap_or(data);
+    match dds::flip_vertical(&data) {
+        Ok(flipped) => {
+            let target = level_dir.join(name);
+            std::fs::create_dir_all(target.parent().expect("has a parent"))?;
+            std::fs::write(target, flipped)?;
+            Ok(name.to_string())
+        }
+        Err(err) => {
+            log::warn!("{source}: {err}");
+            Ok(String::new())
+        }
+    }
 }
 
 fn water_color(world: &World) -> [f32; 4] {

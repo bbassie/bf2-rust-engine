@@ -84,6 +84,17 @@ impl<'a> MeshConverter<'a> {
         Some(path)
     }
 
+    /// Largest distance of any vertex of the first geom/LOD from the origin.
+    pub fn mesh_radius(&self, mesh_path: &str) -> Option<f32> {
+        let key = normalize(mesh_path);
+        let mesh = VisMesh::parse(&self.vfs.read(&key).ok()?, MeshKind::from_path(&key)?).ok()?;
+        let lod = mesh.geoms.first()?.lods.first()?;
+        let corner = |a: [f32; 3], b: [f32; 3]| {
+            (0..3).map(|i| a[i].abs().max(b[i].abs()).powi(2)).sum::<f32>().sqrt()
+        };
+        Some(corner(lod.bounds_min, lod.bounds_max))
+    }
+
     /// Converts a visible mesh (`objects/.../meshes/x.staticmesh`) to `objects/.../meshes/x.glb`.
     /// Returns the output path relative to the output root.
     pub fn convert_mesh(&self, mesh_path: &str) -> Result<String> {
@@ -243,9 +254,7 @@ impl<'a> MeshConverter<'a> {
             doc.nodes.push(glb::Node {
                 name: format!("part{part}"),
                 mesh: Some(part),
-                translation: [0.0; 3],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                children: Vec::new(),
+                ..Default::default()
             });
             doc.scene.push(part);
         }
@@ -302,9 +311,7 @@ impl<'a> MeshConverter<'a> {
                 doc.nodes.push(glb::Node {
                     name: format!("part{part_index}_{kind}"),
                     mesh: Some(mesh_index),
-                    translation: [0.0; 3],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    children: Vec::new(),
+                    ..Default::default()
                 });
                 doc.scene.push(doc.nodes.len() - 1);
             }

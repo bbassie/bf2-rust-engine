@@ -12,6 +12,8 @@ pub struct Primitive {
     pub tangents: Vec<[f32; 4]>,
     /// Up to two UV sets (`TEXCOORD_0`, `TEXCOORD_1`).
     pub uvs: Vec<Vec<[f32; 2]>>,
+    /// `COLOR_0` (linear RGBA).
+    pub colors: Vec<[f32; 4]>,
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
@@ -45,9 +47,46 @@ pub enum AlphaMode {
 pub struct Node {
     pub name: String,
     pub mesh: Option<usize>,
+    pub skin: Option<usize>,
     pub translation: [f32; 3],
     pub rotation: [f32; 4],
     pub children: Vec<usize>,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            mesh: None,
+            skin: None,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Joints (node indices) and their inverse bind matrices (column-major).
+pub struct Skin {
+    pub joints: Vec<usize>,
+    pub inverse_bind_matrices: Vec<[f32; 16]>,
+}
+
+pub struct Animation {
+    pub name: String,
+    pub channels: Vec<Channel>,
+}
+
+pub struct Channel {
+    pub node: usize,
+    /// Seconds.
+    pub times: Vec<f32>,
+    pub values: ChannelValues,
+}
+
+pub enum ChannelValues {
+    Translation(Vec<[f32; 3]>),
+    Rotation(Vec<[f32; 4]>),
 }
 
 #[derive(Default)]
@@ -57,6 +96,8 @@ pub struct Document {
     /// Image URIs relative to the `.glb`.
     pub images: Vec<String>,
     pub nodes: Vec<Node>,
+    pub skins: Vec<Skin>,
+    pub animations: Vec<Animation>,
     /// Root nodes of the default scene.
     pub scene: Vec<usize>,
     pub extras: Value,
@@ -87,12 +128,24 @@ impl Builder {
     }
 
     fn floats<const N: usize>(&mut self, data: &[[f32; N]], with_bounds: bool) -> usize {
+        self.floats_with_target(data, with_bounds, Some(34962))
+    }
+
+    /// Float accessor; `target` is `None` for non-vertex data (animation, matrices).
+    fn floats_with_target<const N: usize>(
+        &mut self,
+        data: &[[f32; N]],
+        with_bounds: bool,
+        target: Option<u32>,
+    ) -> usize {
         let bytes: Vec<u8> = data.iter().flatten().flat_map(|f| f.to_le_bytes()).collect();
-        let view = self.view(&bytes, Some(34962));
+        let view = self.view(&bytes, target);
         let kind = match N {
+            1 => "SCALAR",
             2 => "VEC2",
             3 => "VEC3",
             4 => "VEC4",
+            16 => "MAT4",
             _ => "SCALAR",
         };
         let mut accessor = json!({
@@ -172,6 +225,9 @@ impl Document {
                                 attributes.insert(format!("TEXCOORD_{i}"), json!(b.floats(uv, false)));
                             }
                         }
+                        if p.colors.len() == p.positions.len() {
+                            attributes.insert("COLOR_0".into(), json!(b.floats(&p.colors, false)));
+                        }
                         if p.joints.len() == p.positions.len() && p.weights.len() == p.positions.len() {
                             attributes.insert("JOINTS_0".into(), json!(b.joints(&p.joints)));
                             attributes.insert("WEIGHTS_0".into(), json!(b.floats(&p.weights, false)));
@@ -236,6 +292,9 @@ impl Document {
                 if let Some(mesh) = n.mesh {
                     node["mesh"] = json!(mesh);
                 }
+                if let Some(skin) = n.skin {
+                    node["skin"] = json!(skin);
+                }
                 if n.translation != [0.0; 3] {
                     node["translation"] = json!(n.translation);
                 }
@@ -246,6 +305,40 @@ impl Document {
                     node["children"] = json!(n.children);
                 }
                 node
+            })
+            .collect();
+
+        let skins: Vec<Value> = self
+            .skins
+            .iter()
+            .map(|skin| {
+                json!({
+                    "joints": skin.joints,
+                    "inverseBindMatrices": b.floats_with_target(&skin.inverse_bind_matrices, false, None),
+                })
+            })
+            .collect();
+
+        let animations: Vec<Value> = self
+            .animations
+            .iter()
+            .map(|animation| {
+                let mut samplers = Vec::new();
+                let mut channels = Vec::new();
+                for channel in &animation.channels {
+                    let times: Vec<[f32; 1]> = channel.times.iter().map(|&t| [t]).collect();
+                    let input = b.floats_with_target(&times, true, None);
+                    let (output, path) = match &channel.values {
+                        ChannelValues::Translation(v) => (b.floats_with_target(v, false, None), "translation"),
+                        ChannelValues::Rotation(v) => (b.floats_with_target(v, false, None), "rotation"),
+                    };
+                    samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+                    channels.push(json!({
+                        "sampler": samplers.len() - 1,
+                        "target": { "node": channel.node, "path": path },
+                    }));
+                }
+                json!({ "name": animation.name, "samplers": samplers, "channels": channels })
             })
             .collect();
 
@@ -269,6 +362,12 @@ impl Document {
             root["images"] = json!(images);
             root["textures"] = json!(textures);
             root["samplers"] = json!([{ "magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497 }]);
+        }
+        if !skins.is_empty() {
+            root["skins"] = json!(skins);
+        }
+        if !animations.is_empty() {
+            root["animations"] = json!(animations);
         }
         if !self.extras.is_null() {
             root["extras"] = self.extras.clone();

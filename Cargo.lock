@@ -3193,6 +3193,7 @@ dependencies = [
  "game_data",
  "game_server",
  "game_shared",
+ "serde_json",
 ]
 
 [[package]]

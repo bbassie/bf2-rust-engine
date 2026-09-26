@@ -18,9 +18,10 @@ Early foundation. What works today:
 - Remote players are interpolated; everything is rendered smoothly independent of the 60 Hz tick.
 - Bots that use the same input path as humans (they roam between control points for now).
 - A procedural test range so everything can be tested without BF2 data.
-- Importer for BF2 levels: terrain, color maps, water, ~1800 static objects on Strike at
-  Karkand (meshes as glTF, collision as trimeshes), conquest/co-op layouts with control points
-  and spawn points. All 30 levels in a full install parse.
+- Importer for BF2 levels: terrain with detail texture blending, roads, sky, water, ~1800
+  static objects on Strike at Karkand (meshes as glTF with BF2's layered materials, collision
+  as trimeshes), conquest/co-op layouts, teams and kits. All 30 levels import.
+- Animated BF2 soldier models per team (third person with V).
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
 
@@ -53,7 +54,11 @@ cargo run -p game_client --release -- --host --bots 8
 ```
 
 Controls: click to capture the mouse, `Esc` to release. `WASD` move, `Shift` sprint, `Space`
-jump, `Ctrl` crouch, `Z` prone.
+jump, `Ctrl` crouch, `Z` prone, `V` third person.
+
+For day-to-day development use the dev profile (`cargo run -p game_client`): dependencies are
+fully optimized there too, so it runs nearly as fast as `--release` and rebuilds much faster.
+`cargo build --profile dist` makes the fully optimized (slow to compile) shipping build.
 
 ### Importing BF2 content
 

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Placement;
+use crate::{Placement, TeamDesc};
 
 /// Everything needed to load a level on the client and the server.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -20,9 +20,15 @@ pub struct LevelDesc {
     /// Static, non-networked objects (buildings, props, bridges).
     #[serde(default)]
     pub statics: Vec<StaticInstance>,
+    /// Road meshes draped over the terrain (visual only).
+    #[serde(default)]
+    pub roads: Vec<RoadDesc>,
     /// Available game mode layouts (conquest 16/32/64, ...).
     #[serde(default)]
     pub game_modes: Vec<GameModeDesc>,
+    /// Team 1 and team 2.
+    #[serde(default)]
+    pub teams: Vec<TeamDesc>,
 }
 
 /// A square heightmap terrain.
@@ -45,9 +51,31 @@ pub struct TerrainDesc {
     pub color_maps: Vec<String>,
     #[serde(default = "one")]
     pub color_map_tiles: u32,
-    /// Detail texture tiled across the terrain.
+    /// Up to 6 tiling ground textures (grass, rock, gravel, ...) blended per patch.
     #[serde(default)]
-    pub detail_map: Option<String>,
+    pub detail_textures: Vec<TerrainDetailDesc>,
+    /// Per patch (same order as `color_maps`): two weight maps, relative to the level
+    /// folder. Weight of detail texture `i` is channel B, G, R (`i % 3`) of map `i / 3`.
+    /// Empty strings where a patch has none.
+    #[serde(default)]
+    pub detail_weights: Vec<[String; 2]>,
+    /// Per patch baked lighting: G = sun visibility, B = sky light. Relative to the level folder.
+    #[serde(default)]
+    pub lightmaps: Vec<String>,
+}
+
+/// One tiling ground texture.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TerrainDetailDesc {
+    /// Texture path relative to the imported root.
+    pub texture: String,
+    /// Meters per repeat when projected from above.
+    pub top_tile_size: f32,
+    /// Meters per repeat on steep faces (U, V), used when `tri_planar`.
+    pub side_tile_size: [f32; 2],
+    /// Also project onto steep faces (cliffs) instead of stretching the top projection.
+    #[serde(default)]
+    pub tri_planar: bool,
 }
 
 impl TerrainDesc {
@@ -76,6 +104,22 @@ pub struct EnvironmentDesc {
     pub fog_range: [f32; 2],
     /// Maximum view distance in meters.
     pub view_distance: f32,
+    #[serde(default)]
+    pub sky: Option<SkyDesc>,
+}
+
+/// A textured sky dome drawn around the camera.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkyDesc {
+    /// Dome `.glb` path relative to the imported root.
+    pub mesh: String,
+    /// Dome radius in its own units (used to scale it to the view distance).
+    pub radius: f32,
+    /// Texture path relative to the imported root.
+    pub texture: String,
+    /// Rotation around the vertical axis, degrees.
+    #[serde(default)]
+    pub rotation: f32,
 }
 
 impl Default for EnvironmentDesc {
@@ -88,6 +132,7 @@ impl Default for EnvironmentDesc {
             fog_color: [0.7, 0.75, 0.8],
             fog_range: [300.0, 900.0],
             view_distance: 900.0,
+            sky: None,
         }
     }
 }
@@ -99,6 +144,14 @@ pub struct StaticInstance {
     pub template: String,
     #[serde(flatten)]
     pub placement: Placement,
+}
+
+/// A road decal mesh.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RoadDesc {
+    /// `.glb` path relative to the imported root.
+    pub mesh: String,
+    pub position: [f32; 3],
 }
 
 /// A game mode layout, e.g. conquest at 64 players.

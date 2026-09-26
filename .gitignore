@@ -7,3 +7,6 @@
 # Local settings
 /settings.local.ron
 *.log
+
+# Python
+__pycache__/

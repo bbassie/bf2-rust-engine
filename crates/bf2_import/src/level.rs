@@ -12,16 +12,17 @@ use bf2_formats::{
     con::{Instance, Interpreter, Template, World, parse_vec3},
 };
 use game_data::{
-    ControlPointDesc, EnvironmentDesc, GameModeDesc, LevelDesc, ObjectDesc, ObjectPart, Placement,
-    SpawnPointDesc, StaticInstance, VehicleSpawnerDesc,
+    ControlPointDesc, EnvironmentDesc, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
+    Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, VehicleSpawnerDesc,
 };
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{coords, meshes::MeshConverter, terrain};
+use crate::{coords, meshes::MeshConverter, roads, terrain};
 
 pub struct LevelReport {
     pub statics: usize,
+    pub roads: usize,
     pub templates: usize,
     pub meshes: usize,
     pub failed_meshes: Vec<String>,
@@ -59,12 +60,12 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
 
     let name = level.name.to_lowercase();
     let level_dir = out.join("levels").join(&name);
-    let (terrain, water) = terrain::import(&vfs, &interp.world, &level.name, &level_dir)
+    let converter = MeshConverter::new(&vfs, out);
+    let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
     let world = &interp.world;
 
     // Static objects and the meshes they need.
-    let converter = MeshConverter::new(&vfs, out);
     let static_instances: Vec<&Instance> = world.instances[static_range]
         .iter()
         .filter(|i| world.template(&i.template).is_some_and(is_visible_static))
@@ -100,6 +101,8 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
         })
         .collect();
 
+    let roads = roads::import(&vfs, world, &converter, &name, out);
+
     let game_modes: Vec<GameModeDesc> = layouts
         .iter()
         .map(|(mode, size, range)| build_game_mode(world, mode, *size, &world.instances[range.clone()]))
@@ -110,14 +113,17 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
         display_name,
         terrain: Some(terrain),
         water,
-        environment: environment(world),
+        environment: environment(world, &converter),
         statics,
+        roads,
         game_modes,
+        teams: teams(world),
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
 
     Ok(LevelReport {
         statics: desc.statics.len(),
+        roads: desc.roads.len(),
         templates: objects.values().filter(|o| !o.parts.is_empty()).count(),
         meshes: *mesh_count.lock().unwrap(),
         failed_meshes: failed.into_inner().unwrap(),
@@ -354,7 +360,7 @@ fn build_game_mode(world: &World, mode: &str, size: u32, instances: &[Instance])
     layout
 }
 
-fn environment(world: &World) -> EnvironmentDesc {
+fn environment(world: &World, converter: &MeshConverter) -> EnvironmentDesc {
     let defaults = EnvironmentDesc::default();
     let color = |name: &str| world.setting(name).and_then(parse_vec3).map(terrain::normalize_color);
     let fog = world
@@ -380,7 +386,85 @@ fn environment(world: &World) -> EnvironmentDesc {
         fog_color,
         fog_range,
         view_distance: view_distance.unwrap_or(fog_range[1]).max(fog_range[1]),
+        sky: sky(world, converter),
     }
+}
+
+/// The sky dome: `Skydome.skyTemplate` names the dome object, `Skydome.skyTexture` the
+/// level's sky picture.
+fn sky(world: &World, converter: &MeshConverter) -> Option<SkyDesc> {
+    let template = world.template(world.setting("skydome.skytemplate")?)?;
+    let geometry = world.geometry(template.geometry.as_deref()?)?;
+    let mesh_path = geometry.mesh_path()?;
+    let mesh = converter
+        .convert_mesh(&mesh_path)
+        .map_err(|e| log::warn!("sky dome: {e:#}"))
+        .ok()?;
+    let radius = converter.mesh_radius(&mesh_path).unwrap_or(500.0);
+    let texture = converter.texture(world.setting("skydome.skytexture")?)?;
+    Some(SkyDesc {
+        mesh,
+        radius,
+        texture,
+        rotation: world
+            .setting("skydome.domerotation")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0),
+    })
+}
+
+/// Team names, kits and ticket rules from the level's `gameLogic.*` settings.
+fn teams(world: &World) -> Vec<TeamDesc> {
+    let mut teams = vec![TeamDesc::default(), TeamDesc::default()];
+    let team = |arg: Option<&String>| -> Option<usize> {
+        match arg.map(String::as_str) {
+            Some("1") => Some(0),
+            Some("2") => Some(1),
+            _ => None,
+        }
+    };
+    let unquote = |s: &String| s.trim_matches('"').to_string();
+    for command in &world.commands {
+        let a = &command.args;
+        match command.name.as_str() {
+            "gamelogic.setteamname" => {
+                if let (Some(t), Some(name)) = (team(a.first()), a.get(1)) {
+                    teams[t].name = unquote(name);
+                }
+            }
+            "gamelogic.setkit" => {
+                if let (Some(t), Some(slot), Some(kit), Some(soldier)) =
+                    (team(a.first()), a.get(1).and_then(|s| s.parse::<usize>().ok()), a.get(2), a.get(3))
+                {
+                    let kits = &mut teams[t].kits;
+                    if kits.len() <= slot {
+                        kits.resize(slot + 1, KitSlot { kit: String::new(), soldier: String::new() });
+                    }
+                    kits[slot] = KitSlot {
+                        kit: unquote(kit).to_ascii_lowercase(),
+                        soldier: unquote(soldier).to_ascii_lowercase(),
+                    };
+                }
+            }
+            "gamelogic.setdefaultnumberofticketsex" => {
+                if let (Some(size), Some(t), Some(tickets)) = (
+                    a.first().and_then(|s| s.parse().ok()),
+                    team(a.get(1)),
+                    a.get(2).and_then(|s| s.parse().ok()),
+                ) {
+                    teams[t].tickets.retain(|(s, _)| *s != size);
+                    teams[t].tickets.push((size, tickets));
+                }
+            }
+            "gamelogic.setticketlosspermin" => {
+                if let (Some(t), Some(loss)) = (team(a.first()), a.get(1).and_then(|s| s.parse().ok())) {
+                    teams[t].ticket_loss_per_minute = loss;
+                }
+            }
+            _ => {}
+        }
+    }
+    teams
 }
 
 /// `(mode, players)` pairs from an Info `.desc`.

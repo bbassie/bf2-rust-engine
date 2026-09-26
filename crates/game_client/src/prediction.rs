@@ -79,6 +79,8 @@ pub struct SoldierRender {
     pub position: Vec3,
     pub yaw: f32,
     pub stance: Stance,
+    pub velocity: Vec3,
+    pub grounded: bool,
 }
 
 impl SoldierRender {
@@ -114,6 +116,8 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             position: motion.position,
             yaw: motion.yaw,
             stance: motion.stance,
+            velocity: motion.velocity,
+            grounded: motion.grounded,
         },
         Snapshots::default(),
         TickHistory {
@@ -246,6 +250,8 @@ fn update_render_state(
             position: from.position.lerp(to.position, t),
             yaw: lerp_angle(from.yaw, to.yaw, t),
             stance: to.stance,
+            velocity: to.velocity,
+            grounded: to.grounded,
         };
     }
 }

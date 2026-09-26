@@ -1,0 +1,317 @@
+//! Soldier bodies: skinned mesh + `3p_setup` skeleton + third-person animations, one `.glb`
+//! per soldier model.
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use bf2_formats::{
+    Bf2Install, Side, Vfs,
+    anim::{Animation, Skeleton},
+    mesh::{MeshKind, Usage, VisMesh},
+};
+use game_data::SoldierDesc;
+use glam::{Mat4, Quat, Vec3};
+use serde_json::json;
+
+use crate::{
+    glb::{self, ChannelValues},
+    meshes::MeshConverter,
+};
+
+const SKELETON: &str = "objects/soldiers/common/animations/3p_setup.ske";
+const ANIMATIONS: &str = "objects/soldiers/common/animations/3p/";
+
+/// Z-mirror of a (true, un-conjugated) BF2 rotation.
+fn rotation(r: [f32; 4]) -> Quat {
+    Quat::from_xyzw(-r[0], -r[1], r[2], r[3]).normalize()
+}
+
+fn translation(t: [f32; 3]) -> Vec3 {
+    Vec3::new(t[0], t[1], -t[2])
+}
+
+/// Adds the skeleton as nodes (node index == bone index). Returns rest-pose world matrices.
+fn add_skeleton(doc: &mut glb::Document, skeleton: &Skeleton) -> Vec<Mat4> {
+    let bone_count = skeleton.bones.len();
+    for bone in &skeleton.bones {
+        doc.nodes.push(glb::Node {
+            name: bone.name.clone(),
+            translation: translation(bone.translation).to_array(),
+            rotation: rotation(bone.rotation).to_array(),
+            ..Default::default()
+        });
+    }
+    let mut world = vec![Mat4::IDENTITY; bone_count];
+    for (i, bone) in skeleton.bones.iter().enumerate() {
+        let local = Mat4::from_rotation_translation(rotation(bone.rotation), translation(bone.translation));
+        world[i] = match bone.parent {
+            Some(p) => {
+                doc.nodes[p].children.push(i);
+                world[p] * local
+            }
+            None => local,
+        };
+    }
+    world
+}
+
+/// One root named `soldier` over the skeleton roots (and `extra` nodes), so a soldier is a
+/// single animation hierarchy. Animation sets use the same root, so their clips target the
+/// same bones by name path.
+fn add_root(doc: &mut glb::Document, skeleton: &Skeleton, extra: &[usize]) {
+    let mut children: Vec<usize> = skeleton
+        .bones
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.parent.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    children.extend_from_slice(extra);
+    doc.nodes.push(glb::Node {
+        name: "soldier".into(),
+        children,
+        ..Default::default()
+    });
+    doc.scene.push(doc.nodes.len() - 1);
+}
+
+fn add_clips(doc: &mut glb::Document, clips: &[(String, Animation)], bone_count: usize) {
+    for (name, clip) in clips {
+        let times: Vec<f32> = (0..clip.frame_count).map(|f| f as f32 / Animation::FPS).collect();
+        let mut channels = Vec::new();
+        for track in clip.tracks.iter().filter(|t| t.bone < bone_count) {
+            channels.push(glb::Channel {
+                node: track.bone,
+                times: times.clone(),
+                values: ChannelValues::Rotation(track.rotations.iter().map(|&r| rotation(r).to_array()).collect()),
+            });
+            channels.push(glb::Channel {
+                node: track.bone,
+                times: times.clone(),
+                values: ChannelValues::Translation(track.translations.iter().map(|&t| translation(t).to_array()).collect()),
+            });
+        }
+        doc.animations.push(glb::Animation {
+            name: name.clone(),
+            channels,
+        });
+    }
+}
+
+/// Every `.baf` directly inside `dir`, named by file stem.
+fn load_clips(vfs: &Vfs, dir: &str) -> Vec<(String, Animation)> {
+    let mut clips: Vec<(String, Animation)> = vfs
+        .list(dir)
+        .filter(|p| p.ends_with(".baf") && !p[dir.len()..].contains('/'))
+        .filter_map(|p| {
+            let name = p.rsplit('/').next()?.trim_end_matches(".baf").to_string();
+            let anim = Animation::parse(&vfs.read(p).ok()?)
+                .map_err(|e| log::warn!("{p}: {e}"))
+                .ok()?;
+            Some((name, anim))
+        })
+        .collect();
+    clips.sort_by(|a, b| a.0.cmp(&b.0));
+    clips
+}
+
+/// Third-person upper-body animations of every handheld weapon, as animation sets
+/// (`objects/weapons/handheld/<weapon>/animations/3p.glb`). Clips are named by state:
+/// `3p_ak47_crouchstill` becomes `crouchstill`. Returns how many sets were written.
+fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, out: &Path) -> Result<usize> {
+    let mut dirs: Vec<String> = vfs
+        .list("objects/weapons/handheld/")
+        .filter(|p| p.ends_with(".baf") && p.contains("/animations/3p/"))
+        .filter_map(|p| p.rsplit_once('/').map(|(dir, _)| format!("{dir}/")))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    let mut written = 0;
+    for dir in dirs {
+        let mut clips = load_clips(vfs, &dir);
+        if clips.is_empty() {
+            continue;
+        }
+        // Strip `3p_` and the weapon token shared by all file names.
+        let stems: Vec<&str> = clips.iter().map(|(n, _)| n.trim_start_matches("3p_")).collect();
+        let prefix_len = stems
+            .first()
+            .map(|first| {
+                let common = stems.iter().fold(first.len(), |len, s| {
+                    first.bytes().zip(s.bytes()).take(len).take_while(|(a, b)| a == b).count()
+                });
+                first[..common].rfind('_').map_or(0, |i| i + 1)
+            })
+            .unwrap_or(0);
+        for (name, _) in &mut clips {
+            let stem = name.trim_start_matches("3p_").to_string();
+            *name = stem.get(prefix_len..).unwrap_or(&stem).to_string();
+        }
+        let mut doc = glb::Document::default();
+        add_skeleton(&mut doc, skeleton);
+        add_root(&mut doc, skeleton, &[]);
+        add_clips(&mut doc, &clips, skeleton.bones.len());
+        let out_rel = format!("{}.glb", dir.trim_end_matches('/'));
+        doc.write(&out.join(&out_rel))?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Imports every soldier body of every installed mod. Returns the soldier names.
+pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
+    let mut done = Vec::new();
+    for mod_name in install.mods() {
+        let mut vfs = Vfs::new();
+        install.mount_mod(&mut vfs, &mod_name, Side::Both)?;
+        let Ok(skeleton_data) = vfs.read(SKELETON) else {
+            continue;
+        };
+        let skeleton = Skeleton::parse(&skeleton_data).context("parsing 3p_setup.ske")?;
+
+        let clips = load_clips(&vfs, ANIMATIONS);
+        match export_weapon_sets(&vfs, &skeleton, out) {
+            Ok(count) => log::info!("{mod_name}: {count} weapon animation sets"),
+            Err(err) => log::warn!("{mod_name} weapon animations: {err:#}"),
+        }
+
+        let converter = MeshConverter::new(&vfs, out);
+        let mut meshes: Vec<String> = vfs
+            .list("objects/soldiers/")
+            .filter(|p| p.ends_with(".skinnedmesh"))
+            .map(str::to_string)
+            .collect();
+        meshes.sort();
+        for mesh_path in meshes {
+            let name = mesh_path.rsplit('/').next().unwrap_or(&mesh_path).trim_end_matches(".skinnedmesh").to_string();
+            if done.contains(&name) {
+                continue;
+            }
+            match export(&vfs, &converter, &mesh_path, &skeleton, &clips, out) {
+                Ok(glb_path) => {
+                    let desc = SoldierDesc {
+                        name: name.clone(),
+                        mesh: glb_path,
+                        animations: clips.iter().map(|(n, _)| n.clone()).collect(),
+                    };
+                    game_data::write_ron(out.join("soldiers").join(format!("{name}.ron")), &desc)?;
+                    done.push(name);
+                }
+                Err(err) => log::warn!("soldier {mesh_path}: {err:#}"),
+            }
+        }
+    }
+    Ok(done)
+}
+
+fn export(
+    vfs: &Vfs,
+    converter: &MeshConverter,
+    mesh_path: &str,
+    skeleton: &Skeleton,
+    clips: &[(String, Animation)],
+    out: &Path,
+) -> Result<String> {
+    let mesh = VisMesh::parse(&vfs.read(mesh_path)?, MeshKind::Skinned)?;
+    // Geom 1 is the third-person body (geom 0 is the first-person arms).
+    let lod = mesh
+        .geoms
+        .get(1)
+        .or_else(|| mesh.geoms.first())
+        .and_then(|g| g.lods.first())
+        .context("mesh has no geometry")?;
+    let out_rel = format!("{}.glb", mesh_path.trim_end_matches(".skinnedmesh"));
+
+    let mut doc = glb::Document::default();
+
+    let bone_count = skeleton.bones.len();
+    let world = add_skeleton(&mut doc, skeleton);
+    // The bind pose is the skeleton's rest pose.
+    doc.skins.push(glb::Skin {
+        joints: (0..bone_count).collect(),
+        inverse_bind_matrices: world.iter().map(|m| m.inverse().to_cols_array()).collect(),
+    });
+
+    // Skinned primitives, one per material.
+    let positions = mesh.attribute::<3>(Usage::Position, 0).unwrap_or_default();
+    let normals = mesh.attribute::<3>(Usage::Normal, 0).unwrap_or_default();
+    let uvs = mesh.attribute::<2>(Usage::TexCoord, 0).unwrap_or_default();
+    let weights = mesh.attribute::<1>(Usage::BlendWeight, 0).unwrap_or_default();
+    let blend = mesh.blend_indices().unwrap_or_default();
+    let mut primitives = Vec::new();
+    for (index, material) in lod.materials.iter().enumerate() {
+        let Some(rig) = lod.rigs.get(index).or_else(|| lod.rigs.last()) else {
+            continue;
+        };
+        let joint = |local: u8| -> u16 {
+            rig.get(local as usize)
+                .map(|b| b.ske_index as u16)
+                .filter(|&j| (j as usize) < bone_count)
+                .unwrap_or(0)
+        };
+        let maps = material.texture_maps();
+        let color = maps.first().and_then(|m| converter.texture(m));
+        let image = color.map(|t| {
+            doc.images.push(glb::relative_uri(&out_rel, &t));
+            doc.images.len() - 1
+        });
+        doc.materials.push(glb::Material {
+            name: material.technique.clone(),
+            base_color: image,
+            base_color_uv: 0,
+            normal: None,
+            alpha: if material.technique.to_ascii_lowercase().contains("alpha_test") {
+                glb::AlphaMode::Mask(0.5)
+            } else {
+                glb::AlphaMode::Opaque
+            },
+            double_sided: false,
+            extras: json!({ "bf2": { "technique": material.technique, "maps": maps } }),
+        });
+
+        let mut primitive = glb::Primitive {
+            material: Some(doc.materials.len() - 1),
+            uvs: vec![Vec::new()],
+            ..Default::default()
+        };
+        let mut remap = std::collections::HashMap::new();
+        for tri in mesh.material_triangles(material) {
+            if tri.iter().any(|&v| v as usize >= positions.len()) {
+                continue;
+            }
+            for &v in [tri[0], tri[2], tri[1]].iter() {
+                let index = *remap.entry(v).or_insert_with(|| {
+                    let vi = v as usize;
+                    primitive.positions.push(translation(positions[vi]).to_array());
+                    primitive.normals.push(translation(normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0])).normalize_or(Vec3::Y).to_array());
+                    primitive.uvs[0].push(uvs.get(vi).copied().unwrap_or_default());
+                    let b = blend.get(vi).copied().unwrap_or_default();
+                    let w = weights.get(vi).map_or(1.0, |w| w[0]).clamp(0.0, 1.0);
+                    primitive.joints.push([joint(b[0]), joint(b[1]), 0, 0]);
+                    primitive.weights.push([w, 1.0 - w, 0.0, 0.0]);
+                    (primitive.positions.len() - 1) as u32
+                });
+                primitive.indices.push(index);
+            }
+        }
+        if !primitive.indices.is_empty() {
+            primitives.push(primitive);
+        }
+    }
+    doc.meshes.push(glb::Mesh {
+        name: "body".into(),
+        primitives,
+    });
+    doc.nodes.push(glb::Node {
+        name: "body".into(),
+        mesh: Some(0),
+        skin: Some(0),
+        ..Default::default()
+    });
+    let body = doc.nodes.len() - 1;
+    add_root(&mut doc, skeleton, &[body]);
+    add_clips(&mut doc, clips, bone_count);
+
+    doc.write(&out.join(&out_rel))?;
+    Ok(out_rel)
+}

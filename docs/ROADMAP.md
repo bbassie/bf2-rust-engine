@@ -15,12 +15,24 @@ Milestones are ordered so that each one ends with something playable.
 - [x] Importer: terrain (heightmap + color maps) and static objects (meshes to glTF, collision)
 - [x] Load an imported BF2 level (e.g. Strike at Karkand) and walk around it, also networked
 
-Known gaps: surrounding (outer) terrain, roads, skydome, undergrowth/overgrowth, detail
-textures and lightmaps (statics currently show only their base color map).
+## M0.5: Visual pass (done)
 
-## M1: Infantry combat
+- [x] 16x anisotropic filtering
+- [x] Static objects: base x detail texture layering (BF2 `BaseDetail*` techniques)
+- [x] Terrain: six tiling detail textures blended by per-patch weight maps, tri-planar cliffs
+- [x] Road decals from compiled road meshes
+- [x] Sky dome with the level's sky texture
+- [x] Bindless static materials (4x frame rate: ~270 fps on Karkand in release)
 
-- Soldier meshes and animations (skinned mesh + `.ske`/`.baf` import)
+Still to do for BF2 fidelity: baked lightmaps (statics and terrain), dirt/crack layers,
+surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
+
+## M1: Infantry combat (in progress)
+
+- [x] Soldier meshes and animations (skinned mesh + `.ske`/`.baf` import), per-team models
+- [x] Third-person movement animations: legs from the soldier set, upper body from weapon sets
+- [x] Third-person camera (V)
+- Weapon models in hands and first-person arms/weapon view
 - Kits (7 classes per faction) and handheld weapons from the original templates:
   rate of fire, magazines, recoil, deviation, zoom
 - Projectiles with gravity, server-side hit detection with lag compensation
@@ -53,7 +65,7 @@ textures and lightmaps (statics currently show only their base color map).
 
 - BF2-accurate materials (detail/dirt/crack/lightmap layers on statics, normal-mapped
   bundled meshes), terrain splatting, water, undergrowth/overgrowth, effects, audio
-- Menus, server browser, settings
+- Menus, server browser, settings, HUD: a modern design of our own, not a copy of BF2's UI
 
 ## Later
 

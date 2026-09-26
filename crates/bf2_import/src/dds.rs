@@ -92,6 +92,39 @@ pub fn flip_vertical(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Converts an uncompressed 16-bit R5G6B5 DDS into 32-bit BGRA (GPUs can't sample 565).
+/// Returns `None` if the file isn't R5G6B5.
+pub fn rgb565_to_bgra8(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < HEADER || &data[..4] != b"DDS " {
+        return None;
+    }
+    let pf_flags = u32_at(data, 80);
+    let bit_count = u32_at(data, 88);
+    let (r_mask, g_mask, b_mask) = (u32_at(data, 92), u32_at(data, 96), u32_at(data, 100));
+    if pf_flags & 0x4 != 0 || bit_count != 16 || (r_mask, g_mask, b_mask) != (0xF800, 0x07E0, 0x001F) {
+        return None;
+    }
+    let mut out = data[..HEADER].to_vec();
+    // Pixel format: RGB + alpha, 32 bits, A8R8G8B8 masks.
+    out[80..84].copy_from_slice(&0x41u32.to_le_bytes());
+    out[88..92].copy_from_slice(&32u32.to_le_bytes());
+    out[92..96].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+    out[96..100].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+    out[100..104].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+    out[104..108].copy_from_slice(&0xFF00_0000u32.to_le_bytes());
+    // Pitch flag and value describe the top level.
+    let width = u32_at(data, 16);
+    out[20..24].copy_from_slice(&(width * 4).to_le_bytes());
+    for pixel in data[HEADER..].chunks_exact(2) {
+        let v = u16::from_le_bytes([pixel[0], pixel[1]]) as u32;
+        let r = ((v >> 11) & 31) * 255 / 31;
+        let g = ((v >> 5) & 63) * 255 / 63;
+        let b = (v & 31) * 255 / 31;
+        out.extend_from_slice(&[b as u8, g as u8, r as u8, 255]);
+    }
+    Some(out)
+}
+
 /// Flips the first `rows` pixel rows of one compressed 4x4 block.
 fn flip_block(block: &mut [u8], format: Format, rows: usize) {
     let color = match format {
