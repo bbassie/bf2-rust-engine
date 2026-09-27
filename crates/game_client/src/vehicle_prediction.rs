@@ -17,7 +17,6 @@ use game_shared::{
     flight::BodyState,
     input::InputFrame,
     level::LoadedLevel,
-    soldier::InputAck,
     vehicle::{Seated, VehicleData, VehicleMotion, VehicleSim, VehicleState, integrate, step_vehicle, water_height},
 };
 
@@ -163,16 +162,15 @@ fn reconcile(
     level: Option<Res<LoadedLevel>>,
     history: Res<InputHistory>,
     mut stats: ResMut<VehiclePredictionStats>,
-    driver: Query<Ref<InputAck>, With<LocalSoldier>>,
     mut vehicles: Query<(Entity, &VehicleData, Ref<VehicleMotion>, &VehicleState, &mut PredictedVehicle)>,
 ) {
-    let Ok(ack) = driver.single() else {
-        return;
-    };
     let water = water_height(level.as_deref());
     let dt = fixed.timestep().as_secs_f32();
     for (entity, data, motion, state, mut predicted) in &mut vehicles {
-        if !motion.is_changed() && !ack.is_changed() {
+        // The state carries the input it followed from (the soldier's ack may arrive in
+        // another update than the vehicle's state).
+        let ack = motion.ack;
+        if !motion.is_changed() || ack == 0 {
             continue;
         }
         let model = &data.0;
@@ -182,10 +180,10 @@ fn reconcile(
         let mut sim = predicted
             .sims
             .iter()
-            .find(|(seq, _)| *seq == ack.0)
+            .find(|(seq, _)| *seq == ack)
             .map_or_else(|| predicted.sim.clone(), |(_, sim)| sim.clone());
         let mut count = 0;
-        for frame in history.frames.iter().filter(|f| f.seq > ack.0) {
+        for frame in history.frames.iter().filter(|f| f.seq > ack) {
             let inputs = driver_inputs(model.desc.seats.len(), frame);
             let push = step_vehicle(model, &body, &inputs, &mut replayed_state, &mut sim, &spatial, entity, water, dt);
             integrate(model, &mut body, &push, dt);

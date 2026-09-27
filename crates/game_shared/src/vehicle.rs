@@ -75,6 +75,9 @@ pub struct VehicleMotion {
     pub velocity: Vec3,
     /// World space, radians per second (the driver's prediction replays from it).
     pub angular_velocity: Vec3,
+    /// Sequence number of the driver's input this state followed from (0 without a driver):
+    /// the driver's prediction replays its inputs after it.
+    pub ack: u32,
 }
 
 impl Default for VehicleMotion {
@@ -84,6 +87,7 @@ impl Default for VehicleMotion {
             rotation: Quat::IDENTITY,
             velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
+            ack: 0,
         }
     }
 }
@@ -469,6 +473,8 @@ pub struct VehicleSim {
     /// Suspension compression per wheel last tick, meters.
     pub compression: Vec<f32>,
     pub flight: FlightState,
+    /// Sequence number of the driver's input applied this tick.
+    pub driver_seq: u32,
 }
 
 impl VehicleSim {
@@ -476,6 +482,7 @@ impl VehicleSim {
         Self {
             compression: vec![0.0; desc.wheels.len()],
             flight: FlightState::new(),
+            driver_seq: 0,
         }
     }
 }
@@ -602,6 +609,7 @@ fn simulate_vehicles(
     let water = water_height(level.as_deref());
     for (entity, data, inputs, mut state, mut sim, mut forces, sleeping) in &mut vehicles {
         let occupied = inputs.0.iter().any(Option::is_some);
+        sim.driver_seq = inputs.0.first().copied().flatten().map_or(0, |input| input.seq);
         if sleeping && !occupied {
             continue;
         }
@@ -1014,14 +1022,15 @@ fn wrap_angle(a: f32) -> f32 {
 /// Publishes where simulated vehicles ended up after the physics step.
 #[allow(clippy::type_complexity)]
 fn record_motion(
-    mut vehicles: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity, &mut VehicleMotion), With<VehicleSim>>,
+    mut vehicles: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity, &VehicleSim, &mut VehicleMotion)>,
 ) {
-    for (position, rotation, velocity, angular, mut motion) in &mut vehicles {
+    for (position, rotation, velocity, angular, sim, mut motion) in &mut vehicles {
         motion.set_if_neq(VehicleMotion {
             position: position.0,
             rotation: rotation.0,
             velocity: velocity.0,
             angular_velocity: angular.0,
+            ack: sim.driver_seq,
         });
     }
 }

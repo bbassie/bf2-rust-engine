@@ -1,0 +1,38 @@
+// Flying the Z-10 on a remote server, predicted: walk to it at the Chinese airfield on Wake
+// Island, lift off, hover, fly forward and turn. The trace shows how many inputs each
+// reconciliation replayed and how far it corrected the prediction.
+// server --level wake_island_2007 --port 16673
+// client --connect 127.0.0.1 --port 16673 --scenario scenarios/vehicle2_net_heli.ron --out target/scenarios/vehicle2/net_heli
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        WalkToVehicle("ahe_z10"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(1.0),
+        VehicleInfo("entered"),
+        ThirdPerson(true),
+        VehicleTrace("spin up", 6.0),
+        Move(0.0, 1.0),
+        VehicleTrace("lift off", 4.0),
+        Move(0.0, 0.0),
+        VehicleTrace("hover", 3.0),
+        Screenshot("01_hover"),
+        Stick(0.0, -0.8),
+        VehicleTrace("nose down", 0.5),
+        Stick(0.0, 0.0),
+        VehicleTrace("forward", 6.0),
+        Stick(0.7, 0.0),
+        VehicleTrace("bank", 0.6),
+        Stick(0.0, 0.2),
+        VehicleTrace("turn", 3.0),
+        Screenshot("02_turn"),
+        Stick(0.0, 0.0),
+        VehicleTrace("level", 3.0),
+        Quit,
+    ],
+)

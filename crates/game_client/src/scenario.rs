@@ -114,7 +114,7 @@ pub enum Step {
     /// template (e.g. `"usjep_hmmwv"`), facing it. Singleplayer and listen server only.
     NearVehicle(String),
     /// Walks (sprinting, by input like a player) to the first entry point of the nearest
-    /// vehicle with this template; works connected to a remote server. Gives up after 40 s.
+    /// vehicle with this template; works connected to a remote server. Gives up after 150 s.
     WalkToVehicle(String),
     /// Until someone drives a vehicle of this template (gives up after 60 s).
     WaitDriver(String),
@@ -730,7 +730,7 @@ fn run_scenario(
                     .min_by(|a, b| a.0.distance(origin).total_cmp(&b.0.distance(origin)));
                 let to = target.map(|(point, radius)| (point - (origin + Vec3::Y), radius));
                 match to {
-                    Some((to, radius)) if Vec2::new(to.x, to.z).length() > radius * 0.7 && elapsed < 60.0 => {
+                    Some((to, radius)) if Vec2::new(to.x, to.z).length() > radius * 0.7 && elapsed < 150.0 => {
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = 0.0;
                         // Stuck on something: jump and sidestep for a moment.
@@ -747,7 +747,7 @@ fn run_scenario(
                     _ => {
                         match to {
                             None => warn!("scenario: no {template} to walk to"),
-                            Some((to, _)) if elapsed >= 60.0 => {
+                            Some((to, _)) if elapsed >= 150.0 => {
                                 warn!("scenario: gave up walking to {template}, {:.1} m to go", to.length())
                             }
                             _ => {}
