@@ -74,7 +74,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Squads: create/join/leave, squad leader spawning, bots in squads
 - [x] Commo rose (Q) with BF2's radio voice-overs, spotting (HUD, minimap, map), automatic soldier
   call-outs (reloading, grenade out, man down)
-- Commander: orders to squads, artillery, UAV, supply drops, scans (in progress)
+- [x] Commander: post, mutiny, squad orders, artillery, UAV, satellite scan, supply drops,
+  commander screen (Caps Lock)
 
 ## M3: Vehicles (in progress)
 
@@ -103,7 +104,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Infantry navigation from our collision data: layered walkability grid, cached,
   background A*; stuck events down from ~250/min to 1-3/min
 - Path costs per vehicle class
-- Strategy, squad orders and behaviours (in progress)
+- [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
+  orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
+  settings, ladders in navigation
+- AI commander using assets, bots using launchers/repairs (in progress)
 - Strategic layer from `StrategicAreas.ai`, squad orders, individual utility behaviours
   seeded from `AIBehaviours.ai` and per-object AI templates
 - Bots driving vehicles and flying through the same input channels as players
@@ -118,12 +122,15 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
   audio, controls, key bindings, mouse sensitivity, field of view) saved to disk, pause menu:
   a modern design of our own, not a copy of BF2's UI
-- Server browser (LAN discovery), chat, end-of-round summary (in progress)
+- [x] Server browser (LAN discovery, favourites), text chat (all/team/squad), end-of-round
+  summary with career stats
 
 ## Later
 
-- Special Forces gadgets: night vision, gas masks, flashbangs, zipline, grappling hook (in
-  progress)
-- Co-op
-- Modding workflow: authoring new content directly in glTF + RON
-- Admin tools (RCON), map rotation, server config, stats (in progress); master server
+- [x] Special Forces night vision, gas masks and tear gas, flashbangs, blast tinnitus
+- Zipline, grappling hook (in progress)
+- Co-op (in progress)
+- Modding workflow: authoring new content directly in glTF + RON (in progress)
+- [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
+  map changes; server config file; persistent player stats
+- Master server (in progress)

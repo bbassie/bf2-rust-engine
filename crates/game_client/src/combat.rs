@@ -6,12 +6,10 @@ use std::{collections::VecDeque, sync::Arc};
 
 use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
-use bevy_replicon::{
-    client::{ServerUpdateTick, server_mutate_ticks::ServerMutateTicks},
-    prelude::*,
-};
+use bevy_replicon::prelude::*;
 use game_data::{FireKind, FireMode, WeaponDesc};
 use game_shared::{
+    hitzones::ServerClock,
     input::{Buttons, InputPacket},
     physics::GameLayer,
     protocol::{HitConfirmed, KillFeed, Player, ShotFired},
@@ -69,26 +67,22 @@ pub struct ViewTick {
 fn track_view_tick(
     real: Res<Time<Real>>,
     state: Res<State<ClientState>>,
-    updates: Option<Res<ServerUpdateTick>>,
-    mutations: Option<Res<ServerMutateTicks>>,
+    clock: Query<&ServerClock>,
     mut view: ResMut<ViewTick>,
 ) {
-    if *state.get() != ClientState::Connected {
+    let (ClientState::Connected, Ok(clock)) = (state.get(), clock.single()) else {
         *view = ViewTick::default();
         return;
-    }
-    let latest = updates
-        .map_or(0, |t| t.get())
-        .max(mutations.map_or(0, |t| t.last_tick().get()));
+    };
     let now = real.elapsed_secs_f64();
-    if latest != view.latest {
-        view.latest = latest;
+    if clock.0 != view.latest {
+        view.latest = clock.0;
         view.received = now;
     }
-    // The server has gone on ticking since (it only sends what changed); what is on screen
-    // is from a moment before.
-    let seconds = now - view.received - INTERPOLATION_DELAY;
-    view.tick = (latest as i64 + (seconds * game_shared::TICK_HZ).round() as i64).max(1) as u32;
+    // What is on screen is from a moment before the latest state (which the server sent a
+    // little after the tick it counted).
+    let seconds = (now - view.received).min(0.05) - INTERPOLATION_DELAY;
+    view.tick = (clock.0 as i64 + (seconds * game_shared::TICK_HZ).round() as i64).max(1) as u32;
 }
 
 /// `BF2_SIM_INPUT_DELAY_MS`: our inputs are held back this long before they go to the
@@ -568,9 +562,12 @@ fn receive_kills(
         let victim = name(Some(kill.victim)).unwrap_or_else(|| "?".into());
         let weapon = weapon_display_name(&kill.weapon);
         let headshot = if kill.headshot { " (headshot)" } else { "" };
+        // Kills are announced when a soldier goes down; without a killer (falls, wrecks) he
+        // may still be revived.
         let line = match name(kill.killer) {
             Some(killer) if kill.killer != Some(kill.victim) => format!("{killer}  [{weapon}{headshot}]  {victim}"),
-            _ => format!("{victim} died"),
+            Some(_) => format!("[{weapon}]  {victim}"),
+            None => format!("{victim} is down"),
         };
         feedback.kills.push_back((line, time.elapsed_secs_f64()));
         while feedback.kills.len() > 6 {

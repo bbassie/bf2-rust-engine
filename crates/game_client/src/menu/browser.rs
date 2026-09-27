@@ -1,11 +1,15 @@
-//! The Join page's server list: servers on this machine and on the LAN, and the favourite
-//! and recent servers from the settings, with their map, players and ping (see
+//! The Join page's server list: servers on this machine and on the LAN, the favourite and
+//! recent servers from the settings, and those a master server knows (`master_server` in the
+//! settings, off by default), with their map, players and ping (see
 //! `game_shared::discovery`). The LAN is asked by UDP broadcast, which only the menu does:
-//! scripted runs (scenarios) only ask this machine, so they never open a network socket.
+//! scripted runs (scenarios) only ask this machine (and a master on it), so they never open
+//! a network socket.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
-use game_shared::discovery::{DISCOVERY_PORTS, ServerInfo, encode_query, parse_reply};
+use game_shared::discovery::{
+    DISCOVERY_PORTS, LIST_QUERY, MASTER_PORT, ServerInfo, encode_query, parse_reply, parse_server_list,
+};
 
 use super::*;
 use crate::settings::SavedServer;
@@ -20,6 +24,8 @@ pub struct ServerBrowser {
     pub entries: Vec<BrowserEntry>,
     /// Token of the last query and when it went out (real seconds).
     query: Option<(u64, f32)>,
+    /// When servers a master listed were asked, for their ping.
+    asked: Vec<((IpAddr, u16), f32)>,
     /// Bumped when the list changes.
     pub version: u32,
 }
@@ -71,6 +77,7 @@ impl ServerBrowser {
     pub fn refresh(&mut self, settings: &Settings, now: f32, network: bool) {
         let token = fastrand::u64(..);
         self.query = Some((token, now));
+        self.asked.clear();
         self.version += 1;
         // Saved servers are listed even while (or if) they don't answer.
         self.entries.clear();
@@ -97,11 +104,25 @@ impl ServerBrowser {
                 let _ = socket.send_to(&query, (Ipv4Addr::LOCALHOST, port));
             }
         }
+        let master = settings.master_server.as_deref().and_then(|m| {
+            use std::net::ToSocketAddrs;
+            (m.trim(), MASTER_PORT).to_socket_addrs().ok().or_else(|| m.trim().to_socket_addrs().ok())?.next()
+        });
+        if let Some(master) = master.filter(|m| m.ip().is_loopback())
+            && let Some(socket) = &self.local
+        {
+            let _ = socket.send_to(LIST_QUERY, master);
+        }
         if !network {
             return;
         }
         if self.network.is_none() {
             self.network = bind(Ipv4Addr::UNSPECIFIED, true);
+        }
+        if let Some(master) = master.filter(|m| !m.ip().is_loopback())
+            && let Some(socket) = &self.network
+        {
+            let _ = socket.send_to(LIST_QUERY, master);
         }
         let Some(socket) = &self.network else {
             return;
@@ -172,22 +193,47 @@ pub(super) fn poll_browser(
         return;
     };
     let now = time.elapsed_secs();
-    let mut buffer = [0u8; 2048];
+    let mut buffer = [0u8; 4096];
     let mut replies = Vec::new();
+    let mut listed = Vec::new();
     for socket in [&browser.local, &browser.network].into_iter().flatten() {
         while let Ok((len, from)) = socket.recv_from(&mut buffer) {
             if let Some((answer, info)) = parse_reply(&buffer[..len])
                 && answer == token
             {
                 replies.push((from.ip(), info));
+            } else if let Some(servers) = parse_server_list(&buffer[..len]) {
+                info!("browser: the master server lists {} servers", servers.len());
+                listed.extend(servers);
             }
+        }
+    }
+    // Servers from the master: listed now, and asked for their details directly.
+    let query = encode_query(token);
+    for (ip, game_port, query_port) in listed {
+        if !browser.entries.iter().any(|e| e.is(ip, game_port)) {
+            browser.entries.push(BrowserEntry {
+                address: ip.to_string(),
+                port: game_port,
+                ip: Some(ip),
+                info: None,
+                ping_ms: None,
+                favourite: false,
+            });
+            browser.version += 1;
+        }
+        let socket = if ip.is_loopback() { &browser.local } else { &browser.network };
+        if let Some(socket) = socket {
+            let _ = socket.send_to(&query, (ip, query_port));
+            browser.asked.push(((ip, game_port), now));
         }
     }
     if replies.is_empty() {
         return;
     }
     for (ip, info) in replies {
-        let ping = ((now - sent) * 1000.0).max(1.0);
+        let asked = browser.asked.iter().find(|(key, _)| *key == (ip, info.port)).map_or(sent, |(_, at)| *at);
+        let ping = ((now - asked) * 1000.0).max(1.0);
         info!("browser: {} at {ip}:{} ({} ms)", info.name, info.port, ping.round());
         let known: Vec<SavedServer> = settings
             .favourite_servers

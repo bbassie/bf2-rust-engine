@@ -8,7 +8,10 @@
 //! (next to enemy ground), what the team has seen of the enemy around it, flags being taken
 //! right now, distance, and ticket bleed.
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_data::StrategicLayoutDesc;
@@ -49,14 +52,20 @@ pub struct Area {
 }
 
 /// The strategic areas of the layout being played, rebuilt every round (control points are
-/// new entities then).
+/// new entities then) and with every level.
 #[derive(Resource, Default)]
 pub struct StrategicMap {
     pub areas: Vec<Area>,
     /// Control point entities by index.
     pub control_points: Vec<Option<Entity>>,
+    /// Changes with every rebuild (never 0 once built): area indices kept from an older
+    /// map mean nothing.
+    pub generation: u32,
     built_for: Vec<Entity>,
 }
+
+/// Generations of maps ever built, so they differ even when the resource is replaced.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 impl StrategicMap {
     /// The area of a control point.
@@ -95,6 +104,7 @@ struct PointInfo<'a> {
 /// Rebuilds the areas when the control points change (new level or round).
 pub fn update_map(
     mut map: ResMut<StrategicMap>,
+    mut strategy: ResMut<Strategy>,
     data: Res<AiData>,
     level: Res<LoadedLevel>,
     match_info: Single<&MatchInfo>,
@@ -103,9 +113,11 @@ pub fn update_map(
     let mut points: Vec<(Entity, &ControlPoint, &ControlPointRules)> = control_points.iter().collect();
     points.sort_by_key(|(_, cp, _)| cp.index);
     let entities: Vec<Entity> = points.iter().map(|(e, ..)| *e).collect();
-    if entities == map.built_for && !data.is_changed() {
+    if entities == map.built_for && map.generation != 0 && !data.is_changed() && !level.is_changed() {
         return;
     }
+    // Orders and objectives name areas of the old map: plan again right away.
+    *strategy = Strategy::default();
     let layout = level.game_mode(&match_info.mode, match_info.size);
     let spawn_ids: Vec<&str> = layout
         .map(|l| l.spawn_points.iter().map(|s| s.control_point.as_str()).collect())
@@ -146,6 +158,7 @@ pub fn update_map(
     *map = StrategicMap {
         areas,
         control_points: by_index,
+        generation: GENERATION.fetch_add(1, Ordering::Relaxed) + 1,
         built_for: entities,
     };
 }
@@ -305,10 +318,11 @@ impl Strategy {
     /// distance, varied a little per bot (`seed`).
     pub fn objective_for(&self, team: Team, position: Vec3, map: &StrategicMap, seed: u32) -> Option<Objective> {
         let objectives = team_index(team).map(|t| &self.objectives[t])?;
-        objectives.iter().copied().max_by(|a, b| {
+        objectives.iter().copied().filter(|o| o.area < map.areas.len()).max_by(|a, b| {
             let score = |o: &Objective| {
                 let jitter = 1.0 + 0.3 * hash01(seed, o.area as u32);
-                o.value * jitter / (1.0 + map.areas[o.area].position.distance(position) / 300.0)
+                let distance = map.areas.get(o.area).map_or(f32::MAX, |a| a.position.distance(position));
+                o.value * jitter / (1.0 + distance / 300.0)
             };
             score(a).total_cmp(&score(b))
         })
@@ -383,6 +397,8 @@ pub fn plan(
         strategy.orders.clear();
         return;
     }
+    let count = map.areas.len();
+    strategy.orders.retain(|_, order| order.area < count);
     let states: Vec<Option<FlagState>> = map
         .areas
         .iter()

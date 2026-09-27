@@ -5,11 +5,13 @@ use bevy::prelude::*;
 mod blend;
 mod destruction;
 pub mod environment;
+mod far_trees;
 mod flags;
 pub mod materials;
 mod hitzones;
 mod projectiles;
 mod props;
+mod ropes;
 pub mod scope;
 mod soldiers;
 mod statics;
@@ -36,6 +38,7 @@ impl Plugin for RenderPlugin {
             scope::ScopePlugin,
         ))
         .add_plugins((destruction::DestructionRenderPlugin, projectiles::ProjectileRenderPlugin, hitzones::HitZoneDebugPlugin))
-        .add_plugins((vegetation::VegetationRenderPlugin, water::WaterPlugin));
+        .add_plugins((vegetation::VegetationRenderPlugin, water::WaterPlugin, ropes::RopeRenderPlugin))
+        .add_plugins(far_trees::FarTreesPlugin);
     }
 }

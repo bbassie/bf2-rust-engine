@@ -146,6 +146,8 @@ pub struct BotStats {
     max_path_seconds: f32,
     /// Ladders bots got on.
     climbs: u32,
+    /// Times a bot found it couldn't walk to its goal.
+    stranded: u32,
     /// Milliseconds spent in `think`.
     think_ms: f32,
     max_think_ms: f32,
@@ -249,6 +251,8 @@ pub struct BotBrain {
     regroup: f32,
     /// Squad leaders: the squad gathered before the assault.
     staged: bool,
+    /// [`StrategicMap::generation`] its area indices belong to.
+    map_generation: u32,
     /// Phase of looking around while holding a position.
     sweep: f32,
     /// Kit and spawn were chosen for this death.
@@ -261,6 +265,8 @@ pub struct BotBrain {
     climbing: bool,
     /// Sprinting while stamina lasts (see `act`).
     sprinting: bool,
+    /// Seconds left waiting after finding its goal out of walking reach.
+    stranded: f32,
 
     goal: Option<Vec3>,
     /// Walking straight to the goal without a path; and the goal that was checked for.
@@ -327,12 +333,14 @@ impl Default for BotBrain {
             via: None,
             regroup: 0.0,
             staged: false,
+            map_generation: 0,
             sweep: fastrand::f32() * TAU,
             deployed: false,
             spawn_on_leader: false,
             jump_held: false,
             climbing: false,
             sprinting: true,
+            stranded: 0.0,
             goal: None,
             direct: false,
             direct_goal: None,
@@ -359,6 +367,8 @@ enum Steer {
     Toward { target: Vec3, jump: bool, ladder: Option<LadderStep> },
     /// At the end of the path.
     Arrived,
+    /// At the end of a path that doesn't reach the goal: it can't be walked to from here.
+    Stranded,
 }
 
 /// Where a bot wants to go this tick.
@@ -493,6 +503,7 @@ impl BotBrain {
     /// A new soldier: remember its weapons, forget the last life.
     fn new_life(&mut self, w: &Senses, me: &Me) {
         self.soldier = Some(me.soldier);
+        self.stranded = 0.0;
         self.primary = me.inventory.map_or(0, |i| i.active);
         self.paddles = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Paddles));
         self.medic_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::MedicBag));
@@ -552,6 +563,14 @@ impl BotBrain {
             if self.spawn_on_leader {
                 team_stats.leader_spawns += 1;
             }
+        }
+        if self.map_generation != w.map.generation {
+            // A new round or level: areas it remembers are gone.
+            self.map_generation = w.map.generation;
+            self.order = None;
+            self.spot = None;
+            self.via = None;
+            self.staged = false;
         }
         self.seq = self.seq.wrapping_add(1);
         let skill = self.personality.skill(w.settings.bot_skill);
@@ -991,7 +1010,7 @@ impl BotBrain {
 
         // Attackers work their way forward: a few seconds moving, a few shooting.
         let advance = match self.order {
-            Some((OrderKind::Attack, index)) if me.health_fraction > 0.5 && distance > 25.0 => {
+            Some((OrderKind::Attack, index)) if me.health_fraction > 0.5 && distance > 25.0 && index < w.map.areas.len() => {
                 let area = &w.map.areas[index];
                 let phase = (self.engaged + hash01(self.seed, 3) * 5.0) % 5.0;
                 let moving = phase < 1.5 + 1.5 * self.personality.aggression;
@@ -1170,6 +1189,7 @@ impl BotBrain {
                     .objective_for(me.team, me.motion.position, &w.map, self.seed)
                     .map(|o| (o.kind, o.area))
             })
+            .filter(|(_, area)| *area < w.map.areas.len())
     }
 
     /// The flag someone at `position` is at: to take or to hold.
@@ -1411,7 +1431,14 @@ impl BotBrain {
         let mut jump = false;
         let mut ladder = None;
         self.goal = intent.goal.map(|g| g.position);
-        if let Some(goal) = intent.goal {
+        // Where walking can't get it (a carrier, an island), it waits for a while rather than
+        // pushing against the edge, then tries again.
+        // TODO: vehicles (boats, aircraft) off such spawns.
+        self.stranded -= dt;
+        if self.stranded <= 0.0 && self.stranded > -dt {
+            self.repath = true;
+        }
+        if let Some(goal) = intent.goal.filter(|_| self.stranded <= 0.0) {
             // Short, clear moves need no path.
             if self.direct_goal.is_none_or(|g| g.distance_squared(goal.position) > 1.0) {
                 self.direct_goal = Some(goal.position);
@@ -1422,6 +1449,11 @@ impl BotBrain {
                 (Some(nav), false) => match self.follow_path(nav, goal.position, goal.tolerance, me.motion, dt, stats) {
                     Steer::Toward { target, jump, ladder } => (target, jump, ladder),
                     Steer::Arrived => (goal.position, false, None),
+                    Steer::Stranded => {
+                        stats.stranded += 1;
+                        self.stranded = 10.0;
+                        (position, false, None)
+                    }
                 },
                 _ => (goal.position, false, None),
             };
@@ -1689,8 +1721,13 @@ impl BotBrain {
             }
         }
         let Some(waypoint) = path.waypoints.get(self.waypoint) else {
+            let complete = path.complete;
             self.path = None;
-            return Steer::Arrived;
+            return if complete || flat(goal - position).length() < 3.0 {
+                Steer::Arrived
+            } else {
+                Steer::Stranded
+            };
         };
         if motion.climbing {
             // Height changes and no progress along the ground are what climbing is.
@@ -1766,7 +1803,7 @@ impl BotBrain {
         let objective = match leader {
             // Human leaders decide where the squad goes.
             Some(l) if squad.is_some_and(|s| !s.leader_is_bot) => Some(l.position),
-            _ => area.map(|a| w.map.areas[a].position),
+            _ => area.and_then(|a| w.map.areas.get(a)).map(|a| a.position),
         };
         let spawns: Vec<(u8, Vec3)> = w
             .map
@@ -1894,7 +1931,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             "bots: {} stuck events in the last minute ({} on orders, {} advancing, {} to cover or \
              flanking; {:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
-             {:.1} ms avg, {:.1} ms max; {} ladders climbed; thinking {:.2} ms per tick, {:.1} ms max; \
+             {:.1} ms avg, {:.1} ms max; {} ladders climbed, {} goals out of reach; thinking {:.2} ms per tick, {:.1} ms max; \
              stuck most at {}",
             stats.stuck_events,
             stats.stuck_by_activity[0],
@@ -1911,6 +1948,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.path_seconds * 1000.0 / stats.paths.max(1) as f32,
             stats.max_path_seconds * 1000.0,
             stats.climbs,
+            stats.stranded,
             stats.think_ms / stats.ticks.max(1) as f32,
             stats.max_think_ms,
             hotspots(&stats.stuck_spots),

@@ -19,6 +19,7 @@ pub mod hitzones;
 pub mod input;
 pub mod ladder;
 pub mod level;
+pub mod mods;
 pub mod physics;
 pub mod projectile;
 pub mod protocol;
@@ -48,6 +49,7 @@ pub struct SharedPlugin;
 impl Plugin for SharedPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Time::<Fixed>::from_hz(TICK_HZ))
+            .add_systems(Startup, config::log_mods)
             .add_plugins((
                 RepliconPlugins,
                 PhysicsPlugins::default(),

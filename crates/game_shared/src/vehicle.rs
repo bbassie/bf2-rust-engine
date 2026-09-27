@@ -190,7 +190,7 @@ pub struct VehicleModel {
 }
 
 impl VehicleModel {
-    fn new(desc: VehicleDesc, root: &Path) -> Self {
+    fn new(desc: VehicleDesc, paths: &GamePaths) -> Self {
         let mut joint_index = Vec::with_capacity(desc.parts.len());
         let mut joint_count = 0;
         for part in &desc.parts {
@@ -213,7 +213,7 @@ impl VehicleModel {
             collider: None,
             guns,
         };
-        model.collider = model.build_collider(root);
+        model.collider = model.build_collider(paths);
         model
     }
 
@@ -275,7 +275,7 @@ impl VehicleModel {
         })
     }
 
-    fn build_collider(&self, root: &Path) -> Option<Collider> {
+    fn build_collider(&self, paths: &GamePaths) -> Option<Collider> {
         let transforms = self.part_transforms(&[]);
         let mut hulls = Vec::new();
         for (i, part) in self.desc.parts.iter().enumerate() {
@@ -285,7 +285,7 @@ impl VehicleModel {
             if !self.desc.is_hull_part(i) {
                 continue;
             }
-            let points = match load_collision_points(&root.join(path), part.collision_part) {
+            let points = match load_collision_points(&paths.find(path), part.collision_part) {
                 Ok(points) => points,
                 Err(err) => {
                     warn!("vehicle collision {path}: {err:#}");
@@ -349,9 +349,9 @@ impl VehicleLibrary {
         self.models
             .entry(name.to_string())
             .or_insert_with(|| {
-                let path = paths.imported.join("vehicles").join(format!("{name}.ron"));
-                game_data::read_ron::<VehicleDesc>(&path)
-                    .map(|desc| Arc::new(VehicleModel::new(desc, &paths.imported)))
+                paths
+                    .read_ron::<VehicleDesc>(format!("vehicles/{name}.ron"))
+                    .map(|desc| Arc::new(VehicleModel::new(desc, paths)))
                     .map_err(|err| debug!("{err}"))
                     .ok()
             })

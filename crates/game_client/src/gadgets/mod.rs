@@ -28,7 +28,6 @@ use bevy::{
 use game_data::{FlashbangDesc, GadgetAssets, SoundDesc};
 use game_shared::{
     config::GamePaths,
-    effects::PlayEffect,
     gear::{GearRequest, SoldierGear, TearGas, gas_exposure},
     physics::GameLayer,
     projectile::SmokeCloud,
@@ -42,7 +41,7 @@ use crate::{
     camera::PlayerCamera,
     chat::ChatBox,
     deploy::DeployScreen,
-    effects::EffectLibrary,
+    effects::{EffectLibrary, SpawnEffect},
     menu::Menu,
     net::LocalSoldier,
     settings::{Action, Actions},
@@ -206,10 +205,11 @@ fn toggle_gear(
     }
 }
 
-/// Flashbangs and blasts near the camera, from the detonations the server sends.
+/// Flashbangs and blasts near the camera: detonation effects (from the server's
+/// `PlayEffect`s, which `effects` plays as [`SpawnEffect`]s).
 #[allow(clippy::too_many_arguments)]
 fn take_hits(
-    mut detonations: MessageReader<PlayEffect>,
+    mut detonations: MessageReader<SpawnEffect>,
     armory: Res<Armory>,
     library: Option<Res<EffectLibrary>>,
     camera: Query<&GlobalTransform, With<PlayerCamera>>,
@@ -225,7 +225,7 @@ fn take_hits(
     };
     let eye = camera.translation();
     let forward = camera.forward().as_vec3();
-    for detonation in detonations.read() {
+    for detonation in detonations.read().filter(|d| !d.first_person) {
         let Some(weapon) = armory
             .weapons
             .values()

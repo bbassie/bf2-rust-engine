@@ -10,7 +10,10 @@
 //! run on one machine; clients query all of them. The token comes back unchanged, which is
 //! how the client measures the ping.
 
-use std::ops::RangeInclusive;
+use std::{
+    net::IpAddr,
+    ops::RangeInclusive,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +58,37 @@ pub fn encode_reply(token: u64, info: &ServerInfo) -> Vec<u8> {
     [REPLY.as_slice(), &token.to_le_bytes(), body.as_bytes()].concat()
 }
 
+/// The optional master server's port (`crates/master_server`).
+pub const MASTER_PORT: u16 = 16580;
+
+/// Server -> master, every [`HEARTBEAT_SECONDS`]: "I'm here".
+pub fn encode_heartbeat(game_port: u16, query_port: u16) -> Vec<u8> {
+    [b"BF2R-HB".as_slice(), &game_port.to_le_bytes(), &query_port.to_le_bytes()].concat()
+}
+
+/// Server -> master when it stops.
+pub fn encode_bye(game_port: u16) -> Vec<u8> {
+    [b"BF2R-BYE".as_slice(), &game_port.to_le_bytes()].concat()
+}
+
+pub const HEARTBEAT_SECONDS: f32 = 30.0;
+
+/// Client -> master: the server list, please.
+pub const LIST_QUERY: &[u8] = b"BF2R-LIST";
+
+/// The master's answer: `(ip, game port, query port)` per server.
+pub fn parse_server_list(packet: &[u8]) -> Option<Vec<(IpAddr, u16, u16)>> {
+    let text = std::str::from_utf8(packet.strip_prefix(b"BF2R-SERVERS")?).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+            })
+            .collect(),
+    )
+}
+
 pub fn parse_reply(packet: &[u8]) -> Option<(u64, ServerInfo)> {
     let rest = packet.strip_prefix(REPLY)?;
     let (token, body) = rest.split_at_checked(8)?;
@@ -79,5 +113,10 @@ mod tests {
         };
         assert_eq!(parse_reply(&encode_reply(7, &info)), Some((7, info)));
         assert_eq!(parse_query(b"BF2R!12345678"), None);
+        let list = parse_server_list(b"BF2R-SERVERS127.0.0.1 16567 16568
+10.0.0.2 16600 16569
+").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].1, 16600);
     }
 }

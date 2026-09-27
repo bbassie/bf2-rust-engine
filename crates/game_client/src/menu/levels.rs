@@ -1,8 +1,9 @@
-//! The levels the menu offers: the built-in test range and what `imported/levels` has.
+//! The levels the menu offers: the built-in test range and the levels of `imported/` and
+//! the mods.
 
 use super::*;
 
-/// Levels to offer: the built-in test range, then everything in `imported/levels`.
+/// Levels to offer: the built-in test range, then the imported and mod levels.
 #[derive(Resource)]
 pub struct LevelCatalog {
     pub levels: Vec<LevelInfo>,
@@ -85,14 +86,11 @@ pub(super) fn mode_label(mode: &str) -> String {
 }
 
 pub(super) fn scan_levels(mut catalog: ResMut<LevelCatalog>, paths: Res<GamePaths>) {
-    let dir = paths.imported.join("levels");
+    let paths = paths.clone();
     catalog.scan = Some(AsyncComputeTaskPool::get().spawn(async move {
         let mut levels = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return levels;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path().join("level.ron");
+        for name in paths.level_names() {
+            let path = paths.level_dir(&name).join("level.ron");
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -119,7 +117,7 @@ pub(super) fn scan_levels(mut catalog: ResMut<LevelCatalog>, paths: Res<GamePath
             layouts.sort_by(|a, b| (a.0 != "gpm_cq", &a.0, a.1).cmp(&(b.0 != "gpm_cq", &b.0, b.1)));
             layouts.dedup();
             levels.push(LevelInfo {
-                name: entry.file_name().to_string_lossy().into_owned(),
+                name: name.clone(),
                 display_name: summary.display_name.clone(),
                 minimap: summary.minimap.clone(),
                 layouts,

@@ -7,7 +7,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -70,31 +70,31 @@ pub struct StaticDestroyed {
 
 /// Loads templates and colliders once per level load.
 struct Cache<'a> {
-    root: &'a Path,
+    paths: &'a GamePaths,
     templates: HashMap<String, Option<ObjectDesc>>,
     colliders: HashMap<(String, u32), Option<Collider>>,
 }
 
 impl Cache<'_> {
     fn template(&mut self, name: &str) -> Option<&ObjectDesc> {
-        let root = self.root;
+        let paths = self.paths;
         self.templates
             .entry(name.to_string())
             .or_insert_with(|| {
-                let path = root.join("templates").join(format!("{name}.ron"));
-                game_data::read_ron(&path)
-                    .map_err(|err| warn!("{err}"))
+                paths
+                    .read_ron(format!("templates/{name}.ron"))
+                    .map_err(|err| warn!("{err:#}"))
                     .ok()
             })
             .as_ref()
     }
 
     fn collider(&mut self, path: &str, part: u32) -> Option<Collider> {
-        let root = self.root;
+        let paths = self.paths;
         self.colliders
             .entry((path.to_string(), part))
             .or_insert_with(|| {
-                load_collider(&root.join(path), part)
+                load_collider(&paths.find(path), part)
                     .map_err(|err| warn!("collision {path}: {err:#}"))
                     .ok()
                     .flatten()
@@ -111,9 +111,8 @@ pub fn spawn_statics(commands: &mut Commands, statics: &[StaticInstance], paths:
 /// [`DestroyedStatics`]): objects outside the level's statics, such as the commander's
 /// assets, use numbers above the statics'.
 pub fn spawn_objects(commands: &mut Commands, statics: &[StaticInstance], first_instance: u32, paths: &GamePaths) {
-    let root: PathBuf = paths.imported.clone();
     let mut cache = Cache {
-        root: &root,
+        paths,
         templates: HashMap::new(),
         colliders: HashMap::new(),
     };

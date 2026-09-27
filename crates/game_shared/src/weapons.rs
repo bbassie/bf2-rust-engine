@@ -67,8 +67,7 @@ fn build_armory(level: &LevelDesc, paths: &GamePaths) -> Armory {
         for slot in &desc.kits {
             armory.team_kits[team].push(slot.kit.clone());
             if !armory.hit_zones.contains_key(&slot.kit) {
-                let path = paths.imported.join("soldiers").join(format!("{}.ron", slot.soldier));
-                match game_data::read_ron::<SoldierDesc>(&path) {
+                match paths.read_ron::<SoldierDesc>(format!("soldiers/{}.ron", slot.soldier)) {
                     Ok(body) if !body.hit_zones.is_empty() => {
                         armory.hit_zones.insert(slot.kit.clone(), body.hit_zones.into());
                     }
@@ -79,15 +78,13 @@ fn build_armory(level: &LevelDesc, paths: &GamePaths) -> Armory {
             if armory.kits.contains_key(&slot.kit) {
                 continue;
             }
-            let path = paths.imported.join("kits").join(format!("{}.ron", slot.kit));
-            match game_data::read_ron::<KitDesc>(&path) {
+            match paths.read_ron::<KitDesc>(format!("kits/{}.ron", slot.kit)) {
                 Ok(kit) => {
                     for weapon in &kit.weapons {
                         if armory.weapons.contains_key(weapon) {
                             continue;
                         }
-                        let path = paths.imported.join("weapons").join(format!("{weapon}.ron"));
-                        match game_data::read_ron::<WeaponDesc>(&path) {
+                        match paths.read_ron::<WeaponDesc>(format!("weapons/{weapon}.ron")) {
                             Ok(desc) => {
                                 armory.weapons.insert(weapon.clone(), Arc::new(desc));
                             }

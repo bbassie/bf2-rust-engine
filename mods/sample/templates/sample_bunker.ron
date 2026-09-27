@@ -1,0 +1,11 @@
+(
+    name: "sample_bunker",
+    kind: "SimpleObject",
+    parts: [
+        {
+            "mesh": Some("objects/sample/meshes/bunker.glb"),
+            "collision": Some("objects/sample/meshes/bunker.collision.glb"),
+            "position": (0.0, 0.0, 0.0),
+        },
+    ],
+)

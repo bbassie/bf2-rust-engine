@@ -21,7 +21,7 @@ use game_data::{FireKind, FireMode, Guidance, HitZone, TriggerBy, WeaponDesc};
 use game_shared::{
     conquest::RoundState,
     effects::PlayEffect,
-    hitzones::{BodyPose, HEAD},
+    hitzones::{BodyPose, HEAD, ServerClock},
     input::Buttons,
     physics::GameLayer,
     projectile::{
@@ -29,7 +29,7 @@ use game_shared::{
         steer,
     },
     protocol::{ControlledBy, HitConfirmed, Player, ShotFired, Team},
-    revive::WRECK_HIT_POINTS,
+    revive::{Downed, WRECK_HIT_POINTS},
     soldier::{Health, Hitbox, Soldier, SoldierMotion},
     statics::Destructible,
     vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
@@ -237,14 +237,21 @@ fn current_tick(tick: &ServerTick) -> u32 {
     tick.get().wrapping_add(1)
 }
 
-/// Remembers where every soldier is this tick.
+/// Remembers where every soldier is this tick, and tells clients which tick it is.
 #[allow(clippy::type_complexity)]
 fn record_poses(
     mut commands: Commands,
     tick: Res<ServerTick>,
+    mut clock: Query<&mut ServerClock>,
     mut soldiers: Query<(Entity, &SoldierMotion, Has<Seated>, Option<&mut PoseHistory>), With<Soldier>>,
 ) {
     let tick = current_tick(&tick);
+    match clock.single_mut() {
+        Ok(mut clock) => clock.0 = tick,
+        Err(_) => {
+            commands.spawn((ServerClock(tick), Replicated));
+        }
+    }
     for (entity, motion, seated, history) in &mut soldiers {
         let pose = BodyPose::of(motion, seated);
         match history {
@@ -499,7 +506,7 @@ fn fire_weapons(
                     });
                 }
                 debug!(
-                    "{name} fires {} ({} ticks back, saw tick {} at {now})",
+                    "{name} ({player:?}) fires {} ({} ticks back, saw tick {} at {now})",
                     weapon.name,
                     rewind_for(input.view_tick, now),
                     input.view_tick
@@ -559,7 +566,10 @@ fn simulate_projectiles(
     mut projectiles: Query<(Entity, &mut Live, &mut ProjectileMotion)>,
     shooters: Query<(&SoldierMotion, &Inventory)>,
     colliders: Query<&ColliderOf>,
-    soldiers: Query<(Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>), With<Soldier>>,
+    soldiers: Query<
+        (Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>),
+        (With<Soldier>, Without<Downed>),
+    >,
     vehicles: Query<&VehicleData>,
     materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
@@ -570,7 +580,8 @@ fn simulate_projectiles(
 ) {
     let dt = time.delta_secs();
     let now = current_tick(&tick);
-    // Soldiers inside closed vehicles can't be hit; those on open seats can.
+    // Soldiers inside closed vehicles can't be hit, those on open seats can; bullets pass
+    // over the critically wounded (only blasts and shock paddles reach them).
     let targets: Vec<Target> = soldiers
         .iter()
         .filter(|(.., seated)| {
@@ -659,10 +670,19 @@ fn simulate_projectiles(
                 .filter(|target| target.entity != shooter)
                 .filter_map(|target| {
                     let hit = target.pose(now, rewind).ray(target.zones, origin, *direction, length)?;
-                    Some((target.entity, hit))
+                    Some((target, hit))
                 })
                 .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
-                .map(|(entity, hit)| {
+                .map(|(target, hit)| {
+                    if rewind > 0 {
+                        let now_too = target.pose.ray(target.zones, origin, *direction, length).is_some();
+                        debug!(
+                            "rewound hit on {:?}: {}",
+                            target.entity,
+                            if now_too { "a hit without rewinding too" } else { "a miss without rewinding" }
+                        );
+                    }
+                    let entity = target.entity;
                     let contact = projectile::Contact {
                         entity,
                         point: hit.point,
@@ -698,8 +718,8 @@ fn simulate_projectiles(
             if let Some(target) = targets.iter().find(|t| t.entity == hit.entity) {
                 let moved = target.pose(now, live.rewind).position.distance(target.pose.position);
                 debug!(
-                    "{} hit {:?} in material {part} (x{factor}) for {damage:.1}, judged {} ticks back (moved {moved:.2} m since)",
-                    weapon.name, hit.entity, live.rewind
+                    "{} of {:?} hit {:?} in material {part} (x{factor}) for {damage:.1}, judged {} ticks back (moved {moved:.2} m since)",
+                    weapon.name, live.shooter_player, hit.entity, live.rewind
                 );
             }
             if damage > 0.0 {

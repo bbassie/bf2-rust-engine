@@ -102,10 +102,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Gas mask: the world through two lenses in a dark rubber frame.
     if settings.mask > 0.0 {
         let q = (in.uv - 0.5) * vec2(dims.x / dims.y, 1.0);
-        let lens = min(length((q - vec2(-0.36, 0.02)) * vec2(1.0, 0.92)), length((q - vec2(0.36, 0.02)) * vec2(1.0, 0.92)));
-        let inside = smoothstep(0.56, 0.5, lens);
+        let lens = min(length((q - vec2(-0.34, 0.03)) * vec2(1.0, 0.9)), length((q - vec2(0.34, 0.03)) * vec2(1.0, 0.9)));
+        let inside = smoothstep(0.5, 0.45, lens);
         // Grimy rim, a faint tint of the glass.
-        let rim = smoothstep(0.38, 0.54, lens) * 0.5;
+        let rim = smoothstep(0.32, 0.49, lens) * 0.55;
         let through = color * vec3(0.92, 0.97, 0.94) * (1.0 - rim);
         color = mix(color, mix(vec3(0.015), through, inside), settings.mask);
     }

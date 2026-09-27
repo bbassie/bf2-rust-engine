@@ -303,13 +303,14 @@ pub(super) fn build_level_details(
     catalog: Res<LevelCatalog>,
     asset_server: Res<AssetServer>,
     details: Query<(Entity, &LevelDetails, Option<&Children>)>,
-    mut built: Local<Option<(Entity, String)>>,
+    mut built: Local<Option<(Entity, String, bool)>>,
 ) {
     let Ok((entity, info, children)) = details.single() else {
         return;
     };
     let last = &settings.last_match;
-    let key = (entity, last.level.clone());
+    let coop = game_server::coop::is_coop(&last.mode);
+    let key = (entity, last.level.clone(), coop);
     if built.as_ref() == Some(&key) {
         return;
     }
@@ -378,7 +379,18 @@ pub(super) fn build_level_details(
                     switch(chips, Toggle::Spectate);
                     chips.spawn(text("Spectate", 15.0, DIM));
                 });
-            section(options, "Bots");
+            if coop {
+                options.spawn(text(
+                    if host {
+                        "Co-op: everyone who joins plays on your team, bots fill both teams."
+                    } else {
+                        "Co-op: bots fill both teams."
+                    },
+                    13.0,
+                    DIM,
+                ));
+            }
+            section(options, if coop { "Bots (both teams)" } else { "Bots" });
             options
                 .spawn(Node {
                     column_gap: px(8),

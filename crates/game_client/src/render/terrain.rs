@@ -4,7 +4,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::VisibilityRange,
-    image::{ImageLoaderSettings, ImageSampler},
+    image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     light::NotShadowCaster,
     mesh::Indices,
     prelude::*,
@@ -208,8 +208,19 @@ fn build_terrain_visuals(
         match Surrounding::load(dir, surrounding) {
             Ok(ring) => {
                 for (cell, path) in surrounding.color_maps.iter().enumerate().filter(|(i, _)| *i != 4) {
+                    let texture = (!path.is_empty()).then(|| {
+                        asset_server
+                            .load_builder()
+                            .with_settings(|s: &mut ImageLoaderSettings| {
+                                let mut sampler = ImageSamplerDescriptor::linear();
+                                sampler.set_address_mode(ImageAddressMode::MirrorRepeat);
+                                sampler.set_anisotropic_filter(8);
+                                s.sampler = ImageSampler::Descriptor(sampler);
+                            })
+                            .load(level_file(path))
+                    });
                     let material = materials.add(StandardMaterial {
-                        base_color_texture: load_patch(path, true),
+                        base_color_texture: texture,
                         base_color: if path.is_empty() { untextured.base_color } else { Color::WHITE },
                         perceptual_roughness: 0.95,
                         reflectance: 0.15,
@@ -238,6 +249,8 @@ struct Surrounding {
     spacing: f32,
     origin: Vec3,
     heights: Vec<f32>,
+    /// Mean height of the outer boundary: where the ground beyond levels out.
+    horizon_height: f32,
 }
 
 /// Samples between surrounding terrain vertices (it is only seen from afar).
@@ -251,15 +264,21 @@ impl Surrounding {
         let bytes = std::fs::read(dir.join(&desc.heightmap))?;
         let resolution = desc.resolution as usize;
         anyhow::ensure!(bytes.len() == resolution * resolution * 2, "{} has the wrong size", desc.heightmap);
-        let heights = bytes
+        let heights: Vec<f32> = bytes
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]) as f32 * desc.height_scale)
             .collect();
+        let n = resolution;
+        let border: Vec<f32> = (0..n)
+            .flat_map(|i| [heights[i], heights[(n - 1) * n + i], heights[i * n], heights[i * n + n - 1]])
+            .collect();
+        let horizon_height = border.iter().sum::<f32>() / border.len().max(1) as f32;
         Ok(Self {
             resolution,
             spacing: desc.spacing,
             origin: Vec3::from_array(desc.origin),
             heights,
+            horizon_height,
         })
     }
 
@@ -321,8 +340,9 @@ impl Surrounding {
                 indices.extend_from_slice(&[a, base, b, b, base, base + 1]);
             }
         }
-        // Outer edges continue flat to the horizon, away from the centre (so neighbouring
-        // cells' extensions meet), for view distances beyond the surrounding terrain.
+        // Outer edges continue to the horizon, away from the centre (so neighbouring cells'
+        // extensions meet), levelling out to the boundary's mean height: for view
+        // distances beyond the surrounding terrain.
         let center = Vec2::splat(1.5 * per_cell as f32 * self.spacing);
         let mut outer: Vec<Vec<usize>> = Vec::new();
         if cell_row == 0 {
@@ -337,14 +357,17 @@ impl Surrounding {
         if cell_col == 2 {
             outer.push((0..width).map(|j| j * width + steps).collect());
         }
+        // Their UVs continue past the cell (the texture repeats mirrored), so the ground's
+        // pattern carries on instead of smearing the edge.
+        let (corner, cell_size) = (Vec2::new(c0 as f32, r0 as f32) * self.spacing, per_cell as f32 * self.spacing);
         for edge in outer {
             let base = positions.len() as u32;
             for &v in &edge {
-                let [x, y, z] = positions[v];
+                let [x, _, z] = positions[v];
                 let out = (Vec2::new(x, z) - center).normalize_or_zero() * WORLD_EXTENSION;
-                positions.push([x + out.x, y, z + out.y]);
+                positions.push([x + out.x, self.horizon_height, z + out.y]);
                 normals.push([0.0, 1.0, 0.0]);
-                uvs.push(uvs[v]);
+                uvs.push(((Vec2::new(x, z) + out - corner) / cell_size).to_array());
             }
             for k in 0..edge.len() - 1 {
                 let (a, b) = (edge[k] as u32, edge[k + 1] as u32);

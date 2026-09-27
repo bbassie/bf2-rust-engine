@@ -373,6 +373,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) {
 #endif
+#ifdef VISIBILITY_RANGE_DITHER
+    // Level-of-detail cross-fades (distant trees hand over to their stand-ins).
+    pbr_functions::visibility_range_dither(in.position, in.visibility_range_dither);
+#endif
     let slot = material_slot(in.instance_index);
     let layers = layers_of(slot);
     let flags = standard_material_flags(slot);
@@ -439,6 +443,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) {
 @fragment
 fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var in = vertex;
+#ifdef VISIBILITY_RANGE_DITHER
+    pbr_functions::visibility_range_dither(in.position, in.visibility_range_dither);
+#endif
     let slot = material_slot(in.instance_index);
     let layers = layers_of(slot);
 

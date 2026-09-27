@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 
 use bevy::prelude::*;
 use game_data::HitZone;
+use serde::{Deserialize, Serialize};
 
 use crate::soldier::{SoldierMotion, Stance};
 
@@ -18,6 +19,11 @@ pub const LIMBS: u32 = 77;
 /// No hit zone reaches further than this from a soldier's feet (prone soldiers lie about
 /// 2 m long).
 pub const REACH: f32 = 2.4;
+
+/// The server's tick, on an entity of its own, replicated every tick: clients tell from it
+/// which tick the world they see is from (`InputFrame::view_tick`), for lag compensation.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ServerClock(pub u32);
 
 /// Where a ray met a soldier.
 #[derive(Clone, Copy, Debug, PartialEq)]

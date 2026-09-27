@@ -1,0 +1,13 @@
+// A new weapon made from the imported M4 (`base`): only the fields that differ.
+// Enum values are written as strings in patches.
+(
+    base: "usrif_m4",
+    name: "sample_carbine",
+    display_name: "Sample Carbine",
+    rounds_per_minute: 850.0,
+    magazine_size: 40,
+    magazines: 5,
+    fire_modes: ["Auto", "Burst", "Single"],
+    projectile: (damage: 22.0),
+    recoil: (up: (0.2, 0.35)),
+)

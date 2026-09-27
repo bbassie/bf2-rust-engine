@@ -41,6 +41,7 @@ impl Plugin for ProtocolPlugin {
             .replicate::<crate::projectile::Projectile>()
             .replicate::<crate::projectile::ProjectileMotion>()
             .replicate::<crate::projectile::SmokeCloud>()
+            .replicate::<crate::hitzones::ServerClock>()
             .replicate::<crate::rope::Rope>()
             .replicate::<Vehicle>()
             .replicate::<VehicleMotion>()

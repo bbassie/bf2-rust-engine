@@ -40,6 +40,7 @@ pub mod chat;
 pub mod commander;
 pub mod combat;
 pub mod conquest;
+pub mod coop;
 pub mod discovery;
 pub mod gear;
 pub mod radio;
@@ -85,6 +86,10 @@ pub struct ServerSettings {
     pub rotation: Vec<rotation::MapEntry>,
     /// Remote console, bans, stats and the message of the day.
     pub admin: admin::AdminSettings,
+    /// How co-op maps (`gpm_coop`) are played.
+    pub coop: coop::CoopSettings,
+    /// Master server to announce this server to (`host[:port]`, see `crates/master_server`).
+    pub master_server: Option<String>,
 }
 
 impl Default for ServerSettings {
@@ -107,6 +112,8 @@ impl Default for ServerSettings {
             ticket_ratio: 100.0,
             rotation: Vec::new(),
             admin: default(),
+            coop: default(),
+            master_server: None,
         }
     }
 }
@@ -150,7 +157,8 @@ impl Plugin for GameServerPlugin {
             )
             .add_systems(
                 Update,
-                respawn_players
+                (coop::balance_teams, respawn_players)
+                    .chain()
                     .run_if(resource_exists::<LoadedLevel>)
                     .run_if(in_state(ClientState::Disconnected)),
             );
@@ -333,11 +341,17 @@ fn create_client_player(
     mut commands: Commands,
     clients: Query<&NetworkId>,
     teams: Query<&Team, With<Player>>,
+    settings: Res<ServerSettings>,
 ) {
     let Ok(network_id) = clients.get(add.entity) else {
         return;
     };
-    let team = balanced_team(teams.iter());
+    // Co-op: all humans on one team.
+    let team = if coop::is_coop(&settings.mode) {
+        coop::human_team(&settings)
+    } else {
+        balanced_team(teams.iter())
+    };
     let player = commands
         .spawn((
             Player {

@@ -10,6 +10,10 @@
 //! `OvergrowthCollision.con` lists the result with transforms (imported as statics), but it
 //! was exported once and some levels changed their types afterwards. Types missing from it
 //! are scattered here, visual only.
+//!
+//! Far away BF2 draws each tree as its `<tree>_lod.staticmesh`: a few crossed planes whose
+//! textures the level packs into `Overgrowth/OvergrowthAtlas0.dds`. Those become the tree
+//! stand-ins, with UVs remapped into the atlas.
 
 use std::{collections::HashMap, path::Path};
 
@@ -17,11 +21,12 @@ use anyhow::{Context, Result, bail, ensure};
 use bf2_formats::{
     Vfs,
     con::{Interpreter, World},
+    mesh::{MeshKind, Usage, VisMesh},
     reader::Reader,
 };
 use game_data::{
-    OvergrowthDesc, Placement, TerrainDesc, UndergrowthDesc, UndergrowthMaterial, UndergrowthMesh,
-    UndergrowthType, VegetationDesc,
+    OvergrowthDesc, Placement, TerrainDesc, TreeLodDesc, UndergrowthDesc, UndergrowthMaterial,
+    UndergrowthMesh, UndergrowthType, VegetationDesc,
 };
 use glam::Quat;
 
@@ -45,10 +50,18 @@ pub fn import(
     let overgrowth = overgrowth(interp, converter, &base, level_dir, terrain)
         .map_err(|e| log::warn!("{level_name}: overgrowth: {e:#}"))
         .unwrap_or_default();
-    if undergrowth.is_none() && overgrowth.is_empty() {
+    let (tree_atlas, tree_lods) = tree_lods(interp, converter, &base, level_dir)
+        .map_err(|e| log::warn!("{level_name}: tree stand-ins: {e:#}"))
+        .unwrap_or_default();
+    if undergrowth.is_none() && overgrowth.is_empty() && tree_lods.is_empty() {
         return None;
     }
-    let desc = VegetationDesc { undergrowth, overgrowth };
+    let desc = VegetationDesc {
+        undergrowth,
+        overgrowth,
+        tree_atlas,
+        tree_lods,
+    };
     match game_data::write_ron(level_dir.join("vegetation.ron"), &desc) {
         Ok(()) => Some("vegetation.ron".into()),
         Err(e) => {
@@ -306,6 +319,128 @@ fn overgrowth(
         }
     }
     Ok(out)
+}
+
+/// The stand-ins of every tree the level places (statics and overgrowth) that has a
+/// `_lod` mesh with textures in the level's overgrowth atlas.
+fn tree_lods(
+    interp: &mut Interpreter,
+    converter: &MeshConverter,
+    base: &str,
+    level_dir: &Path,
+) -> Result<(Option<String>, Vec<TreeLodDesc>)> {
+    let vfs = converter.vfs;
+    let Ok(tai) = vfs.read_text(&format!("{base}/overgrowth/overgrowthatlas.tai")) else {
+        return Ok((None, Vec::new()));
+    };
+    // `<texture>  <atlas>, <page>, <u>, <v>, <width>, <height>` (tab separated)
+    let mut rects: HashMap<String, [f32; 4]> = HashMap::new();
+    let mut atlas_file = None;
+    for line in tai.lines().filter(|l| !l.trim_start().starts_with('#')) {
+        let Some((texture, rest)) = line.split_once('\t') else { continue };
+        let fields: Vec<&str> = rest.trim().split(',').map(str::trim).collect();
+        let [atlas, page, u, v, w, h] = fields[..] else { continue };
+        let (Ok(u), Ok(v), Ok(w), Ok(h)) = (u.parse(), v.parse(), w.parse(), h.parse()) else {
+            continue;
+        };
+        if page != "0" {
+            continue;
+        }
+        atlas_file.get_or_insert_with(|| atlas.to_string());
+        rects.insert(texture_key(texture), [u, v, w, h]);
+    }
+    let Some(atlas_file) = atlas_file else {
+        return Ok((None, Vec::new()));
+    };
+    let atlas = vfs.read(&atlas_file).with_context(|| format!("reading {atlas_file}"))?;
+    std::fs::write(level_dir.join("tree_atlas.dds"), atlas)?;
+
+    let mut templates: Vec<String> = interp.world.instances.iter().map(|i| i.template.to_ascii_lowercase()).collect();
+    templates.sort();
+    templates.dedup();
+    let world = &interp.world;
+    let mut lods = Vec::new();
+    let mut done = std::collections::HashSet::new();
+    for template in &templates {
+        let Some(mesh_path) = world
+            .template(template)
+            .and_then(|t| world.geometry(t.geometry.as_deref()?))
+            .and_then(|g| g.mesh_path())
+            .filter(|p| p.contains("vegitation") && p.ends_with(".staticmesh"))
+        else {
+            continue;
+        };
+        if !done.insert(mesh_path.clone()) {
+            continue;
+        }
+        let lod_path = mesh_path.replace(".staticmesh", "_lod.staticmesh");
+        let Ok(data) = vfs.read(&lod_path) else { continue };
+        let lod = match VisMesh::parse(&data, MeshKind::Static) {
+            Ok(lod) => lod,
+            Err(e) => {
+                log::warn!("{lod_path}: {e}");
+                continue;
+            }
+        };
+        let Some(mut desc) = tree_lod(&lod, &rects) else { continue };
+        match converter.convert_mesh(&mesh_path) {
+            Ok(glb) => desc.mesh = glb,
+            Err(e) => {
+                log::warn!("{mesh_path}: {e:#}");
+                continue;
+            }
+        }
+        lods.push(desc);
+    }
+    log::info!("{} tree stand-ins", lods.len());
+    Ok((Some("tree_atlas.dds".into()), lods))
+}
+
+/// Normalized texture reference: lower case, forward slashes, no extension.
+fn texture_key(path: &str) -> String {
+    let path = path.trim().replace('\\', "/").to_ascii_lowercase();
+    path.strip_suffix(".dds").unwrap_or(&path).trim_start_matches('/').to_string()
+}
+
+/// The first LOD of a `_lod` mesh, in engine coordinates, with UVs moved into the atlas.
+/// Materials whose texture isn't in the atlas are left out.
+fn tree_lod(mesh: &VisMesh, rects: &HashMap<String, [f32; 4]>) -> Option<TreeLodDesc> {
+    let lod = mesh.geoms.first()?.lods.first()?;
+    let positions = mesh.attribute::<3>(Usage::Position, 0)?;
+    let normals = mesh.attribute::<3>(Usage::Normal, 0)?;
+    let uvs = mesh.attribute::<2>(Usage::TexCoord, 0)?;
+    let mut out = TreeLodDesc {
+        mesh: String::new(),
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        indices: Vec::new(),
+    };
+    for material in &lod.materials {
+        let Some(&[u0, v0, w, h]) = material.texture_maps().first().and_then(|t| rects.get(&texture_key(t))) else {
+            continue;
+        };
+        let mut remap: HashMap<u32, u16> = HashMap::new();
+        for triangle in mesh.material_triangles(material) {
+            let mut corner = [0u16; 3];
+            for (slot, &vertex) in corner.iter_mut().zip(&triangle) {
+                *slot = *remap.entry(vertex).or_insert_with(|| {
+                    let i = vertex as usize;
+                    let [x, y, z] = positions[i];
+                    let [nx, ny, nz] = normals[i];
+                    // Inside the atlas cell: no tiling there, and keep off its border.
+                    let [u, v] = uvs[i].map(|c| c.clamp(0.01, 0.99));
+                    out.positions.push([x, y, -z]);
+                    out.normals.push([nx, ny, -nz]);
+                    out.uvs.push([u0 + u * w, v0 + v * h]);
+                    (out.positions.len() - 1) as u16
+                });
+            }
+            // Mirroring Z flips the handedness: reverse the winding.
+            out.indices.extend_from_slice(&[corner[0], corner[2], corner[1]]);
+        }
+    }
+    (!out.indices.is_empty() && out.positions.len() < u16::MAX as usize).then_some(out)
 }
 
 /// The visible mesh of a tree template, converted.

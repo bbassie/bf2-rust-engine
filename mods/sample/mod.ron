@@ -1,0 +1,5 @@
+(
+    name: "Sample mod",
+    description: "Sample Valley, a level made from scratch, and a carbine and kit made by patching imported ones.",
+    priority: 0,
+)

@@ -683,7 +683,7 @@ fn update_map(
             continue;
         }
         let spec = match member {
-            _ if local_soldier => dot(render.position, GOLD, 10.0, Some("You".into())),
+            _ if local_soldier => dot(render.position, Color::WHITE, 10.0, None),
             Some(member) => {
                 let color = if screen.squad == Some(member.squad) { SQUAD } else { FRIENDLY };
                 let label = member.leader.then(|| squad_name(member.squad).to_string());

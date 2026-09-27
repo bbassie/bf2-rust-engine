@@ -485,8 +485,7 @@ fn load_env_map(
 ) {
     let path = format!("levels/{}/envmaps/envmap0.dds", level.desc.name);
     cache.env_map = paths
-        .imported
-        .join(&path)
+        .find(&path)
         .exists()
         .then(|| asset_server.load(format!("imported://{path}")));
     for handle in &cache.env_users {

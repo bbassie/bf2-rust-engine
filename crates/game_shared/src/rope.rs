@@ -29,7 +29,12 @@ impl Plugin for RopePlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(add_rope_collider).add_systems(
             FixedPostUpdate,
-            (string_ropes, take_down_ropes).run_if(in_state(ClientState::Disconnected)),
+            (
+                // Tests and tools may run movement without weapons.
+                string_ropes.run_if(resource_exists::<Armory>),
+                take_down_ropes,
+            )
+                .run_if(in_state(ClientState::Disconnected)),
         );
     }
 }
@@ -51,6 +56,23 @@ impl Rope {
     /// The part soldiers hold on to: the hanging part, or the whole wire.
     pub fn climbed(&self) -> (Vec3, Vec3) {
         (self.top, self.end)
+    }
+
+    /// Where the rope entity (and its collider) is: the middle of the climbable part, a
+    /// grappling rope's +Z away from the wall, a zipline's Y along the wire.
+    pub fn transform(&self) -> Transform {
+        let (top, end) = self.climbed();
+        let rotation = match self.kind {
+            RopeKind::Grapple => {
+                let out = Vec3::new(top.x - self.anchor.x, 0.0, top.z - self.anchor.z)
+                    .normalize_or(Vec3::Z);
+                Quat::from_rotation_arc(Vec3::Z, out)
+            }
+            RopeKind::Zipline => {
+                Quat::from_rotation_arc(Vec3::Y, (end - top).normalize_or(Vec3::Y))
+            }
+        };
+        Transform::from_translation((top + end) * 0.5).with_rotation(rotation)
     }
 }
 
@@ -79,31 +101,20 @@ fn add_rope_collider(add: On<Add, Rope>, mut commands: Commands, ropes: Query<&R
         return;
     };
     let (top, end) = rope.climbed();
-    let (collider, transform, layer) = match rope.kind {
-        RopeKind::Grapple => {
-            let out = Vec3::new(top.x - rope.anchor.x, 0.0, top.z - rope.anchor.z).normalize_or(Vec3::Z);
-            let height = (top.y - end.y).max(0.1);
-            (
-                Collider::cuboid(2.0 * ROPE_HALF_WIDTH, height, 0.04),
-                Transform::from_translation((top + end) * 0.5)
-                    .with_rotation(Quat::from_rotation_arc(Vec3::Z, out)),
-                GameLayer::Rope,
-            )
-        }
-        RopeKind::Zipline => {
-            let along = end - top;
-            (
-                Collider::capsule(0.05, along.length()),
-                Transform::from_translation((top + end) * 0.5)
-                    .with_rotation(Quat::from_rotation_arc(Vec3::Y, along.normalize_or(Vec3::Y))),
-                GameLayer::Zipline,
-            )
-        }
+    let (collider, layer) = match rope.kind {
+        RopeKind::Grapple => (
+            Collider::cuboid(2.0 * ROPE_HALF_WIDTH, (top.y - end.y).max(0.1), 0.04),
+            GameLayer::Rope,
+        ),
+        RopeKind::Zipline => (
+            Collider::capsule(0.05, top.distance(end)),
+            GameLayer::Zipline,
+        ),
     };
     commands.entity(add.entity).insert((
         RigidBody::Static,
         collider,
-        transform,
+        rope.transform(),
         CollisionLayers::new(layer, LayerMask::NONE),
     ));
 }
@@ -122,11 +133,18 @@ fn string_ropes(
         if !motion.resting {
             continue;
         }
-        let Some(desc) = armory.weapon(&projectile.weapon).and_then(|w| w.projectile.rope) else {
+        let Some(desc) = armory
+            .weapon(&projectile.weapon)
+            .and_then(|w| w.projectile.rope)
+        else {
             continue;
         };
         commands.entity(entity).despawn();
-        let Some(shooter) = soldiers.iter().find(|(_, c)| c.0 == projectile.player).map(|(m, _)| m.position) else {
+        let Some(shooter) = soldiers
+            .iter()
+            .find(|(_, c)| c.0 == projectile.player)
+            .map(|(m, _)| m.position)
+        else {
             continue;
         };
         let rope = match desc.kind {
@@ -142,7 +160,10 @@ fn string_ropes(
             }
         };
         let Some(rope) = rope else {
-            info!("{}: nothing to string a rope over at {:.1}", projectile.weapon, motion.position);
+            info!(
+                "{}: nothing to string a rope over at {:.1}",
+                projectile.weapon, motion.position
+            );
             continue;
         };
         for (old, other, life) in &ropes {
@@ -150,7 +171,10 @@ fn string_ropes(
                 commands.entity(old).despawn();
             }
         }
-        info!("{} strung a {:?} rope {:.1} -> {:.1} -> {:.1}", projectile.weapon, rope.kind, rope.anchor, rope.top, rope.end);
+        info!(
+            "{} strung a {:?} rope {:.1} -> {:.1} -> {:.1}",
+            projectile.weapon, rope.kind, rope.anchor, rope.top, rope.end
+        );
         commands.spawn((
             rope,
             RopeLife {
@@ -162,7 +186,11 @@ fn string_ropes(
     }
 }
 
-fn take_down_ropes(mut commands: Commands, time: Res<Time>, mut ropes: Query<(Entity, &mut RopeLife)>) {
+fn take_down_ropes(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut ropes: Query<(Entity, &mut RopeLife)>,
+) {
     for (entity, mut life) in &mut ropes {
         life.remaining -= time.delta_secs();
         if life.remaining <= 0.0 {
@@ -171,19 +199,27 @@ fn take_down_ropes(mut commands: Commands, time: Res<Time>, mut ropes: Query<(En
     }
 }
 
-/// A grappling rope from a hook at `hook`, thrown from `thrower`: along the surface towards
-/// the thrower until it goes over a ledge, then straight down (to the ground, or as far as the
-/// rope reaches). `None` when there is no drop within reach: nothing to climb.
+/// A grappling rope from a hook at `hook`, thrown from `thrower`. Pulled on, the hook drags
+/// back towards the thrower until it catches on the ledge (BF2's rope tugs its links the same
+/// way), and the rope hangs straight down from there, to the ground or as far as it reaches.
+/// `None` when there is no drop between the hook and the thrower: nothing to climb.
 pub fn grapple(spatial: &SpatialQuery, hook: Vec3, thrower: Vec3, max_length: f32) -> Option<Rope> {
     let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
     let out = Vec3::new(thrower.x - hook.x, 0.0, thrower.z - hook.z).normalize_or(Vec3::Z);
+    let flat_distance = Vec3::new(thrower.x - hook.x, 0.0, thrower.z - hook.z).length();
     const STEP: f32 = 0.1;
     let mut lip = None;
     let mut surface = hook;
-    for i in 1..=(max_length / STEP) as usize {
+    for i in 1..=(flat_distance / STEP) as usize {
         let probe = hook + out * (i as f32 * STEP);
         // Follows a roof sloping a little; a drop of more than 1 m is the ledge.
-        match spatial.cast_ray(Vec3::new(probe.x, surface.y + 0.5, probe.z), Dir3::NEG_Y, 1.5, true, &filter) {
+        match spatial.cast_ray(
+            Vec3::new(probe.x, surface.y + 0.5, probe.z),
+            Dir3::NEG_Y,
+            1.5,
+            true,
+            &filter,
+        ) {
             Some(hit) => surface = Vec3::new(probe.x, surface.y + 0.5 - hit.distance, probe.z),
             None => {
                 lip = Some(surface);
@@ -192,15 +228,14 @@ pub fn grapple(spatial: &SpatialQuery, hook: Vec3, thrower: Vec3, max_length: f3
         }
     }
     let lip = lip?;
-    let left = max_length - lip.distance(hook);
     let top = lip + out * OFF_WALL;
-    let end = match spatial.cast_ray(top, Dir3::NEG_Y, left, true, &filter) {
+    let end = match spatial.cast_ray(top, Dir3::NEG_Y, max_length, true, &filter) {
         Some(hit) => top - Vec3::Y * hit.distance,
-        None => top - Vec3::Y * left,
+        None => top - Vec3::Y * max_length,
     };
     (top.y - end.y >= MIN_CLIMB).then_some(Rope {
         kind: RopeKind::Grapple,
-        anchor: hook,
+        anchor: lip,
         top,
         end,
     })

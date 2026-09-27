@@ -13,6 +13,26 @@ pub struct VegetationDesc {
     pub undergrowth: Option<UndergrowthDesc>,
     #[serde(default)]
     pub overgrowth: Vec<OvergrowthDesc>,
+    /// Texture all tree stand-ins sample, relative to the level folder.
+    #[serde(default)]
+    pub tree_atlas: Option<String>,
+    /// Simple stand-ins drawn instead of detailed trees far away.
+    #[serde(default)]
+    pub tree_lods: Vec<TreeLodDesc>,
+}
+
+/// A few crossed, alpha-tested planes that look like a tree from afar.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TreeLodDesc {
+    /// The detailed tree (`.glb` relative to the imported root) it stands in for; every
+    /// static mesh of that file gets it, at the same origin.
+    pub mesh: String,
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    /// Texture coordinates in the tree atlas.
+    pub uvs: Vec<[f32; 2]>,
+    /// Triangle list.
+    pub indices: Vec<u16>,
 }
 
 /// Grass and small plants scattered on the terrain near the camera.

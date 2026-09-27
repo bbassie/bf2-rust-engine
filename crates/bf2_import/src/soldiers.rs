@@ -23,6 +23,11 @@ const SKELETON_1P: &str = "objects/soldiers/common/animations/1p_setup.ske";
 const ANIMATIONS: &str = "objects/soldiers/common/animations/3p/";
 /// Climbing ladders (BF2 plays these through the ladder's seat animation system).
 const LADDER_ANIMATIONS: &str = "objects/common/ladder/animations/";
+/// Climbing a grappling rope and hanging from a zipline (Special Forces; their "seats").
+const ROPE_ANIMATIONS: [&str; 2] = [
+    "objects/vehicles/xpak_vehicles/xpak_grapplehook/3p/",
+    "objects/vehicles/xpak_vehicles/xpak_zipline/3p/",
+];
 const FLAGS: &str = "objects/common/flags/";
 
 /// Z-mirror of a (true, un-conjugated) BF2 rotation.
@@ -177,6 +182,9 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
 
         let mut clips = load_clips(&vfs, ANIMATIONS);
         clips.extend(load_clips(&vfs, LADDER_ANIMATIONS));
+        for dir in ROPE_ANIMATIONS {
+            clips.extend(load_clips(&vfs, dir));
+        }
         clips.sort_by(|a, b| a.0.cmp(&b.0));
         let skeleton_1p = vfs
             .read(SKELETON_1P)

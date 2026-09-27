@@ -2,8 +2,8 @@
 //! Runs `step_soldier` headless with avian's spatial queries, no level needed.
 
 use avian3d::prelude::*;
-use game_data::RopeKind;
 use bevy::{ecs::system::RunSystemOnce, prelude::*, time::TimeUpdateStrategy};
+use game_data::RopeKind;
 use game_shared::{
     input::{Buttons, InputFrame},
     ladder::LadderPart,
@@ -1009,15 +1009,28 @@ fn strings_grappling_ropes_over_ledges() {
         .run_system_once(|spatial: SpatialQuery| {
             (
                 // On the roof, thrown from the street in front: over the front edge.
-                rope::grapple(&spatial, Vec3::new(0.5, 4.0, -5.0), Vec3::new(0.0, 0.0, 6.0), 14.0),
+                rope::grapple(
+                    &spatial,
+                    Vec3::new(0.5, 4.0, -5.0),
+                    Vec3::new(0.0, 0.0, 6.0),
+                    14.0,
+                ),
                 // On the street itself: nothing to climb.
-                rope::grapple(&spatial, Vec3::new(0.5, 0.0, 3.0), Vec3::new(0.0, 0.0, 6.0), 14.0),
+                rope::grapple(
+                    &spatial,
+                    Vec3::new(0.5, 0.0, 3.0),
+                    Vec3::new(0.0, 0.0, 6.0),
+                    14.0,
+                ),
             )
         })
         .unwrap();
     println!("{ropes:?}");
     let rope = ropes.0.expect("no rope over the ledge");
-    assert!((rope.top.z - -1.65).abs() < 0.15 && (rope.top.y - 4.0).abs() < 0.05, "{rope:?}");
+    assert!(
+        (rope.top.z - -1.65).abs() < 0.15 && (rope.top.y - 4.0).abs() < 0.05,
+        "{rope:?}"
+    );
     assert!(rope.end.y.abs() < 0.05, "{rope:?}");
     assert!(ropes.1.is_none());
 }
@@ -1034,14 +1047,27 @@ fn climbs_grappling_ropes() {
     let mut app = rope_world(rope);
     let m = settled(&mut app, Vec3::new(0.2, 0.0, 1.0));
     let trace = walk(&mut app, m, 240, Buttons::empty());
-    let on = trace.iter().position(|t| t.climbing).expect("never got on the rope");
+    let on = trace
+        .iter()
+        .position(|t| t.climbing)
+        .expect("never got on the rope");
     assert!(trace[on].on_rope && !trace[on].can_fire());
-    let off = on + trace[on..].iter().position(|t| !t.climbing).expect("never got off");
+    let off = on
+        + trace[on..]
+            .iter()
+            .position(|t| !t.climbing)
+            .expect("never got off");
     let seconds = (off - on) as f32 * DT;
     println!("on the rope for {seconds:.2} s");
-    assert!((seconds - 4.0 / tuning.rope_climb_speed).abs() < 0.4, "{seconds}");
+    assert!(
+        (seconds - 4.0 / tuning.rope_climb_speed).abs() < 0.4,
+        "{seconds}"
+    );
     let last = trace.last().unwrap();
-    assert!(last.grounded && (last.position.y - 4.01).abs() < 0.01 && last.position.z < -2.0, "{last:?}");
+    assert!(
+        last.grounded && (last.position.y - 4.01).abs() < 0.01 && last.position.z < -2.0,
+        "{last:?}"
+    );
 }
 
 #[test]
@@ -1063,15 +1089,39 @@ fn rides_ziplines() {
         f.yaw = std::f32::consts::PI;
     }
     let trace = simulate(&mut app, m, frames);
-    let on = trace.iter().position(|t| t.riding).expect("never grabbed the wire");
-    let off = on + trace[on..].iter().position(|t| !t.riding).expect("never got off");
-    let top_speed = trace[on..off].iter().map(|t| t.velocity.length()).fold(0.0, f32::max);
-    println!("rode {:.2} s, top speed {top_speed:.1} m/s, off at {:?}", (off - on) as f32 * DT, trace[off]);
+    let on = trace
+        .iter()
+        .position(|t| t.riding)
+        .expect("never grabbed the wire");
+    let off = on
+        + trace[on..]
+            .iter()
+            .position(|t| !t.riding)
+            .expect("never got off");
+    let top_speed = trace[on..off]
+        .iter()
+        .map(|t| t.velocity.length())
+        .fold(0.0, f32::max);
+    println!(
+        "rode {:.2} s, top speed {top_speed:.1} m/s, off at {:?}",
+        (off - on) as f32 * DT,
+        trace[off]
+    );
     assert!(!trace[on].can_fire());
     assert!(top_speed > tuning.zipline_min_speed && top_speed <= tuning.zipline_max_speed);
     // Hung under the wire until the feet reach the ground, never below it.
-    assert!(trace[off].position.z > 15.0 && trace[off].grounded, "{:?}", trace[off]);
-    assert!(trace.iter().all(|t| t.position.y > -0.01));
+    assert!(
+        trace[off].position.z > 15.0 && trace[off].grounded,
+        "{:?}",
+        trace[off]
+    );
+    if let Some(i) = trace.iter().position(|t| t.position.y < -0.01) {
+        print_trace(
+            "below",
+            &trace[i.saturating_sub(5)..(i + 5).min(trace.len())],
+        );
+        panic!("below the ground at {i}");
+    }
     let landed = trace.last().unwrap();
     assert!(landed.grounded, "{landed:?}");
 

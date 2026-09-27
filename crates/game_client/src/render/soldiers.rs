@@ -102,9 +102,14 @@ mod clips {
     /// Climbing a ladder, and sliding down one (BF2's `objects/common/ladder` clips).
     pub const CLIMB: &str = "3p_climbup";
     pub const SLIDE: &str = "3p_climbdownfast";
+    /// Climbing a grappling rope, holding still on one, and hanging from a zipline (Special
+    /// Forces soldiers only: BF2 plays them through the rope's and zipline's "seats").
+    pub const ROPE_CLIMB: &str = "grapplehook_climb2";
+    pub const ROPE_HOLD: &str = "grapplehook_climb2_pause";
+    pub const ZIPLINE: &str = "xpak_zipline_hang";
 
     pub fn legs() -> impl Iterator<Item = &'static str> {
-        [STAND, CROUCH, PRONE, CLIMB, SLIDE, REVIVE]
+        [STAND, CROUCH, PRONE, CLIMB, SLIDE, REVIVE, ROPE_CLIMB, ROPE_HOLD, ZIPLINE]
             .into_iter()
             .chain(cycles())
             .chain(STAND_TURN)
@@ -142,6 +147,11 @@ const CROUCH_SPEED: f32 = 1.7;
 const PRONE_SPEED: f32 = 0.7;
 /// Climbing speed the ladder clip is made for (its feet move about 1.25 m/s).
 const CLIMB_SPEED: f32 = 1.25;
+/// Climbing speed the grappling rope clip is made for (about a meter per cycle).
+const ROPE_CLIMB_SPEED: f32 = 1.0;
+/// The rope and zipline clips hold the body lower than standing: the model goes up by this.
+/// BF2 places them at the rope's or the zipline handle's "seat".
+const ROPE_BODY_RAISE: f32 = 0.66;
 
 /// Crossfade times (seconds), roughly BF2's bundle fade times.
 const FADE: f32 = 0.2;
@@ -299,6 +309,10 @@ enum Legs {
     Land(usize),
     /// On a ladder: climbing, or sliding down it if `true`.
     Climb(bool),
+    /// On a grappling rope.
+    Rope,
+    /// Hanging from a zipline.
+    Hang,
     /// Critically wounded, lying where he fell.
     Down,
     /// Revived: getting up.
@@ -366,9 +380,9 @@ fn load_team_models(
             .get(index)
             .and_then(|team| team.kits.first())
             .and_then(|kit| {
-                let path = paths.imported.join("soldiers").join(format!("{}.ron", kit.soldier));
-                game_data::read_ron::<SoldierDesc>(&path)
-                    .map_err(|err| warn!("soldier model: {err}"))
+                paths
+                    .read_ron::<SoldierDesc>(format!("soldiers/{}.ron", kit.soldier))
+                    .map_err(|err| warn!("soldier model: {err:#}"))
                     .ok()
             })
             .map(|desc| asset_server.load(format!("imported://{}", desc.mesh)));
@@ -668,7 +682,9 @@ fn update_visuals(
         Has<game_shared::revive::Downed>,
     )>,
     mut visuals: Query<(&SoldierVisual, &mut Transform, &mut Visibility)>,
+    tuning: Res<game_shared::soldier::SoldierTuning>,
 ) {
+    let zipline_hang = tuning.zipline_hang;
     for (visual, mut transform, mut visibility) in &mut visuals {
         let Ok((render, local, seated, downed)) = soldiers.get(visual.soldier) else {
             continue;
@@ -680,7 +696,13 @@ fn update_visuals(
         } else {
             Visibility::Inherited
         });
-        *transform = Transform::from_translation(render.position)
+        // The zipline clip hangs the body from the handle, the rope clip holds it low.
+        let raise = match (render.riding, render.climbing && render.on_rope) {
+            (true, _) => zipline_hang,
+            (false, true) => ROPE_BODY_RAISE,
+            _ => 0.0,
+        };
+        *transform = Transform::from_translation(render.position + Vec3::Y * raise)
             .with_rotation(Quat::from_rotation_y(render.yaw));
     }
 }
@@ -719,6 +741,12 @@ fn jump_direction(velocity: Vec2) -> usize {
 fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, render: &SoldierRender) -> Legs {
     let velocity = local_velocity(render);
     let speed = velocity.length();
+    if render.riding {
+        return Legs::Hang;
+    }
+    if render.climbing && render.on_rope {
+        return Legs::Rope;
+    }
     if render.climbing {
         return Legs::Climb(render.velocity.y < -CLIMB_SPEED * 1.5);
     }
@@ -758,8 +786,9 @@ fn fade_time(from: Option<Legs>, to: Legs) -> f32 {
         return 0.0;
     };
     match (from, to) {
-        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_) | Legs::Climb(_) | Legs::Down | Legs::GetUp)
-        | (Legs::Climb(_), _) => FADE_JUMP,
+        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_) | Legs::Climb(_) | Legs::Rope | Legs::Hang)
+        | (_, Legs::Down | Legs::GetUp)
+        | (Legs::Climb(_) | Legs::Rope | Legs::Hang, _) => FADE_JUMP,
         _ if from.stance() != to.stance() => {
             if from.stance() == Stance::Prone || to.stance() == Stance::Prone {
                 FADE_PRONE
@@ -880,6 +909,29 @@ impl SoldierAnimator {
                 speed = (render.velocity.y / CLIMB_SPEED).clamp(-2.0, 2.0);
             }
             Legs::Climb(true) => targets[0] = (clips::SLIDE, 1.0),
+            // The rope clips when the soldier has them (Special Forces), else the ladder's.
+            Legs::Rope => {
+                let climbing = render.velocity.y.abs() > 0.1;
+                let (clip, normal) = match (animations.legs.contains_key(clips::ROPE_CLIMB), climbing) {
+                    (true, true) => (clips::ROPE_CLIMB, ROPE_CLIMB_SPEED),
+                    (true, false) => (clips::ROPE_HOLD, ROPE_CLIMB_SPEED),
+                    (false, _) => (clips::CLIMB, CLIMB_SPEED),
+                };
+                targets[0] = (clip, 1.0);
+                speed = if clip == clips::ROPE_HOLD {
+                    1.0
+                } else {
+                    (render.velocity.y / normal).clamp(-2.5, 2.5)
+                };
+            }
+            Legs::Hang => {
+                targets[0] = if animations.legs.contains_key(clips::ZIPLINE) {
+                    (clips::ZIPLINE, 1.0)
+                } else {
+                    (clips::CLIMB, 1.0)
+                };
+                speed = 0.0;
+            }
             Legs::Down | Legs::GetUp if animations.legs.contains_key(clips::REVIVE) => {
                 targets[0] = (clips::REVIVE, 1.0);
                 once = Some(entered);
@@ -913,7 +965,7 @@ impl SoldierAnimator {
 
         // Both hands on the rungs: no weapon, and the ladder clip moves the arms too. Down,
         // the weapon is dropped.
-        self.stowed = matches!(state, Legs::Climb(_) | Legs::Down | Legs::GetUp);
+        self.stowed = matches!(state, Legs::Climb(_) | Legs::Rope | Legs::Hang | Legs::Down | Legs::GetUp);
         if self.stowed {
             self.action = None;
             self.upper.begin();

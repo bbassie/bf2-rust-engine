@@ -262,6 +262,11 @@ fn local_setup(settings: &Settings, host: bool) -> MatchSetup {
         local_player: (!last.spectate).then(|| settings.player_name.clone()),
         local_team: last.team,
         name: format!("{}'s server", settings.player_name),
+        // Co-op: everyone joins our team.
+        coop: game_server::coop::CoopSettings {
+            human_team: last.team,
+            ..default()
+        },
         ..default()
     })
 }

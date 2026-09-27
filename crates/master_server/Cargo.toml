@@ -1,0 +1,13 @@
+[package]
+name = "master_server"
+description = "Optional master server: game servers register with heartbeats, browsers fetch the list. Standard library only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "master"
+path = "src/main.rs"
+
+[dependencies]

@@ -71,6 +71,15 @@ fn kind_name(kind: AssetKind) -> &'static str {
     }
 }
 
+/// Short, for crowded maps.
+fn short_name(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Artillery => "Arty",
+        AssetKind::Uav => "UAV",
+        AssetKind::Radar => "Radar",
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn map_markers(
     mut commands: Commands,
@@ -98,13 +107,10 @@ fn map_markers(
         if order.team != team {
             continue;
         }
-        let label = if commander {
-            format!("{}: {}", squad_name(order.squad), order.kind.label())
-        } else if squad.is_some_and(|s| s.squad == order.squad) {
-            order.kind.label().to_string()
-        } else {
+        if !commander && squad.is_none_or(|s| s.squad != order.squad) {
             continue;
-        };
+        }
+        let label = format!("{}: {}", squad_name(order.squad), order.kind.label());
         markers.0.push(MapMarker {
             key: entity,
             position: order.position,
@@ -118,7 +124,7 @@ fn map_markers(
             continue;
         }
         let label = match effect.asset {
-            Asset::Artillery => "Artillery strike",
+            Asset::Artillery => "Strike",
             Asset::Uav => "UAV",
             Asset::Supply => "Supplies",
             Asset::Scan => continue,
@@ -143,9 +149,9 @@ fn map_markers(
             color: if down { DESTROYED } else { GOLD },
             size: 8.0,
             label: Some(if down {
-                format!("{} (destroyed)", kind_name(asset.kind))
+                format!("{} (down)", short_name(asset.kind))
             } else {
-                kind_name(asset.kind).to_string()
+                short_name(asset.kind).to_string()
             }),
         });
     }

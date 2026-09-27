@@ -128,6 +128,8 @@ pub struct Settings {
     pub favourite_servers: Vec<SavedServer>,
     /// Servers joined lately, newest first.
     pub recent_servers: Vec<SavedServer>,
+    /// Master server the browser asks for servers (`host[:port]`); none by default.
+    pub master_server: Option<String>,
 }
 
 impl Default for Settings {
@@ -153,6 +155,7 @@ impl Default for Settings {
             last_match: LastMatch::default(),
             favourite_servers: Vec::new(),
             recent_servers: Vec::new(),
+            master_server: None,
         }
     }
 }

@@ -1,0 +1,11 @@
+(
+    name: "sample_tower",
+    kind: "SimpleObject",
+    parts: [
+        {
+            "mesh": Some("objects/sample/meshes/tower.glb"),
+            "collision": Some("objects/sample/meshes/tower.collision.glb"),
+            "position": (0.0, 0.0, 0.0),
+        },
+    ],
+)
