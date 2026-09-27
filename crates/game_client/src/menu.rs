@@ -39,7 +39,7 @@ use crate::{
     conquest_hud::{ENEMY, FRIENDLY},
     deploy::DeployScreen,
     net::{self, ActiveMatch, LocalPlayer, LocalSoldier, MatchNotice, MatchSetup},
-    scenario::ScenarioSystems,
+    scenario::{ScenarioInput, ScenarioSystems},
     settings::{Action, Binding, DisplayMode, Settings},
 };
 
@@ -147,6 +147,8 @@ pub struct Menu {
     pending: Option<(MatchSetup, u32)>,
     /// The match was started here: take the mouse when it begins.
     grab_on_start: bool,
+    /// Enter was pressed: the page's main button.
+    submit: bool,
 }
 
 /// Levels to offer: the built-in test range, then everything in `imported/levels`.
@@ -497,6 +499,7 @@ fn menu_keys(
     deploy: Res<DeployScreen>,
     soldier: Query<(), With<LocalSoldier>>,
     window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
+    scripted: Option<Res<ScenarioInput>>,
 ) {
     if let Some(action) = menu.rebinding {
         let key = keys.get_just_pressed().next().copied();
@@ -533,12 +536,8 @@ fn menu_keys(
                 if menu.page == Page::Settings {
                     menu.page = Page::Home;
                 } else {
-                    menu.paused = false;
                     let (window, mut cursor) = window.into_inner();
-                    if window.focused && !deploy.open {
-                        cursor.visible = false;
-                        cursor.grab_mode = CursorGrabMode::Locked;
-                    }
+                    resume(&mut menu, window, &mut cursor, !deploy.open && scripted.is_none());
                 }
                 true
             }
@@ -553,6 +552,9 @@ fn menu_keys(
         if consumed {
             keys.clear_just_pressed(KeyCode::Escape);
         }
+    }
+    if *screen.get() == Screen::Menu && keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]) {
+        menu.submit = true;
     }
     if *screen.get() != Screen::InGame || menu.paused {
         keys.reset_all();
@@ -1446,13 +1448,28 @@ fn press_buttons(
     mut exit: MessageWriter<AppExit>,
     buttons: Query<(&Interaction, &MenuButton), Changed<Interaction>>,
     window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
+    deploy: Res<DeployScreen>,
+    scripted: Option<Res<ScenarioInput>>,
 ) {
     let (window, mut cursor) = window.into_inner();
     if std::mem::take(&mut menu.swallow_click) {
         return;
     }
-    for (interaction, button) in &buttons {
-        if *interaction != Interaction::Pressed || menu.rebinding.is_some() {
+    let submitted = match menu.page {
+        Page::Play | Page::Host => Some(MenuButton::Start),
+        Page::Join => Some(MenuButton::Connect),
+        _ => None,
+    }
+    .filter(|_| std::mem::take(&mut menu.submit));
+    let pressed: Vec<MenuButton> = buttons
+        .iter()
+        .filter(|(interaction, _)| **interaction == Interaction::Pressed)
+        .map(|(_, button)| button.clone())
+        .chain(submitted)
+        .collect();
+    menu.submit = false;
+    for button in &pressed {
+        if menu.rebinding.is_some() {
             continue;
         }
         match button {
@@ -1495,13 +1512,7 @@ fn press_buttons(
                 settings.last_match.team = *team;
                 settings.last_match.spectate = false;
             }
-            MenuButton::Resume => {
-                menu.paused = false;
-                if window.focused {
-                    cursor.visible = false;
-                    cursor.grab_mode = CursorGrabMode::Locked;
-                }
-            }
+            MenuButton::Resume => resume(&mut menu, window, &mut cursor, !deploy.open && scripted.is_none()),
             MenuButton::Leave | MenuButton::CancelLoading => commands.queue(net::leave_match),
             MenuButton::Tab(tab) => menu.tab = *tab,
             MenuButton::Toggle(toggle) => toggle.flip(&mut settings),
@@ -1517,6 +1528,15 @@ fn press_buttons(
                 settings.bindings = Settings::default().bindings;
             }
         }
+    }
+}
+
+/// Closes the Esc menu and gives the mouse back to the game if `grab`.
+fn resume(menu: &mut Menu, window: &Window, cursor: &mut CursorOptions, grab: bool) {
+    menu.paused = false;
+    if grab && window.focused {
+        cursor.visible = false;
+        cursor.grab_mode = CursorGrabMode::Locked;
     }
 }
 
@@ -1830,7 +1850,7 @@ fn track_loading(
     mut images: MessageReader<AssetEvent<Image>>,
     mut meshes: MessageReader<AssetEvent<Mesh>>,
     compiling: Res<CompilingPipelines>,
-    scripted: Option<Res<crate::scenario::ScenarioInput>>,
+    scripted: Option<Res<ScenarioInput>>,
     mut progress: ResMut<LoadingProgress>,
     mut menu: ResMut<Menu>,
     active: Res<ActiveMatch>,

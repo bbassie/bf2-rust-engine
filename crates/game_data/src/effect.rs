@@ -89,6 +89,7 @@ pub enum EmitShape {
 /// A value over a particle's life (or an emitter's emission time) `t` in 0..1:
 /// `a t³ + b t² + c t + d` for `[a, b, c, d]`, as BF2 stores its graphs.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(transparent)]
 pub struct Curve(pub [f32; 4]);
 
 impl Curve {

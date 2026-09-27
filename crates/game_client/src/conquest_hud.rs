@@ -38,6 +38,8 @@ impl Plugin for ConquestHudPlugin {
 pub const FRIENDLY: Color = Color::srgb(0.30, 0.58, 1.0);
 pub const ENEMY: Color = Color::srgb(0.95, 0.33, 0.28);
 pub const NEUTRAL: Color = Color::srgb(0.62, 0.64, 0.68);
+/// Our squad, as in BF2.
+pub const SQUAD: Color = Color::srgb(0.45, 0.9, 0.4);
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
 const PANEL: Color = Color::srgba(0.05, 0.06, 0.08, 0.6);
 

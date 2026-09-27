@@ -96,7 +96,7 @@ impl NavParams {
             voxel: 0.05,
             height: SOLDIER_HEIGHT + 0.05,
             // A margin below the slope where soldiers start sliding.
-            min_normal_y: (tuning.max_slope - 5f32.to_radians()).cos(),
+            min_normal_y: (tuning.max_slope - 10f32.to_radians()).cos(),
             step: tuning.step_height,
             jump: jump.max(tuning.step_height),
             drop: 2.5,

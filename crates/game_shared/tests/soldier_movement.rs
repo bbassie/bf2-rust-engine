@@ -236,7 +236,7 @@ fn steps_up_ledges() {
             let m = settled(&mut app, Vec3::ZERO);
             let trace = walk(&mut app, m, 90, Buttons::empty());
             let last = trace.last().unwrap();
-            if (last.position.y - (height + 0.01)).abs() >= 0.01 {
+            if (last.position.y - (height + 0.01)).abs() >= 0.01 || trace.iter().any(|t| !t.grounded) {
                 print_trace(&format!("step {height} trimesh {trimesh}"), &trace[..40]);
             }
             assert!(

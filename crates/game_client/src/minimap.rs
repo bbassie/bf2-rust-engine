@@ -14,11 +14,12 @@ use game_shared::{
     level::LoadedLevel,
     protocol::{ControlledBy, Team},
     soldier::Soldier,
+    squad::SquadMember,
 };
 
 use crate::{
     camera::PlayerCamera,
-    conquest_hud::{FRIENDLY, team_color},
+    conquest_hud::{FRIENDLY, SQUAD, team_color},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -223,8 +224,8 @@ fn update_minimap(
     settings: Res<MinimapSettings>,
     level: Option<Res<LoadedLevel>>,
     camera: Single<&GlobalTransform, With<PlayerCamera>>,
-    players: Query<&Team, With<LocalPlayer>>,
-    teams: Query<&Team>,
+    players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
+    teams: Query<(&Team, Option<&SquadMember>)>,
     control_points: Query<(Entity, &ControlPoint, &FlagState)>,
     soldiers: Query<(Entity, &SoldierRender, &ControlledBy), (With<Soldier>, Without<LocalSoldier>)>,
     map: Single<Option<&MaterialNode<MinimapMaterial>>, With<MinimapMap>>,
@@ -246,16 +247,20 @@ fn update_minimap(
         material.params.view = Vec4::new(center.x, center.y, map_angle, RANGE / map_meters);
     }
 
-    let local = players.single().copied().unwrap_or_default();
+    let (local, local_squad) = players
+        .single()
+        .map(|(team, squad)| (*team, squad.copied()))
+        .unwrap_or_default();
     // What to show: flags always, teammates' soldiers.
     let mut wanted: HashMap<Entity, (Vec3, Color, f32)> = HashMap::default();
     for (entity, cp, state) in &control_points {
         wanted.insert(entity, (cp.position, team_color(state.owner, local), 12.0));
     }
     for (entity, render, controlled_by) in &soldiers {
-        let team = teams.get(controlled_by.0).copied().unwrap_or_default();
+        let (team, squad) = teams.get(controlled_by.0).map(|(t, s)| (*t, s.copied())).unwrap_or_default();
         if team == local && local != Team::Spectator {
-            wanted.insert(entity, (render.position, FRIENDLY, 6.0));
+            let squad_mate = local_squad.zip(squad).is_some_and(|(a, b)| a.squad == b.squad);
+            wanted.insert(entity, (render.position, if squad_mate { SQUAD } else { FRIENDLY }, 6.0));
         }
     }
 

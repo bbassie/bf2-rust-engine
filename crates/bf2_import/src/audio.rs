@@ -1,5 +1,6 @@
-//! Sounds: BF2 ships voice-overs as Ogg Vorbis, which the game doesn't decode, so they are
-//! converted to 16-bit PCM `.wav` here. `.wav` files are copied as they are.
+//! Sound files: BF2 ships voice-overs and ambience as Ogg Vorbis, which the game doesn't
+//! decode, so they are converted to 16-bit PCM `.wav` here. `.wav` files are copied as they
+//! are (BF2's are all 16-bit PCM).
 
 use std::path::Path;
 
@@ -41,7 +42,11 @@ pub fn ogg_to_wav(data: &[u8]) -> Result<Vec<u8>> {
     while let Some(packet) = reader.read_dec_packet_itl().context("decoding ogg")? {
         samples.extend(packet);
     }
+    Ok(pcm16_wav(channels, rate, &samples))
+}
 
+/// A 16-bit PCM WAV file of interleaved `samples`.
+pub fn pcm16_wav(channels: u16, rate: u32, samples: &[i16]) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut wav = Vec::with_capacity(44 + data_len as usize);
     wav.extend_from_slice(b"RIFF");
@@ -59,5 +64,34 @@ pub fn ogg_to_wav(data: &[u8]) -> Result<Vec<u8>> {
     for sample in samples {
         wav.extend_from_slice(&sample.to_le_bytes());
     }
-    Ok(wav)
+    wav
+}
+
+/// Channels, sample rate and interleaved samples of a 16-bit PCM WAV file.
+pub fn read_pcm16_wav(data: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
+    if data.get(0..4)? != b"RIFF" || data.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let (mut format, mut samples) = (None, None);
+    let mut at = 12;
+    while at + 8 <= data.len() {
+        let size = u32::from_le_bytes(data[at + 4..at + 8].try_into().ok()?) as usize;
+        let body = &data[at + 8..(at + 8 + size).min(data.len())];
+        match &data[at..at + 4] {
+            b"fmt " if body.len() >= 16 => {
+                let word = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
+                let rate = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+                format = Some((word(0), word(2), rate, word(14)));
+            }
+            b"data" => {
+                samples = Some(body.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>());
+            }
+            _ => {}
+        }
+        at += 8 + size + (size & 1);
+    }
+    match (format?, samples?) {
+        ((1, channels, rate, 16), samples) if channels > 0 => Some((channels, rate, samples)),
+        _ => None,
+    }
 }

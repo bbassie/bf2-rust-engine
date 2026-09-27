@@ -8,6 +8,8 @@ use bevy::{
 };
 use game_shared::{
     conquest::{ControlPoint, DeployRequest, Deployment, FlagState, RoundState},
+    protocol::Player,
+    squad::{MAX_MEMBERS, SquadMember, SquadRequest, squad_name},
     level::LoadedLevel,
     protocol::Team,
     weapons::Armory,
@@ -15,7 +17,7 @@ use game_shared::{
 
 use crate::{
     combat::weapon_display_name,
-    conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, team_color},
+    conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, team_color},
     net::{LocalPlayer, LocalSoldier},
 };
 
@@ -32,8 +34,10 @@ impl Plugin for DeployPlugin {
                     set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
                     rebuild_markers,
                     rebuild_kits,
+                    rebuild_squads,
                     pick_kit,
                     pick_control_point,
+                    pick_squad,
                     send_choice,
                     update_markers,
                     update_kits,
@@ -78,6 +82,16 @@ struct KitList;
 struct StatusText;
 #[derive(Component)]
 struct KitButton(u8);
+#[derive(Component)]
+struct SquadList;
+#[derive(Component, Clone, Copy)]
+enum SquadButton {
+    Create,
+    Join(u8),
+    Leave,
+    /// Toggles spawning on our squad leader.
+    SpawnOnLeader,
+}
 #[derive(Component)]
 struct PointMarker {
     entity: Entity,
@@ -150,6 +164,15 @@ fn spawn_deploy_screen(mut commands: Commands) {
                                 flex_direction: FlexDirection::Column,
                                 row_gap: px(4),
                                 margin: UiRect::vertical(px(6)),
+                                ..default()
+                            },
+                        ));
+                        side.spawn((
+                            SquadList,
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(4),
+                                margin: UiRect::bottom(px(6)),
                                 ..default()
                             },
                         ));
@@ -416,6 +439,151 @@ fn pick_control_point(
     }
 }
 
+fn squad_button(list: &mut ChildSpawnerCommands, action: SquadButton, name: String, label: String) {
+    list.spawn((
+        action,
+        Button,
+        Name::new(name),
+        Node {
+            padding: UiRect::axes(px(10), px(4)),
+            border_radius: BorderRadius::all(px(5)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.08)),
+    ))
+    .with_child((Text::new(label), font(13.0), TextColor(TEXT)));
+}
+
+/// Our squad with its members, or the team's squads to join; rebuilt when they change.
+#[allow(clippy::type_complexity)]
+fn rebuild_squads(
+    mut commands: Commands,
+    local: Query<(Entity, &Team, &Deployment, Option<&SquadMember>), With<LocalPlayer>>,
+    players: Query<(Entity, &Player, &Team, Option<&SquadMember>)>,
+    list: Single<(Entity, Option<&Children>), With<SquadList>>,
+    mut built: Local<String>,
+) {
+    let Ok((me, team, deployment, mine)) = local.single() else {
+        return;
+    };
+    let mut squads: Vec<(u8, Vec<(String, bool, bool)>)> = Vec::new();
+    for (entity, player, player_team, member) in &players {
+        let Some(member) = member.filter(|_| player_team == team) else {
+            continue;
+        };
+        let entry = match squads.iter_mut().find(|(squad, _)| *squad == member.squad) {
+            Some(entry) => entry,
+            None => {
+                squads.push((member.squad, Vec::new()));
+                squads.last_mut().unwrap()
+            }
+        };
+        entry.1.push((player.name.clone(), member.leader, entity == me));
+    }
+    squads.sort_by_key(|(squad, _)| *squad);
+    for (_, members) in &mut squads {
+        members.sort_by_key(|(name, leader, _)| (!*leader, name.clone()));
+    }
+    let key = format!("{mine:?}{squads:?}{}", deployment.on_squad_leader);
+    if *built == key {
+        return;
+    }
+    *built = key;
+
+    let (list, children) = *list;
+    for child in children.into_iter().flatten() {
+        commands.entity(*child).despawn();
+    }
+    commands.entity(list).with_children(|list| {
+        match mine {
+            Some(mine) => {
+                let members = squads
+                    .iter()
+                    .find(|(squad, _)| *squad == mine.squad)
+                    .map(|(_, m)| m.as_slice())
+                    .unwrap_or_default();
+                list.spawn((
+                    Text::new(format!(
+                        "{} SQUAD  {}/{MAX_MEMBERS}",
+                        squad_name(mine.squad).to_uppercase(),
+                        members.len()
+                    )),
+                    font(15.0),
+                    TextColor(SQUAD),
+                ));
+                let names = members
+                    .iter()
+                    .map(|(name, leader, _)| if *leader { format!("{name} (leader)") } else { name.clone() })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                list.spawn((Text::new(names), font(12.0), TextColor(DIM)));
+                list.spawn(Node {
+                    column_gap: px(6),
+                    ..default()
+                })
+                .with_children(|row| {
+                    if !mine.leader {
+                        let label = if deployment.on_squad_leader {
+                            "Spawning on leader: on"
+                        } else {
+                            "Spawn on leader: off"
+                        };
+                        squad_button(row, SquadButton::SpawnOnLeader, "spawn:leader".into(), label.into());
+                    }
+                    squad_button(row, SquadButton::Leave, "squad:leave".into(), "Leave squad".into());
+                });
+            }
+            None => {
+                list.spawn((Text::new("SQUADS"), font(15.0), TextColor(TEXT)));
+                for (squad, members) in &squads {
+                    if members.len() >= MAX_MEMBERS {
+                        continue;
+                    }
+                    squad_button(
+                        list,
+                        SquadButton::Join(*squad),
+                        format!("squad:join:{squad}"),
+                        format!("Join {}  ({}/{MAX_MEMBERS})", squad_name(*squad), members.len()),
+                    );
+                }
+                squad_button(list, SquadButton::Create, "squad:create".into(), "Create squad".into());
+            }
+        }
+    });
+}
+
+fn pick_squad(
+    buttons: Query<(&Interaction, &SquadButton), Changed<Interaction>>,
+    players: Query<(&Team, &Deployment), With<LocalPlayer>>,
+    mut screen: ResMut<DeployScreen>,
+    mut requests: MessageWriter<SquadRequest>,
+) {
+    let Ok((_, server)) = players.single() else {
+        return;
+    };
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match button {
+            SquadButton::Create => {
+                requests.write(SquadRequest::Create);
+            }
+            SquadButton::Join(squad) => {
+                requests.write(SquadRequest::Join(*squad));
+            }
+            SquadButton::Leave => {
+                requests.write(SquadRequest::Leave);
+            }
+            SquadButton::SpawnOnLeader => {
+                let choice = screen.choice(server);
+                choice.2 = !choice.2;
+                screen.changed = true;
+            }
+        }
+    }
+}
+
 fn send_choice(mut screen: ResMut<DeployScreen>, mut requests: MessageWriter<DeployRequest>) {
     if !screen.changed {
         return;
@@ -487,6 +655,7 @@ fn update_status(
         .control_point
         .and_then(|i| held.iter().find(|cp| cp.index == i))
         .map_or("any flag we hold".to_string(), |cp| cp.name.clone());
+    let at = if deployment.on_squad_leader { format!("our squad leader, else {at}") } else { at };
     let (line, color) = if matches!(rounds.single(), Ok(RoundState::Ended { .. })) {
         ("Round over".to_string(), DIM)
     } else if !soldier.is_empty() {

@@ -511,8 +511,8 @@ fn walk(
         )
     };
     // Held up by something: maybe it's a step.
-    let obstructed = |moved: &Slide| moved.blocked && travel(moved) < wanted * 0.99;
-    if obstructed(&moved)
+    let obstructed = |moved: &Slide, share: f32| moved.blocked && travel(moved) < wanted * share;
+    if obstructed(&moved, 0.99)
         && let Some(stepped) = world.step_up(
             shape,
             start,
@@ -527,7 +527,7 @@ fn walk(
     }
     // Walls take away speed; slopes and steps don't, nor does a step that is only reached
     // at the end of the tick (it is taken next tick).
-    let mut horizontal = if obstructed(&moved) {
+    let mut horizontal = if obstructed(&moved, 0.9) {
         Vec3::new(moved.velocity.x, 0.0, moved.velocity.z)
     } else {
         horizontal
@@ -811,17 +811,22 @@ impl Surroundings<'_, '_, '_> {
         if normal.y < self.min_normal_y {
             return None;
         }
-        // The shape cast's distance is off by millimeters, which makes a soldier standing
-        // still jitter. Exact: to the plane of a face, or to the contact point of an edge.
+        // The shape cast's distance is off by millimeters (more on long thin triangles),
+        // which makes a soldier standing still jitter. When it agrees with the distance to
+        // the surface's plane, the capsule rests on the face: use the exact one. Further
+        // than the plane, it hangs over an edge: the distance to the contact point.
         let half_height = shape.aabb(Vec3::ZERO, Quat::IDENTITY).size().y * 0.5;
         let sphere = center - Vec3::Y * (half_height - SOLDIER_RADIUS);
-        let distance = if hit.normal1.dot(normal) > 0.95 {
-            let on_plane = Vec3::new(origin.x, height, origin.z);
-            (normal.dot(sphere - on_plane) - SOLDIER_RADIUS) / normal.y
-        } else {
+        let on_plane = Vec3::new(origin.x, height, origin.z);
+        let to_plane = (normal.dot(sphere - on_plane) - SOLDIER_RADIUS) / normal.y;
+        let distance = if (hit.distance - to_plane).abs() < 0.02 {
+            to_plane
+        } else if hit.distance > to_plane {
             let across = Vec2::new(hit.point1.x - sphere.x, hit.point1.z - sphere.z).length();
             let below = (SOLDIER_RADIUS * SOLDIER_RADIUS - across * across).max(0.0).sqrt();
             sphere.y - below - hit.point1.y
+        } else {
+            hit.distance
         };
         Some(Ground {
             distance,
