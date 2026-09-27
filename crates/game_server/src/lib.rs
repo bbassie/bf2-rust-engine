@@ -11,7 +11,7 @@ use std::{
 };
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{platform::collections::HashMap, prelude::*};
 use bevy_replicon::{prelude::*, shared::backend::connected_client::NetworkId};
 use bevy_replicon_renet::{
     RenetChannelsExt, RenetServer,
@@ -21,8 +21,9 @@ use bevy_replicon_renet::{
 use game_shared::{
     PROTOCOL_ID,
     conquest::{ControlPoint, Deployment, FlagState, RoundState},
+    squad::SquadMember,
     input::{InputFrame, InputPacket},
-    level::LoadedLevel,
+    level::{LevelEntity, LoadedLevel},
     protocol::{ClientHello, ControlledBy, MatchInfo, Player, PlayerNetId, Team},
     soldier::{InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, step_soldier},
     weapons::{Armory, Inventory, Loadout, WeaponState},
@@ -31,6 +32,9 @@ use game_shared::{
 pub mod bots;
 pub mod combat;
 pub mod conquest;
+pub mod squads;
+pub mod destruction;
+pub mod nav;
 
 /// How the server was configured to run.
 #[derive(Resource, Clone, Debug)]
@@ -73,14 +77,19 @@ impl Default for ServerSettings {
 }
 
 pub struct GameServerPlugin {
-    pub settings: ServerSettings,
+    /// Serve a match with these settings from startup (the dedicated server). Without, the
+    /// server is idle until [`start_server`] (the client's menu).
+    pub settings: Option<ServerSettings>,
 }
 
 impl Plugin for GameServerPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(self.settings.clone())
-            .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin))
-            .add_systems(Startup, (start_networking, start_match))
+        if let Some(settings) = self.settings.clone() {
+            app.add_systems(Startup, move |world: &mut World| start_server(world, settings.clone()));
+        }
+        app.insert_resource(self.settings.clone().unwrap_or_default())
+            .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin, nav::NavPlugin, squads::SquadPlugin))
+            .add_plugins(destruction::DestructionPlugin)
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
             .add_systems(
@@ -226,6 +235,48 @@ fn start_match(mut commands: Commands, settings: Res<ServerSettings>) {
     }
 }
 
+/// Starts serving a match: listens for connections if `settings.network`, then spawns the
+/// match (which loads the level) and the local player. [`stop_server`] ends it.
+pub fn start_server(world: &mut World, settings: ServerSettings) -> Result<()> {
+    world.insert_resource(settings);
+    world.run_system_cached::<(), _, _>(start_networking)?;
+    world.run_system_cached(start_match)?;
+    Ok(())
+}
+
+/// Ends the match started by [`start_server`]: disconnects every client and despawns the
+/// match, its players, soldiers and control points, and the level. Another match can start
+/// afterwards. Does nothing when no match is running.
+pub fn stop_server(world: &mut World) {
+    if let Some(mut transport) = world.remove_resource::<NetcodeServerTransport>() {
+        if let Some(mut server) = world.get_resource_mut::<RenetServer>() {
+            transport.disconnect_all(&mut server);
+        }
+        info!("stopped listening");
+    }
+    world.remove_resource::<RenetServer>();
+    // Clients first: that despawns their players (see `remove_client_player`).
+    let clients: Vec<Entity> = world
+        .query_filtered::<Entity, With<ConnectedClient>>()
+        .iter(world)
+        .collect();
+    for client in clients {
+        world.despawn(client);
+    }
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, Or<(With<Replicated>, With<LevelEntity>)>>()
+        .iter(world)
+        .collect();
+    for entity in entities {
+        // Children went with their parents.
+        let _ = world.try_despawn(entity);
+    }
+    world.remove_resource::<LoadedLevel>();
+    world.remove_resource::<HostPlayer>();
+    world.remove_resource::<nav::Navigation>();
+    world.insert_resource(Armory::default());
+}
+
 fn create_client_player(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
@@ -262,10 +313,11 @@ fn remove_client_player(
     let Ok(ClientPlayer(player)) = clients.get(remove.entity) else {
         return;
     };
+    // `try_`: `stop_server` may despawn them first.
     if let Ok(Controls(soldier)) = controls.get(*player) {
-        commands.entity(*soldier).despawn();
+        commands.entity(*soldier).try_despawn();
     }
-    commands.entity(*player).despawn();
+    commands.entity(*player).try_despawn();
     info!("client left");
 }
 
@@ -376,17 +428,28 @@ fn respawn_players(
     match_state: Single<(&MatchInfo, Option<&RoundState>)>,
     control_points: Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules)>,
     mut players: Query<
-        (Entity, &Team, &mut Deployment, Option<&mut RespawnTimer>),
+        (Entity, &Team, &mut Deployment, Option<&mut RespawnTimer>, Option<&SquadMember>),
         (With<Player>, Without<Controls>),
     >,
+    leaders: Query<(&Team, &SquadMember, &Controls)>,
+    soldiers: Query<&SoldierMotion>,
 ) {
     let (match_info, round) = *match_state;
+    // Where each squad's leader is, for spawning on them.
+    let leader_at: HashMap<(Team, u8), (Vec3, f32)> = leaders
+        .iter()
+        .filter(|(_, member, _)| member.leader)
+        .filter_map(|(team, member, controls)| {
+            let motion = soldiers.get(controls.0).ok()?;
+            Some(((*team, member.squad), (motion.position, motion.yaw)))
+        })
+        .collect();
     // Kits load right after the level; spawning earlier would leave soldiers unarmed.
     // Nobody spawns between rounds.
     if armory.kits.is_empty() || round != Some(&RoundState::Playing) {
         return;
     }
-    for (player, team, mut deployment, timer) in &mut players {
+    for (player, team, mut deployment, timer, squad) in &mut players {
         if *team == Team::Spectator {
             continue;
         }
@@ -407,8 +470,11 @@ fn respawn_players(
         if !ready {
             continue;
         }
-        let Some((position, yaw)) =
-            pick_spawn(&level, match_info, *team, &deployment, &control_points)
+        let on_leader = squad
+            .filter(|member| deployment.on_squad_leader && !member.leader)
+            .and_then(|member| leader_at.get(&(*team, member.squad)).copied());
+        let Some((position, yaw)) = on_leader
+            .or_else(|| pick_spawn(&level, match_info, *team, &deployment, &control_points))
         else {
             // No spawn point held: wait.
             continue;

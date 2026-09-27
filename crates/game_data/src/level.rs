@@ -195,6 +195,9 @@ pub struct FlagModels {
     /// Flags of neutral, team 1 and team 2: skinned `.glb`s with a looping `idle` clip.
     #[serde(default)]
     pub flags: [Option<String>; 3],
+    /// Looping sound of the flag flapping (`.wav`).
+    #[serde(default)]
+    pub sound: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -150,6 +150,7 @@ fn receive_deploy_requests(
         if let Ok(mut deployment) = players.get_mut(player) {
             deployment.kit = request.message.kit.min(15);
             deployment.control_point = request.message.control_point;
+            deployment.on_squad_leader = request.message.on_squad_leader;
         }
     }
 }

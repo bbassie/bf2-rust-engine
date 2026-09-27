@@ -8,6 +8,7 @@ use crate::{
     local_input::{LookState, cursor_locked},
     net::LocalSoldier,
     prediction::{RenderStateSystems, SoldierRender},
+    settings::{Action, Actions, Settings},
 };
 
 pub struct CameraPlugin;
@@ -44,15 +45,16 @@ pub struct Spectator {
     pub position: Vec3,
 }
 
-fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>) {
+fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>, settings: Res<Settings>) {
+    let ssao = settings.ssao_on(&cli);
     // SSAO needs MSAA off; the view model camera smooths the final image with SMAA then.
-    let msaa = if cli.no_ssao { Msaa::default() } else { Msaa::Off };
+    let msaa = if ssao { Msaa::Off } else { Msaa::default() };
     let mut camera = commands.spawn((
         PlayerCamera,
         Camera3d::default(),
         msaa,
         Projection::from(PerspectiveProjection {
-            fov: 75f32.to_radians(),
+            fov: settings.field_of_view.to_radians(),
             near: 0.05,
             far: 3000.0,
             ..default()
@@ -64,7 +66,7 @@ fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>) {
         Transform::from_xyz(0.0, 40.0, 60.0),
         SpatialListener::new(0.25),
     ));
-    if !cli.no_ssao {
+    if ssao {
         // Contact shadows in corners and under objects, which BF2 baked into lightmaps.
         camera.insert(ScreenSpaceAmbientOcclusion::default());
     }
@@ -100,15 +102,15 @@ fn overview_on_level_load(
 #[derive(Resource, Default)]
 pub struct ThirdPerson(pub bool);
 
-fn toggle_third_person(keys: Res<ButtonInput<KeyCode>>, mut third_person: ResMut<ThirdPerson>) {
-    if keys.just_pressed(KeyCode::KeyV) {
+fn toggle_third_person(actions: Actions, mut third_person: ResMut<ThirdPerson>) {
+    if actions.just_pressed(Action::ThirdPerson) {
         third_person.0 = !third_person.0;
     }
 }
 
 fn update_camera(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Actions,
     cursor: Single<&CursorOptions>,
     look: Res<LookState>,
     third_person: Res<ThirdPerson>,
@@ -158,13 +160,12 @@ fn update_camera(
 
     // Spectator fly-cam.
     if cursor_locked(&cursor) {
-        let axis = |pos: KeyCode, neg: KeyCode| keys.pressed(pos) as i8 as f32 - keys.pressed(neg) as i8 as f32;
         let local = Vec3::new(
-            axis(KeyCode::KeyD, KeyCode::KeyA),
-            axis(KeyCode::Space, KeyCode::ControlLeft),
-            -axis(KeyCode::KeyW, KeyCode::KeyS),
+            actions.axis(Action::MoveRight, Action::MoveLeft),
+            actions.axis(Action::Jump, Action::Crouch),
+            -actions.axis(Action::MoveForward, Action::MoveBack),
         );
-        let speed = if keys.pressed(KeyCode::ShiftLeft) { 120.0 } else { 30.0 };
+        let speed = if actions.pressed(Action::Sprint) { 120.0 } else { 30.0 };
         spectator.position += rotation * local * speed * time.delta_secs();
     }
     transform.translation = spectator.position;

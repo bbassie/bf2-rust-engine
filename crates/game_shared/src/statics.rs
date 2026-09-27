@@ -1,14 +1,20 @@
 //! Static level objects: one entity per object part, with collision where the template
 //! has it. Visuals are added by the client (see [`StaticMesh`]).
+//!
+//! Destroyable objects are destroyed by the server, which lists them in the replicated
+//! [`DestroyedStatics`]. Both sides then swap the object's parts for its wreck (or take them
+//! away), so movement prediction sees the same world as the server.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use game_data::{ObjectDesc, StaticInstance};
+use game_data::{ArmorDesc, ObjectDesc, StaticInstance};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     config::GamePaths,
@@ -16,12 +22,50 @@ use crate::{
     physics::GameLayer,
 };
 
+/// Applies [`DestroyedStatics`] on client and server. Added by the server's and the client's
+/// plugins, whichever comes first.
+pub struct StaticsPlugin;
+
+impl Plugin for StaticsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<StaticDestroyed>()
+            .add_systems(FixedUpdate, apply_destroyed_statics);
+    }
+}
+
 /// A visual mesh to draw for this entity: mesh `index` of the `.glb` at `path` (relative to
 /// the imported assets root). The server ignores it; the client renders it.
 #[derive(Component, Clone, Debug)]
 pub struct StaticMesh {
     pub path: String,
     pub index: u32,
+}
+
+/// A part of a destroyable object.
+#[derive(Component, Clone, Debug)]
+pub struct Destructible {
+    /// The object's index in the level's statics.
+    pub instance: u32,
+    pub armor: Arc<ArmorDesc>,
+    /// Damage table column for direct hits on this part.
+    pub hit_material: u32,
+    /// This part is the wreck that replaces the intact parts once the object is destroyed.
+    pub wreck: bool,
+}
+
+/// A destroyable part that isn't there right now: an intact part of a destroyed object, or
+/// the wreck of an intact one. Its collider is disabled and the client hides it.
+#[derive(Component, Debug)]
+pub struct Inactive;
+
+/// The level statics that are destroyed, by index, on the match entity. Replicated.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct DestroyedStatics(pub BTreeSet<u32>);
+
+/// A destroyable object was destroyed just now (not: found destroyed on joining).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct StaticDestroyed {
+    pub instance: u32,
 }
 
 /// Loads templates and colliders once per level load.
@@ -66,38 +110,103 @@ pub fn spawn_statics(commands: &mut Commands, statics: &[StaticInstance], paths:
         templates: HashMap::new(),
         colliders: HashMap::new(),
     };
-    let mut spawned = 0;
-    for instance in statics {
-        let Some(object) = cache.template(&instance.template).cloned() else {
+    let (mut spawned, mut destroyable) = (0, 0);
+    for (instance, placed) in statics.iter().enumerate() {
+        let Some(object) = cache.template(&placed.template).cloned() else {
             continue;
         };
-        let base = placement_transform(&instance.placement);
+        let armor = object.armor.map(Arc::new);
+        destroyable += usize::from(armor.is_some());
+        let base = placement_transform(&placed.placement);
         for part in &object.parts {
             let transform = base * placement_transform(&part.placement);
-            let mut entity = commands.spawn((LevelEntity, transform));
-            if let Some(mesh) = &part.mesh {
-                entity.insert(StaticMesh {
-                    path: mesh.clone(),
-                    index: part.mesh_index,
-                });
-            }
-            if let Some(collision) = &part.collision
-                && let Some(collider) = cache.collider(collision, part.collision_part)
-            {
-                entity.insert((
-                    RigidBody::Static,
-                    collider,
-                    CollisionLayers::new(GameLayer::World, LayerMask::ALL),
-                ));
+            let mut spawn = |mesh: Option<&String>, collision: Option<&String>, wreck: bool| {
+                let mut entity = commands.spawn((LevelEntity, transform));
+                if let Some(mesh) = mesh {
+                    entity.insert(StaticMesh {
+                        path: mesh.clone(),
+                        index: part.mesh_index,
+                    });
+                }
+                if let Some(collision) = collision
+                    && let Some(collider) = cache.collider(collision, part.collision_part)
+                {
+                    entity.insert((RigidBody::Static, collider, collision_layers(!wreck)));
+                    if part.ladder && !wreck {
+                        entity.insert(crate::ladder::LadderPart);
+                    }
+                }
+                if let Some(armor) = &armor {
+                    entity.insert(Destructible {
+                        instance: instance as u32,
+                        armor: armor.clone(),
+                        hit_material: part.hit_material.unwrap_or(armor.material),
+                        wreck,
+                    });
+                    if wreck {
+                        entity.insert((Inactive, ColliderDisabled));
+                    }
+                }
+            };
+            spawn(part.mesh.as_ref(), part.collision.as_ref(), false);
+            if armor.is_some() && (part.wreck_mesh.is_some() || part.wreck_collision.is_some()) {
+                spawn(part.wreck_mesh.as_ref(), part.wreck_collision.as_ref(), true);
             }
             spawned += 1;
         }
     }
     info!(
-        "spawned {spawned} static parts from {} templates ({} colliders)",
+        "spawned {spawned} static parts from {} templates ({} colliders, {destroyable} destroyable objects)",
         cache.templates.len(),
         cache.colliders.values().filter(|c| c.is_some()).count()
     );
+}
+
+/// Static geometry collides with everything; parts that aren't there with nothing (the
+/// navigation grid skips them too).
+fn collision_layers(present: bool) -> CollisionLayers {
+    if present {
+        CollisionLayers::new(GameLayer::World, LayerMask::ALL)
+    } else {
+        CollisionLayers::NONE
+    }
+}
+
+/// Takes destroyed objects away (or shows their wreck) and brings restored ones back.
+fn apply_destroyed_statics(
+    mut commands: Commands,
+    destroyed: Query<Ref<DestroyedStatics>>,
+    parts: Query<(Entity, &Destructible, Has<Inactive>)>,
+    new_parts: Query<(), Added<Destructible>>,
+    mut news: MessageWriter<StaticDestroyed>,
+) {
+    let destroyed = destroyed.single().ok();
+    if !destroyed.as_ref().is_some_and(Ref::is_changed) && new_parts.is_empty() {
+        return;
+    }
+    // Changes during the match are news; the state found when joining or loading is not.
+    let live = destroyed.as_ref().is_some_and(|d| !d.is_added()) && new_parts.is_empty();
+    let none = BTreeSet::new();
+    let destroyed = destroyed.as_ref().map_or(&none, |d| &d.0);
+    let mut just_destroyed = BTreeSet::new();
+    for (entity, part, inactive) in &parts {
+        let is_destroyed = destroyed.contains(&part.instance);
+        let present = is_destroyed == part.wreck;
+        if present != inactive {
+            continue;
+        }
+        let mut entity = commands.entity(entity);
+        if present {
+            entity.remove::<(Inactive, ColliderDisabled)>();
+        } else {
+            entity.insert((Inactive, ColliderDisabled));
+        }
+        entity.insert(collision_layers(present));
+        if live && is_destroyed {
+            just_destroyed.insert(part.instance);
+        }
+    }
+    news.write_batch(just_destroyed.into_iter().map(|instance| StaticDestroyed { instance }));
 }
 
 /// Reads a collision `.glb` written by the importer and builds a triangle mesh collider for

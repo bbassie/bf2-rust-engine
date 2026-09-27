@@ -25,11 +25,11 @@ use game_shared::{
 use super::{
     blend::{BlendLayer, Clip, Play},
     environment::Sun,
+    scope::Zoom,
 };
 use crate::{
     camera::{PlayerCamera, ThirdPerson},
     combat::CombatFeedback,
-    local_input::InputHistory,
     net::{LocalPlayer, LocalSoldier},
 };
 
@@ -105,11 +105,31 @@ struct ViewState {
     set: String,
     /// Loop playing when no one-shot is (stand, run, zoom_stand...).
     base: &'static str,
-    /// One-shot playing (fire, reload, deploy) and how fast to blend back from it.
-    one_shot: Option<(Clip, f32)>,
+    /// One-shot playing (fire, reload, deploy) and one queued after it (the bolt after a
+    /// bolt-action rifle's shot).
+    one_shot: Option<OneShot>,
+    next: Option<OneShot>,
     layer: BlendLayer,
     shots_seen: u32,
     was_reloading: bool,
+}
+
+#[derive(Clone, Copy)]
+struct OneShot {
+    clip: Clip,
+    speed: f32,
+    /// Crossfade into what follows it.
+    fade_out: f32,
+}
+
+impl OneShot {
+    fn new(clip: Clip, fade_out: f32) -> Self {
+        Self {
+            clip,
+            speed: 1.0,
+            fade_out,
+        }
+    }
 }
 
 fn add_view_model_camera(add: On<Add, PlayerCamera>, mut commands: Commands) {
@@ -359,8 +379,12 @@ fn view_animations<'a>(
 /// quickly, loops and zooming crossfade about as fast as the camera zooms.
 const FADE_LOOP: f32 = 0.2;
 const FADE_FIRE_OUT: f32 = 0.08;
+const FADE_BOLT_IN: f32 = 0.1;
 const FADE_ONE_SHOT_IN: f32 = 0.12;
 const FADE_ONE_SHOT_OUT: f32 = 0.25;
+/// Seconds from a bolt-action rifle's shot until it is ready again: BF2's
+/// `animation.shiftDelay` of all its bolt-action rifles.
+const SHIFT_DELAY: f32 = 1.8;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn animate_view_model(
@@ -373,7 +397,7 @@ fn animate_view_model(
     clip_assets: Res<Assets<AnimationClip>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     feedback: Res<CombatFeedback>,
-    history: Res<InputHistory>,
+    mut zoom: ResMut<Zoom>,
     third_person: Res<ThirdPerson>,
     soldier: Query<(&Loadout, &Inventory, &SoldierMotion), With<LocalSoldier>>,
     mut roots: Query<(&ViewRig, &mut ViewState, &mut Visibility)>,
@@ -409,45 +433,62 @@ fn animate_view_model(
         player.stop_all();
         state.layer = BlendLayer::default();
         state.one_shot = None;
+        state.next = None;
         state.base = "";
         state.set = set;
     }
-    // One-shot starting now: clip, fade in, fade back out.
+    // One-shot starting now, and its fade in.
     let mut started = None;
     if state.animated_weapon != weapon.name {
         state.animated_weapon = weapon.name.clone();
         state.shots_seen = feedback.shots_fired;
         state.was_reloading = false;
-        started = clip("deploy").map(|c| (c, 0.0, FADE_ONE_SHOT_OUT));
+        started = clip("deploy").map(|c| (OneShot::new(c, FADE_ONE_SHOT_OUT), 0.0));
     }
-    let input = history.latest().copied().unwrap_or_default();
-    let zoomed = input.pressed(game_shared::input::Buttons::AIM);
+    let zoomed = zoom.held > 0.0;
     if feedback.shots_fired != state.shots_seen {
         state.shots_seen = feedback.shots_fired;
+        // Bolt-action rifles leave the zoom to work the bolt, so their shot plays unzoomed
+        // and the bolt ("load", BF2's shift animation) follows within the shift delay.
+        let bolt_action = weapon.zoom.out_after_fire;
+        let fire = match zoomed && !bolt_action {
+            true => clip("zoom_fire").or(clip("fire")),
+            false => clip("fire"),
+        };
+        let fire_time = fire.map_or(0.0, |c| c.duration);
+        state.next = clip("load").filter(|_| bolt_action).map(|load| OneShot {
+            speed: (load.duration / (SHIFT_DELAY - fire_time).max(0.1)).max(1.0),
+            ..OneShot::new(load, FADE_ONE_SHOT_OUT)
+        });
+        if bolt_action {
+            zoom.bolt = if state.next.is_some() { SHIFT_DELAY } else { fire_time };
+        }
         // Cuts in so every shot shows at once.
-        let fire = if zoomed { clip("zoom_fire").or(clip("fire")) } else { clip("fire") };
-        started = fire.map(|c| (c, 0.0, FADE_FIRE_OUT));
+        started = fire.map(|c| (OneShot::new(c, FADE_FIRE_OUT), 0.0));
     }
     if feedback.reloading && !state.was_reloading {
-        started = clip("reload").map(|c| (c, FADE_ONE_SHOT_IN, FADE_ONE_SHOT_OUT));
+        started = clip("reload").map(|c| (OneShot::new(c, FADE_ONE_SHOT_OUT), FADE_ONE_SHOT_IN));
+        state.next = None;
     }
     state.was_reloading = feedback.reloading;
 
-    if let Some((one_shot, fade_in, fade_out)) = started {
-        state.one_shot = Some((one_shot, fade_out));
+    let mut restart = started.is_some();
+    if let Some((one_shot, fade_in)) = started {
+        state.one_shot = Some(one_shot);
         state.layer.set_fade(fade_in);
-    } else if let Some((one_shot, fade_out)) = state.one_shot
-        && one_shot.finished(&player)
+    } else if let Some(one_shot) = state.one_shot
+        && one_shot.clip.finished(&player)
     {
-        // Blend back into whichever loop fits now.
-        state.one_shot = None;
+        // On to the queued one-shot, or blend back into whichever loop fits now.
+        state.one_shot = state.next.take();
+        restart = state.one_shot.is_some();
+        state.layer.set_fade(if restart { FADE_BOLT_IN } else { one_shot.fade_out });
         state.base = "";
-        state.layer.set_fade(fade_out);
     }
 
     state.layer.begin();
-    if let Some((one_shot, _)) = state.one_shot {
-        state.layer.play(&mut player, one_shot, Play::once(started.is_some()));
+    if let Some(one_shot) = state.one_shot {
+        state.layer.play(&mut player, one_shot.clip, Play::once(restart).speed(one_shot.speed));
     } else {
         // Run and sprint play at the ground speed (BF2's 1p_move and 1p_sprint speeds).
         let speed = Vec2::new(motion.velocity.x, motion.velocity.z).length();

@@ -81,13 +81,19 @@ pub struct SoldierRender {
     pub stance: Stance,
     pub velocity: Vec3,
     pub grounded: bool,
+    /// Eye height above the feet, easing toward the stance's so the view moves with the
+    /// body when crouching or going prone instead of jumping.
+    pub eye_height: f32,
 }
 
 impl SoldierRender {
     pub fn eye_position(&self) -> Vec3 {
-        self.position + Vec3::Y * self.stance.eye_height()
+        self.position + Vec3::Y * self.eye_height
     }
 }
+
+/// How quickly the eye height follows a stance change (per second; about 0.25 s).
+const EYE_HEIGHT_RATE: f32 = 12.0;
 
 /// Predicted state of our own soldier.
 #[derive(Component)]
@@ -118,6 +124,7 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             stance: motion.stance,
             velocity: motion.velocity,
             grounded: motion.grounded,
+            eye_height: motion.stance.eye_height(),
         },
         Snapshots::default(),
         TickHistory {
@@ -246,12 +253,15 @@ fn update_render_state(
         } else {
             (ticks.previous, ticks.current, alpha)
         };
+        let eye_target = to.stance.eye_height();
+        let eye_blend = 1.0 - (-EYE_HEIGHT_RATE * time.delta_secs()).exp();
         *render = SoldierRender {
             position: from.position.lerp(to.position, t),
             yaw: lerp_angle(from.yaw, to.yaw, t),
             stance: to.stance,
             velocity: to.velocity,
             grounded: to.grounded,
+            eye_height: render.eye_height + (eye_target - render.eye_height) * eye_blend,
         };
     }
 }

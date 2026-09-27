@@ -51,14 +51,15 @@ impl Plugin for DeployPlugin {
 pub struct DeployScreen {
     pub open: bool,
     /// Kit and control point picked here; sent when changed.
-    choice: Option<(u8, Option<u8>)>,
+    choice: Option<(u8, Option<u8>, bool)>,
     changed: bool,
 }
 
 impl DeployScreen {
     /// The current choice, starting from what the server has.
-    fn choice(&mut self, server: &Deployment) -> &mut (u8, Option<u8>) {
-        self.choice.get_or_insert((server.kit, server.control_point))
+    fn choice(&mut self, server: &Deployment) -> &mut (u8, Option<u8>, bool) {
+        self.choice
+            .get_or_insert((server.kit, server.control_point, server.on_squad_leader))
     }
 }
 
@@ -163,6 +164,7 @@ fn spawn_deploy_screen(mut commands: Commands) {
 #[allow(clippy::too_many_arguments)]
 fn open_and_close(
     keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::settings::Actions,
     mut screen: ResMut<DeployScreen>,
     player: Query<(), With<LocalPlayer>>,
     soldier: Query<(), With<LocalSoldier>>,
@@ -182,7 +184,7 @@ fn open_and_close(
             cursor.visible = false;
             cursor.grab_mode = CursorGrabMode::Locked;
         }
-    } else if keys.just_pressed(KeyCode::Enter) {
+    } else if actions.just_pressed(crate::settings::Action::Deploy) {
         screen.open = !screen.open || !alive;
     } else if keys.just_pressed(KeyCode::Escape) && alive {
         screen.open = false;
@@ -406,7 +408,9 @@ fn pick_control_point(
     for (interaction, marker) in &markers {
         let ours = flags.get(marker.entity).is_ok_and(|f| f.owner == *team);
         if *interaction == Interaction::Pressed && ours {
-            screen.choice(server).1 = Some(marker.index);
+            let choice = screen.choice(server);
+            choice.1 = Some(marker.index);
+            choice.2 = false;
             screen.changed = true;
         }
     }
@@ -417,8 +421,12 @@ fn send_choice(mut screen: ResMut<DeployScreen>, mut requests: MessageWriter<Dep
         return;
     }
     screen.changed = false;
-    if let Some((kit, control_point)) = screen.choice {
-        requests.write(DeployRequest { kit, control_point });
+    if let Some((kit, control_point, on_squad_leader)) = screen.choice {
+        requests.write(DeployRequest {
+            kit,
+            control_point,
+            on_squad_leader,
+        });
     }
 }
 

@@ -1,7 +1,8 @@
 //! Weapons on the server: firing, projectiles, damage and death.
 //!
 //! Projectiles are simulated here only; clients are told about each shot (for tracers and
-//! sounds) and about hits and kills, but never decide them.
+//! sounds) and about hits and kills, but never decide them. Hits on destroyable objects and
+//! explosions are passed on as messages (see `destruction`).
 
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use game_shared::{
     physics::GameLayer,
     protocol::{ControlledBy, HitConfirmed, KillFeed, Player, Score, ShotFired, Team},
     soldier::{Health, Hitbox, Soldier, SoldierMotion, Stance, stance_height},
+    statics::Destructible,
     weapons::{Armory, Inventory, Loadout, WeaponState, damage_at, spread_direction},
 };
 
@@ -26,14 +28,18 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<Died>().add_systems(
-            FixedUpdate,
-            (fire_weapons, simulate_projectiles, kill_the_dead)
-                .chain()
-                .in_set(CombatSystems)
-                .after(ServerSimSystems::ApplyInputs)
-                .run_if(in_state(ClientState::Disconnected)),
-        );
+        app.add_message::<Died>()
+            .add_message::<Explosion>()
+            .add_message::<StaticHit>()
+            .add_message::<SoldierHit>()
+            .add_systems(
+                FixedUpdate,
+                (fire_weapons, simulate_projectiles, explode, damage_soldiers, kill_the_dead)
+                    .chain()
+                    .in_set(CombatSystems)
+                    .after(ServerSimSystems::ApplyInputs)
+                    .run_if(in_state(ClientState::Disconnected)),
+            );
     }
 }
 
@@ -46,6 +52,48 @@ pub struct CombatSystems;
 pub struct Died {
     pub player: Entity,
     pub team: Team,
+}
+
+/// Who caused damage: for friendly fire, hit markers and the kill feed.
+#[derive(Clone, Debug)]
+pub struct Attacker {
+    pub player: Option<Entity>,
+    /// The soldier that fired, so it can hurt itself even without friendly fire.
+    pub soldier: Option<Entity>,
+    /// Weapon name for the kill feed.
+    pub weapon: Arc<str>,
+}
+
+/// Server-side: a blast (grenades, rockets, exploding objects). Hurts soldiers here and
+/// destroyable objects in `destruction`.
+#[derive(Message, Clone, Debug)]
+pub struct Explosion {
+    pub position: Vec3,
+    /// Damage at the center, falling off linearly to 0 at `radius`.
+    pub damage: f32,
+    pub radius: f32,
+    /// The damage table row.
+    pub material: u32,
+    pub attacker: Attacker,
+}
+
+/// Server-side: a projectile hit a part of a destroyable object.
+#[derive(Message, Clone, Debug)]
+pub struct StaticHit {
+    pub part: Entity,
+    pub damage: f32,
+    /// The projectile's material (the damage table row).
+    pub material: u32,
+    pub attacker: Attacker,
+}
+
+/// Server-side: damage for a soldier this tick.
+#[derive(Message, Clone, Debug)]
+struct SoldierHit {
+    victim: Entity,
+    damage: f32,
+    headshot: bool,
+    attacker: Attacker,
 }
 
 /// Damage multiplier for hits above the neck.
@@ -122,7 +170,8 @@ fn fire_weapons(
         state.tick(&weapon.deviation, dt, -local.z, local.x, !motion.grounded);
 
         // Fire mode cycling on the button's press.
-        let trigger = input.pressed(Buttons::FIRE);
+        // Hands are on the rungs while climbing.
+        let trigger = input.pressed(Buttons::FIRE) && !motion.climbing;
         if input.pressed(Buttons::FIRE_MODE) && !state.trigger_was_down && !trigger {
             inventory.fire_mode = ((inventory.fire_mode as usize + 1) % weapon.fire_modes.len().max(1)) as u8;
         }
@@ -163,11 +212,13 @@ fn fire_weapons(
             FireMode::Burst => pressed_now || state.burst_left > 0,
         };
         state.trigger_was_down = trigger;
+        // Weapons without a magazine (the knife) never run out.
+        let unlimited = weapon.magazine_size == 0;
         if !wants_shot
             || sprinting
             || state.cooldown > 0.0
             || state.deploy > 0.0
-            || in_mag == 0
+            || (in_mag == 0 && !unlimited)
             || weapon.projectile.velocity <= 0.0
         {
             if in_mag == 0 {
@@ -179,7 +230,9 @@ fn fire_weapons(
         if mode == FireMode::Burst {
             state.burst_left = if pressed_now { 2 } else { state.burst_left.saturating_sub(1) };
         }
-        inventory.ammo[active][0] = in_mag - 1;
+        if !unlimited {
+            inventory.ammo[active][0] = in_mag - 1;
+        }
         let zoomed = input.pressed(Buttons::AIM);
         let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
         state.on_shot(&weapon);
@@ -218,22 +271,17 @@ fn fire_weapons(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn simulate_projectiles(
     mut commands: Commands,
     time: Res<Time>,
-    settings: Res<ServerSettings>,
     spatial: SpatialQuery,
-    host: Option<Res<HostPlayer>>,
-    clients: Query<&PlayerClient>,
     mut projectiles: Query<(Entity, &mut Projectile, &mut Transform)>,
     colliders: Query<&ColliderOf>,
-    mut soldiers: Query<(Entity, &mut Health, &SoldierMotion, &ControlledBy), With<Soldier>>,
-    teams: Query<&Team>,
-    mut players: Query<(&mut Score, &Player)>,
-    mut hits: MessageWriter<ToClients<HitConfirmed>>,
-    mut kills: MessageWriter<ToClients<KillFeed>>,
-    mut died: MessageWriter<Died>,
+    soldiers: Query<&SoldierMotion, With<Soldier>>,
+    destructibles: Query<(), With<Destructible>>,
+    mut soldier_hits: MessageWriter<SoldierHit>,
+    mut static_hits: MessageWriter<StaticHit>,
+    mut explosions: MessageWriter<Explosion>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut projectile, mut transform) in &mut projectiles {
@@ -266,70 +314,123 @@ fn simulate_projectiles(
         commands.entity(entity).despawn();
 
         let desc = &projectile.weapon.projectile;
-        let shooter_team = teams.get(projectile.shooter_player).copied().unwrap_or_default();
-        let mut victims: Vec<(Entity, f32, bool)> = Vec::new();
-
-        // Direct hit on a soldier.
+        let attacker = Attacker {
+            player: Some(projectile.shooter_player),
+            soldier: Some(projectile.shooter),
+            weapon: Arc::from(projectile.weapon.name.as_str()),
+        };
         let body = colliders.get(hit.entity).map(|c| c.body).unwrap_or(hit.entity);
-        if let Ok((_, _, motion, _)) = soldiers.get(body) {
+        if let Ok(motion) = soldiers.get(body) {
             let head = point.y - motion.position.y > stance_height(motion.stance) - 0.3
                 && motion.stance != Stance::Prone;
-            let damage = damage_at(desc, travelled) * if head { HEADSHOT_MULTIPLIER } else { 1.0 };
-            victims.push((body, damage, head));
+            soldier_hits.write(SoldierHit {
+                victim: body,
+                damage: damage_at(desc, travelled) * if head { HEADSHOT_MULTIPLIER } else { 1.0 },
+                headshot: head,
+                attacker: attacker.clone(),
+            });
+        } else if destructibles.contains(hit.entity) {
+            static_hits.write(StaticHit {
+                part: hit.entity,
+                damage: damage_at(desc, travelled),
+                material: desc.material,
+                attacker: attacker.clone(),
+            });
         }
-        // Explosions hurt everyone nearby, less with distance.
         if desc.explosion_damage > 0.0 && desc.explosion_radius > 0.0 {
-            for (soldier, _, motion, _) in &soldiers {
-                let distance = (motion.position + Vec3::Y * 0.9).distance(point);
-                if distance < desc.explosion_radius {
-                    let falloff = 1.0 - distance / desc.explosion_radius;
-                    victims.push((soldier, desc.explosion_damage * falloff, false));
-                }
+            // The explosion's own material isn't imported; the projectile's stands in.
+            explosions.write(Explosion {
+                position: point,
+                damage: desc.explosion_damage,
+                radius: desc.explosion_radius,
+                material: desc.material,
+                attacker,
+            });
+        }
+    }
+}
+
+/// Explosions hurt every soldier nearby, less with distance.
+fn explode(
+    mut explosions: MessageReader<Explosion>,
+    soldiers: Query<(Entity, &SoldierMotion), With<Soldier>>,
+    mut hits: MessageWriter<SoldierHit>,
+) {
+    for explosion in explosions.read() {
+        for (soldier, motion) in &soldiers {
+            let distance = (motion.position + Vec3::Y * 0.9).distance(explosion.position);
+            if distance < explosion.radius {
+                hits.write(SoldierHit {
+                    victim: soldier,
+                    damage: explosion.damage * (1.0 - distance / explosion.radius),
+                    headshot: false,
+                    attacker: explosion.attacker.clone(),
+                });
             }
         }
+    }
+}
 
-        for (victim, damage, head) in victims {
-            let Ok((_, mut health, _, controlled_by)) = soldiers.get_mut(victim) else {
-                continue;
-            };
-            let victim_player = controlled_by.0;
-            let victim_team = teams.get(victim_player).copied().unwrap_or_default();
-            if victim_team == shooter_team && !settings.friendly_fire && victim != projectile.shooter {
-                continue;
-            }
-            if health.current <= 0.0 {
-                continue;
-            }
-            health.current -= damage;
-            let killed = health.current <= 0.0;
-            if let Some(client) = player_client(projectile.shooter_player, &clients, host.as_deref()) {
-                hits.write(ToClients {
-                    targets: SendTargets::Single(client),
-                    message: HitConfirmed {
-                        victim,
-                        damage,
-                        headshot: head,
-                        killed,
-                    },
-                });
-            }
-            if killed {
-                kill(
-                    &mut commands,
-                    victim,
-                    victim_player,
-                    Some(projectile.shooter_player),
-                    &projectile.weapon.name,
-                    head,
-                    settings.respawn_seconds,
-                    &mut players,
-                    &mut kills,
-                );
-                died.write(Died {
-                    player: victim_player,
-                    team: victim_team,
-                });
-            }
+#[allow(clippy::too_many_arguments)]
+fn damage_soldiers(
+    mut commands: Commands,
+    settings: Res<ServerSettings>,
+    host: Option<Res<HostPlayer>>,
+    clients: Query<&PlayerClient>,
+    mut hits: MessageReader<SoldierHit>,
+    mut soldiers: Query<(&mut Health, &ControlledBy), With<Soldier>>,
+    teams: Query<&Team>,
+    mut players: Query<(&mut Score, &Player)>,
+    mut confirmations: MessageWriter<ToClients<HitConfirmed>>,
+    mut kills: MessageWriter<ToClients<KillFeed>>,
+    mut died: MessageWriter<Died>,
+) {
+    for hit in hits.read() {
+        let Ok((mut health, controlled_by)) = soldiers.get_mut(hit.victim) else {
+            continue;
+        };
+        let attacker = &hit.attacker;
+        let attacker_team = attacker.player.and_then(|p| teams.get(p).ok()).copied().unwrap_or_default();
+        let victim_player = controlled_by.0;
+        let victim_team = teams.get(victim_player).copied().unwrap_or_default();
+        if victim_team == attacker_team
+            && !settings.friendly_fire
+            && Some(hit.victim) != attacker.soldier
+        {
+            continue;
+        }
+        if health.current <= 0.0 {
+            continue;
+        }
+        health.current -= hit.damage;
+        let killed = health.current <= 0.0;
+        if let Some(client) = attacker.player.and_then(|p| player_client(p, &clients, host.as_deref())) {
+            confirmations.write(ToClients {
+                targets: SendTargets::Single(client),
+                message: HitConfirmed {
+                    victim: hit.victim,
+                    damage: hit.damage,
+                    headshot: hit.headshot,
+                    killed,
+                },
+            });
+        }
+        if killed {
+            kill(
+                &mut commands,
+                hit.victim,
+                victim_player,
+                attacker.player,
+                &attacker.weapon,
+                hit.headshot,
+                settings.respawn_seconds,
+                &mut players,
+                &mut kills,
+            );
+            died.write(Died {
+                player: victim_player,
+                team: victim_team,
+            });
         }
     }
 }

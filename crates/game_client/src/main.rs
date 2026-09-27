@@ -1,34 +1,45 @@
 //! Game client.
 //!
 //! ```text
-//! client                          # singleplayer on the test range
+//! client                          # main menu
+//! client --level test_range       # singleplayer on the test range, no menu
 //! client --level strike_at_karkand --bots 15
 //! client --host --bots 8          # listen server others can join
 //! client --connect 127.0.0.1      # join a (dedicated) server
 //! ```
+//!
+//! `--level`, `--connect`, `--host`, `--spectate`, `--scenario` and `--screenshot` start a
+//! match right away; without them the client opens the main menu.
 
-use std::{net::IpAddr, path::PathBuf};
-
-use bevy::{
-    asset::io::AssetSourceBuilder, diagnostic::FrameTimeDiagnosticsPlugin, prelude::*,
-    window::PresentMode,
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
 };
+
+use bevy::{asset::io::AssetSourceBuilder, diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
 use bevy_replicon_renet::RepliconRenetPlugins;
 use clap::Parser;
 use game_server::{GameServerPlugin, ServerSettings};
 use game_shared::{SharedPlugin, config::GamePaths};
+use menu::Screen;
+use net::MatchSetup;
+use settings::{Settings, SettingsFile};
 
+mod announcer;
 mod camera;
 mod combat;
 mod conquest_hud;
 mod deploy;
 mod hud;
 mod local_input;
+mod menu;
 mod minimap;
+mod nav_debug;
 mod net;
 mod prediction;
 mod render;
 mod scenario;
+mod settings;
 
 #[derive(Parser, Debug, Clone, Resource)]
 #[command(version, about = "Game client")]
@@ -41,12 +52,12 @@ pub struct Cli {
     host: bool,
     #[arg(long, default_value_t = game_shared::DEFAULT_PORT)]
     port: u16,
-    /// Your player name.
-    #[arg(long, default_value = "Player")]
-    name: String,
-    /// Level to play when hosting or in singleplayer.
-    #[arg(long, default_value = game_shared::level::TEST_RANGE)]
-    level: String,
+    /// Your player name (default: the one in the settings).
+    #[arg(long)]
+    name: Option<String>,
+    /// Level to play when hosting or in singleplayer (default `test_range`).
+    #[arg(long)]
+    level: Option<String>,
     #[arg(long, default_value = "gpm_cq")]
     mode: String,
     #[arg(long, default_value_t = 16)]
@@ -97,6 +108,43 @@ pub struct Cli {
     /// Debug: walk in circles and jump without any input, to exercise prediction.
     #[arg(long, hide = true)]
     debug_walk: bool,
+    /// Debug: draw the bots' navigation grid near the camera and their paths.
+    #[arg(long, hide = true)]
+    debug_nav: bool,
+    /// Settings file to use (default: `settings.local.ron` if it exists, else the platform
+    /// config directory). Scenarios and screenshots use the defaults unless this is given.
+    #[arg(long)]
+    settings: Option<PathBuf>,
+}
+
+impl Cli {
+    /// The match the command line asks for, or `None` to open the main menu.
+    fn match_setup(&self, settings: &Settings, menu_scenario: bool) -> Option<MatchSetup> {
+        let scripted = (self.scenario.is_some() && !menu_scenario) || self.screenshot.is_some();
+        let direct = self.level.is_some() || self.connect.is_some() || self.host || self.spectate || scripted;
+        if !direct {
+            return None;
+        }
+        let name = self.name.clone().unwrap_or_else(|| settings.player_name.clone());
+        Some(match self.connect {
+            Some(ip) => MatchSetup::Join {
+                server: SocketAddr::new(ip, self.port),
+                name,
+                spectate: self.spectate,
+            },
+            None => MatchSetup::Local(ServerSettings {
+                level: self.level.clone().unwrap_or_else(|| game_shared::level::TEST_RANGE.into()),
+                mode: self.mode.clone(),
+                size: self.size,
+                bots: self.bots,
+                port: self.port,
+                network: self.host,
+                local_player: (!self.spectate).then_some(name),
+                local_team: self.team,
+                ..default()
+            }),
+        })
+    }
 }
 
 fn main() -> AppExit {
@@ -123,6 +171,10 @@ fn main() -> AppExit {
         scenario.apply(&mut cli);
     }
     let paths = GamePaths::resolve(cli.imported.clone());
+    let settings_file = SettingsFile::locate(cli.settings.clone(), scenario.is_some());
+    let settings = settings_file.load();
+    let menu_scenario = scenario.as_ref().is_some_and(|(s, _)| s.menu);
+    let start = cli.match_setup(&settings, menu_scenario);
 
     let mut app = App::new();
     // Converted BF2 assets live outside the game folder and are addressed as
@@ -134,11 +186,7 @@ fn main() -> AppExit {
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "bf2-rust-engine".into(),
-                    present_mode: PresentMode::AutoNoVsync,
-                    ..default()
-                }),
+                primary_window: Some(settings.window()),
                 ..default()
             })
             .set(ImagePlugin {
@@ -159,8 +207,20 @@ fn main() -> AppExit {
         conquest_hud::ConquestHudPlugin,
         deploy::DeployPlugin,
         minimap::MinimapPlugin,
+        announcer::AnnouncerPlugin,
+        nav_debug::NavDebugPlugin,
     ))
-    .insert_resource(paths);
+    .add_plugins((
+        // Idle until a match starts (see `net::start_match`).
+        GameServerPlugin { settings: None },
+        settings::SettingsPlugin,
+        menu::MenuPlugin {
+            start: if start.is_some() { Screen::Loading } else { Screen::Menu },
+        },
+    ))
+    .insert_resource(paths)
+    .insert_resource(settings)
+    .insert_resource(settings_file);
 
     if cli.diagnostics {
         app.add_plugins((
@@ -172,20 +232,8 @@ fn main() -> AppExit {
             },
         ));
     }
-    if cli.connect.is_none() {
-        app.add_plugins(GameServerPlugin {
-            settings: ServerSettings {
-                level: cli.level.clone(),
-                mode: cli.mode.clone(),
-                size: cli.size,
-                bots: cli.bots,
-                port: cli.port,
-                network: cli.host,
-                local_player: (!cli.spectate).then(|| cli.name.clone()),
-                local_team: cli.team,
-                ..default()
-            },
-        });
+    if let Some(setup) = start {
+        app.add_systems(Startup, move |world: &mut World| net::start_match(world, setup.clone()));
     }
     if let Some((scenario, out)) = scenario {
         app.add_plugins(scenario::ScenarioPlugin { scenario, out });

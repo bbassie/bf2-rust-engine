@@ -19,6 +19,7 @@ use crate::{
     combat::{CombatFeedback, weapon_display_name},
     net::{LocalPlayer, LocalSoldier},
     prediction::PredictionStats,
+    settings::{Action, Actions, Settings},
 };
 
 pub struct HudPlugin;
@@ -287,6 +288,7 @@ fn update_status(
     prediction: Res<PredictionStats>,
     client_stats: Res<ClientStats>,
     cursor: Single<&bevy::window::CursorOptions>,
+    actions: Actions,
     mut text: Single<&mut Text, With<StatusText>>,
 ) {
     let fps = diagnostics
@@ -315,15 +317,34 @@ fn update_status(
     let help = if cursor.grab_mode == bevy::window::CursorGrabMode::None {
         // Explicit short lines: auto-wrapped text and its shadow get laid out differently,
         // and long lines run into the ticket bar.
-        "\nclick to play  |  Enter deploy  |  Tab scores\nWASD move  shift sprint  space jump\nctrl crouch  Z prone  V third person\nLMB fire  RMB zoom  R reload  B mode  1-6 weapons"
+        let key = |action| actions.label(action);
+        let movement: String = [Action::MoveForward, Action::MoveLeft, Action::MoveBack, Action::MoveRight]
+            .into_iter()
+            .map(key)
+            .collect();
+        format!(
+            "\nclick to play  |  {} deploy  |  {} scores\n{movement} move  {} sprint  {} jump\n{} crouch  {} prone  {} third person\n{} fire  {} zoom  {} reload  {} mode\nEsc menu",
+            key(Action::Deploy),
+            key(Action::Scoreboard),
+            key(Action::Sprint),
+            key(Action::Jump),
+            key(Action::Crouch),
+            key(Action::Prone),
+            key(Action::ThirdPerson),
+            key(Action::Fire),
+            key(Action::Zoom),
+            key(Action::Reload),
+            key(Action::FireMode),
+        )
     } else {
-        ""
+        String::new()
     };
     text.0 = format!("{level}  |  {mode}  |  {fps:.0} fps{net}{help}");
 }
 
 fn update_crosshair(
     feedback: Res<CombatFeedback>,
+    settings: Res<Settings>,
     window: Single<&Window, With<PrimaryWindow>>,
     soldier: Query<(), With<LocalSoldier>>,
     mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility)>,
@@ -331,7 +352,7 @@ fn update_crosshair(
 ) {
     // Zoomed in, the iron sights (or scope) do the aiming.
     let alive = !soldier.is_empty() && feedback.zoom > 0.95;
-    let fov_degrees = 75.0 * feedback.zoom;
+    let fov_degrees = settings.field_of_view * feedback.zoom;
     let px_per_degree = window.height() / fov_degrees;
     let gap = (feedback.spread * 0.5 * px_per_degree).clamp(3.0, 90.0);
     for (line, mut node, mut visibility) in &mut lines {
@@ -426,13 +447,13 @@ fn update_death_notice(
 }
 
 fn update_scoreboard(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Actions,
     players: Query<(&Player, &Team, &Score, Has<LocalPlayer>)>,
     mut board: Single<&mut Visibility, With<Scoreboard>>,
     mut columns: Query<(&ScoreboardColumn, &mut Text)>,
     level: Option<Res<LoadedLevel>>,
 ) {
-    let show = keys.pressed(KeyCode::Tab);
+    let show = actions.pressed(Action::Scoreboard);
     board.set_if_neq(if show { Visibility::Inherited } else { Visibility::Hidden });
     if !show {
         return;

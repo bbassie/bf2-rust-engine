@@ -1,0 +1,32 @@
+// Join a dedicated server from the menu, open the in-game menu, leave, then host a listen
+// server from the menu.
+// server --level test_range --bots 4
+// client --scenario scenarios/menu_join.ron --out target/scenarios/menu/join
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:join"),
+        Wait(0.3),
+        Screenshot("join"),
+        Click("connect"),
+        Frames(2),
+        Screenshot("connecting"),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("joined"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("paused"),
+        Click("pause:leave"),
+        Wait(0.5),
+        WaitReady,
+        Screenshot("left"),
+        Click("menu:host"),
+        Wait(0.3),
+        Click("level:test_range"),
+        Wait(0.3),
+        Screenshot("host"),
+        Quit,
+    ],
+)

@@ -9,6 +9,11 @@ use bevy::{
 };
 use game_shared::input::{Buttons, INPUT_REDUNDANCY, InputFrame, InputPacket};
 
+use crate::{
+    menu::{Menu, Screen},
+    settings::{Action, Actions},
+};
+
 pub struct LocalInputPlugin;
 
 impl Plugin for LocalInputPlugin {
@@ -24,12 +29,16 @@ impl Plugin for LocalInputPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LocalInputSystems;
 
+/// Radians per mouse count at sensitivity 1.
+pub const BASE_SENSITIVITY: f32 = 0.0022;
+
 /// Where the player is looking. Updated every frame from the mouse, sampled every tick.
 #[derive(Resource)]
 pub struct LookState {
     pub yaw: f32,
     pub pitch: f32,
     pub sensitivity: f32,
+    pub invert_y: bool,
     /// Sensitivity multiplier while zoomed in.
     pub zoom_scale: f32,
     /// Set when jump is pressed between ticks so short taps aren't lost.
@@ -41,7 +50,8 @@ impl Default for LookState {
         Self {
             yaw: 0.0,
             pitch: 0.0,
-            sensitivity: 0.0022,
+            sensitivity: BASE_SENSITIVITY,
+            invert_y: false,
             zoom_scale: 1.0,
             jump_latched: false,
         }
@@ -73,26 +83,31 @@ pub fn cursor_locked(cursor: &CursorOptions) -> bool {
     cursor.grab_mode != CursorGrabMode::None
 }
 
+/// A click in the game takes the mouse; menus, the deploy screen and losing focus give it
+/// back (Esc opens the in-game menu, see `menu`).
 fn grab_cursor(
     mut cursor: Single<&mut CursorOptions>,
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     deploy: Res<crate::deploy::DeployScreen>,
+    screen: Res<State<Screen>>,
+    menu: Res<Menu>,
 ) {
-    if mouse.just_pressed(MouseButton::Left) && !cursor_locked(&cursor) && !deploy.open {
+    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open;
+    if !playing || !window.focused {
+        if cursor_locked(&cursor) {
+            cursor.visible = true;
+            cursor.grab_mode = CursorGrabMode::None;
+        }
+    } else if mouse.just_pressed(MouseButton::Left) && !cursor_locked(&cursor) {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
-    }
-    if keys.just_pressed(KeyCode::Escape) || !window.focused {
-        cursor.visible = true;
-        cursor.grab_mode = CursorGrabMode::None;
     }
 }
 
 fn mouse_look(
     motion: Res<AccumulatedMouseMotion>,
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Actions,
     cursor: Single<&CursorOptions>,
     mut look: ResMut<LookState>,
 ) {
@@ -100,17 +115,17 @@ fn mouse_look(
         return;
     }
     let sensitivity = look.sensitivity * look.zoom_scale;
+    let vertical = if look.invert_y { -motion.delta.y } else { motion.delta.y };
     look.yaw -= motion.delta.x * sensitivity;
-    look.pitch = (look.pitch - motion.delta.y * sensitivity)
-        .clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
-    if keys.just_pressed(KeyCode::Space) {
+    look.pitch = (look.pitch - vertical * sensitivity).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
+    if actions.just_pressed(Action::Jump) {
         look.jump_latched = true;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    actions: Actions,
     cursor: Single<&CursorOptions>,
     mut look: ResMut<LookState>,
     mut history: ResMut<InputHistory>,
@@ -118,7 +133,11 @@ pub fn build_input(
     cli: Res<crate::Cli>,
     selection: Res<crate::combat::WeaponSelection>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
+    active: Res<crate::net::ActiveMatch>,
 ) {
+    if active.setup.is_none() {
+        return;
+    }
     if cli.debug_walk {
         look.yaw += 0.01;
     }
@@ -136,21 +155,23 @@ pub fn build_input(
         frame.buttons.set(Buttons::SPRINT, true);
         frame.buttons.set(Buttons::JUMP, frame.seq % 150 == 0);
     } else if cursor_locked(&cursor) {
-        let axis = |pos: KeyCode, neg: KeyCode| keys.pressed(pos) as i8 as f32 - keys.pressed(neg) as i8 as f32;
         frame.set_movement(Vec2::new(
-            axis(KeyCode::KeyD, KeyCode::KeyA),
-            axis(KeyCode::KeyW, KeyCode::KeyS),
+            actions.axis(Action::MoveRight, Action::MoveLeft),
+            actions.axis(Action::MoveForward, Action::MoveBack),
         ));
-        let mut set = |button: Buttons, down: bool| frame.buttons.set(button, down);
-        set(Buttons::JUMP, keys.pressed(KeyCode::Space) || look.jump_latched);
-        set(Buttons::SPRINT, keys.pressed(KeyCode::ShiftLeft));
-        set(Buttons::CROUCH, keys.pressed(KeyCode::ControlLeft));
-        set(Buttons::PRONE, keys.pressed(KeyCode::KeyZ));
-        set(Buttons::FIRE, mouse.pressed(MouseButton::Left));
-        set(Buttons::AIM, mouse.pressed(MouseButton::Right));
-        set(Buttons::USE, keys.pressed(KeyCode::KeyE));
-        set(Buttons::RELOAD, keys.pressed(KeyCode::KeyR));
-        set(Buttons::FIRE_MODE, keys.pressed(KeyCode::KeyB));
+        let mut set = |button: Buttons, action: Action| frame.buttons.set(button, actions.pressed(action));
+        set(Buttons::JUMP, Action::Jump);
+        set(Buttons::SPRINT, Action::Sprint);
+        set(Buttons::CROUCH, Action::Crouch);
+        set(Buttons::PRONE, Action::Prone);
+        set(Buttons::FIRE, Action::Fire);
+        set(Buttons::AIM, Action::Zoom);
+        set(Buttons::USE, Action::Use);
+        set(Buttons::RELOAD, Action::Reload);
+        set(Buttons::FIRE_MODE, Action::FireMode);
+        if look.jump_latched {
+            frame.buttons.insert(Buttons::JUMP);
+        }
     }
     if let Some(scenario) = scenario {
         frame.buttons |= scenario.buttons;

@@ -19,11 +19,11 @@ use game_shared::{
 };
 
 use crate::{
-    render::scope::Zoom,
     camera::PlayerCamera,
     local_input::{InputHistory, LocalInputSystems, LookState},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
+    render::scope::Zoom,
 };
 
 pub struct ClientCombatPlugin;
@@ -163,7 +163,7 @@ fn init_local_weapon(
 }
 
 fn select_weapon(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::settings::Actions,
     scroll: Res<AccumulatedMouseScroll>,
     armory: Res<Armory>,
     soldier: Query<&Loadout, With<LocalSoldier>>,
@@ -184,15 +184,10 @@ fn select_weapon(
             .map_or(0, |w| w.slot)
     };
     // Number keys pick a BF2 inventory slot; pressing again cycles weapons in that slot.
-    const DIGITS: [KeyCode; 9] = [
-        KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5,
-        KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9,
-    ];
-    for (i, key) in DIGITS.iter().enumerate() {
-        if !keys.just_pressed(*key) {
+    for slot in 1..=9 {
+        if !actions.just_pressed(crate::settings::Action::WeaponSlot(slot as u8)) {
             continue;
         }
-        let slot = i as u32 + 1;
         let in_slot: Vec<u8> = (0..count).filter(|&w| slot_of(w) == slot).collect();
         if let Some(&first) = in_slot.first() {
             let current = in_slot.iter().position(|&w| w == selection.index);
@@ -239,7 +234,8 @@ fn predict_local_shots(
     let zoomed = input.pressed(Buttons::AIM);
     feedback.spread = state.deviation(&weapon.deviation, motion.stance, zoomed);
 
-    let trigger = input.pressed(Buttons::FIRE);
+    // Hands are on the rungs while climbing.
+    let trigger = input.pressed(Buttons::FIRE) && !motion.climbing;
     let [in_mag, spare] = inventory.ammo.get(active as usize).copied().unwrap_or([0, 0]);
     feedback.reloading = state.reload > 0.0;
     if state.reload > 0.0 {
@@ -468,6 +464,7 @@ pub(crate) fn apply_zoom(
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
     mut camera: Single<&mut Projection, With<PlayerCamera>>,
+    settings: Res<crate::settings::Settings>,
 ) {
     let target = soldier
         .single()
@@ -486,7 +483,7 @@ pub(crate) fn apply_zoom(
     *was_scoped = zoom.scoped;
     look.zoom_scale = feedback.zoom;
     if let Projection::Perspective(perspective) = camera.as_mut() {
-        perspective.fov = 75f32.to_radians() * feedback.zoom;
+        perspective.fov = settings.field_of_view.to_radians() * feedback.zoom;
     }
     feedback.hit_marker = (feedback.hit_marker - time.delta_secs()).max(0.0);
 }

@@ -12,6 +12,8 @@ pub enum GameLayer {
     Soldier,
     Vehicle,
     Projectile,
+    /// Boxes around ladders, only found by movement queries (see [`crate::ladder`]).
+    Ladder,
 }
 
 impl GameLayer {

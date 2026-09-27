@@ -61,7 +61,7 @@ fn main() -> AppExit {
         SharedPlugin,
         RepliconRenetPlugins,
         GameServerPlugin {
-            settings: ServerSettings {
+            settings: Some(ServerSettings {
                 level: cli.level,
                 mode: cli.mode,
                 size: cli.size,
@@ -71,7 +71,7 @@ fn main() -> AppExit {
                 network: true,
                 local_player: None,
                 ..default()
-            },
+            }),
         },
     ));
     app.run()

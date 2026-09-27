@@ -20,8 +20,11 @@ use bf2_formats::{
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 
+mod audio;
 mod coords;
 mod dds;
+mod destruction;
+mod effects;
 mod glb;
 mod level;
 mod meshes;

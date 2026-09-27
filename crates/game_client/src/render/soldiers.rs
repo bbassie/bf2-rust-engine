@@ -4,8 +4,10 @@
 //! Animation is layered like BF2: the legs play the soldier's movement clips, the upper
 //! body plays the matching clip of the current weapon's animation set. Every change
 //! crossfades: movement blends the four directional clips by direction and plays them at
-//! the ground speed, jumps go through take-off, airborne and landing clips, and a weapon
-//! switch fades the upper body into the new weapon's deploy clip.
+//! the ground speed, turning on the spot steps the feet round, and jumps go through
+//! take-off, airborne and landing clips. Shots, reloads and weapon switches play the
+//! weapon's one-shots on the upper body; a switch lowers the old weapon, swaps the model
+//! out of view and raises the new one.
 
 use bevy::{
     app::AnimationSystems,
@@ -14,17 +16,20 @@ use bevy::{
     prelude::*,
     world_serialization::WorldInstanceReady,
 };
-use game_data::SoldierDesc;
+use std::sync::Arc;
+
+use game_data::{SoldierDesc, WeaponDesc};
 use game_shared::{
     config::GamePaths,
     level::LoadedLevel,
-    protocol::{ControlledBy, Team},
+    protocol::{ControlledBy, ShotFired, Team},
     soldier::{SOLDIER_CENTER, SOLDIER_HEIGHT, SOLDIER_RADIUS, Soldier, Stance},
     weapons::{Armory, Inventory, Loadout},
 };
 
 use super::blend::{BlendLayer, Clip, Play};
 use crate::{
+    combat::CombatFeedback,
     net::LocalSoldier,
     prediction::{RenderStateSystems, SoldierRender},
 };
@@ -69,6 +74,10 @@ mod clips {
         ["3p_crouchforward", "3p_crouchbackward", "3p_crouchstrafeleft", "3p_crouchstraferight"];
     pub const PRONE_MOVE: [&str; 4] =
         ["3p_proneforward", "3p_pronebackward", "3p_pronestrafeleft", "3p_pronestraferight"];
+    /// Stepping round on the spot, left and right. Prone, BF2 turns with the strafe clips
+    /// (the left one backwards).
+    pub const STAND_TURN: [&str; 2] = ["3p_standturnleft", "3p_standturnright"];
+    pub const CROUCH_TURN: [&str; 2] = ["3p_crouchturnleft", "3p_crouchturnright"];
     /// Take-off, airborne loop and landing per jump direction (see [`super::jump_direction`]).
     pub const JUMP: [[&str; 3]; 5] = [
         ["3p_stilljumpstart", "3p_stilljumploop", "3p_stilljumpend"],
@@ -85,7 +94,12 @@ mod clips {
     }
 
     pub fn legs() -> impl Iterator<Item = &'static str> {
-        [STAND, CROUCH, PRONE].into_iter().chain(cycles()).chain(JUMP.into_iter().flatten())
+        [STAND, CROUCH, PRONE]
+            .into_iter()
+            .chain(cycles())
+            .chain(STAND_TURN)
+            .chain(CROUCH_TURN)
+            .chain(JUMP.into_iter().flatten())
     }
 
     /// Upper-body clips named like the movement clip they pair with (`3p_crouchstill` with
@@ -96,9 +110,12 @@ mod clips {
         "runforward", "runbackward", "strafeleft", "straferight",
         "crouchforward", "crouchbackward", "crouchstrafeleft", "crouchstraferight",
         "proneforward", "pronebackward", "pronestrafeleft", "pronestraferight",
+        "standturnleft", "standturnright", "crouchturnleft", "crouchturnright",
     ];
-    pub const STAND_DEPLOY: &str = "standdeploy";
-    pub const PRONE_DEPLOY: &str = "pronedeploy";
+    /// Upper-body one-shots, standing (and crouched) and prone.
+    pub const DEPLOY: [&str; 2] = ["standdeploy", "pronedeploy"];
+    pub const FIRE: [&str; 2] = ["standfire", "pronefire"];
+    pub const RELOAD: [&str; 2] = ["reload", "pronereload"];
 
     pub fn upper_for(legs: &str) -> &'static str {
         let state = legs.trim_start_matches("3p_");
@@ -120,8 +137,23 @@ const FADE_START_MOVING: f32 = 0.15;
 const FADE_STANCE: f32 = 0.3;
 const FADE_PRONE: f32 = 0.4;
 const FADE_JUMP: f32 = 0.1;
-const FADE_DEPLOY_IN: f32 = 0.12;
-const FADE_DEPLOY_OUT: f32 = 0.25;
+const FADE_TURN_IN: f32 = 0.1;
+const FADE_TURN_OUT: f32 = 0.25;
+/// Upper-body one-shots: a weapon switch first lowers the old weapon over `FADE_DEPLOY_IN`
+/// (into the deploy clip's first, lowest frame), swaps the model and then plays the clip.
+const FADE_DEPLOY_IN: f32 = 0.15;
+const FADE_FIRE_IN: f32 = 0.05;
+const FADE_RELOAD_IN: f32 = 0.15;
+const FADE_ACTION_OUT: f32 = 0.2;
+
+/// Turning on the spot faster than this (rad/s) steps the feet round; slower than
+/// `TURN_STOP` ends it.
+const TURN_START: f32 = 1.0;
+const TURN_STOP: f32 = 0.4;
+/// Turning speed (rad/s) at which the turn clips play at normal speed (BF2's value holder).
+const TURN_SPEED: f32 = 1.0;
+/// How quickly the measured turning speed follows the yaw (per second).
+const TURN_SMOOTHING: f32 = 6.0;
 
 /// Upward speed that means the soldier jumped rather than stepped off something.
 const TAKE_OFF_SPEED: f32 = 1.0;
@@ -154,7 +186,7 @@ struct ModelAnimations {
     legs: HashMap<&'static str, Clip>,
     /// Nodes of [`clips::cycles`].
     cycles: Vec<AnimationNodeIndex>,
-    /// Per weapon set path, its clips of [`clips::UPPER`] and the deploy clips.
+    /// Per weapon set path, its clips of [`clips::UPPER`] and the one-shots.
     upper: HashMap<String, HashMap<&'static str, Clip>>,
 }
 
@@ -200,14 +232,48 @@ struct SoldierAnimator {
     state_time: f32,
     /// Seconds since the soldier last stood on the ground.
     airborne: f32,
-    /// Weapon switch clip playing on the upper body.
-    deploy: Option<Clip>,
+    /// Last yaw and the smoothed turning speed (rad/s, positive to the left).
+    yaw: Option<f32>,
+    yaw_rate: f32,
+    /// One-shot playing on the upper body over the movement clips.
+    action: Option<Action>,
+    /// Weapon model to show, when it isn't the active weapon yet: during a switch the old
+    /// one stays in the hands until it has been lowered.
+    hand: Option<Arc<WeaponDesc>>,
+    /// Our own soldier: shots fired so far (others' shots arrive as [`ShotFired`]).
+    shots_seen: Option<u32>,
+    was_reloading: bool,
+}
+
+/// An upper-body one-shot.
+#[derive(Clone, Copy, Debug)]
+struct Action {
+    kind: ActionKind,
+    clip: Clip,
+    /// Seconds since it started.
+    time: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ActionKind {
+    Deploy,
+    Fire,
+    Reload,
+}
+
+impl Action {
+    /// A weapon switch still lowering the old weapon.
+    fn lowering(&self) -> bool {
+        self.kind == ActionKind::Deploy && self.time < FADE_DEPLOY_IN
+    }
 }
 
 /// What the legs do.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Legs {
     Still(Stance),
+    /// Turning on the spot, to the left if `true`.
+    Turn(Stance, bool),
     /// Standing, slower than a run.
     Walk,
     Move(Stance),
@@ -222,7 +288,7 @@ enum Legs {
 impl Legs {
     fn stance(self) -> Stance {
         match self {
-            Legs::Still(stance) | Legs::Move(stance) => stance,
+            Legs::Still(stance) | Legs::Turn(stance, _) | Legs::Move(stance) => stance,
             _ => Stance::Standing,
         }
     }
@@ -319,13 +385,12 @@ fn team_animations<'a>(
     }
     let animations = models.graphs[team].as_mut()?;
     if !animations.upper.contains_key(set) {
-        if !models.weapon_sets.contains_key(set) {
-            models.weapon_sets.insert(set.to_string(), asset_server.load(format!("imported://{set}")));
-        }
+        preload_set(&mut models.weapon_sets, set, asset_server);
         let handle = &models.weapon_sets[set];
         if let (Some(weapon), Some(mut graph)) = (gltfs.get(handle), graphs.get_mut(&animations.graph)) {
             let mut upper = HashMap::default();
-            for &name in clips::UPPER.iter().chain(&[clips::STAND_DEPLOY, clips::PRONE_DEPLOY]) {
+            let one_shots = [clips::DEPLOY, clips::FIRE, clips::RELOAD];
+            for &name in clips::UPPER.iter().chain(one_shots.iter().flatten()) {
                 if let Some(handle) = weapon.named_animations.get(name) {
                     upper.insert(name, add_clip(&mut graph, handle, clip_assets));
                 }
@@ -334,6 +399,13 @@ fn team_animations<'a>(
         }
     }
     Some(animations)
+}
+
+/// Starts loading a weapon's upper-body set, so switching to the weapon animates at once.
+fn preload_set(sets: &mut HashMap<String, Handle<Gltf>>, set: &str, asset_server: &AssetServer) {
+    if !sets.contains_key(set) {
+        sets.insert(set.to_string(), asset_server.load(format!("imported://{set}")));
+    }
 }
 
 fn add_clip(graph: &mut AnimationGraph, handle: &Handle<AnimationClip>, clips: &Assets<AnimationClip>) -> Clip {
@@ -475,12 +547,13 @@ fn active_weapon<'a>(
     armory: &'a Armory,
     loadout: Option<&Loadout>,
     inventory: Option<&Inventory>,
-) -> Option<&'a game_data::WeaponDesc> {
+) -> Option<&'a Arc<WeaponDesc>> {
     let (loadout, inventory) = (loadout?, inventory?);
-    armory.weapon(loadout.weapons.get(inventory.active as usize)?).map(|w| w.as_ref())
+    armory.weapon(loadout.weapons.get(inventory.active as usize)?)
 }
 
-/// Puts the soldier's current weapon model on the weapon bones (part `n` on `mesh{n+1}`).
+/// Puts the soldier's weapon model on the weapon bones (part `n` on `mesh{n+1}`): the
+/// active weapon, or the one the animator still has in hand during a switch.
 #[allow(clippy::type_complexity)]
 fn attach_weapons(
     mut commands: Commands,
@@ -489,13 +562,15 @@ fn attach_weapons(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     soldiers: Query<(Option<&Loadout>, Option<&Inventory>)>,
-    mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&mut HeldWeapon>)>,
+    mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&SoldierAnimator>, Option<&mut HeldWeapon>)>,
 ) {
-    for (entity, visual, rig, held) in &mut visuals {
+    for (entity, visual, rig, animator, held) in &mut visuals {
         let Ok((loadout, inventory)) = soldiers.get(visual.soldier) else {
             continue;
         };
-        let weapon = active_weapon(&armory, loadout, inventory);
+        let weapon = animator
+            .and_then(|a| a.hand.as_ref())
+            .or_else(|| active_weapon(&armory, loadout, inventory));
         let name = weapon.map_or(String::new(), |w| w.name.clone());
         let mut held = match held {
             Some(held) if held.name == name => held,
@@ -605,7 +680,7 @@ fn jump_direction(velocity: Vec2) -> usize {
 
 /// The legs state for this frame. Thresholds have some hysteresis so noisy speeds don't
 /// flicker between states.
-fn next_legs(state: Option<Legs>, time: f32, airborne: f32, render: &SoldierRender) -> Legs {
+fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, render: &SoldierRender) -> Legs {
     let velocity = local_velocity(render);
     let speed = velocity.length();
     match state {
@@ -625,10 +700,13 @@ fn next_legs(state: Option<Legs>, time: f32, airborne: f32, render: &SoldierRend
         }
         _ => {}
     }
-    let moving = speed > if matches!(state, None | Some(Legs::Still(_))) { 0.5 } else { 0.3 };
+    let standing = matches!(state, None | Some(Legs::Still(_) | Legs::Turn(..)));
+    let moving = speed > if standing { 0.5 } else { 0.3 };
+    let turning = yaw_rate.abs() > if matches!(state, Some(Legs::Turn(..))) { TURN_STOP } else { TURN_START };
     let sprint_above = if state == Some(Legs::Sprint) { 4.8 } else { 5.2 };
     let walk_below = if state == Some(Legs::Walk) { 2.4 } else { 2.0 };
     match render.stance {
+        stance if !moving && turning => Legs::Turn(stance, yaw_rate > 0.0),
         stance if !moving => Legs::Still(stance),
         Stance::Standing if speed > sprint_above && velocity.y > 0.0 => Legs::Sprint,
         Stance::Standing if speed < walk_below => Legs::Walk,
@@ -649,28 +727,39 @@ fn fade_time(from: Option<Legs>, to: Legs) -> f32 {
                 FADE_STANCE
             }
         }
-        (Legs::Still(_), _) => FADE_START_MOVING,
+        (_, Legs::Turn(..)) => FADE_TURN_IN,
+        (Legs::Turn(..), Legs::Still(_)) => FADE_TURN_OUT,
+        (Legs::Still(_) | Legs::Turn(..), _) => FADE_START_MOVING,
         _ => FADE,
     }
 }
 
+/// What a soldier's animator needs to know this frame.
+struct Cues<'a> {
+    render: &'a SoldierRender,
+    weapon: Option<&'a Arc<WeaponDesc>>,
+    /// The weapon's upper-body set.
+    set: &'a str,
+    fired: bool,
+    reloading: bool,
+}
+
 impl SoldierAnimator {
     /// Picks this frame's clips and weights and advances the crossfades.
-    fn update(
-        &mut self,
-        player: &mut AnimationPlayer,
-        animations: &ModelAnimations,
-        render: &SoldierRender,
-        set: &str,
-        dt: f32,
-    ) {
+    fn update(&mut self, player: &mut AnimationPlayer, animations: &ModelAnimations, cues: &Cues, dt: f32) {
+        let render = cues.render;
         self.airborne = if render.grounded { 0.0 } else { self.airborne + dt };
-        let state = next_legs(self.state, self.state_time, self.airborne, render);
+        if dt > 0.0 {
+            let turned = self.yaw.map_or(0.0, |yaw| angle_between(yaw, render.yaw));
+            self.yaw_rate += (turned / dt - self.yaw_rate) * (1.0 - (-TURN_SMOOTHING * dt).exp());
+        }
+        self.yaw = Some(render.yaw);
+        let state = next_legs(self.state, self.state_time, self.airborne, self.yaw_rate, render);
         let entered = self.state != Some(state);
         if entered {
             let fade = fade_time(self.state, state);
             self.legs.set_fade(fade);
-            if self.deploy.is_none() {
+            if self.action.is_none() {
                 self.upper.set_fade(fade);
             }
             self.state = Some(state);
@@ -692,6 +781,19 @@ impl SoldierAnimator {
                     Stance::Prone => clips::PRONE,
                 };
                 targets[0] = (clip, 1.0);
+            }
+            Legs::Turn(stance, left) => {
+                let side = if left { 0 } else { 1 };
+                let clip = match stance {
+                    Stance::Standing => clips::STAND_TURN[side],
+                    Stance::Crouching => clips::CROUCH_TURN[side],
+                    Stance::Prone => clips::PRONE_MOVE[2 + side],
+                };
+                targets[0] = (clip, 1.0);
+                speed = (self.yaw_rate.abs() / TURN_SPEED).clamp(0.6, 1.8);
+                if stance == Stance::Prone && left {
+                    speed = -speed;
+                }
             }
             Legs::Walk | Legs::Move(_) => {
                 let (set, normal) = match state {
@@ -743,32 +845,51 @@ impl SoldierAnimator {
                 None if animations.cycles.contains(&clip.node) => {
                     Play::looping(weight).speed(speed).phase(cycle_phase)
                 }
-                None => Play::looping(weight),
+                None => Play::looping(weight).speed(speed),
             };
             self.legs.play(player, clip, play);
         }
         self.legs.update(player, dt);
 
-        // Upper body: the weapon set's clips paired with the legs clips, in step with them.
+        // Upper body: a one-shot (weapon switch, shot, reload) or else the weapon set's
+        // clips paired with the legs clips, in step with them.
         let first_set = self.set.is_empty();
-        let switched = self.set != set && animations.upper.contains_key(set);
+        let switched = self.set != cues.set && animations.upper.contains_key(cues.set);
         if switched {
-            self.set = set.to_string();
+            self.set = cues.set.to_string();
         }
         let Some(upper) = animations.upper.get(&self.set) else {
+            self.hand = None;
             return;
         };
-        if switched && !first_set {
-            let deploy = if render.stance == Stance::Prone { clips::PRONE_DEPLOY } else { clips::STAND_DEPLOY };
-            self.deploy = upper.get(deploy).copied();
-            self.upper.set_fade(if self.deploy.is_some() { FADE_DEPLOY_IN } else { FADE_DEPLOY_OUT });
-        } else if self.deploy.is_some_and(|clip| clip.finished(player)) {
-            self.deploy = None;
-            self.upper.set_fade(FADE_DEPLOY_OUT);
+        let pose = usize::from(render.stance == Stance::Prone);
+        let one_shot = |names: [&str; 2]| upper.get(names[pose]).copied();
+        let started = if switched && !first_set {
+            one_shot(clips::DEPLOY).map(|clip| (ActionKind::Deploy, clip, FADE_DEPLOY_IN))
+        } else if cues.fired {
+            one_shot(clips::FIRE).map(|clip| (ActionKind::Fire, clip, FADE_FIRE_IN))
+        } else if cues.reloading && !self.was_reloading {
+            one_shot(clips::RELOAD).map(|clip| (ActionKind::Reload, clip, FADE_RELOAD_IN))
+        } else {
+            None
+        };
+        self.was_reloading = cues.reloading;
+        if let Some((kind, clip, fade)) = started {
+            self.action = Some(Action { kind, clip, time: 0.0 });
+            self.upper.set_fade(fade);
+        } else if let Some(action) = &mut self.action {
+            action.time += dt;
+            let done = action.clip.finished(player) || (action.kind == ActionKind::Reload && !cues.reloading);
+            if done {
+                self.action = None;
+                self.upper.set_fade(FADE_ACTION_OUT);
+            }
         }
         self.upper.begin();
-        if let Some(deploy) = self.deploy {
-            self.upper.play(player, deploy, Play::once(switched));
+        if let Some(action) = self.action {
+            // Held on its first frame while the old weapon goes down.
+            let speed = if action.lowering() { 0.0 } else { 1.0 };
+            self.upper.play(player, action.clip, Play::once(started.is_some()).speed(speed));
         } else {
             for &(name, weight) in targets {
                 let Some(&clip) = upper.get(clips::upper_for(name)).or_else(|| upper.get("stand")) else {
@@ -780,7 +901,17 @@ impl SoldierAnimator {
             }
         }
         self.upper.update(player, dt);
+
+        if !self.action.is_some_and(|a| a.lowering()) {
+            self.hand = cues.weapon.cloned();
+        }
     }
+}
+
+/// Signed angle from `a` to `b`, radians.
+fn angle_between(a: f32, b: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    (b - a + PI).rem_euclid(TAU) - PI
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -793,19 +924,31 @@ fn animate(
     gltfs: Res<Assets<Gltf>>,
     clip_assets: Res<Assets<AnimationClip>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    soldiers: Query<(&SoldierRender, Option<&Loadout>, Option<&Inventory>)>,
+    feedback: Res<CombatFeedback>,
+    mut shots: MessageReader<ShotFired>,
+    soldiers: Query<(&SoldierRender, Option<Ref<Loadout>>, Option<&Inventory>, Has<LocalSoldier>)>,
     mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
+    let fired: Vec<Entity> = shots.read().map(|shot| shot.soldier).collect();
     for (visual, body, rig, mut animator) in &mut visuals {
-        let (Ok((render, loadout, inventory)), Some(team)) = (soldiers.get(visual.soldier), body.0) else {
+        let (Ok((render, loadout, inventory, local)), Some(team)) = (soldiers.get(visual.soldier), body.0) else {
             continue;
         };
-        let set = active_weapon(&armory, loadout, inventory)
-            .and_then(|w| w.animations_3p.as_deref())
-            .unwrap_or(DEFAULT_WEAPON_ANIMATIONS);
+        let loadout_changed = loadout.as_ref().is_some_and(|l| l.is_changed());
+        let loadout = loadout.as_deref();
+        let weapon = active_weapon(&armory, loadout, inventory);
+        let set = weapon.and_then(|w| w.animations_3p.as_deref()).unwrap_or(DEFAULT_WEAPON_ANIMATIONS);
+        if animator.graph.is_none() || loadout_changed {
+            for name in loadout.map_or(&[][..], |l| &l.weapons) {
+                if let Some(set) = armory.weapon(name).and_then(|w| w.animations_3p.as_deref()) {
+                    preload_set(&mut models.weapon_sets, set, &asset_server);
+                }
+            }
+        }
         let animations = team_animations(&mut models, team, set, &asset_server, &gltfs, &clip_assets, &mut graphs);
         let (Some(animations), Ok(mut player)) = (animations, players.get_mut(rig.player)) else {
+            animator.hand = None;
             continue;
         };
         if animator.graph != Some(animations.graph.id()) {
@@ -816,6 +959,21 @@ fn animate(
                 ..default()
             };
         }
-        animator.update(&mut player, animations, render, set, time.delta_secs());
+        // Our own shots are predicted locally; everyone else's arrive from the server.
+        let (fired, reloading) = if local {
+            let fired = animator.shots_seen.is_some_and(|seen| seen != feedback.shots_fired);
+            animator.shots_seen = Some(feedback.shots_fired);
+            (fired, feedback.reloading)
+        } else {
+            (fired.contains(&visual.soldier), inventory.is_some_and(|i| i.reloading))
+        };
+        let cues = Cues {
+            render,
+            weapon,
+            set,
+            fired,
+            reloading,
+        };
+        animator.update(&mut player, animations, &cues, time.delta_secs());
     }
 }

@@ -15,12 +15,12 @@ use bf2_formats::{
 };
 use game_data::{
     ControlPointDesc, EnvironmentDesc, FlagModels, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
-    Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, VehicleSpawnerDesc,
+    Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, TeamVoice, VehicleSpawnerDesc,
 };
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{coords, meshes::MeshConverter, roads, terrain, weapons};
+use crate::{audio, coords, destruction, meshes::MeshConverter, roads, terrain, weapons};
 
 pub struct LevelReport {
     pub statics: usize,
@@ -72,7 +72,10 @@ pub fn import_level(
     let converter = MeshConverter::new(&vfs, out);
 
     // Kits of both teams and the weapons they carry.
-    let level_teams = teams(&interp.world);
+    let mut level_teams = teams(&interp.world);
+    for team in &mut level_teams {
+        team.voice = team_voice(&vfs, &team.language, out);
+    }
     let kit_names: Vec<String> = level_teams
         .iter()
         .flat_map(|t| t.kits.iter().map(|k| k.kit.clone()))
@@ -83,6 +86,15 @@ pub fn import_level(
 
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
+    let static_templates: HashSet<String> = interp.world.instances[static_range.clone()]
+        .iter()
+        .map(|i| i.template.to_ascii_lowercase())
+        .collect();
+    destruction::load_effects(&mut interp, &static_templates);
+    crate::effects::import(&mut interp, &converter, &kit_names, &static_templates, out);
+    if let Err(err) = destruction::import_materials(&vfs, out) {
+        log::warn!("damage table: {err:#}");
+    }
     let world = &interp.world;
 
     // Static objects and the meshes they need.
@@ -108,6 +120,9 @@ pub fn import_level(
         if !object.parts.is_empty() {
             game_data::write_ron(out.join("templates").join(format!("{name}.ron")), object)?;
         }
+    }
+    if let Err(err) = crate::effects::import_surfaces(world, &converter, &objects, &level_dir) {
+        log::warn!("surfaces: {err:#}");
     }
 
     let statics: Vec<StaticInstance> = static_instances
@@ -225,6 +240,7 @@ fn build_object(
         name: name.to_string(),
         kind,
         parts,
+        armor: world.template(name).and_then(|t| destruction::armor(world, t, converter)),
     }
 }
 
@@ -259,7 +275,7 @@ fn flatten(
         let result = if is_collision {
             converter.convert_collision(path)
         } else {
-            converter.convert_mesh(path)
+            destruction::convert_object_mesh(converter, path)
         };
         match result {
             Ok(rel) => {
@@ -273,23 +289,37 @@ fn flatten(
         }
     };
 
-    let own_mesh = template
+    let mesh_source = template
         .geometry
         .as_deref()
         .and_then(|g| world.geometry(g))
-        .and_then(|g| g.mesh_path())
-        .and_then(|path| convert(&path, false));
-    let own_collision = template
+        .and_then(|g| g.mesh_path());
+    let collision_source = template
         .collision_mesh
         .as_deref()
-        .and_then(|c| world.collision_meshes.get(&c.to_ascii_lowercase()))
-        .and_then(|path| convert(path, true));
+        .and_then(|c| world.collision_meshes.get(&c.to_ascii_lowercase()).cloned())
+        .or_else(|| destruction::uncreated_collision_mesh(converter, template));
+    let own_mesh = mesh_source.as_deref().and_then(|path| convert(path, false));
+    let own_collision = collision_source.as_deref().and_then(|path| convert(path, true));
     let has_geometry_part = template.get("geometrypart").is_some();
     let has_collision_part = template.get("collisionpart").is_some();
     let mesh = own_mesh.clone().or_else(|| has_geometry_part.then(|| inherited.mesh.clone()).flatten());
     let collision = own_collision
         .clone()
         .or_else(|| has_collision_part.then(|| inherited.collision.clone()).flatten());
+    let collision_part = template.get_f32("collisionpart").unwrap_or(0.0) as u32;
+
+    // What a destroyable object leaves behind, and what its surface is made of.
+    let (wreck_mesh, (hit_material, wreck_collision)) = if destruction::is_destroyable(template) {
+        (
+            mesh_source.as_deref().and_then(|path| destruction::convert_wreck_mesh(converter, path)),
+            collision_source.as_deref().map_or((None, None), |path| {
+                destruction::collision_info(converter, path, collision_part as usize, template)
+            }),
+        )
+    } else {
+        (None, (None, None))
+    };
 
     if mesh.is_some() || collision.is_some() {
         let (scale, rotation, translation) = transform.to_scale_rotation_translation();
@@ -297,7 +327,11 @@ fn flatten(
             mesh,
             mesh_index: template.get_f32("geometrypart").unwrap_or(0.0) as u32,
             collision,
-            collision_part: template.get_f32("collisionpart").unwrap_or(0.0) as u32,
+            collision_part,
+            wreck_mesh,
+            wreck_collision,
+            hit_material,
+            ladder: template.ty.eq_ignore_ascii_case("ladder"),
             placement: Placement {
                 position: translation.to_array(),
                 rotation: rotation.to_array(),
@@ -502,7 +536,36 @@ fn flag_models(interp: &mut Interpreter, vfs: &Vfs, converter: &MeshConverter, o
             *slot = glb.filter(|p| out.join(p).exists());
         }
     }
+    // The pole's effect bundle loops a flapping sound.
+    models.sound = interp
+        .world
+        .template("s_flagpole_sfxbundle_start")
+        .and_then(|t| t.get_str("soundfilename"))
+        .and_then(|file| converter.file(file));
     models
+}
+
+/// The commander's rule announcements in `language` (`common/sound/<language>/commander/`).
+fn team_voice(vfs: &Vfs, language: &str, out: &Path) -> TeamVoice {
+    let dir = format!("common/sound/{}/commander/filter/", language.to_ascii_lowercase());
+    let lines = |name: &str| -> Vec<String> {
+        let prefix = format!("{dir}auto_rules_{name}");
+        let mut files: Vec<String> = vfs
+            .list(&dir)
+            .filter(|p| p.starts_with(&prefix) && p.ends_with(".ogg"))
+            .filter_map(|p| audio::sound(vfs, p, out))
+            .collect();
+        files.sort();
+        files
+    };
+    TeamVoice {
+        we_captured: lines("wecapturedacp"),
+        we_lost: lines("welostacp"),
+        enemy_captured: lines("enemycapturedacp"),
+        bleed_start: lines("ticketbleedstart"),
+        bleed_end: lines("ticketbleedend"),
+        low_tickets: audio::sound(vfs, "common/sound/hud/lowontickets.wav", out).into_iter().collect(),
+    }
 }
 
 /// Team names, kits and ticket rules from the level's `gameLogic.*` settings.
@@ -546,6 +609,11 @@ fn teams(world: &World) -> Vec<TeamDesc> {
                 ) {
                     teams[t].tickets.retain(|(s, _)| *s != size);
                     teams[t].tickets.push((size, tickets));
+                }
+            }
+            "gamelogic.setteamlanguage" => {
+                if let (Some(t), Some(language)) = (team(a.first()), a.get(1)) {
+                    teams[t].language = unquote(language);
                 }
             }
             "gamelogic.setticketlosspermin" => {

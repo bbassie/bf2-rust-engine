@@ -9,12 +9,16 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub mod effect;
 pub mod level;
+pub mod material;
 pub mod object;
 pub mod soldier;
 pub mod weapon;
 
+pub use effect::*;
 pub use level::*;
+pub use material::*;
 pub use object::*;
 pub use soldier::*;
 pub use weapon::*;

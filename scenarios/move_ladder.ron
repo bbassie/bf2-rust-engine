@@ -1,0 +1,41 @@
+// Ladders on Karkand: up a house ladder onto the roof, back down, jumping off.
+// Needs templates imported with ladder parts marked (bf2-import level strike_at_karkand).
+// client --scenario scenarios/move_ladder.ron --out target/scenarios/move/ladder
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        ThirdPerson(true),
+
+        // ladder_7m on the house south of the square, climbed from the west.
+        Teleport((-186.5, 156.5, 1.95), -90.0, 10.0),
+        Wait(1.0),
+        Screenshot("ladder_bottom"),
+        Move(0.0, 1.0),
+        Trace("up", 1.3),
+        Screenshot("ladder_climbing"),
+        Trace("up_top", 3.0),
+        Screenshot("ladder_roof"),
+        Move(0.0, 0.0),
+
+        // Back onto it from the roof, looking down: climb down.
+        Look(90.0, -40.0),
+        Wait(0.3),
+        Move(0.0, 1.0),
+        Trace("down", 3.5),
+        Screenshot("ladder_down"),
+        Move(0.0, 0.0),
+
+        // Up halfway, then jump off.
+        Look(-90.0, 10.0),
+        Move(0.0, 1.0),
+        Trace("up_again", 1.5),
+        Hold([Jump]),
+        Trace("jump_off", 1.5),
+        Release([Jump]),
+        Move(0.0, 0.0),
+        Screenshot("jumped_off"),
+        Quit,
+    ],
+)

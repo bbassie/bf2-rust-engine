@@ -1,0 +1,31 @@
+// Host a listen server from the menu, let a guest join, leave, and host again on the same
+// port (checks that leaving closes the socket).
+// client --scenario scenarios/menu_host.ron --out target/scenarios/menu/host
+// client --connect 127.0.0.1 --screenshot target/scenarios/menu/host/guest.png   (meanwhile)
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:host"),
+        Wait(0.3),
+        Click("level:test_range"),
+        Wait(0.3),
+        Click("start"),
+        WaitReady,
+        // Time for the guest to join, look around and leave.
+        Wait(15.0),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("paused"),
+        Click("pause:leave"),
+        Wait(0.5),
+        WaitReady,
+        Click("menu:host"),
+        Wait(0.3),
+        Click("start"),
+        WaitReady,
+        Wait(0.5),
+        Screenshot("hosting_again"),
+        Quit,
+    ],
+)

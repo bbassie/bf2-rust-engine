@@ -5,6 +5,8 @@
 //! camera, hold buttons, toggle render features, take screenshots, measure frame times.
 //! Screenshots and `report.txt` go to `--out` (default `target/scenarios/<name>/`).
 //! `--screenshot <path>` is shorthand for "wait until ready, take one screenshot, quit".
+//! With `menu: true` the client starts at the main menu, to script it with `Click` steps.
+//! Scenarios use the default settings (see `settings`) unless `--settings` is given.
 //!
 //! ```ron
 //! (
@@ -35,6 +37,11 @@ use std::{
 
 use bevy::{
     gltf::Gltf,
+    input::{
+        ButtonState,
+        keyboard::{Key, KeyboardInput, NativeKey},
+    },
+    window::PrimaryWindow,
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
     render::{
@@ -55,7 +62,8 @@ use crate::{
     camera::{PlayerCamera, Spectator, ThirdPerson},
     combat::WeaponSelection,
     local_input::LookState,
-    net::LocalSoldier,
+    menu::Screen,
+    net::{ActiveMatch, LocalSoldier},
     render::environment::Sun,
 };
 
@@ -70,13 +78,16 @@ pub struct Scenario {
     pub third_person: Option<bool>,
     /// Our team, 1 or 2.
     pub team: Option<u8>,
+    /// Start at the main menu instead of in a match (the other fields then don't apply).
+    pub menu: bool,
     pub steps: Vec<Step>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub enum Step {
     /// Until the level is loaded, assets stopped streaming in, no shader is compiling and
-    /// (unless spectating) our soldier exists. Gives up after 90 s.
+    /// (unless spectating) our soldier exists; at the main menu, until assets and shaders
+    /// are done. Gives up after 90 s.
     WaitReady,
     /// Real-time seconds.
     Wait(f32),
@@ -109,6 +120,9 @@ pub enum Step {
     /// Frame time statistics over this many seconds, logged and added to the report.
     Measure(String, f32),
     Log(String),
+    /// Adds our soldier's movement state (and the last prediction correction when
+    /// connected) to the report every frame for this many seconds.
+    Trace(String, f32),
     Quit,
 }
 
@@ -159,7 +173,7 @@ impl Scenario {
     /// Applies the scenario's overrides to the command line.
     pub fn apply(&self, cli: &mut Cli) {
         if let Some(level) = &self.level {
-            cli.level = level.clone();
+            cli.level = Some(level.clone());
         }
         if let Some(mode) = &self.mode {
             cli.mode = mode.clone();
@@ -282,7 +296,8 @@ struct PlayerControls<'w, 's> {
     look: ResMut<'w, LookState>,
     third_person: ResMut<'w, ThirdPerson>,
     selection: ResMut<'w, WeaponSelection>,
-    keys: ResMut<'w, ButtonInput<KeyCode>>,
+    keyboard: MessageWriter<'w, KeyboardInput>,
+    window: Single<'w, 's, Entity, With<PrimaryWindow>>,
     buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
 }
 
@@ -296,13 +311,15 @@ enum Progress {
 fn run_scenario(
     mut commands: Commands,
     time: Res<Time<Real>>,
-    cli: Res<Cli>,
+    active: Res<ActiveMatch>,
+    screen: Res<State<Screen>>,
     mut runner: ResMut<Runner>,
     mut readiness: ResMut<Readiness>,
     waiting_pipelines: Res<WaitingPipelines>,
     level: Option<Res<LoadedLevel>>,
     player: PlayerControls,
     mut soldier: Query<(&mut SoldierMotion, &mut Health), With<LocalSoldier>>,
+    prediction: Res<crate::prediction::PredictionStats>,
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
     mut suns: Query<&mut DirectionalLight, With<Sun>>,
@@ -313,12 +330,24 @@ fn run_scenario(
         mut look,
         mut third_person,
         mut selection,
-        mut keys,
+        mut keyboard,
+        window,
         mut buttons,
     } = player;
     let now = time.elapsed_secs();
+    // Keys go through the same input events as a real keyboard, so every system sees them.
+    let mut key_event = |key_code: KeyCode, state: ButtonState| {
+        keyboard.write(KeyboardInput {
+            key_code,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat: false,
+            window: *window,
+        });
+    };
     for key in runner.released.drain(..) {
-        keys.release(key);
+        key_event(key, ButtonState::Released);
     }
     if waiting_pipelines.0.load(Ordering::Relaxed) > 0 {
         readiness.last_pipeline_wait = now;
@@ -332,8 +361,15 @@ fn run_scenario(
         let elapsed = now - started;
         let progress = match &step {
             Step::WaitReady => {
-                let ready = level.is_some()
-                    && (cli.spectate || !soldier.is_empty())
+                // At the main menu there is nothing to wait for but assets and shaders. A
+                // match started by a `Click` just before shows up a frame later.
+                runner.frames += 1;
+                let in_place = match screen.get() {
+                    Screen::Menu => runner.frames > 1,
+                    Screen::Loading => false,
+                    Screen::InGame => level.is_some() && (active.spectating() || !soldier.is_empty()),
+                };
+                let ready = in_place
                     && now - readiness.last_asset_event > 1.0
                     && now - readiness.last_pipeline_wait > 0.5;
                 if ready || elapsed > 90.0 {
@@ -413,7 +449,7 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Key(key) => {
-                keys.press(*key);
+                key_event(*key, ButtonState::Pressed);
                 runner.released.push(*key);
                 Progress::Done
             }
@@ -463,6 +499,26 @@ fn run_scenario(
                 } else {
                     Progress::Waiting
                 }
+            }
+            Step::Trace(name, seconds) => {
+                if let Ok((m, _)) = soldier.single() {
+                    let (p, v) = (m.position, m.velocity);
+                    writeln!(
+                        runner.report,
+                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} correction {:.4}",
+                        p.x,
+                        p.y,
+                        p.z,
+                        v.x,
+                        v.y,
+                        v.z,
+                        if m.grounded { "G" } else { "-" },
+                        m.stance,
+                        prediction.last_correction,
+                    )
+                    .ok();
+                }
+                done_if(elapsed >= *seconds)
             }
             Step::Log(text) => {
                 info!("scenario: {text}");

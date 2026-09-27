@@ -3,6 +3,7 @@
 use bevy::prelude::*;
 
 mod blend;
+mod destruction;
 pub mod environment;
 mod flags;
 pub mod materials;
@@ -27,6 +28,7 @@ impl Plugin for RenderPlugin {
             statics::StaticRenderPlugin,
             viewmodel::ViewModelPlugin,
             scope::ScopePlugin,
-        ));
+        ))
+        .add_plugins(destruction::DestructionRenderPlugin);
     }
 }

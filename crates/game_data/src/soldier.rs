@@ -30,6 +30,29 @@ pub struct TeamDesc {
     /// Tickets lost per minute while the other side holds more of the map.
     #[serde(default)]
     pub ticket_loss_per_minute: f32,
+    /// Voice language (`English`, `Mec`, ...).
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub voice: TeamVoice,
+}
+
+/// The commander's announcements for a team, in its language (`.wav` paths; one is picked
+/// at random).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct TeamVoice {
+    #[serde(default)]
+    pub we_captured: Vec<String>,
+    #[serde(default)]
+    pub we_lost: Vec<String>,
+    #[serde(default)]
+    pub enemy_captured: Vec<String>,
+    #[serde(default)]
+    pub bleed_start: Vec<String>,
+    #[serde(default)]
+    pub bleed_end: Vec<String>,
+    #[serde(default)]
+    pub low_tickets: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

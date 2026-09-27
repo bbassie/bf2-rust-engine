@@ -43,6 +43,9 @@ pub struct Zoom {
     pub held: f32,
     /// The zoom model replaces the weapon.
     pub scoped: bool,
+    /// Seconds a weapon that leaves the zoom after firing (`zoom.out_after_fire`, bolt-action
+    /// rifles) stays out of it. Set by the view model, which plays the bolt.
+    pub bolt: f32,
     weapon: String,
     /// Seconds since switching to the weapon.
     drawn: f32,
@@ -63,9 +66,10 @@ fn active_weapon<'a>(armory: &'a Armory, soldier: Option<(&Loadout, &Inventory)>
         .map(|w| w.as_ref())
 }
 
-/// Zooming needs the aim button and a weapon that is drawn and not reloading. The zoom model
-/// appears after the weapon's zoom delay, once the arms have settled into the zoom pose:
-/// no one-shot (deploy, hip fire) playing and no crossfade in progress.
+/// Zooming needs the aim button and a weapon that is drawn, not reloading and not working
+/// its bolt (with aim still held it zooms back in afterwards). The zoom model appears after
+/// the weapon's zoom delay, once the arms have settled into the zoom pose: no one-shot
+/// (deploy, hip fire, bolt) playing and no crossfade in progress.
 #[allow(clippy::too_many_arguments)]
 fn update_zoom(
     time: Res<Time>,
@@ -87,10 +91,13 @@ fn update_zoom(
     if zoom.weapon != weapon.name {
         zoom.weapon = weapon.name.clone();
         zoom.drawn = 0.0;
+        zoom.bolt = 0.0;
     }
     zoom.drawn += time.delta_secs();
+    zoom.bolt = (zoom.bolt - time.delta_secs()).max(0.0);
     let aiming = history.latest().is_some_and(|input| input.pressed(Buttons::AIM));
     let can_zoom = aiming
+        && zoom.bolt <= 0.0
         && !feedback.reloading
         && zoom.drawn >= weapon.deploy_time
         && weapon.zoom_factors.iter().any(|&f| f > 0.0);

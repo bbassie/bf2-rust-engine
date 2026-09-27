@@ -72,6 +72,8 @@ pub struct Deployment {
     pub kit: u8,
     /// Preferred control point index; any owned one if unset or lost.
     pub control_point: Option<u8>,
+    /// Spawn on our squad leader (when alive), before any control point.
+    pub on_squad_leader: bool,
     /// Seconds until the next spawn while dead; 0 while alive.
     pub respawn_in: f32,
 }
@@ -82,6 +84,7 @@ impl Default for Deployment {
             // Assault: the most generally useful kit.
             kit: 2,
             control_point: None,
+            on_squad_leader: false,
             respawn_in: 0.0,
         }
     }
@@ -92,6 +95,7 @@ impl Default for Deployment {
 pub struct DeployRequest {
     pub kit: u8,
     pub control_point: Option<u8>,
+    pub on_squad_leader: bool,
 }
 
 /// Server -> everyone: a control point changed hands.

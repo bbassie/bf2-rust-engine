@@ -31,3 +31,5 @@ clap.workspace = true
 serde.workspace = true
 anyhow.workspace = true
 fastrand = "2"
+bytemuck.workspace = true
+flate2.workspace = true
