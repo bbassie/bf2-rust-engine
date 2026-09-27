@@ -104,8 +104,11 @@ helicopter, sea, stationary) comes from the engine type.
 - **Server** (`game_server::vehicles`): spawners create vehicles for the team holding their
   control point and respawn them when they are gone or abandoned. The use button near an
   entry point takes the first free seat, F1..F8 change seats, use again gets out beside the
-  vehicle. A seated soldier stays alive but `apply_inputs` skips it: its `InputFrame` goes to
-  the vehicle's `SeatInputs`, and it is carried along at its seat every tick. Guns fire from
+  vehicle (out of an aircraft high up, with its speed and under a parachute that sinks at
+  5 m/s, glides where the keys steer and packs away on landing; the jump key also opens one
+  when falling fast). A seated soldier stays alive but `apply_inputs` skips it: its
+  `InputFrame` goes to the vehicle's `SeatInputs`, and it is carried along at its seat every
+  tick. Guns fire from
   their seat's triggers (weapon keys pick among the guns of one trigger) with BF2 overheat;
   wire/TV guided missiles follow the gunner's aim, heat seekers lock on piloted aircraft.
   Direct hits take the damage table's factor for the armour face they strike (BF2's

@@ -110,6 +110,9 @@ impl Decoy {
     }
 }
 
+/// Leaving an aircraft further than this above the ground (m) opens a parachute.
+const BAIL_OUT_HEIGHT: f32 = 8.0;
+
 /// How long decoy flares keep heat seekers off the aircraft that dropped them.
 const DECOY_TIME: f32 = 3.0;
 /// Share of the aircraft's velocity decoy flares keep (they fall behind in arcs).
@@ -381,9 +384,16 @@ fn ride_vehicles(
             let transforms = model.part_transforms(&state.joints);
             if let Some(exit) = exit_position(model, &transforms, vehicle_transform, seated.seat as usize, &spatial, &shapes) {
                 motion.position = exit;
-                motion.velocity = velocity.0 * 0.5;
+                // Out of an aircraft, with its speed: anything slower is run over by it.
+                motion.velocity = velocity.0 * if model.desc.category.flies() { 1.0 } else { 0.5 };
                 motion.stance = Stance::Standing;
                 motion.grounded = false;
+                // Bailing out of an aircraft high up opens a parachute.
+                let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
+                    .with_excluded_entities([seated.vehicle]);
+                let ground = spatial.cast_ray(exit + Vec3::Y * 0.5, Dir3::NEG_Y, 2000.0, true, &filter);
+                motion.parachute =
+                    model.desc.category.flies() && ground.is_none_or(|hit| hit.distance > BAIL_OUT_HEIGHT);
                 commands.entity(soldier).remove::<Seated>();
                 set_hittable(&mut commands, hitbox, true);
                 if let Some(seats) = taken.get_mut(&seated.vehicle) {

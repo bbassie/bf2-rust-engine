@@ -121,6 +121,10 @@ pub struct SoldierMotion {
     pub on_rope: bool,
     /// Sliding down a zipline, hanging from the wire at [`SoldierTuning::zipline_hang`].
     pub riding: bool,
+    /// Under an open parachute: sinking slowly, steering with the movement keys, until the
+    /// feet touch something.
+    #[serde(default)]
+    pub parachute: bool,
 }
 
 impl Default for SoldierMotion {
@@ -145,6 +149,7 @@ impl Default for SoldierMotion {
             stance_lock: 0.0,
             on_rope: false,
             riding: false,
+            parachute: false,
         }
     }
 }
@@ -591,6 +596,7 @@ pub fn step_soldier(
     }
 
     if let Some(ground) = ground {
+        m.parachute = false;
         let target = wish * speed;
         let factor = if target.length_squared() > horizontal.length_squared() + 1e-4 {
             tuning.acceleration
@@ -622,6 +628,12 @@ pub fn step_soldier(
             );
             return;
         }
+    } else if m.parachute || (fresh_jump && m.velocity.y < -PARACHUTE_OPENS_AT) {
+        // Under a parachute: glide where the keys steer, sink slowly.
+        m.parachute = true;
+        horizontal = approach(horizontal, wish * PARACHUTE_SPEED, PARACHUTE_STEER, dt);
+        m.velocity.x = horizontal.x;
+        m.velocity.z = horizontal.z;
     } else {
         // Airborne: keep momentum, steer a little right after a jump.
         let control = m.air_control / tuning.air_control_time;
@@ -637,7 +649,11 @@ pub fn step_soldier(
     }
 
     // In the air.
-    m.velocity.y -= tuning.gravity * dt;
+    if m.parachute {
+        m.velocity.y = (m.velocity.y - tuning.gravity * dt).max(-PARACHUTE_SINK);
+    } else {
+        m.velocity.y -= tuning.gravity * dt;
+    }
     let impact = -m.velocity.y;
     let moved = world.slide(shape, start, m.velocity, dt, Contact::Air);
     m.position = moved.center - center;
@@ -648,6 +664,7 @@ pub fn step_soldier(
     if let Some(ground) = world.ground(shape, moved.center, 5.0 * SKIN) {
         m.position.y -= ground.gap();
         m.grounded = true;
+        m.parachute = false;
         let horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
         m.velocity = along_ground(horizontal, ground.normal);
         if impact > tuning.landing_impact {
@@ -966,6 +983,14 @@ fn along_ground(horizontal: Vec3, normal: Vec3) -> Vec3 {
 }
 
 /// BF2's acceleration model: every 1/30 s, close `factor` of the gap to the target.
+/// Parachutes: how fast they sink and glide (m/s), how quickly the glide follows the keys
+/// (like the walking `acceleration`), and how fast a falling soldier must drop for the jump
+/// key to open one.
+const PARACHUTE_SINK: f32 = 5.0;
+const PARACHUTE_SPEED: f32 = 7.0;
+const PARACHUTE_STEER: f32 = 0.04;
+const PARACHUTE_OPENS_AT: f32 = 12.0;
+
 fn approach(current: Vec3, target: Vec3, factor: f32, dt: f32) -> Vec3 {
     let keep = (1.0 - factor).powf(dt * 30.0);
     let next = target + (current - target) * keep;

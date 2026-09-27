@@ -60,6 +60,8 @@ const FORCE_PER_TORQUE: f32 = 4.5;
 const BRAKE_PER_TORQUE: f32 = 2.5;
 const ENGINE_BRAKE_PER_TORQUE: f32 = 0.4;
 const TRACK_FORCE_PER_POWER: f32 = 125.0;
+/// BF2's parachute canopy (converted to `.glb` beside it).
+const PARACHUTE_MESH: &str = "objects/vehicles/air/parachute/meshes/animatedparachute.skinnedmesh";
 /// Landing flaps' lift (`setFlapLift 3`) would lift a jet off at a walking pace.
 const LANDING_FLAP_SHARE: f32 = 0.3;
 /// Rudders in the water need more bite than BF2's numbers give against our water drag.
@@ -106,6 +108,10 @@ pub fn import(
         written.push(name.clone());
     }
     let (count, _) = crate::effects::convert_named(interp, converter, effects, out);
+    // The parachute soldiers bail out of aircraft with (its canopy in its bind pose).
+    if let Err(err) = converter.convert_mesh(PARACHUTE_MESH) {
+        log::debug!("parachute: {err:#}");
+    }
     log::info!("vehicles: {} imported, {count} more damage effects", written.len());
     Ok(written)
 }

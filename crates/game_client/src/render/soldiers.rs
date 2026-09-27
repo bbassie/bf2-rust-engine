@@ -25,6 +25,7 @@ use game_shared::{
     level::LoadedLevel,
     protocol::{ControlledBy, ShotFired, Team},
     soldier::{SOLDIER_CENTER, SOLDIER_HEIGHT, SOLDIER_RADIUS, Soldier, Stance},
+    statics::StaticMesh,
     vehicle::{Seated, VehicleData},
     weapons::{Armory, Inventory, Loadout},
 };
@@ -58,12 +59,49 @@ impl Plugin for SoldierRenderPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (update_visuals, animate)
+                (update_visuals, animate, show_parachutes)
                     .after(RenderStateSystems)
                     .after(VehicleViewSystems)
                     .before(AnimationSystems)
                     .before(TransformSystems::Propagate),
             );
+    }
+}
+
+/// BF2's parachute canopy, and how high above a soldier's feet it hangs.
+const PARACHUTE_MESH: &str = "objects/vehicles/air/parachute/meshes/animatedparachute.glb";
+const PARACHUTE_HEIGHT: f32 = 2.4;
+
+/// A soldier's open parachute, drawn over its visual.
+#[derive(Component)]
+struct Canopy;
+
+/// Opens and packs away the parachutes of soldiers who have one out.
+fn show_parachutes(
+    mut commands: Commands,
+    visuals: Query<(Entity, &SoldierVisual, Option<&Children>)>,
+    renders: Query<&SoldierRender>,
+    canopies: Query<(), With<Canopy>>,
+) {
+    for (visual, owner, children) in &visuals {
+        let open = renders.get(owner.soldier).is_ok_and(|r| r.parachute);
+        let canopy = children.and_then(|c| c.iter().find(|e| canopies.contains(*e)));
+        match (open, canopy) {
+            (true, None) => {
+                commands.spawn((
+                    Canopy,
+                    Transform::from_xyz(0.0, PARACHUTE_HEIGHT, 0.0),
+                    Visibility::default(),
+                    StaticMesh {
+                        path: PARACHUTE_MESH.into(),
+                        index: 0,
+                    },
+                    ChildOf(visual),
+                ));
+            }
+            (false, Some(canopy)) => commands.entity(canopy).despawn(),
+            _ => {}
+        }
     }
 }
 

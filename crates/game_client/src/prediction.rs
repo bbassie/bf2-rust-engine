@@ -87,6 +87,8 @@ pub struct SoldierRender {
     pub on_rope: bool,
     /// Hanging from a zipline.
     pub riding: bool,
+    /// Under an open parachute.
+    pub parachute: bool,
     /// Eye height above the feet, easing toward the stance's so the view moves with the
     /// body when crouching or going prone instead of jumping.
     pub eye_height: f32,
@@ -146,6 +148,7 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             climbing: motion.climbing,
             on_rope: motion.on_rope,
             riding: motion.riding,
+            parachute: motion.parachute,
             eye_height: motion.stance.eye_height(),
             step_offset: 0.0,
         },
@@ -304,6 +307,7 @@ fn update_render_state(
             climbing: to.climbing,
             on_rope: to.on_rope,
             riding: to.riding,
+            parachute: to.parachute,
             eye_height: render.eye_height + (eye_target - render.eye_height) * eye_blend,
             step_offset: (step * (1.0 - eye_blend)).clamp(-STEP_SMOOTHING, STEP_SMOOTHING),
         };

@@ -112,7 +112,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   direction, guns and countermeasures; flight instruments for pilots (horizon and pitch
   ladder, heading, airspeed, throttle, altitude, climb rate, stall and pull-up warnings)
 - Artillery and commander assets as vehicles
-- [x] F-35B vertical take-off and hover (BF2's lift fan engine)
+- [x] F-35B vertical take-off and hover (BF2's lift fan engine); parachutes when bailing out of
+  aircraft (BF2's canopy)
 - [x] Helicopter landing: the collective slows the descent near the ground, landed
   helicopters sit on their skids
 - Flight tuning against BF2 (rudder authority)
