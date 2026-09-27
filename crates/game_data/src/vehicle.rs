@@ -21,6 +21,10 @@ pub struct VehicleDesc {
     /// What it is, for the controls, camera and HUD.
     #[serde(default)]
     pub category: VehicleCategory,
+    /// The parts' meshes are rigged: each model file is one skinned mesh whose joint `n` is
+    /// the part drawing its mesh index `n` (older imports: one mesh per part).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rigged: bool,
     pub drive: DriveKind,
     pub physics: VehiclePhysics,
     pub engine: EngineDesc,
@@ -515,6 +519,21 @@ pub struct VehicleWeaponDesc {
     #[serde(default)]
     pub alt_fire: bool,
     pub weapon: WeaponDesc,
+    /// The sight drawn over the view from its seat (BF2's vehicle HUD for the weapon).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sight: Vec<HudPicture>,
+}
+
+/// A picture of a HUD overlay, placed on BF2's 800x600 HUD screen (centred on wider screens,
+/// scaled with the height).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct HudPicture {
+    /// `.dds`, relative to the imported root.
+    pub texture: String,
+    /// Left, top, width, height.
+    pub rect: [f32; 4],
+    /// Tint (rgba).
+    pub color: [f32; 4],
 }
 
 fn default_hit_points() -> f32 {

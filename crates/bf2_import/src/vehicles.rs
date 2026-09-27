@@ -69,6 +69,7 @@ pub fn import(
     out: &Path,
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
+    let huds = crate::vehicle_hud::VehicleHuds::load(converter);
     for name in names {
         interp.ensure_template(name);
         load_tree(interp, name, 0);
@@ -82,7 +83,7 @@ pub fn import(
         if matches!(desc.drive, DriveKind::Wheeled | DriveKind::Tracked) {
             tune_engine(&mut desc);
         }
-        desc.weapons = weapon_descs(interp, converter, localization, &desc, out);
+        desc.weapons = weapon_descs(interp, converter, localization, &huds, &desc, out);
         desc.sounds = crate::sounds::SoundConverter::new(converter.vfs, out).vehicle(&interp.world, name);
         game_data::write_ron(out.join("vehicles").join(format!("{name}.ron")), &desc)?;
         written.push(name.clone());
@@ -194,11 +195,11 @@ impl Builder<'_> {
             .filter(|g| !g.ty.eq_ignore_ascii_case("SkinnedMesh"))
             .and_then(|g| g.mesh_path())
             .and_then(|path| {
-                let (outside, interior) = match self.converter.convert_mesh_geom(&path, 1, "_3p") {
-                    Ok(outside) => (outside, self.converter.convert_mesh_geom(&path, 0, "_1p").ok()),
+                let (outside, interior) = match self.converter.convert_mesh_rigged(&path, 1, "_rig3p") {
+                    Ok(outside) => (outside, self.converter.convert_mesh_rigged(&path, 0, "_rig1p").ok()),
                     Err(_) => (
                         self.converter
-                            .convert_mesh(&path)
+                            .convert_mesh_rigged(&path, 0, "_rig")
                             .map_err(|e| log::debug!("vehicle mesh {path}: {e:#}"))
                             .ok()?,
                         None,
@@ -665,6 +666,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
             .map(|s| s.trim_matches('"').to_string())
             .unwrap_or_else(|| name.to_string()),
         category,
+        rigged: true,
         drive,
         physics: VehiclePhysics {
             mass: root.get_f32("mass").unwrap_or(1000.0),
@@ -1084,6 +1086,7 @@ fn weapon_descs(
     interp: &mut Interpreter,
     converter: &MeshConverter,
     localization: &Localization,
+    huds: &crate::vehicle_hud::VehicleHuds,
     desc: &VehicleDesc,
     out: &Path,
 ) -> Vec<VehicleWeaponDesc> {
@@ -1127,6 +1130,7 @@ fn weapon_descs(
             seat: desc.seat_of(index),
             alt_fire: fire_input == "pialtfire",
             weapon,
+            sight: t.get_f32("weaponhud.guiindex").map_or_else(Vec::new, |index| huds.sight(index as u32)),
         });
     }
     weapons

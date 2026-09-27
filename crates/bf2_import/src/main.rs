@@ -36,6 +36,7 @@ mod soldiers;
 mod sounds;
 mod terrain;
 mod vegetation;
+mod vehicle_hud;
 mod vehicles;
 mod weapons;
 

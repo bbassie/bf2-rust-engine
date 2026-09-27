@@ -1,0 +1,23 @@
+// Close-ups of the Chinese armour at Dalian Plant's Chinese base (rigged models): Type 98
+// and WZ-551.
+// client --scenario scenarios/vehicle2_closeup_dalian.ron --out target/scenarios/vehicle2/closeup_dalian
+(
+    level: "dalian_plant",
+    size: 64,
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Wait(4.0),
+        Camera((-598.4, 186.2, 379.2), 53.0, -8.0),
+        Wait(1.5),
+        Screenshot("type98_side"),
+        Camera((-599.2, 186.8, 368.6), 180.0, -12.0),
+        Wait(1.0),
+        Screenshot("type98_front"),
+        Camera((-623.5, 186.0, 357.7), 50.0, -8.0),
+        Wait(1.5),
+        Screenshot("wz551_side"),
+        Quit,
+    ],
+)

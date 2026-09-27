@@ -46,7 +46,9 @@ impl Plugin for ClientVehiclesPlugin {
                     .after(ClientSystems::Receive)
                     .run_if(in_state(ClientState::Connected)),
             )
+            .init_resource::<VehicleSight>()
             .add_systems(Update, (read_seat_keys, update_hud, receive_shots))
+            .add_systems(PostUpdate, update_sight.after(VehicleViewSystems))
             .add_systems(Update, fly.after(crate::local_input::LookSystems))
             .add_systems(
                 PostUpdate,
@@ -322,19 +324,120 @@ fn follow_vehicle_heading(
         return;
     };
     let now = heading(view.transform.rotation);
-    if let Some((vehicle, seat, before)) = *last
-        && vehicle == seated.vehicle
-        && seat == seated.seat
-        && !data.0.seat_aims(seat as usize)
-    {
-        look.yaw += wrap(now - before);
+    match *last {
+        Some((vehicle, seat, before)) if vehicle == seated.vehicle && seat == seated.seat => {
+            if !data.0.seat_aims(seat as usize) {
+                look.yaw += wrap(now - before);
+            }
+        }
+        // A new seat: look the way its camera faces (firing ports look out sideways).
+        _ => {
+            let model = &data.0;
+            let facing = model.desc.seats.get(seated.seat as usize).and_then(|s| s.camera.as_ref()).map_or(
+                view.transform.rotation,
+                |camera| {
+                    let transforms = model.part_transforms(&view.joints);
+                    view.transform.rotation * model.attachment(&transforms, &camera.attachment).rotation
+                },
+            );
+            let forward = facing * Vec3::NEG_Z;
+            look.yaw = (-forward.x).atan2(-forward.z);
+            look.pitch = forward.y.clamp(-1.0, 1.0).asin().clamp(-1.2, 1.2);
+        }
     }
     *last = Some((seated.vehicle, seated.seat, now));
+}
+
+/// BF2's sight of the weapon fired from our seat (its vehicle HUD: reticle, sight frame), over
+/// the first-person view. The soldier's crosshair hides meanwhile.
+#[derive(Resource, Default)]
+pub struct VehicleSight {
+    pub active: bool,
+    /// What is drawn: vehicle, gun and window size.
+    shown: Option<(Entity, usize, UVec2)>,
+    root: Option<Entity>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_sight(
+    mut commands: Commands,
+    mut sight: ResMut<VehicleSight>,
+    third_person: Res<crate::camera::ThirdPerson>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    asset_server: Res<AssetServer>,
+    seated: Query<&Seated, With<LocalSoldier>>,
+    vehicles: Query<(&VehicleData, Option<&VehicleWeapons>)>,
+) {
+    // The gun of our seat whose sight to show: the chosen one on the main trigger.
+    let wanted = seated
+        .single()
+        .ok()
+        .filter(|_| !third_person.0)
+        .and_then(|s| {
+            let (data, weapons) = vehicles.get(s.vehicle).ok()?;
+            let desc = &data.0.desc;
+            let guns = desc.weapons.iter().enumerate().filter(|(_, w)| w.seat == s.seat as u32 && !w.sight.is_empty());
+            let selected = |i: usize| weapons.and_then(|w| w.guns.get(i)).is_some_and(|g| g.selected);
+            let mut guns: Vec<(usize, bool)> = guns.map(|(i, w)| (i, w.alt_fire)).collect();
+            guns.sort_by_key(|&(i, alt)| (alt, !selected(i)));
+            guns.first().map(|&(i, _)| (s.vehicle, i))
+        });
+    let size = UVec2::new(window.width() as u32, window.height() as u32);
+    let key = wanted.map(|(vehicle, gun)| (vehicle, gun, size));
+    if key == sight.shown {
+        return;
+    }
+    sight.shown = key;
+    sight.active = key.is_some();
+    if let Some(root) = sight.root.take() {
+        commands.entity(root).despawn();
+    }
+    let Some((vehicle, gun)) = wanted else {
+        return;
+    };
+    let Some(pictures) = vehicles.get(vehicle).ok().and_then(|(d, _)| d.0.desc.weapons.get(gun)).map(|w| w.sight.clone()) else {
+        return;
+    };
+    // BF2's HUD is laid out on an 800x600 screen: scaled with the height, centred.
+    let scale = window.height() / 600.0;
+    let left = (window.width() - 800.0 * scale) * 0.5;
+    let root = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            GlobalZIndex(-1),
+            Pickable::IGNORE,
+        ))
+        .id();
+    for picture in pictures {
+        let [x, y, w, h] = picture.rect;
+        let [r, g, b, a] = picture.color;
+        commands.spawn((
+            ImageNode::new(asset_server.load(format!("imported://{}", picture.texture))).with_color(Color::srgba(r, g, b, a)),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(left + x * scale),
+                top: px(y * scale),
+                width: px(w * scale),
+                height: px(h * scale),
+                ..default()
+            },
+            ChildOf(root),
+        ));
+    }
+    sight.root = Some(root);
 }
 
 /// Where the camera goes for a seat: the seat camera's eye point and chase settings.
 pub struct SeatView {
     pub eye: Vec3,
+    /// Gunners' cameras ride on the turret or gun they aim: the view turns with it (at its
+    /// speed, as in BF2) rather than with the mouse.
+    pub aimed: Option<Quat>,
     pub vehicle: Transform,
     pub chase_distance: f32,
     pub chase_height: f32,
@@ -356,8 +459,20 @@ pub fn seat_view(seated: &Seated, vehicles: &Query<(&VehicleView, &VehicleData)>
         .camera
         .as_ref()
         .map_or((12.0, 1.0), |c| (c.chase_distance, c.chase_offset[1]));
+    let aims = |axis: &game_data::JointAxis| {
+        matches!(axis.input, Some(game_data::JointInput::AimYaw | game_data::JointInput::AimPitch))
+    };
+    let mut part = seat.camera.as_ref().map(|c| c.attachment.part as usize);
+    let mut aimed = false;
+    while let Some(index) = part {
+        let desc = &model.desc.parts[index];
+        aimed |= desc.joint.as_ref().is_some_and(|j| j.axes.iter().any(aims));
+        part = desc.parent.map(|p| p as usize);
+    }
+    let world = view.transform * local;
     Some(SeatView {
-        eye: (view.transform * local).translation,
+        eye: world.translation,
+        aimed: aimed.then_some(world.rotation),
         vehicle: view.transform,
         chase_distance,
         chase_height,

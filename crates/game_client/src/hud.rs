@@ -66,6 +66,9 @@ struct WeaponText;
 struct AmmoText;
 #[derive(Component)]
 struct VitalsPanel;
+/// The weapon and ammo panel (hidden in vehicles, which show their own).
+#[derive(Component)]
+struct AmmoPanel;
 #[derive(Component)]
 struct KillFeedText;
 #[derive(Component)]
@@ -212,6 +215,7 @@ fn spawn_hud(mut commands: Commands) {
     commands
         .spawn((
             VitalsPanel,
+            AmmoPanel,
             Node {
                 position_type: PositionType::Absolute,
                 right: px(24),
@@ -373,11 +377,12 @@ fn update_crosshair(
     settings: Res<Settings>,
     window: Single<&Window, With<PrimaryWindow>>,
     soldier: Query<(), With<LocalSoldier>>,
+    vehicle_sight: Res<crate::vehicles::VehicleSight>,
     mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility)>,
     mut marker: Query<&mut BackgroundColor, With<HitMarker>>,
 ) {
-    // Zoomed in, the iron sights (or scope) do the aiming.
-    let alive = !soldier.is_empty() && feedback.zoom > 0.95;
+    // Zoomed in, the iron sights (or scope) do the aiming; in vehicles, their sights.
+    let alive = !soldier.is_empty() && feedback.zoom > 0.95 && !vehicle_sight.active;
     let fov_degrees = settings.field_of_view * feedback.zoom;
     let px_per_degree = window.height() / fov_degrees;
     let gap = (feedback.spread * 0.5 * px_per_degree).clamp(3.0, 90.0);
@@ -422,21 +427,21 @@ fn update_stamina(
 fn update_vitals(
     armory: Res<Armory>,
     feedback: Res<CombatFeedback>,
-    soldier: Query<(&Health, &Loadout, &Inventory), With<LocalSoldier>>,
-    mut panels: Query<&mut Visibility, With<VitalsPanel>>,
+    soldier: Query<(&Health, &Loadout, &Inventory, Has<game_shared::vehicle::Seated>), With<LocalSoldier>>,
+    mut panels: Query<(&mut Visibility, Has<AmmoPanel>), With<VitalsPanel>>,
     mut health_text: Single<&mut Text, (With<HealthText>, Without<WeaponText>, Without<AmmoText>)>,
     mut health_fill: Single<(&mut Node, &mut BackgroundColor), With<HealthFill>>,
     mut weapon_text: Single<&mut Text, (With<WeaponText>, Without<HealthText>, Without<AmmoText>)>,
     mut ammo_text: Single<&mut Text, (With<AmmoText>, Without<HealthText>, Without<WeaponText>)>,
 ) {
-    let Ok((health, loadout, inventory)) = soldier.single() else {
-        for mut visibility in &mut panels {
+    let Ok((health, loadout, inventory, seated)) = soldier.single() else {
+        for (mut visibility, _) in &mut panels {
             visibility.set_if_neq(Visibility::Hidden);
         }
         return;
     };
-    for mut visibility in &mut panels {
-        visibility.set_if_neq(Visibility::Inherited);
+    for (mut visibility, ammo) in &mut panels {
+        visibility.set_if_neq(if ammo && seated { Visibility::Hidden } else { Visibility::Inherited });
     }
     let fraction = (health.current / health.max.max(1.0)).clamp(0.0, 1.0);
     health_text.0 = format!("{:.0}", health.current.max(0.0));

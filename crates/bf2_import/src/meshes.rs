@@ -134,10 +134,21 @@ impl<'a> MeshConverter<'a> {
         let key = normalize(mesh_path);
         let job = format!("{key}#{geom}.{lod}{suffix}");
         let suffix = suffix.to_string();
-        self.once(&job, || self.convert_mesh_inner(key, geom, lod, &suffix))
+        self.once(&job, || self.convert_mesh_inner(key, geom, lod, &suffix, false))
     }
 
-    fn convert_mesh_inner(&self, key: String, geom: usize, lod: usize, suffix: &str) -> Result<String> {
+    /// Converts one geom of a bundled mesh to `x{suffix}.glb` as a single skinned mesh whose
+    /// joint `n` is part `n` (vehicles): each vertex follows its own part, so triangles
+    /// spanning parts (track belts between hull and wheels) stretch between them instead of
+    /// tearing. The joints' inverse bind matrices are identities: vertices are part-local.
+    pub fn convert_mesh_rigged(&self, mesh_path: &str, geom: usize, suffix: &str) -> Result<String> {
+        let key = normalize(mesh_path);
+        let job = format!("{key}#{geom}.rig{suffix}");
+        let suffix = suffix.to_string();
+        self.once(&job, || self.convert_mesh_inner(key, geom, 0, &suffix, true))
+    }
+
+    fn convert_mesh_inner(&self, key: String, geom: usize, lod: usize, suffix: &str, rigged: bool) -> Result<String> {
         let kind = MeshKind::from_path(&key).context("not a mesh file")?;
         let out_rel = format!("{}{suffix}.glb", key.rsplit_once('.').map_or(key.as_str(), |(s, _)| s));
         if mesh_version(&self.out.join(&out_rel)).is_some_and(|v| v >= MESH_VERSION) {
@@ -149,13 +160,13 @@ impl<'a> MeshConverter<'a> {
             mesh.geoms.get(geom).is_some_and(|g| lod < g.lods.len()),
             "{key} has no geom {geom} LOD {lod}"
         );
-        let doc = self.build_document(&mesh, geom, lod, &out_rel);
+        let doc = self.build_document(&mesh, geom, lod, &out_rel, rigged && mesh.kind == MeshKind::Bundled);
         doc.write(&self.out.join(&out_rel))
             .with_context(|| format!("writing {out_rel}"))?;
         Ok(out_rel)
     }
 
-    fn build_document(&self, mesh: &VisMesh, geom: usize, lod: usize, out_rel: &str) -> Document {
+    fn build_document(&self, mesh: &VisMesh, geom: usize, lod: usize, out_rel: &str, rigged: bool) -> Document {
         let mut doc = Document::default();
         let mut image_index: HashMap<String, usize> = HashMap::new();
         let mut image = |doc: &mut Document, texture: &str| -> usize {
@@ -187,7 +198,9 @@ impl<'a> MeshConverter<'a> {
             MeshKind::Bundled => lod.part_count.max(1) as usize,
             _ => 1,
         };
-        let mut part_primitives: Vec<Vec<glb::Primitive>> = (0..part_count).map(|_| Vec::new()).collect();
+        // Rigged: all parts in one mesh, each vertex skinned to its part.
+        let buckets = if rigged { 1 } else { part_count };
+        let mut part_primitives: Vec<Vec<glb::Primitive>> = (0..buckets).map(|_| Vec::new()).collect();
 
         for (material_index, material) in lod.materials.iter().enumerate() {
             let maps: Vec<(String, Option<String>)> = material
@@ -243,8 +256,8 @@ impl<'a> MeshConverter<'a> {
             let material_id = doc.materials.len() - 1;
 
             // Remap the material's vertices into compact per-part primitives.
-            let mut remap: Vec<HashMap<u32, u32>> = vec![HashMap::new(); part_count];
-            let mut prims: Vec<glb::Primitive> = (0..part_count)
+            let mut remap: Vec<HashMap<u32, u32>> = vec![HashMap::new(); buckets];
+            let mut prims: Vec<glb::Primitive> = (0..buckets)
                 .map(|_| glb::Primitive {
                     material: Some(material_id),
                     uvs: vec![Vec::new(); uv_sets.len().min(2)],
@@ -255,16 +268,21 @@ impl<'a> MeshConverter<'a> {
                 if tri.iter().any(|&v| v as usize >= positions.len()) {
                     continue;
                 }
-                let part = match (&blend, mesh.kind) {
-                    (Some(b), MeshKind::Bundled) => (b[tri[0] as usize][0] as usize).min(part_count - 1),
+                let part_of = |v: u32| match (&blend, mesh.kind) {
+                    (Some(b), MeshKind::Bundled) => (b[v as usize][0] as usize).min(part_count - 1),
                     _ => 0,
                 };
+                let part = if rigged { 0 } else { part_of(tri[0]) };
                 let prim = &mut prims[part];
                 // Reverse winding: the Z mirror flips handedness.
                 for &v in [tri[0], tri[2], tri[1]].iter() {
                     let index = *remap[part].entry(v).or_insert_with(|| {
                         let vi = v as usize;
                         prim.positions.push(coords::position(positions[vi]));
+                        if rigged {
+                            prim.joints.push([part_of(v) as u16, 0, 0, 0]);
+                            prim.weights.push([1.0, 0.0, 0.0, 0.0]);
+                        }
                         if let Some(n) = &normals {
                             prim.normals.push(normalize_or_up(coords::direction(n[vi])));
                         }
@@ -293,6 +311,32 @@ impl<'a> MeshConverter<'a> {
             }
         }
 
+        if rigged {
+            for part in 0..part_count {
+                doc.nodes.push(glb::Node {
+                    name: format!("part{part}"),
+                    ..Default::default()
+                });
+                doc.scene.push(part);
+            }
+            const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+            doc.skins.push(glb::Skin {
+                joints: (0..part_count).collect(),
+                inverse_bind_matrices: vec![IDENTITY; part_count],
+            });
+            doc.meshes.push(glb::Mesh {
+                name: "parts".into(),
+                primitives: part_primitives.pop().unwrap_or_default(),
+            });
+            doc.nodes.push(glb::Node {
+                name: "parts".into(),
+                mesh: Some(0),
+                skin: Some(0),
+                ..Default::default()
+            });
+            doc.scene.push(part_count);
+            return doc;
+        }
         for (part, primitives) in part_primitives.into_iter().enumerate() {
             doc.meshes.push(glb::Mesh {
                 name: format!("part{part}"),

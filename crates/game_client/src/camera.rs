@@ -186,7 +186,10 @@ fn update_camera(
         } else {
             view.eye
         };
-        transform.rotation = rotation;
+        transform.rotation = match (third_person.0, view.aimed) {
+            (false, Some(aimed)) => aimed,
+            _ => rotation,
+        };
         spectator.position = transform.translation;
         return;
     }
