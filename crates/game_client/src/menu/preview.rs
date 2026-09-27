@@ -1,8 +1,8 @@
 //! The map preview of the level pages: the level's map with what the picked layout puts on
 //! it, drawn like the in-game maps: control points with their names and first owners'
-//! flags (main bases crossed out: they can't be captured), and the vehicles each side's
-//! spawners make, turned the way they face. Names are placed so that they don't cover each
-//! other (see `map_markers::place_labels`).
+//! flags (main bases crossed out: they can't be captured), and the vehicles (not the guns)
+//! each side's spawners make, turned the way they face. Names are placed so that they don't
+//! cover each other or the flags (see `map_markers::place_labels`).
 
 use game_data::VehicleClass;
 use game_shared::protocol::Team;
@@ -10,8 +10,8 @@ use game_shared::protocol::Team;
 use super::*;
 use crate::{
     conquest_hud::{NEUTRAL, team_color},
-    map_icons::{FLAG_BOUNDS, FLAG_CLOTH, class_shape, icon_size},
-    map_markers::{LabelRequest, label_bundle, label_node, place_labels, silhouette},
+    map_icons::{FLAG_CLOTH, class_shape, flag_bounds, icon_size, vehicle_bounds},
+    map_markers::{LabelRequest, Obstacle, label_bundle, label_node, place_labels, silhouette},
 };
 
 /// Size of a control point's icon, in pixels, on a 300 px preview.
@@ -108,7 +108,8 @@ pub(super) fn layout_preview(
             let Some(icon) = level.vehicle_icons.get(&template.to_ascii_lowercase()) else {
                 continue;
             };
-            if icon.class == VehicleClass::Stationary && icon.icon.is_none() {
+            // Not the guns: they crowd the small map (and BF2's gun icons are all black).
+            if icon.class == VehicleClass::Stationary {
                 continue;
             }
             let color = if owner == 0 { NEUTRAL } else { team_color(side(owner), local) };
@@ -121,8 +122,11 @@ pub(super) fn layout_preview(
                 None => class_shape(icon.class),
             };
             let (width, height) = (edge * VEHICLE * scale * aspect, edge * VEHICLE * scale);
-            let half = if image.is_some() { Vec2::splat(height * 0.36) } else { Vec2::new(width, height) / 2.0 };
-            obstacles.push(Rect::from_center_half_size(point * size, half));
+            let half = if image.is_some() { vehicle_bounds(icon.class).half_size() * height } else { Vec2::new(width, height) / 2.0 };
+            obstacles.push(Obstacle {
+                rect: Rect::from_center_half_size(point * size, half),
+                hard: false,
+            });
             frame.spawn(anchor(point)).with_children(|anchor| {
                 let body = Node {
                     position_type: PositionType::Absolute,
@@ -170,11 +174,15 @@ pub(super) fn layout_preview(
             };
             let point = uv(cp.position);
             let color = team_color(owner, local);
+            let bounds = flag_bounds(cp.uncapturable);
             let icon = match image {
-                Some(_) => Rect::from_corners(FLAG_BOUNDS.min * edge - edge / 2.0, FLAG_BOUNDS.max * edge - edge / 2.0),
+                Some(_) => Rect::from_corners(bounds.min * edge - edge / 2.0, bounds.max * edge - edge / 2.0),
                 None => Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(edge * 0.25)),
             };
-            obstacles.push(Rect::from_corners(point * size + icon.min, point * size + icon.max));
+            obstacles.push(Obstacle {
+                rect: Rect::from_corners(point * size + icon.min, point * size + icon.max),
+                hard: true,
+            });
             if labels && !cp.name.is_empty() {
                 names.push((
                     point,

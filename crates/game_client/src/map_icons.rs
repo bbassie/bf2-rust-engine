@@ -3,10 +3,11 @@
 //!
 //! Flags show as their owner's flag on a pole (a crossed-out one for main bases, which can't
 //! be captured) on a dot of the owner's colour. Vehicles show as BF2's white silhouettes
-//! (a box shaped by their class without one), sized by class and turned with the hull: the
-//! one we sit in in white (like our own marker), our team's in our colour (green when a
-//! squad mate is in), empty ones grey (only those our side or both sides spawn), enemy ones
-//! in red while spotted; tanks, APCs and anti-air with a line for the turret.
+//! (a box shaped by their class without one), sized by class and turned with the hull, under
+//! the flags: the one we sit in in white above everything (like our own marker), our team's
+//! in our colour (green when a squad mate is in), empty ones grey (only those our side or
+//! both sides spawn), enemy ones in red while spotted; tanks, APCs and anti-air with a line
+//! for the turret.
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_data::VehicleClass;
@@ -21,7 +22,7 @@ use game_shared::{
 
 use crate::{
     conquest_hud::{FRIENDLY, NEUTRAL, SQUAD, team_color},
-    map_markers::{CONTROL_POINT_LABEL, FLAG_LAYER, MapMarker, MapMarkers, MarkerSystems, VEHICLE_LAYER},
+    map_markers::{CONTROL_POINT_LABEL, FLAG_LAYER, MapMarker, MapMarkers, MarkerSystems, OWN_LAYER, VEHICLE_LAYER},
     net::{LocalPlayer, LocalSoldier},
     vehicles::VehicleView,
 };
@@ -149,7 +150,7 @@ fn flag_markers(
         markers.0.push(MapMarker {
             image,
             frame,
-            bounds: Some(FLAG_BOUNDS),
+            bounds: Some(flag_bounds(cp.uncapturable)),
             layer: FLAG_LAYER,
             ..MapMarker::dot(entity, cp.position, team_color(state.owner, team), size)
                 .label(cp.name.clone())
@@ -165,22 +166,56 @@ pub const FLAG_CLOTH: Rect = Rect {
     max: Vec2::new(33.0 / 33.0, 20.5 / 33.0),
 };
 
-/// What map flag icons show (the pole's foot, the cloth and a main base's crossed-out circle),
-/// for keeping labels clear of them.
+/// What map flag icons show (the pole's foot and the cloth), for keeping labels clear of them.
 pub const FLAG_BOUNDS: Rect = Rect {
+    min: Vec2::new(11.0 / 33.0, 4.0 / 33.0),
+    max: Vec2::new(33.0 / 33.0, 21.0 / 33.0),
+};
+
+/// The same for a main base's flag, crossed out by a circle around the pole's foot.
+pub const BASE_BOUNDS: Rect = Rect {
     min: Vec2::new(6.0 / 33.0, 4.0 / 33.0),
     max: Vec2::new(33.0 / 33.0, 26.0 / 33.0),
 };
 
-/// Minimap size of a vehicle's icon (BF2's 16 px silhouettes leave a margin), by class: big
-/// armour and aircraft stand out, guns stay small.
+/// A flag icon's bounds.
+pub fn flag_bounds(uncapturable: bool) -> Rect {
+    if uncapturable { BASE_BOUNDS } else { FLAG_BOUNDS }
+}
+
+/// Minimap size of a vehicle's icon, by class: sized for what shows of it (see
+/// [`icon_fill`]), a tank's or a jet's silhouette 24 px long, an APC's 21, a jeep's 14.5, a
+/// gun's 11.
 pub fn icon_size(class: VehicleClass) -> f32 {
+    let shown = match class {
+        VehicleClass::Tank | VehicleClass::Jet => 24.0,
+        VehicleClass::Helicopter => 25.0,
+        VehicleClass::Apc => 21.0,
+        VehicleClass::AntiAir => 20.0,
+        VehicleClass::Jeep => 14.5,
+        VehicleClass::Boat => 18.5,
+        VehicleClass::Stationary => 11.0,
+    };
+    (shown / icon_fill(class)).round()
+}
+
+/// How much of its icon a vehicle's silhouette covers (its longest side, in shares of the
+/// icon's), by class: BF2's 16 px silhouettes fill them unevenly (a tank 13 px, a jeep 7).
+pub fn icon_fill(class: VehicleClass) -> f32 {
     match class {
-        VehicleClass::Tank | VehicleClass::Jet | VehicleClass::Helicopter => 28.0,
-        VehicleClass::Apc | VehicleClass::AntiAir => 26.0,
-        VehicleClass::Jeep | VehicleClass::Boat => 22.0,
-        VehicleClass::Stationary => 17.0,
+        VehicleClass::Tank | VehicleClass::Jet => 0.8,
+        VehicleClass::Helicopter => 0.9,
+        VehicleClass::Apc | VehicleClass::AntiAir => 0.72,
+        VehicleClass::Jeep => 0.45,
+        VehicleClass::Boat => 0.85,
+        VehicleClass::Stationary => 0.6,
     }
+}
+
+/// The part of a vehicle's icon labels keep clear of (see [`MapMarker::bounds`]): its
+/// silhouette, turned any way.
+pub fn vehicle_bounds(class: VehicleClass) -> Rect {
+    Rect::from_center_half_size(Vec2::splat(0.5), Vec2::splat(icon_fill(class) * 0.45))
 }
 
 /// Size and shape (width over height) of a vehicle without an icon.
@@ -272,11 +307,12 @@ fn vehicle_markers(
         };
         markers.0.push(MapMarker {
             image: icon.and_then(|i| i.image.clone()),
+            bounds: Some(vehicle_bounds(class)),
             tint: true,
             aspect,
             heading: Some(heading(forward)),
             pointer,
-            layer: VEHICLE_LAYER,
+            layer: if ours == Some(entity) { OWN_LAYER } else { VEHICLE_LAYER },
             ..MapMarker::dot(entity, view.transform.translation, color, size)
         });
     }

@@ -6,12 +6,12 @@ use bevy::{
     ecs::system::SystemParam,
     gltf::{GltfMaterialExtras, GltfPrimitive},
     image::{ImageAddressMode, ImageLoaderSettings, ImageSamplerDescriptor},
-    mesh::MeshVertexBufferLayoutRef,
+    mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexFormat},
     pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     platform::collections::HashMap,
     prelude::*,
     render::render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError},
-    shader::ShaderRef,
+    shader::{ShaderDefVal, ShaderRef},
 };
 use game_shared::{config::GamePaths, level::LoadedLevel};
 
@@ -28,7 +28,10 @@ impl Plugin for MaterialsPlugin {
         .init_resource::<Bf2MaterialCache>()
         .add_systems(
             Update,
-            (load_env_map, apply_tree_light).run_if(resource_exists_and_changed::<LoadedLevel>),
+            (
+                (load_env_map, apply_tree_light, load_static_lightmaps).run_if(resource_exists_and_changed::<LoadedLevel>),
+                apply_baked_sky.run_if(resource_changed::<crate::settings::Settings>),
+            ),
         )
         .add_systems(PostUpdate, swap_scene_materials);
     }
@@ -68,6 +71,10 @@ pub struct TerrainLayers {
     pub detail_4: Option<Handle<Image>>,
     #[texture(109)]
     pub detail_5: Option<Handle<Image>>,
+    /// The patch's baked lighting (BF2 terrain lightmap): B is how much sky the ground sees.
+    #[texture(111)]
+    #[sampler(112)]
+    pub lightmap: Option<Handle<Image>>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Copy)]
@@ -86,6 +93,8 @@ pub struct TerrainLayerParams {
     /// (sunlight) and the diffuse occlusion (ambient light relative to sunlight).
     pub light_sun: Vec4,
     pub light_ambient: Vec4,
+    /// Baked sky visibility as ambient occlusion ([`BakedSky::uniform`]).
+    pub sky: Vec4,
 }
 
 impl Default for TerrainLayerParams {
@@ -100,6 +109,7 @@ impl Default for TerrainLayerParams {
             _pad2: 0,
             light_sun: Vec4::ONE,
             light_ambient: Vec4::ONE,
+            sky: Vec4::ZERO,
         }
     }
 }
@@ -107,6 +117,26 @@ impl Default for TerrainLayerParams {
 impl TerrainLayerParams {
     pub const TRI_PLANAR_0: u32 = 1;
     pub const HAS_WEIGHTS: u32 = 2;
+    /// `lightmap` is bound.
+    pub const HAS_LIGHTMAP: u32 = 4;
+}
+
+/// Ambient occlusion from BF2's baked sky visibility (the B channel of its lightmaps): 1 on
+/// open ground (where BF2's lightmaps have about [`BakedSky::OPEN`]), less where buildings,
+/// walls and trees hide the sky. The sun channel is never used: the sun is real time.
+pub struct BakedSky;
+
+impl BakedSky {
+    /// Sky visibility of open flat ground in BF2's lightmaps.
+    pub const OPEN: f32 = 0.85;
+    /// The darkest the occlusion gets (light bounces into the most covered places).
+    pub const FLOOR: f32 = 0.12;
+
+    /// For shaders: x = 1 / open sky visibility, y = strength (0 without the setting),
+    /// z = floor.
+    pub fn uniform(enabled: bool) -> Vec4 {
+        Vec4::new(1.0 / Self::OPEN, if enabled { 1.0 } else { 0.0 }, Self::FLOOR, 0.0)
+    }
 }
 
 impl MaterialExtension for TerrainLayers {
@@ -129,12 +159,17 @@ pub fn default_sampler() -> ImageSamplerDescriptor {
 /// game's `RaShaderSTM/BM/SM.fx`. Build them with [`Bf2Materials`].
 pub type Bf2Material = ExtendedMaterial<StandardMaterial, Bf2Layers>;
 
+/// Lightmap UVs of static meshes (BF2's last UV set), as the importer writes them: glTF
+/// attribute `_LIGHTMAP_UV`. Registered with the glTF loader in `main.rs`.
+pub const ATTRIBUTE_LIGHTMAP_UV: MeshVertexAttribute =
+    MeshVertexAttribute::new("Lightmap_Uv", 0x4246_324c, VertexFormat::Float32x2);
+
 /// Bindless, so the thousands of objects with different textures still batch into few draw
 /// calls (in the main pass, the prepass and every shadow cascade). All layers share the
 /// detail texture's sampler; the base color is the `StandardMaterial`'s.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[data(50, Bf2LayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..58), binding(100)))]
+#[bindless(index_table(range(50..59), binding(100)))]
 pub struct Bf2Layers {
     /// [`Bf2Layers`] flag constants.
     pub flags: u32,
@@ -167,6 +202,12 @@ pub struct Bf2Layers {
     /// Reflection cube map for `EnvMap` techniques.
     #[texture(57, dimension = "cube")]
     pub env_map: Option<Handle<Image>>,
+    /// The level's static lightmap atlases (sky visibility, one layer per atlas); where a
+    /// mesh's lightmap lies is in its `MeshTag` (`static_lightmaps`).
+    #[texture(58, dimension = "2d_array")]
+    pub lightmap: Option<Handle<Image>>,
+    /// Strength of the baked sky occlusion (0: the setting is off).
+    pub baked_sky: f32,
 }
 
 impl Default for Bf2Layers {
@@ -183,6 +224,8 @@ impl Default for Bf2Layers {
             normal: None,
             crack_normal: None,
             env_map: None,
+            lightmap: None,
+            baked_sky: 1.0,
         }
     }
 }
@@ -214,6 +257,11 @@ impl Bf2Layers {
     pub const UV_SUM: u32 = 1 << 14;
     /// Wrecks: the `detail` texture is a wreck map on UV0 that darkens color and gloss.
     pub const WRECK: u32 = 1 << 15;
+    /// A moving kind of mesh (bundled, skinned): its `MeshTag` may carry its measured sky
+    /// visibility (`sky_occlusion`).
+    pub const DYNAMIC: u32 = 1 << 16;
+    /// `lightmap` holds the level's static lightmap atlases.
+    pub const LIGHTMAPPED: u32 = 1 << 17;
 }
 
 #[derive(ShaderType, Clone, Default)]
@@ -221,7 +269,7 @@ pub struct Bf2LayersUniform {
     pub flags: u32,
     pub gloss: f32,
     pub albedo_scale: f32,
-    pub _pad: f32,
+    pub baked_sky: f32,
     pub light_sun: Vec4,
     pub light_ambient: Vec4,
 }
@@ -232,7 +280,7 @@ impl From<&Bf2Layers> for Bf2LayersUniform {
             flags: layers.flags,
             gloss: layers.gloss,
             albedo_scale: layers.albedo_scale,
-            _pad: 0.0,
+            baked_sky: layers.baked_sky,
             light_sun: layers.light_sun,
             light_ambient: layers.light_ambient,
         }
@@ -252,10 +300,13 @@ impl MaterialExtension for Bf2Layers {
 
     /// `BF2_MATERIAL_DEBUG=lighting` (grey albedo), `normals`, `gloss` or `env` shows one term;
     /// `nolayers` draws the base color only (to measure the layers' cost).
+    ///
+    /// Meshes with lightmap UVs ([`ATTRIBUTE_LIGHTMAP_UV`]) get `BF2_LIGHTMAP_UV` and the vertex
+    /// shader in `bf2_material.wgsl` that passes the UVs on (main pass only).
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         static DEBUG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -265,9 +316,33 @@ impl MaterialExtension for Bf2Layers {
                 .shader_defs
                 .push(format!("BF2_DEBUG_{}", debug.to_ascii_uppercase()).as_str().into());
         }
+        let prepass = descriptor
+            .vertex
+            .shader_defs
+            .iter()
+            .any(|def| matches!(def, ShaderDefVal::Bool(name, true) if name == "PREPASS_PIPELINE"));
+        let lightmap_uv = layout
+            .0
+            .attribute_ids()
+            .iter()
+            .position(|id| *id == ATTRIBUTE_LIGHTMAP_UV.id);
+        if let (false, Some(index), Some(fragment), Some(buffer)) =
+            (prepass, lightmap_uv, descriptor.fragment.as_mut(), descriptor.vertex.buffers.first_mut())
+        {
+            let mut attribute = layout.0.layout().attributes[index];
+            attribute.shader_location = LIGHTMAP_UV_LOCATION;
+            buffer.attributes.push(attribute);
+            fragment.shader_defs.push("BF2_LIGHTMAP_UV".into());
+            descriptor.vertex.shader_defs.push("BF2_LIGHTMAP_UV".into());
+            descriptor.vertex.shader = fragment.shader.clone();
+            descriptor.vertex.entry_point = Some("vertex".into());
+        }
         Ok(())
     }
 }
+
+/// Shader location of the lightmap UVs (after Bevy's standard attributes).
+const LIGHTMAP_UV_LOCATION: u32 = 8;
 
 /// One BF2 material per glTF material, shared by everything using it.
 #[derive(Resource, Default)]
@@ -283,6 +358,10 @@ struct Bf2MaterialCache {
     /// The level's tree light (`LightScale::uniforms`) and the tree materials.
     tree_light: Option<(Vec4, Vec4)>,
     tree_users: Vec<Handle<Bf2Material>>,
+    /// The level's static lightmap atlases and the static materials that may use them.
+    lightmap: Option<Handle<Image>>,
+    static_users: Vec<Handle<Bf2Material>>,
+    baked_sky: f32,
 }
 
 /// Makes BF2 materials from glTF materials: the `StandardMaterial` Bevy's glTF loader
@@ -351,6 +430,11 @@ impl Bf2Materials<'_> {
         let mut material = describe(base, &bf2, &path, &self.asset_server, self.cache.env_map.as_ref());
         let reflects = technique_reflects(&bf2);
         let tree = is_tree(&bf2, &path);
+        let lightmapped = material.extension.flags & Bf2Layers::DYNAMIC == 0 && !tree;
+        if lightmapped {
+            set_lightmap(&mut material.extension, self.cache.lightmap.clone());
+        }
+        material.extension.baked_sky = self.cache.baked_sky;
         if tree && let Some((sun, ambient)) = self.cache.tree_light {
             material.extension.light_sun = sun;
             material.extension.light_ambient = ambient;
@@ -361,6 +445,9 @@ impl Bf2Materials<'_> {
         }
         if tree {
             self.cache.tree_users.push(handle.clone());
+        }
+        if lightmapped {
+            self.cache.static_users.push(handle.clone());
         }
         self.cache.materials.insert(standard.id(), handle.clone());
         Some(handle)
@@ -405,6 +492,56 @@ fn is_tree(bf2: &serde_json::Value, path: &str) -> bool {
 
 fn technique_reflects(bf2: &serde_json::Value) -> bool {
     bf2["kind"] != "static" && bf2["technique"].as_str().is_some_and(|t| t.to_ascii_lowercase().contains("envmap"))
+}
+
+/// Points a static material at the level's lightmap atlases (none: no baked occlusion).
+fn set_lightmap(layers: &mut Bf2Layers, lightmap: Option<Handle<Image>>) {
+    if lightmap.is_some() {
+        layers.flags |= Bf2Layers::LIGHTMAPPED;
+    } else {
+        layers.flags &= !Bf2Layers::LIGHTMAPPED;
+    }
+    layers.lightmap = lightmap;
+}
+
+/// Loads the level's static lightmap atlases (`EnvironmentDesc::static_lightmaps`) and hands
+/// them to the static materials.
+fn load_static_lightmaps(
+    level: Res<LoadedLevel>,
+    paths: Res<GamePaths>,
+    asset_server: Res<AssetServer>,
+    settings: Res<crate::settings::Settings>,
+    mut cache: ResMut<Bf2MaterialCache>,
+    mut materials: ResMut<Assets<Bf2Material>>,
+) {
+    cache.baked_sky = if settings.baked_ao { 1.0 } else { 0.0 };
+    cache.lightmap = super::static_lightmaps::load_index(&level.desc, &paths)
+        .map(|index| asset_server.load(format!("imported://levels/{}/{}", level.desc.name, index.atlas)));
+    for handle in &cache.static_users {
+        if let Some(mut material) = materials.get_mut(handle) {
+            set_lightmap(&mut material.extension, cache.lightmap.clone());
+        }
+    }
+}
+
+/// The baked sky occlusion setting on every BF2 material.
+fn apply_baked_sky(
+    settings: Res<crate::settings::Settings>,
+    mut cache: ResMut<Bf2MaterialCache>,
+    mut materials: ResMut<Assets<Bf2Material>>,
+) {
+    let strength = if settings.baked_ao { 1.0 } else { 0.0 };
+    cache.baked_sky = strength;
+    let changed: Vec<_> = materials
+        .iter()
+        .filter(|(_, m)| m.extension.baked_sky != strength)
+        .map(|(id, _)| id)
+        .collect();
+    for id in changed {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.extension.baked_sky = strength;
+        }
+    }
 }
 
 /// Points an `EnvMap` material at the level's cube map (none: no reflection).
@@ -501,6 +638,7 @@ fn describe(
         }
         layers.albedo_scale = 2.0;
     } else {
+        layers.flags |= Bf2Layers::DYNAMIC;
         let colormap_gloss = technique.contains("colormapgloss");
         if let Some(normal) = normal_map {
             layers.normal = Some(normal);

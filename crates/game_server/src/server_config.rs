@@ -29,6 +29,15 @@
 //!     coop_bot_skill: 0.4,
 //!     // Announce the server to a master server (off by default; see crates/master_server).
 //!     master_server: "127.0.0.1:16580",
+//!     // What joining clients download from this server (docs/MODDING.md): Off, Mods (the
+//!     // default: content made for this engine) or All (also the imported BF2 assets, which
+//!     // are EA's copyrighted content: only if you may share them).
+//!     content: Mods,
+//!     // Clients fetch files from here first (a static host or CDN filled by
+//!     // `server export-content`); this server stays the fallback.
+//!     download_url: "https://cdn.example.com/bf2-content",
+//!     // TCP port of the content endpoint (default: `port`).
+//!     content_port: 16567,
 //!     rotation: [
 //!         (level: "strike_at_karkand", size: 32),
 //!         (level: "dalian_plant", mode: "gpm_cq", size: 64, bots: 24),
@@ -41,7 +50,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{ServerSettings, admin::AdminSettings, coop::CoopSettings, rotation::MapEntry};
+use game_shared::content::ContentMode;
+
+use crate::{ServerSettings, admin::AdminSettings, content::ContentSettings, coop::CoopSettings, rotation::MapEntry};
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(default)]
@@ -72,6 +83,12 @@ pub struct ServerConfig {
     pub coop_bot_skill: Option<f32>,
     /// Master server to announce this server to, `host[:port]`.
     pub master_server: Option<String>,
+    /// What joining clients may download: `Off`, `Mods` or `All`.
+    pub content: ContentMode,
+    /// Clients download from here first: `<url>/<hash>`.
+    pub download_url: Option<String>,
+    /// TCP port of the content endpoint (default: `port`).
+    pub content_port: Option<u16>,
     pub rotation: Vec<MapEntry>,
 }
 
@@ -100,6 +117,9 @@ impl Default for ServerConfig {
             coop_bot_ratio: 50.0,
             coop_bot_skill: None,
             master_server: None,
+            content: ContentMode::default(),
+            download_url: None,
+            content_port: None,
             rotation: Vec::new(),
         }
     }
@@ -107,7 +127,7 @@ impl Default for ServerConfig {
 
 /// `server` in the platform config directory (`%APPDATA%\bf2-rust-engine\server` on
 /// Windows, `~/.config/bf2-rust-engine/server` on Linux).
-fn data_dir() -> Option<PathBuf> {
+pub fn data_dir() -> Option<PathBuf> {
     let env = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     let base = if cfg!(windows) {
         env("APPDATA")
@@ -172,6 +192,12 @@ impl ServerConfig {
                 bot_skill: self.coop_bot_skill.map(|s| s.clamp(0.0, 1.0)),
             },
             master_server: self.master_server.filter(|m| !m.trim().is_empty()),
+            content: ContentSettings {
+                mode: self.content,
+                port: self.content_port,
+                download_url: self.download_url.filter(|u| !u.trim().is_empty()),
+                cache_dir: None,
+            },
         }
     }
 }
@@ -202,5 +228,7 @@ mod tests {
         assert_eq!(settings.level, "strike_at_karkand");
         assert_eq!(settings.size, 32);
         assert_eq!(settings.admin.motd.lines().count(), 2);
+        assert_eq!(settings.content.mode, ContentMode::Mods);
+        assert_eq!(settings.content.port, Some(16567));
     }
 }

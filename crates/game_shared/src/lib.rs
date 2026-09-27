@@ -12,6 +12,7 @@ pub mod chat;
 pub mod commander;
 pub mod config;
 pub mod conquest;
+pub mod content;
 pub mod discovery;
 pub mod effects;
 pub mod flight;

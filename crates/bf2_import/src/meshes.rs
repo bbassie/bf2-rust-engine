@@ -23,9 +23,22 @@ use crate::{
 };
 
 /// Version of the visible mesh conversion; older `.glb` files are converted again.
-const MESH_VERSION: u64 = 2;
+/// 3: static meshes carry their lightmap UVs (`_LIGHTMAP_UV`).
+const MESH_VERSION: u64 = 3;
 /// Version of rigged (vehicle) meshes, which also split BF2's UV-animated faces.
 const RIGGED_MESH_VERSION: u64 = 6;
+
+/// glTF vertex attribute with a static mesh's lightmap UVs (BF2's last UV set, as stored:
+/// no V flip), for meshes with at least 3 UV sets. The client registers it as a custom
+/// attribute.
+pub const LIGHTMAP_UV_ATTRIBUTE: &str = "_LIGHTMAP_UV";
+
+/// The UV set holding a mesh's lightmap UVs: the last of 3 or more sets of a static mesh
+/// that isn't vegetation (`out_rel` is the output path, which keeps the source path).
+fn lightmap_uv_set(kind: MeshKind, uv_sets: usize, out_rel: &str) -> Option<usize> {
+    (kind == MeshKind::Static && uv_sets >= 3 && !out_rel.to_ascii_lowercase().contains("vegitation"))
+        .then(|| uv_sets - 1)
+}
 
 /// Shared state for converting many meshes: output folder and already-copied textures.
 pub struct MeshConverter<'a> {
@@ -189,6 +202,9 @@ impl<'a> MeshConverter<'a> {
             let set = uv_sets.get(channel).or(uv_sets.last());
             sanitize_uv(set.and_then(|s| s.get(vertex)).copied().unwrap_or([0.0, 0.0]))
         };
+        // Static meshes with 3+ UV sets keep their lightmap UVs (the last set) as
+        // `_LIGHTMAP_UV`, for the client's baked lighting. Vegetation has none.
+        let lightmap_set = lightmap_uv_set(mesh.kind, uv_sets.len(), out_rel);
 
         let Some(lod) = mesh.geoms.get(geom).and_then(|g| g.lods.get(lod)) else {
             return doc;
@@ -301,6 +317,9 @@ impl<'a> MeshConverter<'a> {
                 .map(|slot| glb::Primitive {
                     material: Some(group_materials[slot % groups]),
                     uvs: vec![Vec::new(); uv_sets.len().min(2)],
+                    extra_vec2: lightmap_set
+                        .map(|_| vec![(LIGHTMAP_UV_ATTRIBUTE.to_string(), Vec::new())])
+                        .unwrap_or_default(),
                     ..Default::default()
                 })
                 .collect();
@@ -337,6 +356,9 @@ impl<'a> MeshConverter<'a> {
                         if let Some([a, b]) = color_uvs {
                             let (a, b) = (uv(a, vi), uv(b, vi));
                             prim.colors.push([a[0], a[1], b[0], b[1]]);
+                        }
+                        if let (Some(set), Some((_, values))) = (lightmap_set, prim.extra_vec2.first_mut()) {
+                            values.push(uv(set, vi));
                         }
                         (prim.positions.len() - 1) as u32
                     });
@@ -793,6 +815,45 @@ mod tests {
         assert_eq!(layers.color_uvs(), None);
         assert!(layers.normal_mapped());
         assert!(!StaticLayers::parse("BaseDetail").normal_mapped());
+    }
+
+    #[test]
+    fn lightmap_uvs_are_the_last_of_three_or_more_static_sets() {
+        let house = "objects/staticobjects/x/house/meshes/house_lod1.glb";
+        assert_eq!(lightmap_uv_set(MeshKind::Static, 3, house), Some(2));
+        assert_eq!(lightmap_uv_set(MeshKind::Static, 5, house), Some(4));
+        assert_eq!(lightmap_uv_set(MeshKind::Static, 2, house), None);
+        assert_eq!(lightmap_uv_set(MeshKind::Bundled, 4, house), None);
+        let tree = "objects/vegitation/mideast/me_palmtree01/meshes/me_palmtree01.glb";
+        assert_eq!(lightmap_uv_set(MeshKind::Static, 3, tree), None);
+    }
+
+    /// The attribute reaches the file with one value per vertex.
+    #[test]
+    fn extra_vec2_attributes_are_written() {
+        let primitive = glb::Primitive {
+            positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            extra_vec2: vec![(LIGHTMAP_UV_ATTRIBUTE.to_string(), vec![[0.0, 0.0], [0.5, 0.0], [0.0, 0.5]])],
+            ..Default::default()
+        };
+        let doc = Document {
+            meshes: vec![glb::Mesh {
+                name: "m".into(),
+                primitives: vec![primitive],
+            }],
+            ..Default::default()
+        };
+        let path = std::env::temp_dir().join(format!("bf2_lightmap_uv_{}.glb", std::process::id()));
+        doc.write(&path).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let json_len = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+        let json: serde_json::Value = serde_json::from_slice(&data[20..20 + json_len]).unwrap();
+        let attributes = &json["meshes"][0]["primitives"][0]["attributes"];
+        let accessor = &json["accessors"][attributes[LIGHTMAP_UV_ATTRIBUTE].as_u64().unwrap() as usize];
+        assert_eq!(accessor["type"], "VEC2");
+        assert_eq!(accessor["count"], 3);
     }
 
     /// A quad in the XY plane facing -Z (BF2 space), u along +X and v along -Y, with zero

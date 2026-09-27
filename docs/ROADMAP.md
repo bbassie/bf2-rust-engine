@@ -116,7 +116,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - [x] Infantry navigation from our collision data: layered walkability grid, cached,
   background A*; stuck events down from ~250/min to 1-3/min
-- Path costs per vehicle class
+- Path costs per vehicle class (in progress)
 - [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
   orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
   settings, ladders in navigation
@@ -125,7 +125,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   flashbangs, tear gas and gas masks, repair vehicles and assets, throw bags
 - [x] Utility behaviours weighted like `AIBehaviours.ai`, BF2's weapon AI templates (ranges,
   firing poses)
-- Bots driving vehicles and flying through the same input channels as players
+- Bots driving vehicles and flying through the same input channels as players (in progress)
 
 ## M5: Presentation
 
@@ -136,7 +136,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - Lighting depth (in progress): per-map world lighting from BF2's values (night maps), directional
   sky ambient, BF2's baked sky visibility as ambient occlusion (the sun stays dynamic), light
   probes for soldiers and vehicles, tonemapping and bloom
-- Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
+- [x] Static mesh LODs with BF2's switch distances (`setSubGeometryLodDistance`) and draw distances
+  (cull radius), dithered cross-fades, zoom-aware like BF2
+- Vehicle and soldier LODs
 - [x] Effects: BF2's particle effects for muzzle flashes, impacts per surface, explosions with
   their material-manager dust columns, smoke, destruction, scorch decals
 - [x] Audio: BF2's sounds with its distance model, weapons (near/far, cracks), footsteps per

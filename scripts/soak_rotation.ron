@@ -1,0 +1,21 @@
+// Map rotation for soak tests (scripts/soak.sh): Karkand, Dalian Plant (vehicles), Gulf of
+// Oman, a Special Forces map, co-op and the sample mod (mods/sample). With
+// `--soak-rotate 10` the server plays each for 10 minutes, whatever the tickets do.
+//
+//   scripts/soak.sh --minutes 61 --client-runs 6 -- --config scripts/soak_rotation.ron --soak-rotate 10
+(
+    name: "Soak test",
+    bots: 32,
+    respawn_time: 10.0,
+    // Keep the soak's stats and bans out of the user's server folder.
+    stats_file: None,
+    ban_file: None,
+    rotation: [
+        (level: "strike_at_karkand", mode: "gpm_cq", size: 32),
+        (level: "dalian_plant", mode: "gpm_cq", size: 64),
+        (level: "gulf_of_oman", mode: "gpm_cq", size: 32),
+        (level: "warlord", mode: "gpm_cq", size: 32),
+        (level: "strike_at_karkand", mode: "gpm_coop", size: 16, bots: 16),
+        (level: "sample_valley", mode: "gpm_cq", size: 16, bots: 12),
+    ],
+)

@@ -9,11 +9,12 @@ use game_shared::{
     squad::squad_name,
 };
 
-use game_shared::weapons::Armory;
+use game_shared::{vehicle::VehicleHealth, weapons::Armory};
 
 use super::{
     squad::SquadSnapshot,
     strategy::{OrderKind, StrategicMap, Strategy},
+    vehicles::VehicleClaims,
 };
 use crate::{bots::BotBrain, combat::Died};
 
@@ -63,6 +64,17 @@ pub struct TeamStats {
     pub spawns: u32,
     /// Spawns on the squad leader.
     pub leader_spawns: u32,
+    /// Vehicles: seats taken (and of those stationary weapons), meters driven by bot drivers,
+    /// their stuck events, rounds fired from vehicle guns, enemy vehicles wrecked while bots
+    /// fired at them, aircraft taking off and crashing.
+    pub mounts: u32,
+    pub stationary: u32,
+    pub driven: f32,
+    pub vehicle_stuck: u32,
+    pub vehicle_shots: u32,
+    pub vehicle_kills: u32,
+    pub flights: u32,
+    pub crashes: u32,
 }
 
 impl TeamStats {
@@ -92,6 +104,14 @@ impl TeamStats {
         self.supplies += other.supplies;
         self.spawns += other.spawns;
         self.leader_spawns += other.leader_spawns;
+        self.mounts += other.mounts;
+        self.stationary += other.stationary;
+        self.driven += other.driven;
+        self.vehicle_stuck += other.vehicle_stuck;
+        self.vehicle_shots += other.vehicle_shots;
+        self.vehicle_kills += other.vehicle_kills;
+        self.flights += other.flights;
+        self.crashes += other.crashes;
     }
 }
 
@@ -101,14 +121,29 @@ impl AiStats {
     }
 }
 
-/// Counts flags changing hands and deaths.
+/// Counts flags changing hands, deaths and vehicles bots destroyed.
+#[allow(clippy::too_many_arguments)]
 pub fn track_events(
     mut stats: ResMut<AiStats>,
     mut deaths: MessageReader<Died>,
     flags: Query<(Entity, &FlagState), (With<ControlPoint>, Changed<FlagState>)>,
     control_points: Query<(), With<ControlPoint>>,
     mut owners: Local<HashMap<Entity, Team>>,
+    vehicles: Query<(Entity, &VehicleHealth), Changed<VehicleHealth>>,
+    mut wrecks: Local<bevy::platform::collections::HashSet<Entity>>,
+    claims: Res<VehicleClaims>,
 ) {
+    for (vehicle, health) in &vehicles {
+        if health.wrecked()
+            && wrecks.insert(vehicle)
+            && let Some((team, at)) = claims.engaged.get(&vehicle)
+            && claims.now() - at < 6.0
+            && let Some(t) = team_index(*team)
+        {
+            stats.teams[t].vehicle_kills += 1;
+        }
+    }
+    wrecks.retain(|v| vehicles.contains(*v) || claims.engaged.contains_key(v));
     for death in deaths.read() {
         if let Some(t) = team_index(death.team) {
             stats.teams[t].deaths += 1;
@@ -194,7 +229,8 @@ pub fn log_stats(
              {} covers, {} flanks, {} grenades, {} reactions, {} revives, {} bags, {} launcher shots, \
              {} rockets, {} repairs, {} flashed, {:.0} s gassed; commander: {} orders, {} artillery, {} UAVs, \
              {} scans, {} supply drops; {} of {} spawns on the squad leader; \
-             kits {}; {:?}, {} squads attacking, {} defending: {}",
+             vehicles: {} entered ({} stationary), {:.2} km driven, {} stuck, {} shots, {} vehicle kills, \
+             {} takeoffs, {} crashes; kits {}; {:?}, {} squads attacking, {} defending: {}",
             t + 1,
             minute.captures,
             minute.neutralized,
@@ -225,6 +261,14 @@ pub fn log_stats(
             minute.supplies,
             minute.leader_spawns,
             minute.spawns,
+            minute.mounts,
+            minute.stationary,
+            minute.driven / 1000.0,
+            minute.vehicle_stuck,
+            minute.vehicle_shots,
+            minute.vehicle_kills,
+            minute.flights,
+            minute.crashes,
             kits.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "),
             strategy.posture[t],
             attacking,

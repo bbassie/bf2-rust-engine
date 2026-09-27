@@ -37,7 +37,7 @@ impl RadioVoices {
         self.0
             .entry(language.to_string())
             .or_insert_with(|| {
-                let path = paths.imported.join("radio").join(format!("{language}.ron"));
+                let path = paths.find(format!("radio/{language}.ron"));
                 path.exists().then(|| game_data::read_ron(&path).map_err(|e| warn!("{e}")).ok().map(Arc::new)).flatten()
             })
             .clone()

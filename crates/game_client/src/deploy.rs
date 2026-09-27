@@ -18,6 +18,7 @@ use game_shared::{
 use crate::{
     combat::weapon_display_name,
     conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, team_color},
+    map_markers::{LabelRequest, Obstacle, place_labels},
     net::{LocalPlayer, LocalSoldier},
 };
 
@@ -281,8 +282,34 @@ fn rebuild_markers(
     for child in children.into_iter().flatten() {
         commands.entity(*child).despawn();
     }
-    for (entity, cp) in &control_points {
-        let uv = map_uv(&level, cp.position).clamp(Vec2::ZERO, Vec2::ONE);
+    // Names where they don't cover each other or the flags (see `map_markers::place_labels`).
+    let points: Vec<(Entity, &ControlPoint, Vec2)> = control_points
+        .iter()
+        .map(|(entity, cp)| (entity, cp, map_uv(&level, cp.position).clamp(Vec2::ZERO, Vec2::ONE)))
+        .collect();
+    let icon = Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(MARKER / 2.0));
+    let obstacles: Vec<Obstacle> = points
+        .iter()
+        .map(|&(_, _, uv)| Obstacle {
+            rect: Rect::from_center_half_size(uv * MAP_SIZE, icon.half_size()),
+            hard: true,
+        })
+        .collect();
+    let requests: Vec<LabelRequest> = points
+        .iter()
+        .enumerate()
+        .map(|(i, &(_, cp, uv))| LabelRequest {
+            at: uv * MAP_SIZE,
+            icon,
+            chars: cp.name.chars().count(),
+            font: 12.0,
+            priority: 0,
+            previous: None,
+            own: Some(i),
+        })
+        .collect();
+    let spots = place_labels(&requests, &obstacles, Rect::new(0.0, 0.0, MAP_SIZE, MAP_SIZE));
+    for (&(entity, cp, uv), spot) in points.iter().zip(spots) {
         commands.entity(map).with_children(|map| {
             map.spawn((
                 PointMarker {
@@ -325,24 +352,30 @@ fn rebuild_markers(
                 Visibility::Hidden,
                 bevy::ui::FocusPolicy::Pass,
             ))
-            .with_child((
-                Text::new(cp.name.clone()),
-                font(12.0),
-                TextColor(TEXT),
-                TextShadow {
-                    offset: Vec2::splat(1.0),
-                    color: Color::srgba(0.0, 0.0, 0.0, 0.9),
-                },
-                TextLayout::justify(Justify::Center),
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: px(MARKER),
-                    left: px(MARKER / 2.0 - 60.0),
-                    width: px(120),
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-            ));
+            .with_children(|marker| {
+                let Some(spot) = spot else { return };
+                marker.spawn((
+                    Text::new(cp.name.clone()),
+                    font(12.0 * spot.scale),
+                    TextColor(TEXT),
+                    TextShadow {
+                        offset: Vec2::splat(1.0),
+                        color: Color::srgba(0.0, 0.0, 0.0, 0.9),
+                    },
+                    TextLayout::new(Justify::Center, LineBreak::NoWrap),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        // From the point (inside the marker's 2 px border).
+                        left: px(MARKER / 2.0 - 2.0 + spot.offset.x),
+                        top: px(MARKER / 2.0 - 2.0 + spot.offset.y),
+                        width: px(spot.size.x),
+                        height: px(spot.size.y),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                ));
+            });
         });
     }
 }

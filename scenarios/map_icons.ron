@@ -2,7 +2,9 @@
 // letters, the minimap (rotating and north up) and the big map with flag icons, placed labels
 // and vehicles (grey empty ones at the US base, ours in white with the turret line once we
 // sit in the M1A2 and turn the turret), the scoreboard's team flags, the deploy screen's
-// markers and the commander screen. For a bigger window add `--settings` with a
+// markers and the commander screen; and the base's vehicles at the minimap's edge (118 m
+// in front of the M1A2, both rotation modes: cut off at the frame, not spilling out of it).
+// For a bigger window add `--settings` with a
 // `(window_size: (1920, 1080))` file.
 // client --scenario scenarios/map_icons.ron --out target/scenarios/map_icons
 (
@@ -31,6 +33,13 @@
         Screenshot("deploy"),
         Key(Enter),
         Wait(0.3),
+        InFrontOf("ustnk_m1a2", 118.0),
+        Wait(0.5),
+        Screenshot("minimap_edge"),
+        Key(KeyN),
+        Wait(0.2),
+        Screenshot("minimap_edge_north"),
+        Key(KeyN),
         NearVehicle("ustnk_m1a2"),
         Wait(1.0),
         Hold([Use]),

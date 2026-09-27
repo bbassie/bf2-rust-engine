@@ -133,7 +133,8 @@ pub fn start_match(world: &mut World, setup: MatchSetup) {
             }
             game_server::start_server(world, settings)
         }
-        MatchSetup::Join { server, .. } => connect(world, *server),
+        // The server's content first (if it shares any), then `connect`.
+        MatchSetup::Join { server, .. } => crate::content::begin_join(world, *server),
     };
     let failure = match &setup {
         MatchSetup::Local(_) => "Can't start the server".to_string(),
@@ -154,6 +155,7 @@ pub fn start_match(world: &mut World, setup: MatchSetup) {
 /// Leaves the match: disconnects from the server or stops ours, and despawns everything the
 /// match brought (players, soldiers, flags, the level). Back to the menu.
 pub fn leave_match(world: &mut World) {
+    crate::content::leave(world);
     if let Some(mut transport) = world.remove_resource::<NetcodeClientTransport>() {
         transport.disconnect();
     }
@@ -195,7 +197,7 @@ fn set_screen(world: &mut World, screen: Screen) {
         .set_if_neq(screen);
 }
 
-fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
+pub(crate) fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
     let channels = world.resource::<RepliconChannels>();
     let client = RenetClient::new(ConnectionConfig {
         server_channels_config: channels.server_configs(),

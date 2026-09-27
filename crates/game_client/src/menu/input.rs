@@ -6,7 +6,6 @@ use super::*;
 /// take the keyboard and the wheel from the game.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn menu_keys(
-    mut commands: Commands,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut scroll: ResMut<AccumulatedMouseScroll>,
@@ -46,7 +45,7 @@ pub(super) fn menu_keys(
                 true
             }
             Screen::Loading => {
-                commands.queue(net::leave_match);
+                menu.leave = true;
                 true
             }
             Screen::InGame if menu.paused => {
@@ -88,7 +87,6 @@ pub(super) fn menu_keys(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn press_buttons(
-    mut commands: Commands,
     mut menu: ResMut<Menu>,
     mut settings: ResMut<Settings>,
     catalog: Res<LevelCatalog>,
@@ -172,7 +170,7 @@ pub(super) fn press_buttons(
                 &mut cursor,
                 !deploy.open && scripted.is_none(),
             ),
-            MenuButton::Leave | MenuButton::CancelLoading => commands.queue(net::leave_match),
+            MenuButton::Leave | MenuButton::CancelLoading => menu.leave = true,
             MenuButton::Tab(tab) => menu.tab = *tab,
             MenuButton::Toggle(toggle) => toggle.flip(&mut settings),
             MenuButton::Step(slider, dir) => {
@@ -183,6 +181,7 @@ pub(super) fn press_buttons(
             MenuButton::Display(mode) => settings.window_mode = *mode,
             MenuButton::WindowSize(w, h) => settings.window_size = (*w, *h),
             MenuButton::ViewDistance(distance) => settings.view_distance = *distance,
+            MenuButton::ToneMapping(t) => settings.tone_mapping = *t,
             MenuButton::Rebind(action) => menu.rebinding = Some(*action),
             MenuButton::ResetBindings => {
                 settings.bindings = Settings::default().bindings;

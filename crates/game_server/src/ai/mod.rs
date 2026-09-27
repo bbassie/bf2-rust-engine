@@ -10,6 +10,7 @@
 //! - [`gadgets`]: flashbangs and tear gas against bots, gas masks.
 //! - [`skill`]: difficulty and per-bot personality.
 //! - [`stats`]: per-minute statistics.
+//! - [`vehicles`]: what vehicles are for, their guns, seats bots are going for.
 //!
 //! Level data comes from the importer ([`game_data::LevelAiDesc`], BF2's strategic areas,
 //! and [`game_data::AiWeaponsDesc`], BF2's weapon templates); both are optional.
@@ -21,6 +22,7 @@ pub mod squad;
 pub mod stats;
 pub mod strategy;
 pub mod tactics;
+pub mod vehicles;
 
 use bevy::prelude::*;
 use game_data::{AiWeaponDesc, AiWeaponsDesc, FireKind, FiringPose, LevelAiDesc, WeaponDesc, WeaponEffectTable};

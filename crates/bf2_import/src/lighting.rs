@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use bf2_formats::{
     Bf2Install, LevelInfo, Side,
     con::{Interpreter, World, parse_vec3},
+    vfs::Vfs,
 };
-use game_data::{AdaptedLighting, LevelDesc, TerrainDesc, WorldLighting};
+use game_data::{AdaptedLighting, LevelDesc, StaticLightmapEntry, StaticLightmaps, TerrainDesc, WorldLighting};
 
 use crate::terrain::normalize_color;
 
@@ -107,6 +108,8 @@ pub fn import_only(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resul
         desc.environment.sun_direction,
     );
     desc.environment.lighting = lighting.clone();
+    desc.environment.ground_albedo = desc.terrain.as_ref().and_then(|t| ground_albedo(&level_dir, t));
+    desc.environment.static_lightmaps = static_lightmaps(&vfs, &level.name, &level_dir)?;
     game_data::write_ron(&path, &desc)?;
     Ok(lighting)
 }
@@ -177,54 +180,259 @@ fn terrain_sun_scale(level_dir: &Path, terrain: &TerrainDesc, sun_height: f32) -
 
 /// Width, height and green channel of a DDS file's top level (DXT1 or uncompressed 32-bit).
 fn green_channel(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let (width, height, rgb) = decode_rgb(data)?;
+    Some((width, height, rgb.iter().map(|p| p[1]).collect()))
+}
+
+/// Width, height and RGB texels of a DDS file's top level (DXT1/3/5 or uncompressed 32-bit).
+pub fn decode_rgb(data: &[u8]) -> Option<(usize, usize, Vec<[u8; 3]>)> {
     let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     if data.len() < 128 || &data[..4] != b"DDS " {
         return None;
     }
     let (height, width) = (u32_at(12)? as usize, u32_at(16)? as usize);
-    let (flags, bits, green_mask) = (u32_at(80)?, u32_at(88)?, u32_at(96)?);
+    let flags = u32_at(80)?;
+    let bits = u32_at(88)?;
+    let masks = [u32_at(92)?, u32_at(96)?, u32_at(100)?];
     let pixels = &data[128..];
-    let mut out = vec![0u8; width * height];
-    if flags & 0x4 != 0 && &data[84..88] == b"DXT1" {
+    let mut out = vec![[0u8; 3]; width * height];
+    let four_cc = &data[84..88];
+    if flags & 0x4 != 0 && matches!(four_cc, b"DXT1" | b"DXT3" | b"DXT5") {
+        // DXT3/5 blocks are an 8-byte alpha block, then a DXT1 colour block (always 4 colours).
+        let (block_size, colour_at) = if four_cc == b"DXT1" { (8, 0) } else { (16, 8) };
         let (bw, bh) = (width.div_ceil(4), height.div_ceil(4));
-        if pixels.len() < bw * bh * 8 {
+        if pixels.len() < bw * bh * block_size {
             return None;
         }
-        let green = |c: u16| (((c >> 5) & 63) as u32 * 255 / 63) as u8;
+        let rgb = |c: u16| {
+            [
+                ((c >> 11) & 31) as u32 * 255 / 31,
+                ((c >> 5) & 63) as u32 * 255 / 63,
+                (c & 31) as u32 * 255 / 31,
+            ]
+        };
+        let mix = |a: [u32; 3], b: [u32; 3], wa: u32, wb: u32| {
+            [0, 1, 2].map(|i| (a[i] * wa + b[i] * wb) / (wa + wb))
+        };
         for by in 0..bh {
             for bx in 0..bw {
-                let block = &pixels[(by * bw + bx) * 8..][..8];
+                let block = &pixels[(by * bw + bx) * block_size + colour_at..][..8];
                 let c0 = u16::from_le_bytes([block[0], block[1]]);
                 let c1 = u16::from_le_bytes([block[2], block[3]]);
-                let (g0, g1) = (green(c0) as u32, green(c1) as u32);
-                let palette = if c0 > c1 {
-                    [g0, g1, (2 * g0 + g1) / 3, (g0 + 2 * g1) / 3]
+                let (p0, p1) = (rgb(c0), rgb(c1));
+                let palette = if c0 > c1 || block_size == 16 {
+                    [p0, p1, mix(p0, p1, 2, 1), mix(p0, p1, 1, 2)]
                 } else {
-                    [g0, g1, (g0 + g1) / 2, 0]
+                    [p0, p1, mix(p0, p1, 1, 1), [0; 3]]
                 };
                 let indices = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
                 for i in 0..16 {
                     let (x, y) = (bx * 4 + i % 4, by * 4 + i / 4);
                     if x < width && y < height {
-                        out[y * width + x] = palette[((indices >> (2 * i)) & 3) as usize] as u8;
+                        out[y * width + x] = palette[((indices >> (2 * i)) & 3) as usize].map(|v| v as u8);
                     }
                 }
             }
         }
-    } else if flags & 0x4 == 0 && bits == 32 && green_mask != 0 {
+    } else if flags & 0x4 == 0 && bits == 32 && masks.iter().all(|m| *m != 0) {
         if pixels.len() < width * height * 4 {
             return None;
         }
-        let shift = green_mask.trailing_zeros();
-        let max = green_mask >> shift;
         for (o, p) in out.iter_mut().zip(pixels.chunks_exact(4)) {
             let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
-            *o = (((v & green_mask) >> shift) * 255 / max.max(1)) as u8;
+            *o = masks.map(|mask| {
+                let shift = mask.trailing_zeros();
+                (((v & mask) >> shift) * 255 / (mask >> shift).max(1)) as u8
+            });
         }
     } else {
         return None;
     }
     Some((width, height, out))
+}
+
+/// Side of the static lightmap atlas layers we write (BF2's are mostly 2048; sky light is
+/// smooth), halved for levels with many atlases to bound the memory they take.
+fn atlas_size(atlases: usize) -> usize {
+    if atlases > 24 { 512 } else { 1024 }
+}
+
+/// The sky channel of the level's static object lightmaps (`lightmaps/objects/`: atlases
+/// and `LightmapAtlas.tai`, where each object's lightmap lies in them) as one texture array
+/// `lightmaps/objects_sky.dds` and `lightmaps/objects.ron` ([`StaticLightmaps`]). Returns the
+/// RON's path relative to the level folder, `None` if the level has no object lightmaps.
+pub fn static_lightmaps(vfs: &Vfs, level: &str, level_dir: &Path) -> Result<Option<String>> {
+    let base = format!("levels/{level}/lightmaps/objects");
+    let Ok(tai) = vfs.read_text(&format!("{base}/lightmapatlas.tai")) else {
+        return Ok(None);
+    };
+    let (entries, atlases) = parse_atlas_index(&tai);
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let size = atlas_size(atlases.len());
+    let mut layers = Vec::with_capacity(atlases.len());
+    for atlas in &atlases {
+        let sky = vfs
+            .read(atlas)
+            .ok()
+            .and_then(|data| decode_rgb(&data))
+            .map(|(w, h, rgb)| resample(&rgb.iter().map(|p| p[2]).collect::<Vec<_>>(), w, h, size));
+        if sky.is_none() {
+            log::warn!("{atlas}: missing or unreadable");
+        }
+        layers.push(sky.unwrap_or_else(|| vec![217; size * size]));
+    }
+    // A single layer would load as a plain 2D texture; shaders expect an array.
+    if layers.len() == 1 {
+        layers.push(layers[0].clone());
+    }
+    let dir = level_dir.join("lightmaps");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("objects_sky.dds"), r8_array_dds(&layers, size))?;
+    let desc = StaticLightmaps {
+        atlas: "lightmaps/objects_sky.dds".into(),
+        entries,
+    };
+    game_data::write_ron(&dir.join("objects.ron"), &desc)?;
+    Ok(Some("lightmaps/objects.ron".into()))
+}
+
+/// Entries of a `LightmapAtlas.tai` (lines `<dir>/<name>=<geometry><lod>=<x>=<y>=<z>.dds
+/// <atlas path>, <index>, <u offset>, <v offset>, <width>, <height>`) and the atlas paths by
+/// index.
+fn parse_atlas_index(tai: &str) -> (Vec<StaticLightmapEntry>, Vec<String>) {
+    let mut entries = Vec::new();
+    let mut atlases: Vec<String> = Vec::new();
+    for line in tai.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((texture, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split(',').map(str::trim).collect();
+        let [atlas, index, u, v, width, height] = fields[..] else {
+            continue;
+        };
+        let stem = texture.rsplit('/').next().unwrap_or(texture).trim_end_matches(".dds");
+        let parts: Vec<&str> = stem.split('=').collect();
+        let [name, geometry_lod, x, y, z] = parts[..] else {
+            continue;
+        };
+        let number = |s: &str| s.parse::<f32>().ok();
+        let (Ok(index), Some(u), Some(v), Some(width), Some(height), Some(x), Some(y), Some(z)) = (
+            index.parse::<usize>(),
+            number(u),
+            number(v),
+            number(width),
+            number(height),
+            number(x),
+            number(y),
+            number(z),
+        ) else {
+            continue;
+        };
+        let digit = |i: usize| geometry_lod.chars().nth(i).and_then(|c| c.to_digit(10)).unwrap_or(0);
+        if atlases.len() <= index {
+            atlases.resize(index + 1, String::new());
+        }
+        atlases[index] = atlas.to_ascii_lowercase();
+        entries.push(StaticLightmapEntry {
+            name: name.to_ascii_lowercase(),
+            geometry: digit(0),
+            lod: digit(1),
+            position: crate::coords::position([x, y, z]),
+            layer: index as u32,
+            offset: [u, v],
+            scale: [width, height],
+        });
+    }
+    (entries, atlases)
+}
+
+/// A square single-channel image resampled to `size` (box filter down, nearest up).
+fn resample(pixels: &[u8], width: usize, height: usize, size: usize) -> Vec<u8> {
+    let mut out = vec![0u8; size * size];
+    for y in 0..size {
+        let (y0, y1) = (y * height / size, ((y + 1) * height / size).max(y * height / size + 1));
+        for x in 0..size {
+            let (x0, x1) = (x * width / size, ((x + 1) * width / size).max(x * width / size + 1));
+            let (mut sum, mut n) = (0u32, 0u32);
+            for sy in y0..y1.min(height) {
+                for sx in x0..x1.min(width) {
+                    sum += pixels[sy * width + sx] as u32;
+                    n += 1;
+                }
+            }
+            out[y * size + x] = (sum / n.max(1)) as u8;
+        }
+    }
+    out
+}
+
+/// A DDS (DX10 header) texture array of `R8_UNORM` layers, `size` square, with all mip levels.
+fn r8_array_dds(layers: &[Vec<u8>], size: usize) -> Vec<u8> {
+    let mips = size.max(1).ilog2() as usize + 1;
+    let mut out = Vec::new();
+    let mut put = |v: u32| out.extend_from_slice(&v.to_le_bytes());
+    put(u32::from_le_bytes(*b"DDS "));
+    put(124); // header size
+    put(0x1 | 0x2 | 0x4 | 0x8 | 0x1000 | 0x20000); // caps, height, width, pitch, pixel format, mips
+    put(size as u32); // height
+    put(size as u32); // width
+    put(size as u32); // pitch
+    put(0); // depth
+    put(mips as u32);
+    for _ in 0..11 {
+        put(0);
+    }
+    put(32); // pixel format size
+    put(0x4); // four cc
+    put(u32::from_le_bytes(*b"DX10"));
+    for _ in 0..5 {
+        put(0);
+    }
+    put(0x1000 | 0x8 | 0x40_0000); // texture, complex, mipmap
+    for _ in 0..4 {
+        put(0);
+    }
+    put(61); // DXGI_FORMAT_R8_UNORM
+    put(3); // texture 2D
+    put(0);
+    put(layers.len() as u32);
+    put(0);
+    for layer in layers {
+        let mut level = layer.clone();
+        let mut s = size;
+        for _ in 0..mips {
+            out.extend_from_slice(&level);
+            if s > 1 {
+                level = resample(&level, s, s, s / 2);
+                s /= 2;
+            }
+        }
+    }
+    out
+}
+
+/// Mean linear colour of the terrain's colour maps (`None` without any readable one).
+pub fn ground_albedo(level_dir: &Path, terrain: &TerrainDesc) -> Option<[f32; 3]> {
+    let to_linear = |v: u8| (v as f32 / 255.0).powf(2.2);
+    let (mut sum, mut count) = ([0f64; 3], 0usize);
+    for path in terrain.color_maps.iter().filter(|p| !p.is_empty()) {
+        let Some((_, _, rgb)) = std::fs::read(level_dir.join(path)).ok().and_then(|d| decode_rgb(&d)) else {
+            continue;
+        };
+        for texel in rgb.iter().step_by(7) {
+            for (s, v) in sum.iter_mut().zip(texel) {
+                *s += to_linear(*v) as f64;
+            }
+            count += 1;
+        }
+    }
+    (count > 0).then(|| sum.map(|s| (s / count as f64) as f32))
 }
 
 #[cfg(test)]
@@ -237,6 +445,35 @@ mod tests {
         assert_eq!(parse_color("1"), Some([1.0; 3]));
         let fog = parse_color("8.00/12.00/24.00").unwrap();
         assert!((fog[2] - 24.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn atlas_index() {
+        let tai = "# comment\n\nlevels/x/lightmaps/objects/house_01=01=-226=166=59.dds\t\tlevels/x/lightmaps/objects/LightmapAtlas3.dds, 3, 0.25, 0.5, 0.125, 0.125\n";
+        let (entries, atlases) = parse_atlas_index(tai);
+        assert_eq!(atlases.len(), 4);
+        assert_eq!(atlases[3], "levels/x/lightmaps/objects/lightmapatlas3.dds");
+        assert_eq!(
+            entries,
+            vec![StaticLightmapEntry {
+                name: "house_01".into(),
+                geometry: 0,
+                lod: 1,
+                position: [-226.0, 166.0, -59.0],
+                layer: 3,
+                offset: [0.25, 0.5],
+                scale: [0.125, 0.125],
+            }]
+        );
+    }
+
+    #[test]
+    fn r8_array_layout() {
+        let dds = r8_array_dds(&[vec![10; 16], vec![20; 16]], 4);
+        // Header, DX10 header, then 2 layers of 16 + 4 + 1 texels.
+        assert_eq!(dds.len(), 128 + 20 + 2 * 21);
+        assert_eq!(u32::from_le_bytes(dds[128..132].try_into().unwrap()), 61);
+        assert_eq!(dds[148 + 21], 20);
     }
 
     #[test]

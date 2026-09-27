@@ -259,10 +259,14 @@ fn load_collider(path: &Path, part: u32) -> anyhow::Result<Option<Collider>> {
             continue;
         };
         vertices.extend(positions.map(Vec3::from_array));
+        // Checked, not trusted: the mesh may come from a server (see `content`).
+        let count = vertices.len() as u32 - base;
+        anyhow::ensure!(vertices.iter().all(|v| v.is_finite()), "{}: vertices that aren't numbers", path.display());
         if let Some(read) = reader.read_indices() {
             let flat: Vec<u32> = read.into_u32().collect();
             indices.extend(
                 flat.chunks_exact(3)
+                    .filter(|t| t.iter().all(|&i| i < count))
                     .map(|t| [base + t[0], base + t[1], base + t[2]]),
             );
         }
@@ -270,5 +274,7 @@ fn load_collider(path: &Path, part: u32) -> anyhow::Result<Option<Collider>> {
     if vertices.is_empty() || indices.is_empty() {
         return Ok(None);
     }
-    Ok(Some(Collider::trimesh(vertices, indices)))
+    Collider::try_trimesh(vertices, indices)
+        .map(Some)
+        .map_err(|err| anyhow::anyhow!("{}: {err:?}", path.display()))
 }

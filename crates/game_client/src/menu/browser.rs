@@ -349,7 +349,11 @@ fn server_row(list: &mut ChildSpawnerCommands, entry: Option<&BrowserEntry>) {
     let values: [String; 5] = match (entry, info) {
         (None, _) => ["Server".into(), "Map".into(), "Mode".into(), "Players".into(), "Ping".into()],
         (Some(entry), Some(info)) => [
-            if incompatible { format!("{} (other version)", info.name) } else { info.name.clone() },
+            match (incompatible, crate::content::browser_tag(info)) {
+                (true, _) => format!("{} (other version)", info.name),
+                (false, Some(tag)) => format!("{}  ({tag})", info.name),
+                (false, None) => info.name.clone(),
+            },
             info.level_name.clone(),
             format!("{} {}", mode_label(&info.mode), info.size),
             format!("{}/{}{}", info.players, info.max_players, if info.bots > 0 { format!(" +{}", info.bots) } else { String::new() }),

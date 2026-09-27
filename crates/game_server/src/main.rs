@@ -5,6 +5,8 @@
 //! server --level strike_at_karkand --bots 16
 //! server --config server.ron                    # name, map rotation, admin, ... (see server_config)
 //! server rcon --password secret info players    # a running server's remote console
+//! server --content all                          # joining clients download everything
+//! server export-content --out www/content       # files for a --download-url host
 //! ```
 
 use std::{path::PathBuf, time::Duration};
@@ -18,7 +20,7 @@ use bevy::{
 use bevy_replicon_renet::RepliconRenetPlugins;
 use clap::{Parser, Subcommand};
 use game_server::{GameServerPlugin, admin::rcon, server_config::ServerConfig};
-use game_shared::{SharedPlugin, TICK_HZ, config::GamePaths};
+use game_shared::{SharedPlugin, TICK_HZ, config::GamePaths, content::ContentMode};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Dedicated server", args_conflicts_with_subcommands = true)]
@@ -75,6 +77,17 @@ struct Cli {
     /// Announce the server to this master server (`host[:port]`).
     #[arg(long)]
     master: Option<String>,
+    /// What joining clients may download from this server: `off`, `mods` (default: content
+    /// made for this engine) or `all` (also the imported BF2 assets: EA's copyrighted
+    /// content, only if you may share it). See docs/MODDING.md.
+    #[arg(long)]
+    content: Option<ContentMode>,
+    /// Clients download content from here first (`<url>/<hash>`, see `export-content`).
+    #[arg(long)]
+    download_url: Option<String>,
+    /// TCP port of the content endpoint (default: the game port).
+    #[arg(long)]
+    content_port: Option<u16>,
     /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
@@ -88,6 +101,10 @@ struct Cli {
     /// Seconds between soak reports.
     #[arg(long, default_value_t = 30.0)]
     soak_every: f32,
+    /// Soak test: play the next map of the rotation after this many minutes on one (without
+    /// a rotation: restart the map).
+    #[arg(long)]
+    soak_rotate: Option<f32>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -104,10 +121,37 @@ enum Command {
         /// Commands, one per argument: `server rcon --password pw info "kick 3 spam"`.
         commands: Vec<String>,
     },
+    /// Writes the files the server shares to a folder, named by hash, with `manifest.ron`:
+    /// upload it to a static web host or CDN and give its URL as `--download-url`.
+    ExportContent {
+        /// Output folder.
+        #[arg(long)]
+        out: PathBuf,
+        /// `mods` (default) or `all`.
+        #[arg(long, default_value = "mods")]
+        content: ContentMode,
+        #[arg(long)]
+        imported: Option<PathBuf>,
+        #[arg(long)]
+        mods: Option<PathBuf>,
+    },
 }
 
 fn main() -> AppExit {
     let cli = Cli::parse();
+    if let Some(Command::ExportContent { out, content, imported, mods }) = &cli.command {
+        let paths = GamePaths::resolve_with_mods(imported.clone(), mods.clone());
+        return match game_server::content::export(&paths, *content, out) {
+            Ok((files, bytes)) => {
+                println!("{files} files ({}) written to {}", game_shared::content::format_bytes(bytes), out.display());
+                AppExit::Success
+            }
+            Err(err) => {
+                eprintln!("export-content: {err:#}");
+                AppExit::error()
+            }
+        };
+    }
     if let Some(Command::Rcon {
         host,
         port,
@@ -173,6 +217,15 @@ fn main() -> AppExit {
     if let Some(master) = cli.master {
         settings.master_server = Some(master);
     }
+    if let Some(mode) = cli.content {
+        settings.content.mode = mode;
+    }
+    if let Some(url) = cli.download_url {
+        settings.content.download_url = Some(url);
+    }
+    if let Some(port) = cli.content_port {
+        settings.content.port = Some(port);
+    }
     settings.public |= cli.public;
     settings.friendly_fire |= cli.friendly_fire;
 
@@ -203,6 +256,7 @@ fn main() -> AppExit {
         app.add_plugins(game_server::soak::SoakPlugin {
             duration: (minutes > 0.0).then(|| Duration::from_secs_f32(minutes * 60.0)),
             every: cli.soak_every,
+            rotate_every: cli.soak_rotate.filter(|m| *m > 0.0).map(|m| Duration::from_secs_f32(m * 60.0)),
         });
     }
     app.run()

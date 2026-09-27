@@ -28,9 +28,15 @@ pub struct RotationPlugin;
 
 impl Plugin for RotationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<MapRotation>().add_observer(apply_ticket_ratio);
+        app.init_resource::<MapRotation>()
+            .add_observer(apply_ticket_ratio)
+            .add_systems(First, apply_map_change);
     }
 }
+
+/// A map change asked for this frame (see [`change_map`]).
+#[derive(Resource)]
+struct PendingMapChange(MapEntry);
 
 /// One map of the rotation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -131,11 +137,27 @@ pub fn current_map(world: &World) -> MapEntry {
     }
 }
 
-/// Switches to `map` right away, with everyone connected staying on. Everything of the old
-/// map goes (soldiers, vehicles, flags, projectiles, bots, the match and its level); human
-/// players keep their teams and start the new map with fresh scores. Spawning the new
-/// match loads the level, and clients do the same when it replicates to them.
+/// Switches to `map` at the start of the next frame, with everyone connected staying on.
+/// Everything of the old map goes (soldiers, vehicles, flags, projectiles, bots, the match
+/// and its level); human players keep their teams and start the new map with fresh scores.
+/// Spawning the new match loads the level, and clients do the same when it replicates.
+///
+/// Not right away: callers run in the middle of a schedule (the round end in `FixedUpdate`,
+/// the remote console in `Update`), where a system set may already have found the level
+/// with `resource_exists::<LoadedLevel>`; its remaining systems would then run without it
+/// and their `Res<LoadedLevel>` panics.
 pub fn change_map(world: &mut World, map: &MapEntry) {
+    world.insert_resource(PendingMapChange(map.clone()));
+}
+
+/// Makes the map change asked for last frame, before any system looks at the level.
+fn apply_map_change(world: &mut World) {
+    if let Some(PendingMapChange(map)) = world.remove_resource::<PendingMapChange>() {
+        switch_map(world, &map);
+    }
+}
+
+fn switch_map(world: &mut World, map: &MapEntry) {
     let name = level_display_name(world.resource::<GamePaths>(), &map.level);
     info!("changing map to {} ({} {})", map.level, map.mode, map.size);
     world.write_message(ToClients {
@@ -206,6 +228,8 @@ pub fn change_map(world: &mut World, map: &MapEntry) {
 /// Drops what the server keeps about the loaded level: the level itself, navigation, the
 /// armory and the bots' plans (which refer to its areas).
 pub fn forget_level(world: &mut World) {
+    // A map change still to come is void too (a stopped server must not start one).
+    world.remove_resource::<PendingMapChange>();
     world.remove_resource::<LoadedLevel>();
     world.remove_resource::<nav::Navigation>();
     world.insert_resource(Armory::default());

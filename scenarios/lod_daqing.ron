@@ -1,0 +1,30 @@
+// Static mesh LODs and draw distances on a big map with many statics (Daqing Oilfields,
+// 2 km across, 2700 statics): a village from street level (LOD 0 and the first switches),
+// from 30 m up, from 190 m up and from 400 m up. Measures each view.
+// client --scenario scenarios/lod_daqing.ron --out target/scenarios/lod/daqing_on
+// BF2_STATIC_LODS=off client --scenario scenarios/lod_daqing.ron --out target/scenarios/lod/daqing_off
+(
+    level: "daqing_oilfields",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((300.0, 139.7, 620.0), 0.0, -2.0),
+        Wait(2.0),
+        Screenshot("street"),
+        Measure("street", 5.0),
+        Camera((300.0, 168.0, 640.0), 0.0, -8.0),
+        Wait(2.0),
+        Screenshot("low"),
+        Measure("low", 5.0),
+        Camera((300.0, 330.0, 800.0), 0.0, -20.0),
+        Wait(3.0),
+        Screenshot("high"),
+        Measure("high", 5.0),
+        Camera((300.0, 540.0, 900.0), 0.0, -30.0),
+        Wait(3.0),
+        Screenshot("air_400"),
+        Measure("air 400", 5.0),
+        Quit,
+    ],
+)

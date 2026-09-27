@@ -7,11 +7,15 @@
 //! use the defaults and save nothing unless `--settings` is given, so their screenshots and
 //! `Key` steps don't depend on anyone's preferences. Missing fields take their defaults.
 //! `--no-shadows` and `--no-ssao` override the graphics settings without changing them.
+//! Scenarios change settings for their run with `Setting(key, value)` ([`Settings::set`]).
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use bevy::{
     audio::{GlobalVolume, Volume},
+    core_pipeline::tonemapping::Tonemapping,
+    post_process::bloom::Bloom,
+    camera::Hdr,
     ecs::system::SystemParam,
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
@@ -26,6 +30,7 @@ use crate::{
     Cli,
     audio::AudioMix,
     camera::PlayerCamera,
+    content::ContentDownloads,
     local_input::{BASE_SENSITIVITY, LookState},
     render::environment::Sun,
 };
@@ -43,6 +48,7 @@ impl Plugin for SettingsPlugin {
                     .run_if(resource_changed::<Settings>)
                     .before(bevy::camera::CameraUpdateSystems),
                 apply_graphics,
+                apply_post_processing,
                 save_settings,
             ),
         );
@@ -83,7 +89,7 @@ impl SettingsFile {
     }
 }
 
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     let env = |name| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())
@@ -119,6 +125,16 @@ pub struct Settings {
     pub vsync: bool,
     pub shadows: bool,
     pub ambient_occlusion: bool,
+    /// Directional sky light (brighter from above than from below) instead of one uniform
+    /// ambient colour.
+    pub sky_light: bool,
+    /// Ambient occlusion baked into the levels (BF2's lightmaps: how much sky the ground and
+    /// buildings see) and measured for soldiers and vehicles: darker interiors and alleys.
+    pub baked_ao: bool,
+    /// Glow around bright light (renders in HDR).
+    pub bloom: bool,
+    /// How the rendered light is mapped to screen colours.
+    pub tone_mapping: ToneMapping,
     /// How far the world fades into the fog.
     pub view_distance: ViewDistance,
     pub bindings: BTreeMap<Action, Binding>,
@@ -130,6 +146,11 @@ pub struct Settings {
     pub recent_servers: Vec<SavedServer>,
     /// Master server the browser asks for servers (`host[:port]`); none by default.
     pub master_server: Option<String>,
+    /// Whether to download a server's content (its mods, and its BF2 assets if it shares
+    /// them) when joining: ask, always or never (see `content`).
+    pub content_downloads: ContentDownloads,
+    /// Size limit of the content cache in GB; the files used longest ago go first.
+    pub content_cache_gb: u32,
 }
 
 impl Default for Settings {
@@ -147,6 +168,10 @@ impl Default for Settings {
             vsync: false,
             shadows: true,
             ambient_occlusion: true,
+            sky_light: true,
+            baked_ao: true,
+            bloom: false,
+            tone_mapping: ToneMapping::default(),
             view_distance: ViewDistance::default(),
             bindings: Action::ALL
                 .iter()
@@ -156,6 +181,8 @@ impl Default for Settings {
             favourite_servers: Vec::new(),
             recent_servers: Vec::new(),
             master_server: None,
+            content_downloads: ContentDownloads::default(),
+            content_cache_gb: 10,
         }
     }
 }
@@ -196,6 +223,28 @@ impl Settings {
     /// Ambient occlusion, unless `--no-ssao`.
     pub fn ssao_on(&self, cli: &Cli) -> bool {
         self.ambient_occlusion && !cli.no_ssao
+    }
+
+    /// Sets a graphics setting by name (for scenarios): `shadows`, `ssao`, `sky_light`,
+    /// `baked_ao`, `bloom` (`on`/`off`) or `tone_mapping` (see [`ToneMapping::parse`]).
+    pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let on = || match value.to_ascii_lowercase().as_str() {
+            "on" | "true" | "1" | "yes" => Ok(true),
+            "off" | "false" | "0" | "no" => Ok(false),
+            _ => Err(format!("setting {key}: expected on or off, got {value}")),
+        };
+        match key {
+            "shadows" => self.shadows = on()?,
+            "ssao" | "ambient_occlusion" => self.ambient_occlusion = on()?,
+            "sky_light" => self.sky_light = on()?,
+            "baked_ao" => self.baked_ao = on()?,
+            "bloom" => self.bloom = on()?,
+            "tone_mapping" => {
+                self.tone_mapping = ToneMapping::parse(value).ok_or_else(|| format!("unknown tone mapping {value}"))?
+            }
+            _ => return Err(format!("unknown setting {key}")),
+        }
+        Ok(())
     }
 
     /// The primary window as configured.
@@ -247,6 +296,100 @@ impl DisplayMode {
             DisplayMode::Windowed => WindowMode::Windowed,
             DisplayMode::Borderless => WindowMode::BorderlessFullscreen(monitor),
             DisplayMode::Fullscreen => WindowMode::Fullscreen(monitor, VideoModeSelection::Current),
+        }
+    }
+}
+
+/// How rendered light (which can be brighter than white) becomes screen colours.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ToneMapping {
+    /// Bevy's default: rolls off highlights softly and desaturates very bright colours.
+    #[default]
+    TonyMcMapface,
+    /// Film-like: lower contrast, strong desaturation of highlights.
+    AgX,
+    /// Closest to BF2, which clamped: colours stay as lit up to the highlights, which are
+    /// compressed without hue shifts (Khronos PBR Neutral).
+    Neutral,
+}
+
+impl ToneMapping {
+    pub const ALL: [ToneMapping; 3] = [ToneMapping::TonyMcMapface, ToneMapping::AgX, ToneMapping::Neutral];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToneMapping::TonyMcMapface => "Tony McMapface",
+            ToneMapping::AgX => "AgX",
+            ToneMapping::Neutral => "Neutral",
+        }
+    }
+
+    /// `tony`/`tonymcmapface`, `agx` or `neutral`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().replace(['_', '-', ' '], "").as_str() {
+            "tony" | "tonymcmapface" => Some(ToneMapping::TonyMcMapface),
+            "agx" => Some(ToneMapping::AgX),
+            "neutral" | "pbrneutral" | "khronospbrneutral" => Some(ToneMapping::Neutral),
+            _ => None,
+        }
+    }
+
+    pub fn tonemapping(self) -> Tonemapping {
+        match self {
+            ToneMapping::TonyMcMapface => Tonemapping::TonyMcMapface,
+            ToneMapping::AgX => Tonemapping::AgX,
+            ToneMapping::Neutral => Tonemapping::KhronosPbrNeutral,
+        }
+    }
+}
+
+/// Subtle bloom: bright light (sunlit glass, fire, muzzle flashes, lamps at night) glows a
+/// little, the rest of the image is untouched.
+fn bloom() -> Bloom {
+    Bloom {
+        intensity: 0.08,
+        ..Bloom::NATURAL
+    }
+}
+
+/// Tone mapping and bloom on the 3D cameras. The player's camera and the view model's draw
+/// into one image: without bloom each tone maps its own pixels (in the shader); with bloom
+/// both render in HDR and only the last one (the view model's) blooms and tone maps the
+/// whole image.
+#[allow(clippy::type_complexity)]
+fn apply_post_processing(
+    mut commands: Commands,
+    settings: Res<Settings>,
+    cameras: Query<(Entity, &Camera, Option<&Tonemapping>, Has<Bloom>), With<Camera3d>>,
+    added: Query<(), Added<Camera3d>>,
+) {
+    if !settings.is_changed() && added.is_empty() {
+        return;
+    }
+    let last = cameras.iter().max_by_key(|(_, camera, ..)| camera.order).map(|(e, ..)| e);
+    let wanted = settings.tone_mapping.tonemapping();
+    for (entity, _, tonemapping, has_bloom) in &cameras {
+        let mut camera = commands.entity(entity);
+        if settings.bloom {
+            let is_last = Some(entity) == last;
+            let tonemapping_here = if is_last { wanted } else { Tonemapping::None };
+            if tonemapping != Some(&tonemapping_here) {
+                camera.insert(tonemapping_here);
+            }
+            match (is_last, has_bloom) {
+                (true, false) => {
+                    camera.insert((Hdr, bloom()));
+                }
+                (false, _) => {
+                    camera.remove::<Bloom>().insert(Hdr);
+                }
+                _ => {}
+            }
+        } else {
+            if tonemapping != Some(&wanted) {
+                camera.insert(wanted);
+            }
+            camera.remove::<(Bloom, Hdr)>();
         }
     }
 }

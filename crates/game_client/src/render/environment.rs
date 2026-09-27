@@ -31,12 +31,16 @@
 //!
 //! Levels without [`game_data::WorldLighting`] (made without BF2's `sky.con`) are lit from
 //! the dynamic `ambient_color` and `sun_color` alone. `BF2_LIGHT=ambient=9,sun=1.2,...`
-//! overrides the constants for tuning (keys: ambient, sun, adapt, contrast, moon, tint).
+//! overrides the constants for tuning (keys: ambient, sun, adapt, night_adapt, contrast,
+//! class, class_sun, moon, terrain_moon, tint, sky_up, horizon, bounce).
 
 use bevy::{
     asset::{LoadState, embedded_asset},
     gltf::{GltfAssetLabel, GltfMesh},
-    light::{CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver},
+    light::{
+        AmbientLight, CascadeShadowConfig, CascadeShadowConfigBuilder, EnvironmentMapLight, NotShadowCaster,
+        NotShadowReceiver,
+    },
     mesh::MeshVertexBufferLayoutRef,
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
@@ -45,6 +49,7 @@ use bevy::{
 };
 use game_shared::level::LoadedLevel;
 
+use super::sky_light::SkyGradient;
 use crate::camera::PlayerCamera;
 
 pub struct EnvironmentPlugin;
@@ -59,6 +64,7 @@ impl Plugin for EnvironmentPlugin {
                 (
                     apply_environment.run_if(resource_exists_and_changed::<LoadedLevel>),
                     spawn_sky_mesh,
+                    attach_sky_light.after(apply_environment),
                 ),
             )
             .add_systems(
@@ -89,10 +95,36 @@ pub const ADAPTATION: f32 = 0.25;
 /// levels have Karkand's; 1: BF2's), in log space: BF2's range, from overcast levels with a
 /// faint sun to harsh ones with dark shade, is too wide without its clamping.
 pub const CONTRAST: f32 = 0.5;
+/// How much of BF2's difference between the terrain's (or trees') light and the statics'
+/// is kept beyond what the albedos explain (0: none; 1: all), in log space, for the sky
+/// light and for the sun. BF2 clamped the terrain's bright sun and GI colours, which here
+/// would wash the ground out (sunlit ground on Dalian Plant, Gulf of Oman, Midnight Sun).
+pub const CLASS_CONTRAST: f32 = 0.5;
+pub const CLASS_SUN_CONTRAST: f32 = 0.25;
+/// Highest terrain lightmap sun scale used (Midnight Sun's lightmaps are 1.7 times N.L).
+const MAX_TERRAIN_SUN_SCALE: f32 = 1.2;
 /// Moonlight on night levels, relative to the ambient's brightness.
 pub const MOON: f32 = 0.6;
+/// Share of the moonlight the terrain gets (BF2 gave it none; its sky light already
+/// matches the statics').
+pub const TERRAIN_MOON: f32 = 0.35;
+/// [`ADAPTATION`] on night levels: they are meant to be darker.
+pub const NIGHT_ADAPTATION: f32 = 0.1;
 /// Strength of the levels' light tints (1: BF2's; 0: grey light).
 pub const TINT: f32 = 1.0;
+/// Sky light on surfaces facing straight up, relative to the uniform ambient it replaces;
+/// walls and undersides get less (see [`LevelLight::sky_gradient`]).
+pub const SKY_UP: f32 = 1.1;
+/// Brightness of the haze at the horizon relative to the zenith.
+pub const HORIZON: f32 = 1.3;
+/// How much the haze takes the fog's hue (0: the ambient's).
+const HORIZON_FOG_TINT: f32 = 0.35;
+/// Share of the light on the ground that it throws back up (times its albedo).
+pub const BOUNCE: f32 = 1.0;
+/// The ground below the horizon is at most this bright relative to the sky light from above.
+const GROUND_MAX: f32 = 0.5;
+/// Ground albedo where the level doesn't give one.
+const DEFAULT_GROUND_ALBEDO: f32 = 0.15;
 
 /// Sky light on open static surfaces: BF2's sky normal (0.65) x open sky visibility (0.85).
 const OPEN_SKY_STATIC: f32 = 0.65 * 0.85;
@@ -150,9 +182,16 @@ struct Knobs {
     ambient: f32,
     sun: f32,
     adapt: f32,
+    night_adapt: f32,
     contrast: f32,
+    class: f32,
+    class_sun: f32,
     moon: f32,
+    terrain_moon: f32,
     tint: f32,
+    sky_up: f32,
+    horizon: f32,
+    bounce: f32,
 }
 
 impl Knobs {
@@ -163,9 +202,16 @@ impl Knobs {
                 ambient: AMBIENT_EXPOSURE,
                 sun: SUN_EXPOSURE,
                 adapt: ADAPTATION,
+                night_adapt: NIGHT_ADAPTATION,
                 contrast: CONTRAST,
+                class: CLASS_CONTRAST,
+                class_sun: CLASS_SUN_CONTRAST,
                 moon: MOON,
+                terrain_moon: TERRAIN_MOON,
                 tint: TINT,
+                sky_up: SKY_UP,
+                horizon: HORIZON,
+                bounce: BOUNCE,
             };
             for pair in std::env::var("BF2_LIGHT").unwrap_or_default().split(',') {
                 let Some((key, value)) = pair.split_once('=') else { continue };
@@ -174,9 +220,16 @@ impl Knobs {
                     "ambient" => knobs.ambient = value,
                     "sun" => knobs.sun = value,
                     "adapt" => knobs.adapt = value,
+                    "night_adapt" => knobs.night_adapt = value,
                     "contrast" => knobs.contrast = value,
+                    "class" => knobs.class = value,
+                    "class_sun" => knobs.class_sun = value,
+                    "terrain_moon" => knobs.terrain_moon = value,
                     "moon" => knobs.moon = value,
                     "tint" => knobs.tint = value,
+                    "sky_up" => knobs.sky_up = value,
+                    "horizon" => knobs.horizon = value,
+                    "bounce" => knobs.bounce = value,
                     other => warn!("BF2_LIGHT: unknown key {other}"),
                 }
             }
@@ -213,19 +266,27 @@ impl LevelLight {
             let tint = to_linear(v(moon), k.tint);
             let tint = tint / tint.dot(LUMA).max(1e-9);
             let moon = tint * k.moon * ambient_static.dot(LUMA) * k.ambient / k.sun;
-            // The same light on the terrain's albedo, which lacks the statics' x 2.
-            (moon, moon * 2f32.powf(2.2))
+            // On the terrain's albedo, which lacks the statics' x 2.
+            (moon, moon * 2f32.powf(2.2) * k.terrain_moon)
         } else {
             // Overcast levels may have (almost) no sun on statics but some on the terrain.
-            let terrain = v(l.terrain_sun) * 2.0 * l.terrain_sun_scale;
+            let terrain = v(l.terrain_sun) * 2.0 * l.terrain_sun_scale.min(MAX_TERRAIN_SUN_SCALE);
             let floor = terrain.normalize_or(Vec3::ONE) * 0.03;
             let statics = if dim(l.static_sun) { v(l.static_sun).max(floor) } else { v(l.static_sun) };
             (to_linear(statics, k.tint), to_linear(terrain, k.tint))
         };
         let ratio = |a: Vec3, b: Vec3| (a + Vec3::splat(1e-7)) / (b + Vec3::splat(1e-7));
+        // The terrain's albedo lacks the statics' x 2 (2^2.2 in linear light); only BF2's
+        // difference beyond that is compressed.
+        let albedo = 2f32.powf(2.2);
+        let compress = |r: Vec3, base: f32, amount: f32| base * (r / base).powf(amount);
         let terrain = LightScale {
-            sun: ratio(sun_terrain, sun_static),
-            ambient: ratio(ambient_terrain, ambient_static),
+            sun: if night {
+                ratio(sun_terrain, sun_static)
+            } else {
+                compress(ratio(sun_terrain, sun_static), albedo, k.class_sun)
+            },
+            ambient: compress(ratio(ambient_terrain, ambient_static), albedo, k.class),
         };
         // BF2's leaf shader: `texture x 2 x (tree_sun x N.L + tree_ambient / 2)`. Its moonlight
         // is the statics' here. Some levels set odd tree colours (Leviathan: black ambient).
@@ -234,9 +295,10 @@ impl LevelLight {
             sun: if night {
                 Vec3::ONE
             } else {
-                ratio(to_linear(v(l.tree_sun), k.tint), sun_static).clamp(low, high)
+                compress(ratio(to_linear(v(l.tree_sun), k.tint), sun_static), 1.0, k.class_sun).clamp(low, high)
             },
-            ambient: ratio(to_linear(0.5 * v(l.tree_ambient), k.tint), ambient_static).clamp(low, high),
+            ambient: compress(ratio(to_linear(0.5 * v(l.tree_ambient), k.tint), ambient_static), 1.0, k.class)
+                .clamp(low, high),
         };
 
         let (reference_ambient, reference_sun) = (
@@ -255,7 +317,7 @@ impl LevelLight {
         }
         let level = |ambient: f32, sun: f32| ambient + 0.5 * sun;
         let exposure = (level(reference_ambient, reference_sun) / level(ambient.dot(LUMA), sun.dot(LUMA)).max(1e-6))
-            .powf(k.adapt);
+            .powf(if night { k.night_adapt } else { k.adapt });
         Self {
             ambient: ambient * exposure,
             sun: sun * exposure,
@@ -281,6 +343,39 @@ impl LevelLight {
         }
     }
 
+    /// The ambient light as the sky and ground around a surface (for an environment map):
+    /// the sky tinted like the ambient, hazier towards the fog colour at the horizon, gives
+    /// surfaces facing up [`SKY_UP`] times the ambient; the ground reflects the sun and sky
+    /// light the terrain gets (times its albedo), so walls get less and undersides least.
+    pub fn sky_gradient(&self, env: &game_data::EnvironmentDesc) -> SkyGradient {
+        let k = Knobs::get();
+        let lum = |c: Vec3| c.dot(LUMA).max(1e-9);
+        let chroma = |c: Vec3| c / lum(c);
+        let up = self.ambient * k.sky_up;
+        // The fog's hue, limited: night fog colours are nearly pure blue.
+        let fog = chroma(Vec3::from_array(env.fog_color).max(Vec3::splat(1e-3)).powf(2.2));
+        let fog = chroma(fog.clamp(Vec3::splat(0.5), Vec3::splat(1.8)));
+        let mut sky = SkyGradient {
+            zenith: chroma(self.ambient),
+            horizon: chroma(self.ambient).lerp(fog, HORIZON_FOG_TINT) * k.horizon,
+            ground: Vec3::ZERO,
+        };
+        // Surfaces facing up don't see the ground: scale the sky to give them `up`.
+        let scale = lum(up) / lum(sky.irradiance(1.0));
+        sky.zenith *= scale;
+        sky.horizon *= scale;
+        let albedo = env.ground_albedo.map_or(Vec3::splat(DEFAULT_GROUND_ALBEDO), Vec3::from_array);
+        let height = (-Vec3::from_array(env.sun_direction).normalize_or(Vec3::NEG_Y).y).max(0.0);
+        let lit = up * self.terrain.ambient + self.sun * height * self.terrain.sun;
+        let mut ground = albedo * lit * k.bounce;
+        let max = GROUND_MAX * lum(up);
+        if lum(ground) > max {
+            ground *= max / lum(ground);
+        }
+        sky.ground = ground;
+        sky
+    }
+
     /// The sun as a directional light: colour and illuminance (lux).
     fn sun_light(&self) -> (Color, f32) {
         let max = self.sun.max_element().max(1e-9);
@@ -295,6 +390,50 @@ impl LevelLight {
 /// The level's sun (lights the world layer only).
 #[derive(Component)]
 pub struct Sun;
+
+/// The level's sky light: environment maps made from [`LevelLight::sky_gradient`], lighting
+/// every 3D camera's view instead of the uniform [`GlobalAmbientLight`] (unless the
+/// `sky_light` setting is off).
+#[derive(Resource, Clone)]
+pub struct SkyLight {
+    pub diffuse: Handle<Image>,
+    pub specular: Handle<Image>,
+}
+
+/// Puts the level's [`SkyLight`] on the 3D cameras (the player's and the view model's), or
+/// takes it off when the setting is off.
+fn attach_sky_light(
+    mut commands: Commands,
+    sky: Option<Res<SkyLight>>,
+    settings: Res<crate::settings::Settings>,
+    cameras: Query<(Entity, Option<&EnvironmentMapLight>), With<Camera3d>>,
+) {
+    let wanted = sky.as_deref().filter(|_| settings.sky_light);
+    for (camera, current) in &cameras {
+        match (wanted, current) {
+            (Some(sky), current) if current.is_none_or(|c| c.diffuse_map != sky.diffuse) => {
+                commands.entity(camera).insert((
+                    EnvironmentMapLight {
+                        diffuse_map: sky.diffuse.clone(),
+                        specular_map: sky.specular.clone(),
+                        intensity: LIGHT_UNIT,
+                        ..default()
+                    },
+                    // The environment map replaces the uniform ambient.
+                    AmbientLight {
+                        color: Color::BLACK,
+                        brightness: 0.0,
+                        affects_lightmapped_meshes: true,
+                    },
+                ));
+            }
+            (None, Some(_)) => {
+                commands.entity(camera).remove::<(EnvironmentMapLight, AmbientLight)>();
+            }
+            _ => {}
+        }
+    }
+}
 
 /// The sky dome; it moves with the camera so it always surrounds it.
 #[derive(Component)]
@@ -314,6 +453,7 @@ fn apply_environment(
     mut cameras: Query<&mut DistanceFog, With<PlayerCamera>>,
     asset_server: Res<AssetServer>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     cli: Res<crate::Cli>,
 ) {
     let env = &level.desc.environment;
@@ -346,6 +486,17 @@ fn apply_environment(
         Transform::default().looking_to(direction, Vec3::Y),
         shadow_cascades(0.0),
     ));
+
+    let gradient = light.sky_gradient(env);
+    info!(
+        "sky light: zenith {:.3?}, horizon {:.3?}, ground {:.3?}",
+        gradient.zenith, gradient.horizon, gradient.ground
+    );
+    let (diffuse, specular) = super::sky_light::cube_maps(&gradient);
+    commands.insert_resource(SkyLight {
+        diffuse: images.add(diffuse),
+        specular: images.add(specular),
+    });
 
     clear.0 = rgb(env.sky_color);
     *ambient = GlobalAmbientLight {

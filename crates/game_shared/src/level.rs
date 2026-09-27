@@ -114,7 +114,16 @@ impl Heightmap {
         let path = dir.join(&desc.heightmap);
         let bytes = std::fs::read(&path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let expected = (desc.resolution * desc.resolution * 2) as usize;
+        // Checked, not trusted: the level may come from a server (see `content`).
+        anyhow::ensure!(
+            (2..=16385).contains(&desc.resolution) && desc.spacing.is_finite() && desc.spacing > 0.0 && desc.height_scale.is_finite(),
+            "{}: implausible terrain (resolution {}, spacing {}, height scale {})",
+            path.display(),
+            desc.resolution,
+            desc.spacing,
+            desc.height_scale
+        );
+        let expected = desc.resolution as usize * desc.resolution as usize * 2;
         anyhow::ensure!(
             bytes.len() == expected,
             "{} is {} bytes, expected {expected} for a {}x{} heightmap",

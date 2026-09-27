@@ -32,8 +32,10 @@ Every subfolder of the mods folder that has a `mod.ron` is a mod. A mod with
 `priority` wins; on a tie, the folder that sorts first wins. The client and the server log
 the mods they use at startup.
 
-The server and every client need the same mods. The game doesn't check this yet, so a
-client without a server's mod sees the wrong models, or none, and predicts weapons wrongly.
+The server and every client need the same mods. By default a server shares its mods, and
+joining clients download them (see [Sharing content from a server](#sharing-content-from-a-server)),
+so players don't install anything. A server that shares nothing needs clients with the same
+mods; one without them sees the wrong models, or none, and predicts weapons wrongly.
 
 ### How files are found
 
@@ -134,6 +136,14 @@ are written as maps because their placement is flattened into them:
 `armor` makes an object destroyable (`hit_points`, damage `material`, optional explosion). Its
 parts' `wreck_mesh` and `wreck_collision` replace the intact ones when it is destroyed.
 
+Levels of detail are optional. A part's `lods` lists lower-detail meshes, most detailed
+first, each with the camera distance in meters from which it replaces the one before
+(`"lods": [(mesh: "objects/sample/meshes/crate_lod1.glb", distance: 50.0)]`, the same
+`mesh_index` in each file; `wreck_lods` does the same for `wreck_mesh`). The object's
+`draw_distance` (meters) is how far away it is drawn at all. Leave it out for objects that
+should reach the fog. The client cross-fades around each distance. The view distance setting
+scales `draw_distance`, and zooming in scales both (BF2's rule).
+
 ## glTF conventions (Blender)
 
 Engine space is **meters, right-handed, +Y up, −Z forward (north), +X east**, the same as
@@ -218,6 +228,77 @@ A vehicle is `vehicles/<name>.ron` (`game_data::VehicleDesc`, `crates/game_data/
 
 A level places vehicles with `vehicle_spawners` in its layouts. The spawner's `templates`
 name one vehicle per team.
+
+## Sharing content from a server
+
+A server can hand its content to the clients that join it: its mods by default, and, if its
+admin says so, the imported BF2 assets too. Players then join a modded server without
+installing the mod, and a player without Battlefield 2 can join a server that shares
+everything. Only data is shared (RON, glTF, textures, sounds, heightmaps: the file types the
+game reads), never code, and every file is checked against its hash before it is used.
+
+### For server admins
+
+| setting | config file (`server --config`) | command line | default |
+|---|---|---|---|
+| what is shared | `content: Off` / `Mods` / `All` | `--content off\|mods\|all` | `Mods` |
+| download host | `download_url: "https://..."` | `--download-url <url>` | none |
+| endpoint port (TCP) | `content_port: 16567` | `--content-port <port>` | the game port |
+
+- **`Mods`** shares every enabled mod (`mods/<name>/`). **`All`** also shares the imported
+  BF2 assets. **`Off`** shares nothing; clients then need the server's mods themselves.
+- **Licensing.** Mods authored for this engine are yours to share, as long as they don't
+  contain files copied from `imported/` (see [Replacing, patching and deriving](#replacing-patching-and-deriving)).
+  The imported assets are EA's copyrighted content, converted from your own copy of
+  Battlefield 2. `All` redistributes them to everyone who joins, so it is a separate choice
+  that is never on by default: only turn it on if you may share them (for example on a
+  private LAN where every player owns the game).
+- The endpoint is a small HTTP server on **TCP** at the game's port number (the game itself
+  uses UDP). It listens where the game does: this machine only, unless the server is
+  `--public`. For players on other machines, open TCP as well as UDP for the port.
+  Browsers (LAN and master server) show what a server shares and roughly how much a client
+  downloads, e.g. `shares mods, 9.1 MB`.
+- Clients get the files of the maps the server plays: the current one and the rotation. The
+  server works out which files each level uses from the references in the data, so a
+  client that joins a BF2 map downloads that map and what it uses (about 0.5 GB with `All`),
+  not the whole import (about 4 GB). If an admin changes to a map outside the rotation,
+  clients briefly rejoin to fetch its files.
+- Files are hashed (BLAKE3) when the server starts. The hashes and the levels' files are
+  remembered (`content-index.txt`, `content-levels.txt` in the server's data folder,
+  `%APPDATA%\bf2-rust-engine\server` on Windows), so only the first start with `All` takes
+  a minute or two. Joining clients wait meanwhile ("preparing").
+- **Download host.** `server export-content --out <folder> [--content all]` writes the
+  shared files named by their hash, plus `manifest.ron`. Upload the folder to a static web
+  host or CDN and give its URL as `download_url`. Clients fetch `<url>/<hash>` from there
+  and fall back to the server. Export again when the content changes (unchanged files are
+  skipped).
+- Listen servers (Host in the menu) share their mods the same way.
+
+### For players
+
+- When you join, the game first asks the server what it shares, compares that with what
+  you have, and shows **Download N files, X MB?** with *Download*, *Always download* and
+  *Cancel*. The loading screen then shows the download's progress; Cancel (or Esc) stops
+  it, and a later join resumes where it stopped. Settings > Game > **Server content**:
+  *Ask* (default), *Always* or *Never* (join with your own content only).
+  `client --content always|ask|never` overrides it for one run; scenarios and screenshots
+  download without asking.
+- Files you already have count: a file in your own import or mods with the same hash isn't
+  downloaded. If you have Battlefield 2 imported yourself, a server that shares everything
+  only costs you its mods.
+- While you play on the server, its content is used wherever it differs from yours, and
+  your own mods are off for that session, so the server and every client simulate the same
+  data. Leaving the server switches back.
+- Downloads go to a cache shared by every server: `cache/` next to the settings file
+  (`%APPDATA%\bf2-rust-engine\cache` on Windows; `--content-cache <dir>` or
+  `$GAME_CONTENT_CACHE` put it elsewhere). It is limited to `content_cache_gb` (10 GB) in
+  the settings file: the files used longest ago are deleted first. Deleting the folder is
+  safe; files are downloaded again when needed.
+- Without Battlefield 2 (no `imported/` folder) the game still starts. The menu offers the
+  test range and Join: join a server that shares all its content to play its maps.
+- The game only accepts files the server's manifest lists, with the data file types it
+  reads, at checked relative paths, of the listed size and hash. Sounds must decode.
+  Nothing downloaded is ever run.
 
 ## Testing a mod
 
