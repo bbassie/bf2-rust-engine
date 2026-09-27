@@ -127,7 +127,8 @@ pub enum Step {
     VehicleLook(f32, f32),
     /// Logs our vehicle's position, speed and orientation, and adds it to the report.
     VehicleInfo(String),
-    /// Logs every moving or occupied vehicle (works connected to a remote server too).
+    /// Logs every moving or occupied vehicle (works connected to a remote server too); with a
+    /// label starting with "all", every vehicle.
     LogVehicles(String),
     /// Adds our vehicle's state (position, speed, altitude above ground, climb rate,
     /// attitude, engine) to the report every 0.25 s for this many seconds.
@@ -344,6 +345,8 @@ fn count_waiting_pipelines(cache: Res<PipelineCache>, waiting: Res<WaitingPipeli
 #[derive(Resource, Default)]
 struct Readiness {
     last_asset_event: f32,
+    /// The last event, logged when `WaitReady` times out.
+    last_asset: String,
     last_pipeline_wait: f32,
 }
 
@@ -351,9 +354,20 @@ fn note_asset_events<A: Asset>(
     mut events: MessageReader<AssetEvent<A>>,
     time: Res<Time<Real>>,
     mut readiness: ResMut<Readiness>,
+    server: Res<AssetServer>,
 ) {
-    if events.read().next().is_some() {
+    if let Some(event) = events.read().last() {
         readiness.last_asset_event = time.elapsed_secs();
+        if time.elapsed_secs() > 60.0 {
+            let path = match event {
+                AssetEvent::Added { id }
+                | AssetEvent::Modified { id }
+                | AssetEvent::LoadedWithDependencies { id }
+                | AssetEvent::Removed { id }
+                | AssetEvent::Unused { id } => server.get_path(*id),
+            };
+            readiness.last_asset = format!("{event:?} {path:?}");
+        }
     }
 }
 
@@ -566,7 +580,16 @@ fn run_scenario(
                     && now - readiness.last_asset_event > 1.0
                     && now - readiness.last_pipeline_wait > 0.5;
                 if ready || elapsed > 90.0 {
-                    let note = if ready { "" } else { " (timed out)" };
+                    let note = if ready {
+                        String::new()
+                    } else {
+                        format!(
+                            " (timed out; last asset event {:.1} s ago: {}, last pipeline wait {:.1} s ago)",
+                            now - readiness.last_asset_event,
+                            readiness.last_asset,
+                            now - readiness.last_pipeline_wait
+                        )
+                    };
                     info!("scenario: ready after {now:.1} s{note}");
                     Progress::Done
                 } else {
@@ -778,18 +801,20 @@ fn run_scenario(
             }
             Step::LogVehicles(label) => {
                 let mut lines = Vec::new();
+                let all = label.starts_with("all");
                 for (entity, vehicle, view) in &vehicles.all {
                     let riders = vehicles.riders.iter().filter(|s| s.vehicle == entity).count();
-                    if riders == 0 && view.speed.abs() < 0.5 {
+                    if riders == 0 && view.speed.abs() < 0.5 && !all {
                         continue;
                     }
                     let p = view.transform.translation;
                     lines.push(format!(
-                        "{} at ({:.1}, {:.1}, {:.1}) {:.1} km/h, {riders} aboard",
+                        "{} at ({:.1}, {:.1}, {:.1}) heading {:.0}, {:.1} km/h, {riders} aboard",
                         vehicle.template,
                         p.x,
                         p.y,
                         p.z,
+                        crate::vehicles::heading(view.transform.rotation).to_degrees(),
                         view.speed * 3.6
                     ));
                 }

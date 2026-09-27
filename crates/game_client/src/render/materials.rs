@@ -2,7 +2,7 @@
 //! shadows and fog.
 
 use bevy::{
-    asset::embedded_asset,
+    asset::{AssetPath, embedded_asset},
     ecs::system::SystemParam,
     gltf::{GltfMaterialExtras, GltfPrimitive},
     image::{ImageAddressMode, ImageLoaderSettings, ImageSamplerDescriptor},
@@ -273,6 +273,9 @@ impl MaterialExtension for Bf2Layers {
 #[derive(Resource, Default)]
 struct Bf2MaterialCache {
     materials: HashMap<AssetId<StandardMaterial>, Handle<Bf2Material>>,
+    /// The glTF `StandardMaterial`s asked for, held so they stay loaded: a dropped one
+    /// would be loaded again with its whole file each time it is asked for.
+    standard: HashMap<AssetPath<'static>, Handle<StandardMaterial>>,
     untextured: Option<Handle<Bf2Material>>,
     /// The level's environment cube map and the materials reflecting it.
     env_map: Option<Handle<Image>>,
@@ -307,9 +310,14 @@ impl Bf2Materials<'_> {
         };
         // Bevy's glTF loader stores a StandardMaterial next to every glTF material.
         let path = gltf_material.path()?;
+        let path = path.clone().with_label(format!("{}/std", path.label()?));
+        let asset_server = &self.asset_server;
         let standard = self
-            .asset_server
-            .load(path.clone().with_label(format!("{}/std", path.label()?)));
+            .cache
+            .standard
+            .entry(path)
+            .or_insert_with_key(|path| asset_server.load(path.clone()))
+            .clone();
         self.from_standard(&standard, primitive.material_extras.as_ref().map(|e| e.value.as_str()))
     }
 
@@ -377,6 +385,10 @@ const STATIC_GLOSS: f32 = 0.15;
 const GLASS_GLOSS: f32 = 0.5;
 /// Share of the light on a leaf that passes through to its other side.
 const LEAF_TRANSMISSION: f32 = 0.4;
+/// Cutoff of BF2's brightness alpha test (`_HASDOT3ALPHATEST_`: `dot(color, 1)` against the
+/// engine's small alpha reference): only black is cut out, as in the holes of track links;
+/// the dark rest of a texture such as the KORD's stays.
+const DOT3_ALPHA_REF: f32 = 20.0 / 255.0;
 
 /// Tree (and bush) materials: static meshes from BF2's `vegitation` folders.
 fn is_tree(bf2: &serde_json::Value, path: &str) -> bool {
@@ -497,6 +509,7 @@ fn describe(
             layers.flags |= Bf2Layers::GLOSS_FROM_BASE;
             if alpha_test {
                 layers.flags |= Bf2Layers::ALPHA_FROM_COLOR;
+                base.alpha_mode = AlphaMode::Mask(DOT3_ALPHA_REF);
             }
         }
         if technique.contains("animateduv") {
