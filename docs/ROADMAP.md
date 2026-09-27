@@ -128,7 +128,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 ## Later
 
 - [x] Special Forces night vision, gas masks and tear gas, flashbangs, blast tinnitus
-- Zipline, grappling hook (in progress)
+- [x] Zipline and grappling hook (Special Forces): BF2 rope lengths and lifetimes, climbing, sliding, over the network
 - [x] Co-op: bots fill both teams around the humans, who play one side
 - [x] Modding workflow: mods authored directly in glTF + RON (`mods/`, see docs/MODDING.md)
 - [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
