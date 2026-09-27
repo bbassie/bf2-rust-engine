@@ -111,7 +111,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Vehicle HUD in our own style: seats and occupants, hit points, speed and gear, turret
   direction, guns and countermeasures; flight instruments for pilots (horizon and pitch
   ladder, heading, airspeed, throttle, altitude, climb rate, stall and pull-up warnings)
-- Artillery and commander assets as vehicles
+- [x] Artillery and commander assets as vehicles: the artillery pieces turn onto the target and fire
+  their bursts as shells arcing to it (a strike needs a living piece, more pieces fire more shells, wrecks
+  stay until repaired), the UAV circles the target and can be shot down, satellite scans show the enemy on
+  the commander's map for him to spot, supply drops repair vehicles too
 - [x] F-35B vertical take-off and hover (BF2's lift fan engine); parachutes when bailing out of
   aircraft (BF2's canopy)
 - [x] Helicopter landing: the collective slows the descent near the ground, landed
@@ -155,7 +158,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   optional bloom
 - [x] Static mesh LODs with BF2's switch distances (`setSubGeometryLodDistance`) and draw distances
   (cull radius), dithered cross-fades, zoom-aware like BF2
-- Vehicle and soldier LODs
+- [x] Vehicle and soldier LODs: BF2's lower LODs rigged like the full models, switched at BF2's distances
+  (plus half the model's box, as the engine does) with dithered cross-fades, BF2's cull rule for player
+  control objects and their small parts (carried weapons, pintle guns), zoom-aware; unseen soldiers aren't
+  posed
 - [x] Effects: BF2's particle effects for muzzle flashes, impacts per surface, explosions with
   their material-manager dust columns, smoke, destruction, scorch decals
 - [x] Audio: BF2's sounds with its distance model, weapons (near/far, cracks), footsteps per

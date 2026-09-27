@@ -16,7 +16,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bevy::{
-    camera::visibility::NoFrustumCulling,
+    camera::primitives::{Aabb, MeshAabb},
     gltf::Gltf,
     math::Affine2,
     mesh::skinning::SkinnedMesh,
@@ -389,9 +389,9 @@ fn build_parts(
                     let rig = VehicleRig {
                         gltf: asset_server.load(format!("imported://{file}")),
                         joints: joints.clone(),
-                        lod: (!interior_view && lods).then(|| UnitLod {
+                        lod: (!interior_view).then(|| UnitLod {
                             starts: starts.clone(),
-                            draw_distance: desc.model_draw_distance(&path),
+                            draw_distance: if lods { desc.model_draw_distance(&path) } else { None },
                             level,
                         }),
                     };
@@ -451,6 +451,19 @@ fn spawn_rigs(
             continue;
         };
         commands.entity(entity).remove::<VehicleRig>();
+        // Skinned vertices are wherever the parts put them: a box around everything any part
+        // can reach (the farthest part plus the largest part-local extent of the model),
+        // so the vehicle is still frustum culled.
+        let reach = vehicles
+            .get(vehicle)
+            .map_or(0.0, |data| data.0.rest_hull.iter().map(|t| t.translation.length()).fold(0.0, f32::max));
+        let extent = mesh
+            .primitives
+            .iter()
+            .filter_map(|primitive| meshes.get(&primitive.mesh)?.compute_aabb())
+            .map(|aabb| (Vec3::from(aabb.center).abs() + Vec3::from(aabb.half_extents)).length())
+            .fold(0.0, f32::max);
+        let bounds = Aabb::from_min_max(Vec3::splat(-(reach + extent)), Vec3::splat(reach + extent));
         let skinned = skin.map(|skin| {
             let collapsed = commands.spawn((Transform::from_scale(Vec3::ZERO), ChildOf(entity))).id();
             let joints = (0..skin.joints.len() as u32)
@@ -491,8 +504,7 @@ fn spawn_rigs(
                         Mesh3d(primitive.mesh.clone()),
                         MeshMaterial3d(material),
                         skinned.clone(),
-                        // The skinned vertices are wherever the parts are.
-                        NoFrustumCulling,
+                        bounds,
                         ChildOf(entity),
                     ));
                     if let Some(animated) = animated {

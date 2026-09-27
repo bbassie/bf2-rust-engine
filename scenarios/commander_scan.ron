@@ -1,0 +1,31 @@
+// The satellite scan the BF2 way: every enemy shows on the commander's maps (and only his)
+// while the scan lasts, and the commander spots them for his team (right-click on the
+// commander screen). Karkand 64, US commander, 8 bots.
+// RUST_LOG=info,game_server::commander=debug target/debug/deps/client.exe --scenario scenarios/commander_scan.ron --out target/scenarios/commander_scan
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 8,
+    steps: [
+        WaitReady,
+        Commander(Apply),
+        Wait(4.0),
+        Commander(Use(asset: Scan, target: (0.0, 0.0, 0.0))),
+        Wait(1.2),
+        Key(CapsLock),
+        Wait(0.5),
+        Screenshot("scan_screen"),
+        // An enemy 10 m east of us on the Gas Station road, spotted from the screen.
+        Teleport((-172.8, 161.5, 315.0), -90.0, 0.0),
+        SummonEnemy(10.0),
+        Wait(0.2),
+        Commander(Spot(target: (-162.8, 161.3, 315.0))),
+        Wait(1.0),
+        Screenshot("scan_spotted"),
+        Wait(6.0),
+        Screenshot("scan_over"),
+        Key(CapsLock),
+        Quit,
+    ],
+)

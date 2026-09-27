@@ -5,11 +5,16 @@
 //! the import; zooming in reaches further (switch distances times the zoom, draw distances
 //! times its square root) and the view distance setting scales the draw distances, with the
 //! same factors as the statics. `BF2_UNIT_LODS=off` draws vehicles and soldiers at full
-//! detail at any distance (for comparisons).
+//! detail at any distance (for comparisons); `BF2_UNIT_LOD_STATS` logs every second how many
+//! of their meshes and triangles were drawn.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use bevy::{camera::visibility::VisibilityRange, prelude::*};
+use bevy::{
+    asset::AssetId,
+    camera::visibility::{ViewVisibility, VisibilityRange},
+    prelude::*,
+};
 
 use super::statics::{LodScales, lod_ranges};
 
@@ -17,7 +22,9 @@ pub struct UnitLodPlugin;
 
 impl Plugin for UnitLodPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(UnitLodConfig::from_env()).add_systems(PostUpdate, apply_unit_lods);
+        app.insert_resource(UnitLodConfig::from_env())
+            .add_systems(PostUpdate, apply_unit_lods)
+            .add_systems(Last, log_stats.run_if(|config: Res<UnitLodConfig>| config.stats));
     }
 }
 
@@ -25,6 +32,8 @@ impl Plugin for UnitLodPlugin {
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct UnitLodConfig {
     pub enabled: bool,
+    /// Log what is drawn (`BF2_UNIT_LOD_STATS`).
+    pub stats: bool,
 }
 
 impl UnitLodConfig {
@@ -36,7 +45,10 @@ impl UnitLodConfig {
         if !enabled {
             info!("vehicle and soldier LODs and draw distances are off (BF2_UNIT_LODS)");
         }
-        Self { enabled }
+        Self {
+            enabled,
+            stats: std::env::var_os("BF2_UNIT_LOD_STATS").is_some(),
+        }
     }
 }
 
@@ -70,6 +82,53 @@ impl UnitLod {
             .into_iter()
             .nth(self.level)
             .flatten()
+    }
+}
+
+/// Vehicle and soldier meshes and triangles drawn, summed over the frames of a second.
+#[derive(Default)]
+struct Stats {
+    frames: u32,
+    meshes: u64,
+    triangles: u64,
+    since: f32,
+    counts: HashMap<AssetId<Mesh>, u32>,
+}
+
+/// Logs the average number of vehicle and soldier meshes and triangles drawn per frame, once a
+/// second (meshes in a cross-fade band count twice).
+fn log_stats(
+    time: Res<Time<Real>>,
+    meshes: Res<Assets<Mesh>>,
+    drawn: Query<(&Mesh3d, &ViewVisibility), With<UnitLod>>,
+    mut stats: Local<Stats>,
+) {
+    let stats = &mut *stats;
+    for (mesh, visibility) in &drawn {
+        if !visibility.get() {
+            continue;
+        }
+        let triangles = *stats.counts.entry(mesh.id()).or_insert_with(|| {
+            meshes
+                .get(mesh.id())
+                .map_or(0, |m| m.indices().map_or(m.count_vertices(), |i| i.len()) as u32 / 3)
+        });
+        stats.meshes += 1;
+        stats.triangles += u64::from(triangles);
+    }
+    stats.frames += 1;
+    let now = time.elapsed_secs();
+    if now - stats.since >= 1.0 {
+        let frames = u64::from(stats.frames.max(1));
+        info!(
+            "unit lod stats: {} meshes, {} triangles drawn per frame",
+            stats.meshes / frames,
+            stats.triangles / frames
+        );
+        stats.since = now;
+        stats.frames = 0;
+        stats.meshes = 0;
+        stats.triangles = 0;
     }
 }
 

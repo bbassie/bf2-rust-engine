@@ -308,32 +308,79 @@ The parser handles them.
 
 ### 2.12 LOD switch and cull distances (engine code, BF2 1.5)
 
-Read from the `RendDX9.dll` and `BF2.exe` 1.5 disassembly; the constants are the ones those binaries use.
+Read from the `RendDX9.dll` and `BF2.exe` 1.5 disassembly; the constants are the ones those binaries use. Addresses are
+given for the second pass, which checked and corrected the first (marked below).
 
 * `GeometryTemplate.setSubGeometryLodDistance <geom> <lod> <m>` is the camera distance at which LOD `lod` of geom `geom`
   hands over to `lod + 1` (entries 0..lodCount-2; 386 of 722 static geometries set them, e.g. `billboard_highway_01`:
-  10, 23, 90 m). When the mesh loads, LODs without an entry get a running default: it starts at **50 m**, an unset LOD
-  takes the running value and adds 50, a set LOD adds its own distance to it. Unset entries below a set one are
-  zero-filled (`mosque`: LOD0 would never show); the importer treats them as unset.
-* Selection: `lod = 1 + max{ i : dist[i] · globalStaticMeshLodDistanceScale · qualityScale < d / zoom }` (else 0), `d` the
-  camera distance, `zoom = tan(fov₀/2) / tan(fov/2)` (1 unzoomed; fov₀ is the camera's first FOV). Highest geometry
-  quality: both scales 1 (medium: quality scale 0.8; low: 0.5, distances ×2 and one LOD skipped via
-  `forceStaticMeshSkipLod`). `GeometryTemplate.maxSkip3pLods` limits the skipping for geoms 1 and 2.
-* Culling (the object manager in `BF2.exe`): cull radius `r = 0.8 · object radius · ObjectTemplate.cullRadiusScale`
-  (default 1; 2 to 3.5 on long, flat statics such as walls, fences, sandbags, and on flags). With
-  `D² = |camera − origin|² − r²` and `C² = zoom · max(10π · distanceCullConst² · r², minCullDistance²)`, the object is
-  drawn fully up to `D² = 0.8 C²`, fades out until `1.2 C²`, and is hidden past the view distance plus `r`.
-  `renderer.distanceCullConst` is 4 by default and 8 on high quality (`distanceCullConstPCO`, for soldiers and vehicles,
-  5 and 10), `renderer.minCullDistance` 100 by default and 80 on high. So on high a static is drawn to about
-  `max(35.9 · radius · cullRadiusScale, 80)` m.
+  10, 23, 90 m). When the mesh loads, LODs without an entry get a running default: it starts at **50 m** (`50 · (skip + 1)`),
+  an unset LOD takes the running value and adds 50, a set LOD adds its own distance to it (load code `0x100ea7ca`). Unset
+  entries below a set one are zero-filled (`mosque`: LOD0 would never show); the importer treats them as unset.
+* Selection (bundled meshes `0x101050c0`, skinned `0x101a7660`; statics the same rule):
+  `lod = 1 + max{ i : dist[i] · global<Kind>MeshLodDistanceScale · Q < d / zoom − r0 }` (else 0), `d` the camera distance
+  to the instance origin, `zoom = tan(fov₀/2) / tan(fov/2)` (1 unzoomed; fov₀ is the camera's first FOV; set in the
+  camera's `setFov`, `0x101c2bd0`), and **`r0` half the diagonal of that geom's LOD 0 bounding box** (the first pass
+  missed `r0`). So LOD `k` takes over at `dist[k−1] + r0`. `Q` is the renderer's quality factor (`+0x84c`: 1 / 0.8 / 0.5
+  for high / medium / low); the static, bundled and skinned global scales are 1 at every quality, and every level's
+  `Init.con` sets all three to 1.
+* LOD skipping (`0x100ea650`): `skip = min(maxSkip, forceStaticMeshSkipLod)`, capped at lodCount − 1; geom 1 uses
+  `GeometryTemplate.maxSkip3pLods` (default 1), geom 2 `maxSkipWreckLods` (default 1), geom 0 is never skipped. Only low
+  quality sets `forceStaticMeshSkipLod 1`. `forceBundledMeshLod` / `forceSkinnedMeshLod` default to −1 (off);
+  `qualityLodEnabled` is off and the `setQualityLodDistance*` tables pick a shader quality, not geometry.
+* `lightManager.skinnedMeshShaderLodDistance` (default 10 m, not zoomed): beyond it a skinned instance selects cheaper
+  lighting (`0x101a80a1`) [?: what reads the flag was not traced].
+* Soldiers: every soldier `.tweak` sets `setSubGeometryLodDistance 1 0 10` and `1 1 20` and `CullRadiusScale 2.5`; every
+  soldier `.skinnedMesh` has geom 1 with 3 LODs (r0 ≈ 1.16 m), so the 3P body switches at about 11.2 and 21.2 m.
+  Vehicles mostly set `1 0 15`, `1 1 30`, `1 2 95` (M1A2: 19.5, 34.5, 99.5 m with r0 4.48).
+* Renderer presets per geometry quality (`0x1000fef0`; quality 0 keeps the defaults):
+
+  | quality | distanceCullConst | distanceCullConstPCO | minCullDistance | Q (`+0x84c`) | forceStaticMeshSkipLod |
+  |---|---|---|---|---|---|
+  | high | 8 | 10 | 80 | 1 | 0 |
+  | medium | 7 | 8 | 60 | 0.8 | 0 |
+  | low | 6 | 6 | 40 | 0.5 | 1 |
+  | default | 4 | 5 | 100 | 1 | 0 |
+
+  RendDX9 keeps them on the renderer (`+0x6c0/+0x6c4/+0x6c8`) and copies them into BF2.exe's ObjectManager every frame
+  (`0x100305a2`); the ObjectManager's own defaults (constructor `0x728d94`) are 4 / 5 / 100.
+* Culling (the object manager in `BF2.exe`: `0x724990` walks the hierarchy, `0x721a50` tests):
+  * Cull radius `r = Object::getRadius · ObjectTemplate.cullRadiusScale` (default 1; 2 to 3.5 on long, flat statics
+    such as walls, fences, sandbags, and on flags; 2.5 on soldiers). **There is no 0.8 factor** (the first pass had
+    one; 0.8 is the small part threshold below).
+  * `getRadius` (`0x71ebb0`): the object's collision radius (the farthest corner of its collision part's box, from
+    the part's first geom and column with faces), else its render instance's (bundled: half the diagonal of the
+    current LOD's box; skinned: 1.0 for a soldier), plus `boundingRadiusModifierWhenOccupied` on PCOs (0 except the
+    bipods: 2), then grown over all children: `r = max(r, |child position| + r_child)`. A soldier's collision box is
+    built in code (x and z within ±0.4 m, y from −0.6 to 0.8 m): radius 0.98. Vehicles: M1A2 ≈ 6.7 m, HMMWV 2.95,
+    LAV-25 4.41, F-18 11.85, UH-60 13.0.
+  * `K = distanceCullConstPCO` when the object's class is exactly `PlayerControlObject` or `Soldier` (`0x7219d9`;
+    tested per root and per nested PCO or soldier), else `distanceCullConst`. With `D² = max(0, |camera − origin|² − r²)`
+    and `C² = zoom · max(10π · K² · r², minCullDistance²)`: shown at once while `D² ≤ 0.8 C²`, hidden at once past
+    `1.2 C²` or past the view distance plus `r`; in between it fades in (`D² ≤ C²`) or out (`D² > C²`) over 0.25 s
+    (alpha rate 4/s, `[0x97acd4]`). So it switches at `D² = C²`: on high a PCO or soldier at `max(56.05 · r, 80)` m
+    (a soldier 137 m, the M1A2 375 m), a static at `max(44.84 · r, 80)` m.
+  * Children with a render instance of their own (rotors, weapons, kits, antennas; bundled parts are drawn by the
+    root) are tested separately: with the parent's constants if `r_child ≥ 0.8 · r_root` (radius times cull radius
+    scale, `[0x97acc8]`), else with the "small part" constants `C² = zoom · max(5π · distanceCullConst² · r², (minCullDistance
+    / 2)²)`, i.e. `max(31.7 · r, 40)` m on high (the non-PCO constant even under a PCO): a soldier's weapon (r ≈ 0.51)
+    disappears at 40 m, the kit mesh at about 50 m, a tank's pintle machine gun at 40 m.
+  * No special case for the vehicle the local player sits in, and no special distance for soldiers.
 * `ObjectTemplate.lodDistance High|Medium|Low` is only used by effects.
-* What the importer makes of it (`bf2_import::lods`): LOD 1.. of the geoms a static object draws become
-  `<mesh>_lod<N>.glb` (`_3p_lod<N>`, `_wreck_lod<N>`) listed in the template's parts as `lods` / `wreck_lods`
-  with the distance each takes over at (the high-quality rule above), and the object's `draw_distance` is the
-  distance from its origin where the cull fade is half done (`D² = C²`). Vegetation keeps neither (the tree code handles its distances). The client
-  cross-fades between them with Bevy's `VisibilityRange` (±10 % around each distance), multiplies the switch
-  distances by the zoom and the draw distances by its square root, and the view distance setting scales the draw
-  distances.
+* What the importer makes of it (`bf2_import::lods`):
+  * Statics: LOD 1.. of the geoms a static object draws become `<mesh>_lod<N>.glb` (`_3p_lod<N>`, `_wreck_lod<N>`)
+    listed in the template's parts as `lods` / `wreck_lods` with the distance each takes over at, and the object's
+    `draw_distance` is the distance from its origin where the cull fade is half done (`D² = C²`). These still follow the
+    first pass (no `r0`, the 0.8 factor on the visible mesh's radius, so statics are drawn to `max(35.9 · r, 80)` m
+    instead of `max(44.84 · r_collision, 80)` m) [to do]. Vegetation keeps neither (the tree code handles its distances).
+  * Vehicles: the outside models' LOD 1.. become rigged `<model>_lod<N>.glb` (`VehicleDesc::lods`, the same joints),
+    the wreck's `_wreck_lod<N>.glb` (`wreck_lods`), with the distances plus `r0`; `draw_distance` is the PCO rule with the
+    radius from the collision parts grown over the part tree; models of small parts get their own (`ModelLods`).
+  * Soldiers: the body's LOD 1.. are meshes `body_lod<N>` in the soldier's `.glb` (same skeleton), `SoldierDesc::lods`
+    their distances plus `r0`, `draw_distance` the PCO rule with 0.98 · `cullRadiusScale` (`cull_radius`); the client
+    culls carried weapons with the small part rule from their model's box.
+  * The client cross-fades with Bevy's `VisibilityRange` (±10 % around each distance) instead of BF2's timed fade,
+    multiplies the switch distances by the zoom and the draw distances by its square root, and the view distance setting
+    scales the draw distances.
 
 ## 3. Collision meshes: `.collisionmesh`
 

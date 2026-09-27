@@ -248,12 +248,17 @@ fn setup_teams(
 }
 
 /// Vehicles the layout's spawners put where an asset of the layout stands are that asset.
+/// (Every untagged vehicle of an asset template is looked at, so the order in which the level's
+/// assets and vehicles appear doesn't matter.)
 fn tag_asset_vehicles(
     mut commands: Commands,
     assets: Res<CommanderAssets>,
-    vehicles: Query<(Entity, &Vehicle, &VehicleMotion), (Added<Vehicle>, Without<AssetVehicle>)>,
+    vehicles: Query<(Entity, &Vehicle, &VehicleMotion), Without<AssetVehicle>>,
 ) {
     for (entity, vehicle, motion) in &vehicles {
+        if !assets.desc.assets.contains_key(&vehicle.template) {
+            continue;
+        }
         let asset = assets.instances.iter().find(|a| {
             a.vehicle
                 && a.template == vehicle.template
@@ -428,9 +433,9 @@ fn handle_commands(
                         };
                         Some((body, at.xz().distance(target.xz())))
                     })
-                    .filter(|(_, distance)| *distance <= SPOT_REACH)
                     .min_by(|a, b| a.1.total_cmp(&b.1));
-                if let Some((body, _)) = nearest {
+                debug!("{team:?} commander spots at {target:.0}: nearest enemy {:.0} m away", nearest.map_or(f32::NAN, |n| n.1));
+                if let Some((body, _)) = nearest.filter(|(_, distance)| *distance <= SPOT_REACH) {
                     spots.write(Spot {
                         target: body,
                         team,
@@ -879,14 +884,14 @@ fn run_strikes(
 }
 
 impl UavFlight {
-    /// Where it is on its circle and which way it faces: flying counter-clockwise seen from
-    /// above, banked into the turn.
+    /// Where it is on its circle and which way it faces: along the circle with its middle to
+    /// the right, banked into the turn (right wing down).
     fn pose(&self) -> (Vec3, Quat) {
         let (sin, cos) = self.angle.sin_cos();
         let position = self.center + Vec3::new(cos, 0.0, sin) * self.radius;
         let tangent = Vec3::new(-sin, 0.0, cos);
         let bank = (self.speed * self.speed / (self.radius * GRAVITY)).atan();
-        let rotation = Transform::IDENTITY.looking_to(tangent, Vec3::Y).rotation * Quat::from_rotation_z(bank);
+        let rotation = Transform::IDENTITY.looking_to(tangent, Vec3::Y).rotation * Quat::from_rotation_z(-bank);
         (position, rotation)
     }
 }
@@ -1194,6 +1199,7 @@ mod tests {
         let forward = rotation * Vec3::NEG_Z;
         assert!(forward.dot(position - flight.center).abs() < 1e-3);
         let right = rotation * Vec3::X;
-        assert!(right.y < 0.0 || right.dot(flight.center - position) < 0.0);
+        assert!(right.dot(flight.center - position) > 0.0, "the middle is to the right");
+        assert!(right.y < 0.0, "banked right");
     }
 }

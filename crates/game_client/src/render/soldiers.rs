@@ -12,7 +12,9 @@
 //!
 //! The body's lower levels of detail (meshes `body_lod1`, ... in the model, on the same
 //! skeleton) are drawn by distance, cross-fading, and soldiers with their weapons fade out
-//! past BF2's cull distance for them (see `unit_lods`).
+//! past BF2's cull distance for them (see `unit_lods`). Soldiers nobody sees (culled or out of
+//! view) aren't posed until they are seen again: animating the skeletons of a 32-bot battle is
+//! most of its animation work.
 
 use bevy::{
     app::AnimationSystems,
@@ -65,7 +67,7 @@ impl Plugin for SoldierRenderPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (update_visuals, animate, show_parachutes)
+                (update_visuals, sleep_unseen.before(animate), animate, show_parachutes)
                     .after(RenderStateSystems)
                     .after(VehicleViewSystems)
                     .before(AnimationSystems)
@@ -319,6 +321,8 @@ struct ModelRig {
     player: Entity,
     /// Weapon part bones `mesh1..mesh8`.
     weapon_bones: [Option<Entity>; 8],
+    /// The body's meshes (every LOD), to tell whether anyone sees the soldier.
+    meshes: Vec<Entity>,
 }
 
 /// Animation state of a visual.
@@ -348,6 +352,8 @@ struct SoldierAnimator {
     /// Our own soldier: shots fired so far (others' shots arrive as [`ShotFired`]).
     shots_seen: Option<u32>,
     was_reloading: bool,
+    /// Nobody sees the soldier: its graph, taken off the animation player meanwhile.
+    sleeping: Option<Handle<AnimationGraph>>,
 }
 
 /// An upper-body one-shot.
@@ -468,10 +474,18 @@ fn load_team_models(
                     .ok()
             });
         models.teams[index] = desc.as_ref().map(|desc| asset_server.load(format!("imported://{}", desc.mesh)));
-        models.lods[index] = desc.filter(|_| config.enabled).map(|desc| BodyLods {
-            starts: std::iter::once(0.0).chain(desc.lods.iter().copied()).collect(),
-            draw_distance: desc.draw_distance,
-            cull_radius: desc.cull_radius,
+        // Without LODs: one level (the full-detail body) drawn at any distance.
+        models.lods[index] = desc.map(|desc| match config.enabled {
+            true => BodyLods {
+                starts: std::iter::once(0.0).chain(desc.lods.iter().copied()).collect(),
+                draw_distance: desc.draw_distance,
+                cull_radius: desc.cull_radius,
+            },
+            false => BodyLods {
+                starts: Arc::from([0.0]),
+                draw_distance: None,
+                cull_radius: 0.0,
+            },
         });
     }
 }
@@ -623,9 +637,13 @@ fn attach_models(
                   parents: Query<&ChildOf>| {
                 let mut player = None;
                 let mut weapon_bones = [None; 8];
+                let mut body_meshes = Vec::new();
                 for descendant in children.iter_descendants(ready.entity) {
                     if players.contains(descendant) {
                         player = Some(descendant);
+                    }
+                    if meshes.contains(descendant) {
+                        body_meshes.push(descendant);
                     }
                     // Body meshes are drawn in their LOD's distance band.
                     if let Some(lods) = &lods
@@ -633,8 +651,15 @@ fn attach_models(
                     {
                         let name = |e: Entity| names.get(e).ok().and_then(|n| BodyLods::level(n.as_str()));
                         let level = name(descendant).or_else(|| parents.get(descendant).ok().and_then(|p| name(p.parent())));
-                        if let Some(level) = level {
-                            commands.entity(descendant).insert(lods.lod(level));
+                        match level {
+                            // LODs off: only the full-detail body.
+                            Some(level) if level >= lods.starts.len() => {
+                                commands.entity(descendant).insert(Visibility::Hidden);
+                            }
+                            Some(level) => {
+                                commands.entity(descendant).insert(lods.lod(level));
+                            }
+                            None => {}
                         }
                     }
                     if let Ok(name) = names.get(descendant)
@@ -651,6 +676,7 @@ fn attach_models(
                     ModelRig {
                         player,
                         weapon_bones,
+                        meshes: body_meshes,
                     },
                     SoldierAnimator::default(),
                 ));
@@ -1269,6 +1295,41 @@ fn animate(
             downed,
             seat_pose: seat_pose.as_deref(),
         };
-        animator.update(&mut player, animations, &cues, time.delta_secs());
+        // Unseen: posed again once seen (the animation picks up from where it is then).
+        if animator.sleeping.is_none() {
+            animator.update(&mut player, animations, &cues, time.delta_secs());
+        }
+    }
+}
+
+/// Soldiers nobody sees (every body mesh culled by distance or outside the view last frame)
+/// are left unposed: their animation graph comes off the animation player, which Bevy then
+/// skips, and goes back on once one of the meshes is seen again. BF2 doesn't animate culled
+/// soldiers either. Off with the unit LODs.
+fn sleep_unseen(
+    mut commands: Commands,
+    config: Res<UnitLodConfig>,
+    mut visuals: Query<(&ModelRig, &mut SoldierAnimator)>,
+    seen: Query<&ViewVisibility>,
+    graphs: Query<&AnimationGraphHandle>,
+) {
+    if !config.enabled {
+        return;
+    }
+    for (rig, mut animator) in &mut visuals {
+        let visible = rig.meshes.iter().any(|mesh| seen.get(*mesh).is_ok_and(|v| v.get()));
+        match (visible, animator.sleeping.take()) {
+            (false, None) => {
+                if let Ok(graph) = graphs.get(rig.player) {
+                    animator.sleeping = Some(graph.0.clone());
+                    commands.entity(rig.player).remove::<AnimationGraphHandle>();
+                }
+            }
+            (false, Some(graph)) => animator.sleeping = Some(graph),
+            (true, Some(graph)) => {
+                commands.entity(rig.player).insert(AnimationGraphHandle(graph));
+            }
+            (true, None) => {}
+        }
     }
 }

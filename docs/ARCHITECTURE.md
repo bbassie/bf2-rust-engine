@@ -170,6 +170,15 @@ helicopter, sea, stationary) comes from the engine type.
   and climb rate, stall and pull-up warnings). BF2's armor effects show the damage state: smoke (and sparks) while the
   hit points are under their thresholds, the explosion and wreck fires at 0; the wreck burns
   down to -100 % over its 10 s and blows apart.
+  The outside models' lower LODs (BF2 geom 1 LOD 1..) are rigged like the full model and
+  drawn by distance with dithered cross-fades, and the vehicle fades out at BF2's cull
+  distance for player control objects (see "Levels of detail").
+- **Remote controlled vehicles** (`VehicleDesc::remote`): the commander's artillery pieces
+  (BF2 `PlayerControlObject`s with an `RCArtillery` remote control object: `ars_d30`,
+  `usart_lw155`) are imported as stationary vehicles without seats, and the UAV
+  (`UAVVehicle uav_pred`) as an aircraft; `game_server::commander` works them (see
+  "Commander"). Their wrecks stay until repaired (`repairable_wreck`, BF2's
+  `armor.canBeDestroyed 0`): a wreck brought back above 0 hit points is a vehicle again.
 
 Controls in vehicles: W/S throttle (jets: hands off holds 50 %, S idles and air brakes, and
 slows a jump jet into hover; helicopters and hovering jets: collective), A/D steering, rudder
@@ -220,12 +229,65 @@ driven around. Connected areas per class let paths snap to goals they can reach.
 4 m water grid (depth from the heightmap, nothing solid at the surface), aircraft an air map of
 the highest obstacle per 16 m cell (BF2's aerial height map).
 
+### Commander
+
+The commander (`game_shared::commander`, `game_server::commander`, the client's `commander`
+module) orders squads and calls in the team's assets through `CommanderRequest`s; an AI
+commander (`game_server::ai::commander`) sends the same requests with its bot player. The
+assets follow BF2:
+
+- **Artillery**: the layout's artillery pieces are vehicles spawned by their spawners and
+  tagged `AssetVehicle` (kind, team, asset number). A strike gives each living piece of the
+  team a fire mission: it turns onto the target at its BF2 joint speeds (60°/s) and fires its
+  burst (`fire.burstSize` 5 at `roundsPerMinute` 30), each shell a projectile of the gun's own
+  shell launched on the arc (BF2 gravity × 5) that lands where and when the strike planned it:
+  the first after 5 s, then one every 2 s per gun, 0.4 s between guns, within the gun's
+  `deviation.radius` 20 m of the target. More pieces fire more shells; a strike needs at least
+  one living piece. Destroyed pieces stay wrecks until an engineer repairs them (about half a
+  minute of wrench work) or they come back after 360 s (the spawners' `minSpawnDelay`).
+- **UAV**: a `uav_pred` vehicle flies a 60 m circle 120 m above the target at 30 m/s (a
+  kinematic body, banked into the turn) and marks the enemies around the target for the team
+  every second for 60 s. It has BF2's 200 hit points: shot down, it falls, burns and the sweep
+  ends. It needs the UAV trailer standing to be called.
+- **Satellite scan**: the commander's maps (and only his) show every enemy, updated every
+  second while the scan lasts (BF2: "your map will show the position of every enemy"); he
+  spots them for the team by right-clicking them on the commander screen. An AI commander's
+  scan spots them for its team directly. Needs the radar.
+- **Supply drop**: a crate on a parachute (5 m/s) that heals, resupplies and repairs soldiers
+  and vehicles of the team within 5 m (`healSpeed`, `refillAmmoSpeed`, `workOnVehicles`) from a
+  shared stock of 500 points for up to 300 s.
+
+The UAV trailer and the radar are destroyable objects numbered from `ASSET_INSTANCE_BASE`;
+a destroyed asset (object or artillery wreck) is in `DestroyedStatics`, which the
+commander screen, the maps and the bots' engineers read. Levels imported before the pieces
+were vehicles keep them as objects, with shells landing on schedule.
+
 ### Levels
 
 `MatchInfo` (replicated) names the level. Client and server both load it from `imported/`:
 heightfield collider, static objects (trimesh colliders from the BF2 soldier collision
 meshes). The client additionally builds terrain chunks (one per BF2 color-map patch),
 water, and loads the glTF meshes of static objects.
+
+### Levels of detail
+
+Statics, vehicles and soldiers use BF2's lower LODs and its cull distances, with the rules
+found in `RendDX9.dll` and `BF2.exe` 1.5 (docs/formats/meshes.md §2.12, `bf2_import::lods`).
+The client draws each LOD within its distance band (Bevy's `VisibilityRange`, dithered
+cross-fades around each switch), multiplies the switch distances by the camera zoom and the
+draw distances by its square root (so scopes keep full detail), and scales the draw distances
+by the view distance setting (`render::statics`, `render::unit_lods`).
+
+- Vehicles switch their 3P model at their `setSubGeometryLodDistance`s plus half the diagonal
+  of its box (the M1A2 at 19.5, 34.5 and 99.5 m), their wrecks likewise, and fade out at
+  `max(56 · r, 80)` m with `r` BF2's object radius (the M1A2 at 375 m, the HMMWV at 165 m);
+  small parts with a model of their own (pintle guns, tail rotors) fade out on their own
+  (40 m for a machine gun).
+- Soldiers switch the body at 11.2 and 21.2 m (3148, 1540, 360 triangles), carried weapons fade
+  out at 40 m, soldiers at 137 m. Soldiers nobody sees (culled or out of view) aren't posed
+  until they are seen again.
+- `BF2_STATIC_LODS=off` / `BF2_UNIT_LODS=off` draw full detail at any distance (for
+  comparisons), `BF2_UNIT_LOD_STATS` logs the vehicle and soldier triangles drawn.
 
 ## Coordinate conventions
 
