@@ -7,6 +7,7 @@
 //! with `Click`. A scenario with `menu: true` starts here instead of in a match.
 
 mod browser;
+mod download;
 mod input;
 mod levels;
 mod loading;
@@ -48,7 +49,7 @@ use crate::{
     deploy::DeployScreen,
     net::{self, ActiveMatch, LocalPlayer, LocalSoldier, MatchNotice, MatchSetup},
     scenario::{ScenarioInput, ScenarioSystems},
-    settings::{Action, Binding, DisplayMode, Settings, ViewDistance},
+    settings::{Action, Binding, DisplayMode, Settings, ToneMapping, ViewDistance},
 };
 
 use self::{browser::*, input::*, levels::*, loading::*, pages::*, preview::*, widgets::*};
@@ -68,6 +69,7 @@ impl Plugin for MenuPlugin {
             );
         }
         app.insert_resource(compiling)
+            .add_plugins(download::DownloadUiPlugin)
             .insert_state(self.start)
             .init_resource::<Menu>()
             .init_resource::<LevelCatalog>()
@@ -75,6 +77,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<ServerBrowser>()
             .add_observer(level_changed)
             .add_systems(Startup, scan_levels)
+            .add_systems(First, leave_when_asked)
             .add_systems(PreUpdate, menu_keys.in_set(MenuKeys).after(InputSystems))
             .add_systems(OnEnter(Screen::Menu), spawn_main_menu)
             .add_systems(OnEnter(Screen::Loading), spawn_loading_screen)
@@ -105,6 +108,17 @@ impl Plugin for MenuPlugin {
                     .run_if(in_state(Screen::Loading)),
             )
             .add_systems(Update, pause_time.run_if(in_state(Screen::InGame)));
+    }
+}
+
+/// Leaves the match a button or Esc asked to leave. Leaving removes the level and the
+/// server's resources, so it runs first thing in the frame: queued as a command from `Update`
+/// it landed between a system set's `resource_exists::<LoadedLevel>` check and the set's
+/// systems, whose `Res<LoadedLevel>` then panicked.
+fn leave_when_asked(world: &mut World) {
+    if world.resource::<Menu>().leave {
+        world.resource_mut::<Menu>().leave = false;
+        net::leave_match(world);
     }
 }
 
@@ -179,6 +193,8 @@ pub struct Menu {
     grab_on_start: bool,
     /// Enter was pressed: the page's main button.
     submit: bool,
+    /// Leave the match at the start of the next frame (see [`leave_when_asked`]).
+    leave: bool,
 }
 
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
@@ -224,6 +240,7 @@ enum MenuButton {
     Display(DisplayMode),
     WindowSize(u32, u32),
     ViewDistance(ViewDistance),
+    ToneMapping(ToneMapping),
     Rebind(Action),
     ResetBindings,
     /// Join page: ask for servers again.
@@ -259,6 +276,7 @@ impl MenuButton {
             MenuButton::Display(mode) => format!("display:{}", mode.label().to_lowercase()),
             MenuButton::WindowSize(w, h) => format!("size:{w}x{h}"),
             MenuButton::ViewDistance(distance) => format!("view:{}", distance.label().to_lowercase()),
+            MenuButton::ToneMapping(t) => format!("tonemap:{}", t.label().to_lowercase().replace(' ', "")),
             MenuButton::Rebind(action) => format!("bind:{}", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
             MenuButton::Refresh => "browser:refresh".into(),
@@ -293,6 +311,9 @@ enum Toggle {
     VSync,
     Shadows,
     Ssao,
+    SkyLight,
+    BakedAo,
+    Bloom,
 }
 
 impl Toggle {
@@ -304,6 +325,9 @@ impl Toggle {
             Toggle::VSync => "vsync",
             Toggle::Shadows => "shadows",
             Toggle::Ssao => "ssao",
+            Toggle::SkyLight => "sky_light",
+            Toggle::BakedAo => "baked_ao",
+            Toggle::Bloom => "bloom",
         }
     }
 
@@ -315,6 +339,9 @@ impl Toggle {
             Toggle::VSync => settings.vsync,
             Toggle::Shadows => settings.shadows,
             Toggle::Ssao => settings.ambient_occlusion,
+            Toggle::SkyLight => settings.sky_light,
+            Toggle::BakedAo => settings.baked_ao,
+            Toggle::Bloom => settings.bloom,
         }
     }
 
@@ -326,6 +353,9 @@ impl Toggle {
             Toggle::VSync => settings.vsync ^= true,
             Toggle::Shadows => settings.shadows ^= true,
             Toggle::Ssao => settings.ambient_occlusion ^= true,
+            Toggle::SkyLight => settings.sky_light ^= true,
+            Toggle::BakedAo => settings.baked_ao ^= true,
+            Toggle::Bloom => settings.bloom ^= true,
         }
     }
 }

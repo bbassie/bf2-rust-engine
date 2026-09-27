@@ -124,8 +124,8 @@ impl Flash {
     }
 }
 
-fn load_assets(mut commands: Commands, paths: Res<GamePaths>, asset_server: Res<AssetServer>, mut images: ResMut<Assets<Image>>) {
-    let assets: GadgetAssets = game_data::read_ron(paths.imported.join("effects/gadgets.ron")).unwrap_or_default();
+pub(crate) fn load_assets(mut commands: Commands, paths: Res<GamePaths>, asset_server: Res<AssetServer>, mut images: ResMut<Assets<Image>>) {
+    let assets: GadgetAssets = game_data::read_ron(paths.find("effects/gadgets.ron")).unwrap_or_default();
     let gradient = match &assets.night_vision_gradient {
         Some(path) => asset_server.load(format!("imported://{path}")),
         // Without Special Forces: black through green to pale green.

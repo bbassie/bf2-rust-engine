@@ -57,6 +57,11 @@ when `ClientState::Disconnected`).
   `game_shared::protocol::ProtocolPlugin`, so client and server always agree; replicon
   checks a protocol hash on connect.
 - Fixed 60 Hz simulation tick; replication runs on the same tick.
+- Server content: a server shares its mods (optionally the imported assets) over HTTP on TCP
+  at the game port. Before connecting, clients download what they lack into a
+  content-addressed cache and mount it over their own data for the session
+  (`game_shared::content`, `game_server::content`, `game_client::content`; see
+  [MODDING.md](MODDING.md#sharing-content-from-a-server)).
 
 ### Player vs soldier
 

@@ -911,12 +911,15 @@ fn send_notices(
     }
 }
 
-/// Drops what is kept about soldiers that are gone (round restarts, players leaving).
+/// Drops what is kept about soldiers and players that are gone (round restarts, players
+/// leaving, and every map change, which brings new bots).
 fn forget_the_gone(
     time: Res<Time>,
     soldiers: Query<(), With<Soldier>>,
+    players: Query<(), With<Player>>,
     mut assists: ResMut<Assists>,
     mut credit: ResMut<AmmoCredit>,
+    mut ledger: ResMut<Ledger>,
     mut since: Local<f32>,
 ) {
     *since += time.delta_secs();
@@ -926,6 +929,10 @@ fn forget_the_gone(
     *since = 0.0;
     assists.0.retain(|soldier, _| soldiers.contains(*soldier));
     credit.0.retain(|(soldier, _), _| soldiers.contains(*soldier));
+    ledger.points.retain(|(helper, _), _| players.contains(*helper));
+    ledger
+        .scored
+        .retain(|(helper, helped), _| players.contains(*helper) && players.contains(*helped));
 }
 
 /// What a bot can use a gadget for.

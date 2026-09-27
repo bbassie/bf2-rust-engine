@@ -41,6 +41,9 @@ pub struct ServerInfo {
     pub port: u16,
     /// [`crate::PROTOCOL_ID`]: clients can only join servers with theirs.
     pub protocol: u64,
+    /// What the server shares with joining clients, if anything (see [`crate::content`]).
+    #[serde(default)]
+    pub content: Option<crate::content::ContentAdvert>,
 }
 
 pub fn encode_query(token: u64) -> Vec<u8> {

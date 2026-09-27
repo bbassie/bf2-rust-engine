@@ -327,6 +327,13 @@ Read from the `RendDX9.dll` and `BF2.exe` 1.5 disassembly; the constants are the
   5 and 10), `renderer.minCullDistance` 100 by default and 80 on high. So on high a static is drawn to about
   `max(35.9 · radius · cullRadiusScale, 80)` m.
 * `ObjectTemplate.lodDistance High|Medium|Low` is only used by effects.
+* What the importer makes of it (`bf2_import::lods`): LOD 1.. of the geoms a static object draws become
+  `<mesh>_lod<N>.glb` (`_3p_lod<N>`, `_wreck_lod<N>`) listed in the template's parts as `lods` / `wreck_lods`
+  with the distance each takes over at (the high-quality rule above), and the object's `draw_distance` is the
+  distance from its origin where the cull fade is half done (`D² = C²`). Vegetation keeps neither (the tree code handles its distances). The client
+  cross-fades between them with Bevy's `VisibilityRange` (±10 % around each distance), multiplies the switch
+  distances by the zoom and the draw distances by its square root, and the view distance setting scales the draw
+  distances.
 
 ## 3. Collision meshes: `.collisionmesh`
 

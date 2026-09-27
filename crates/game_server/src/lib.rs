@@ -40,6 +40,7 @@ pub mod chat;
 pub mod commander;
 pub mod combat;
 pub mod conquest;
+pub mod content;
 pub mod coop;
 pub mod discovery;
 pub mod gear;
@@ -91,6 +92,8 @@ pub struct ServerSettings {
     pub coop: coop::CoopSettings,
     /// Master server to announce this server to (`host[:port]`, see `crates/master_server`).
     pub master_server: Option<String>,
+    /// What joining clients may download from this server (see [`content`]).
+    pub content: content::ContentSettings,
 }
 
 impl Default for ServerSettings {
@@ -115,6 +118,7 @@ impl Default for ServerSettings {
             admin: default(),
             coop: default(),
             master_server: None,
+            content: default(),
         }
     }
 }
@@ -141,6 +145,7 @@ impl Plugin for GameServerPlugin {
                 discovery::DiscoveryPlugin,
                 rotation::RotationPlugin,
                 stats::StatsPlugin,
+                content::ContentPlugin,
             ))
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
@@ -297,6 +302,7 @@ pub fn start_server(world: &mut World, mut settings: ServerSettings) -> Result<(
     world.insert_resource(settings);
     world.run_system_cached::<(), _, _>(start_networking)?;
     discovery::start(world);
+    content::start(world);
     admin::start(world);
     stats::start(world);
     world.run_system_cached(start_match)?;
@@ -310,6 +316,7 @@ pub fn stop_server(world: &mut World) {
     stats::stop(world);
     admin::stop(world);
     discovery::stop(world);
+    content::stop(world);
     if let Some(mut transport) = world.remove_resource::<NetcodeServerTransport>() {
         if let Some(mut server) = world.get_resource_mut::<RenetServer>() {
             transport.disconnect_all(&mut server);

@@ -28,6 +28,8 @@ struct UndergrowthParams {
     // xyz scale the albedo, so sunlight, and the diffuse occlusion, so ambient light.
     light_sun: vec4<f32>,
     light_ambient: vec4<f32>,
+    // Baked sky visibility as occlusion: x = 1 / open sky, y = strength, z = floor.
+    sky: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: UndergrowthParams;
@@ -35,6 +37,8 @@ struct UndergrowthParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var atlas_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var ground: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var ground_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var lightmap: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var lightmap_sampler: sampler;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -107,6 +111,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // brightness factor in gamma space; the same product in linear space is far darker.
     let ground_uv = (in.world_position.xz - params.ground_rect.xy) / params.ground_rect.zw;
     let ground_color = textureSample(ground, ground_sampler, ground_uv).rgb;
+    let sky = textureSample(lightmap, lightmap_sampler, ground_uv).b;
     let tint = mix(vec3(1.0), to_gamma(ground_color), in.tint.x);
     let albedo = to_linear(min(to_gamma(texel.rgb) * tint * params.distances.w * in.tint.y, vec3(1.0)));
 
@@ -129,6 +134,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.diffuse_occlusion = vec3(ao);
 #endif
     pbr_input.diffuse_occlusion *= params.light_ambient.rgb;
+    let occlusion = mix(1.0, clamp(sky * params.sky.x, params.sky.z, 1.0), params.sky.y);
+    pbr_input.diffuse_occlusion *= occlusion;
+    pbr_input.specular_occlusion *= occlusion;
 
     var color = apply_pbr_lighting(pbr_input);
     color = main_pass_post_lighting_processing(pbr_input, color);

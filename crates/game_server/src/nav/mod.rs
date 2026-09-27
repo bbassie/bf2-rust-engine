@@ -13,6 +13,7 @@
 mod build;
 mod cache;
 mod path;
+pub mod vehicle;
 
 use std::{ops::Range, sync::Arc, time::Instant};
 
@@ -46,9 +47,15 @@ impl Plugin for NavPlugin {
                     .run_if(resource_exists_and_changed::<LoadedLevel>)
                     .run_if(in_state(bevy_replicon::prelude::ClientState::Disconnected)),
                 finish_build.run_if(resource_exists::<NavBuild>),
+                finish_vehicle_build.run_if(resource_exists::<VehicleNavBuild>),
                 forget_level
                     .run_if(not(resource_exists::<LoadedLevel>))
-                    .run_if(resource_exists::<Navigation>.or_else(resource_exists::<NavBuild>)),
+                    .run_if(
+                        resource_exists::<Navigation>
+                            .or_else(resource_exists::<NavBuild>)
+                            .or_else(resource_exists::<vehicle::VehicleNavigation>)
+                            .or_else(resource_exists::<VehicleNavBuild>),
+                    ),
             )
                 .chain(),
         );
@@ -62,8 +69,13 @@ pub struct Navigation(pub Arc<NavGrid>);
 #[derive(Resource)]
 struct NavBuild(Task<NavGrid>);
 
+#[derive(Resource)]
+struct VehicleNavBuild(Task<vehicle::VehicleNavGrid>);
+
 /// How far around the control points and spawn points the grid reaches, meters.
 const GAMEPLAY_MARGIN: f32 = 60.0;
+/// The same for the vehicle grid, which also covers the vehicle spawners.
+const VEHICLE_MARGIN: f32 = 120.0;
 
 /// Movement limits the grid is built for, derived from [`SoldierTuning`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +139,7 @@ pub struct NavCell {
 const SLOPE_SCALE: f32 = 32.0;
 
 /// A cell and its column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CellRef {
     pub x: u32,
     pub z: u32,
@@ -314,8 +326,10 @@ fn start_build(
         (With<LevelEntity>, Without<ColliderDisabled>),
     >,
     ladder_parts: Query<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>,
+    paths: Option<Res<game_shared::config::GamePaths>>,
 ) {
     commands.remove_resource::<Navigation>();
+    commands.remove_resource::<vehicle::VehicleNavigation>();
     let params = NavParams::from_tuning(&tuning);
     let meshes = colliders
         .iter()
@@ -346,6 +360,7 @@ fn start_build(
         ladders,
         bounds: layout.and_then(gameplay_bounds),
     };
+    start_vehicle_build(&mut commands, &level, layout, &geometry, paths.as_deref());
     let cache_path = level.dir.as_ref().map(|dir| {
         dir.join(match layout {
             Some(l) => format!("navgrid_{}_{}.bin", l.mode, l.size),
@@ -388,6 +403,68 @@ fn start_build(
     commands.insert_resource(NavBuild(task));
 }
 
+/// Builds (or loads) the vehicle grids on a background task: see [`vehicle`].
+fn start_vehicle_build(
+    commands: &mut Commands,
+    level: &LoadedLevel,
+    layout: Option<&GameModeDesc>,
+    infantry: &build::LevelGeometry,
+    paths: Option<&game_shared::config::GamePaths>,
+) {
+    let geometry = build::LevelGeometry {
+        terrain: infantry.terrain.clone(),
+        meshes: infantry.meshes.clone(),
+        ladders: Vec::new(),
+        bounds: layout.and_then(vehicle_bounds),
+    };
+    let water = level.desc.water.as_ref().map(|w| w.height);
+    let roads_desc = level.desc.roads.clone();
+    let paths = paths.cloned();
+    let cache_path = level.dir.as_ref().map(|dir| {
+        dir.join(match layout {
+            Some(l) => format!("navgrid_vehicle_{}_{}.bin", l.mode, l.size),
+            None => "navgrid_vehicle.bin".into(),
+        })
+    });
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let started = Instant::now();
+        let roads = paths.as_ref().map_or_else(Vec::new, |p| vehicle::road_triangles(p, &roads_desc));
+        let input = vehicle::VehicleGeometry { geometry, roads, water };
+        let params = vehicle::land_params();
+        let key = build::geometry_key(&input.geometry, &params);
+        let cached = cache_path.as_ref().and_then(|path| cache::load(path, key, params));
+        let was_cached = cached.is_some();
+        let grid = vehicle::build_all(&input, cached);
+        if !was_cached
+            && let Some(path) = &cache_path
+            && let Err(err) = cache::save(path, key, &grid.land)
+        {
+            warn!("nav: can't write {}: {err:#}", path.display());
+        }
+        info!(
+            "nav: vehicle grids in {:.2} s ({}): land {}x{} ({} cells, {} road columns from {} road triangles),              water {}, air {}",
+            started.elapsed().as_secs_f32(),
+            if was_cached { "cached" } else { "built" },
+            grid.land.width,
+            grid.land.depth,
+            grid.land.cell_count(),
+            grid.road_columns(),
+            input.roads.len(),
+            grid.water.as_ref().map_or("none".to_string(), |w| format!("{}x{}", w.width, w.depth)),
+            grid.air.as_ref().map_or("none".to_string(), |a| format!("{}x{}", a.width, a.depth)),
+        );
+        grid
+    });
+    commands.insert_resource(VehicleNavBuild(task));
+}
+
+fn finish_vehicle_build(mut commands: Commands, mut build: ResMut<VehicleNavBuild>) {
+    if let Some(grid) = check_ready(&mut build.0) {
+        commands.insert_resource(vehicle::VehicleNavigation(Arc::new(grid)));
+        commands.remove_resource::<VehicleNavBuild>();
+    }
+}
+
 fn finish_build(mut commands: Commands, mut build: ResMut<NavBuild>) {
     if let Some(grid) = check_ready(&mut build.0) {
         commands.insert_resource(Navigation(Arc::new(grid)));
@@ -399,6 +476,8 @@ fn finish_build(mut commands: Commands, mut build: ResMut<NavBuild>) {
 fn forget_level(mut commands: Commands) {
     commands.remove_resource::<Navigation>();
     commands.remove_resource::<NavBuild>();
+    commands.remove_resource::<vehicle::VehicleNavigation>();
+    commands.remove_resource::<VehicleNavBuild>();
 }
 
 /// The area around the control points and spawn points of a layout.
@@ -413,6 +492,21 @@ fn gameplay_bounds(layout: &GameModeDesc) -> Option<(Vec2, Vec2)> {
         (min.min(p), max.max(p))
     });
     (min.x <= max.x).then(|| (min - GAMEPLAY_MARGIN, max + GAMEPLAY_MARGIN))
+}
+
+/// The area around the control points, spawn points and vehicle spawners of a layout.
+fn vehicle_bounds(layout: &GameModeDesc) -> Option<(Vec2, Vec2)> {
+    let points = layout
+        .control_points
+        .iter()
+        .map(|cp| cp.position)
+        .chain(layout.spawn_points.iter().map(|sp| sp.placement.position))
+        .chain(layout.vehicle_spawners.iter().map(|v| v.placement.position));
+    let (min, max) = points.fold((Vec2::MAX, Vec2::MIN), |(min, max), p| {
+        let p = Vec2::new(p[0], p[2]);
+        (min.min(p), max.max(p))
+    });
+    (min.x <= max.x).then(|| (min - VEHICLE_MARGIN, max + VEHICLE_MARGIN))
 }
 
 #[cfg(test)]

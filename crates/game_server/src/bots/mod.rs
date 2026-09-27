@@ -39,7 +39,7 @@ use game_shared::{
     gear::{SoldierGear, TearGas},
     projectile::SmokeCloud,
     statics::DestroyedStatics,
-    vehicle::{Seated, Vehicle, VehicleHealth, VehicleMotion},
+    vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleMotion, VehicleState, VehicleWeapons},
     weapons::{Armory, Inventory, Loadout, cooks},
 };
 
@@ -54,14 +54,17 @@ use crate::{
         stats::{AiStats, TeamStats},
         strategy::{self, OrderKind, StrategicMap, Strategy, TeamIntel, hash01},
         tactics,
+        vehicles::{SeatWish, VehicleClaims, VehicleProfiles},
     },
     destruction::ObjectHealth,
-    nav::{LadderStep, NavGrid, NavPath, Navigation, Waypoint},
+    nav::{LadderStep, NavGrid, NavPath, Navigation, Waypoint, vehicle::VehicleNavigation},
 };
 
 mod equipment;
+mod vehicle;
 
 use equipment::{LaunchTarget, RepairTarget};
+use vehicle::{Crew, Crews, Ride, VehicleCx};
 
 pub struct BotPlugin;
 
@@ -80,6 +83,8 @@ impl Plugin for BotPlugin {
         .init_resource::<AiStats>()
         .init_resource::<ai::commander::AiCommander>()
         .init_resource::<Flashes>()
+        .init_resource::<VehicleProfiles>()
+        .init_resource::<VehicleClaims>()
         .add_systems(
             Update,
             (
@@ -104,6 +109,7 @@ impl Plugin for BotPlugin {
                 ai::commander::yield_to_humans,
                 ai::commander::command,
                 ai::gadgets::wear_gas_masks,
+                ai::vehicles::update_profiles,
                 think,
                 ai::gadgets::forget_flashes,
                 log_stats,
@@ -180,6 +186,21 @@ pub struct BotStats {
     think_ms: f32,
     max_think_ms: f32,
     ticks: u32,
+    /// Vehicles: seats taken and left, meters driven and seconds at the wheel by bot drivers,
+    /// their path requests, stuck events (and where), aircraft taking off and crashing.
+    vehicle_entries: u32,
+    vehicle_exits: u32,
+    driven: f32,
+    driving_seconds: f32,
+    vehicle_paths: u32,
+    vehicle_partial_paths: u32,
+    vehicle_failed_paths: u32,
+    vehicle_stuck: u32,
+    vehicle_stuck_spots: bevy::platform::collections::HashMap<(i32, i32), u32>,
+    flights: u32,
+    crashes: u32,
+    /// Milliseconds of `think` spent on seated bots.
+    seated_ms: f32,
 }
 
 /// A finished path request.
@@ -211,6 +232,8 @@ enum Activity {
     Launch { target: LaunchTarget, time: f32, weapon: u8, shots: u16, fired: f32 },
     /// Engineers: to something of the team's that is damaged, and the wrench at it.
     Repair { target: RepairTarget, time: f32 },
+    /// To a vehicle's entry point and in, for a seat of this kind (see [`vehicle`]).
+    Mount { vehicle: Entity, wish: SeatWish, time: f32 },
 }
 
 /// How a bot stands while shooting.
@@ -345,6 +368,17 @@ pub struct BotBrain {
     /// Closest the bot got to the current waypoint, and for how long it hasn't got closer.
     waypoint_best: f32,
     waypoint_timer: f32,
+
+    /// In a vehicle: what it does there (see [`vehicle`]).
+    ride: Option<Ride>,
+    /// The vehicle and seat it went for.
+    mount_wish: Option<(Entity, SeatWish)>,
+    /// Seconds before it looks for vehicles again.
+    vehicle_cooldown: f32,
+    /// The vehicle it last left, and for how many more seconds to leave it alone.
+    left_vehicle: Option<(Entity, f32)>,
+    /// Use was pressed last tick (getting in presses it on alternate ticks).
+    use_toggle: bool,
 }
 
 impl Default for BotBrain {
@@ -425,6 +459,11 @@ impl Default for BotBrain {
             repath_cooldown: 0.0,
             waypoint_best: f32::MAX,
             waypoint_timer: 0.0,
+            ride: None,
+            mount_wish: None,
+            vehicle_cooldown: 5.0 * fastrand::f32(),
+            left_vehicle: None,
+            use_toggle: false,
         }
     }
 }
@@ -513,6 +552,23 @@ struct Senses<'w, 's> {
     assets: Res<'w, CommanderAssets>,
     destroyed: Query<'w, 's, &'static DestroyedStatics>,
     object_health: Res<'w, ObjectHealth>,
+    /// Vehicles with what riding them needs.
+    rides: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Vehicle,
+            &'static VehicleData,
+            &'static VehicleMotion,
+            &'static VehicleState,
+            Option<&'static VehicleHealth>,
+            Option<&'static VehicleWeapons>,
+        ),
+    >,
+    profiles: Res<'w, VehicleProfiles>,
+    vehicle_nav: Option<Res<'w, VehicleNavigation>>,
+    players: Query<'w, 's, &'static Player>,
 }
 
 impl Senses<'_, '_> {
@@ -625,8 +681,11 @@ impl BotBrain {
         self.path_task = None;
         self.path_goal = None;
         self.activity = Activity::Objective;
+        self.ride = None;
+        self.mount_wish = None;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tick(
         &mut self,
         w: &Senses,
@@ -635,8 +694,20 @@ impl BotBrain {
         stats: &mut BotStats,
         team_stats: &mut TeamStats,
         covers: &mut u32,
+        vcx: &mut VehicleCx,
     ) -> InputFrame {
         let dt = w.time.delta_secs();
+        self.vehicle_cooldown -= dt;
+        if let Some((_, left)) = &mut self.left_vehicle {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.left_vehicle = None;
+            }
+        }
+        if self.ride.is_some() {
+            // Just got out.
+            self.end_ride(w, me, vcx.claims, stats);
+        }
         if self.soldier != Some(me.soldier) {
             self.new_life(w, me);
             team_stats.spawns += 1;
@@ -669,7 +740,7 @@ impl BotBrain {
         self.decide_timer -= dt;
         if self.decide_timer <= 0.0 {
             self.decide_timer = DECIDE_INTERVAL;
-            self.decide(w, me, team_stats, covers);
+            self.decide(w, me, team_stats, covers, vcx);
         }
 
         let mut intent = Intent::default();
@@ -724,6 +795,7 @@ impl BotBrain {
                 self.launch(w, me, skill, target, time, weapon, shots, fired, &mut intent, dt)
             }
             Activity::Repair { target, time } => self.repair(w, me, target, time, &mut intent, dt),
+            Activity::Mount { vehicle, wish, time } => self.mount(w, me, vcx, vehicle, wish, time, &mut intent, dt),
             Activity::Objective => {
                 self.objective(w, me, &mut intent, dt);
                 intent.weapon = intent.weapon.or(self.bag);
@@ -790,9 +862,15 @@ impl BotBrain {
         let mut candidates: Vec<(Entity, f32, Vec3, bool)> = Vec::new();
         let mut heard: Option<(f32, Vec3)> = None;
         for (entity, motion, controlled_by, _, _, applied, _, seated, downed) in &w.soldiers {
-            // Crews are fought through their vehicles (rocket launchers, `scan_armor`); the
+            // Crews behind armour are fought through their vehicles (rocket launchers,
+            // `scan_armor`), exposed ones (open seats: gunners, jeep riders) like anyone; the
             // critically wounded are left alone.
-            if entity == me.soldier || seated.is_some() || downed || !w.is_enemy(controlled_by.0, me.team) {
+            let exposed = seated.is_none_or(|s| {
+                w.vehicle(s.vehicle)
+                    .and_then(|v| v.data.0.desc.seats.get(s.seat as usize).map(|d| d.open))
+                    .unwrap_or(false)
+            });
+            if entity == me.soldier || !exposed || downed || !w.is_enemy(controlled_by.0, me.team) {
                 continue;
             }
             let to = motion.position - position;
@@ -901,7 +979,7 @@ impl BotBrain {
 
     /// Weighs the options (utility) and switches activity when another is worth more.
     /// `covers`: cover searches left this tick (they cast rays).
-    fn decide(&mut self, w: &Senses, me: &Me, team_stats: &mut TeamStats, covers: &mut u32) {
+    fn decide(&mut self, w: &Senses, me: &Me, team_stats: &mut TeamStats, covers: &mut u32, vcx: &mut VehicleCx) {
         if me.motion.climbing {
             // Hands on the rungs: nothing to do but climb on.
             if matches!(
@@ -939,6 +1017,7 @@ impl BotBrain {
             Activity::Search { time, .. } if time > 0.0 => best = (2.5, self.activity),
             Activity::Revive { time, .. } if time > 0.0 => best = (REVIVE_UTILITY, self.activity),
             Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
+            Activity::Mount { time, .. } if time < 30.0 => best = (5.0, self.activity),
             _ => {}
         }
         let consider = |best: &mut (f32, Activity), utility: f32, activity: Activity| {
@@ -1046,6 +1125,9 @@ impl BotBrain {
         }
 
         self.equipment_options(w, me, target, &mut best);
+        if !matches!(self.activity, Activity::Mount { .. }) {
+            self.vehicle_options(w, me, vcx, target, &mut best);
+        }
         if self.gassed > 0.25
             && let Some(spot) = self.out_of_gas(w, me)
         {
@@ -1097,6 +1179,10 @@ impl BotBrain {
                     team_stats.repairs += 1;
                 }
                 Activity::Revive { .. } => team_stats.revives += 1,
+                Activity::Mount { vehicle, wish, .. } => {
+                    let template = w.vehicle(vehicle).map_or("?", |v| v.template);
+                    debug!("{} goes for {template} ({wish:?})", w.name(me.player));
+                }
                 _ => {}
             }
             self.activity = next;
@@ -2033,21 +2119,31 @@ fn spawn_bots(
     settings: Res<ServerSettings>,
     bots: Query<(), With<BotBrain>>,
     teams: Query<&Team, With<Player>>,
+    players: Query<&Player>,
 ) {
     let existing = bots.iter().count() as u32;
     if existing >= settings.bots {
         return;
     }
     let mut teams: Vec<Team> = teams.iter().copied().collect();
-    for i in existing..settings.bots {
+    // The first free name: "Alpha (bot)" ... "Zulu (bot)", then "Alpha 2 (bot)", ...
+    let mut taken: Vec<String> = players.iter().map(|p| p.name.clone()).collect();
+    for _ in existing..settings.bots {
         let team = balanced_team(teams.iter());
         teams.push(team);
-        let name = BOT_NAMES[i as usize % BOT_NAMES.len()];
+        let name = (0..)
+            .map(|n| {
+                let base = BOT_NAMES[n % BOT_NAMES.len()];
+                match n / BOT_NAMES.len() {
+                    0 => format!("{base} (bot)"),
+                    round => format!("{base} {} (bot)", round + 1),
+                }
+            })
+            .find(|name| !taken.contains(name))
+            .expect("names never run out");
+        taken.push(name.clone());
         commands.spawn((
-            Player {
-                name: format!("{name} (bot)"),
-                is_bot: true,
-            },
+            Player { name, is_bot: true },
             team,
             InputBuffer::default(),
             BotBrain::default(),
@@ -2076,18 +2172,33 @@ fn think(
     mut intel: ResMut<TeamIntel>,
     mut stats: ResMut<BotStats>,
     mut ai_stats: ResMut<AiStats>,
+    mut claims: ResMut<VehicleClaims>,
 ) {
     let started = Instant::now();
     let mut covers = 3;
+    claims.tick(w.time.delta_secs());
+    // Who sits where.
+    let mut crews = Crews::default();
+    for (soldier, _, controlled_by, .., seated, _) in &w.soldiers {
+        if let Some(seated) = seated {
+            let _ = soldier;
+            crews.entry(seated.vehicle).or_default().push(Crew {
+                seat: seated.seat,
+                player: controlled_by.0,
+                team: w.teams.get(controlled_by.0).copied().unwrap_or_default(),
+            });
+        }
+    }
+    let mut seated_ms = 0.0;
     for (player, mut brain, mut buffer, team, controls, member, mut deployment) in &mut bots {
         let soldier = controls.and_then(|c| w.soldiers.get(c.0).ok());
         let Some((own, motion, _, inventory, health, _, loadout, seated, downed)) = soldier else {
             brain.while_dead(&w, player, *team, member.copied(), &mut deployment);
+            claims.release(player);
             continue;
         };
-        // Down, the server ignores its input; in a vehicle, bots do nothing yet.
-        if seated.is_some() || downed {
-            // TODO: bots driving and gunning vehicles. They never get in by themselves.
+        // Down, the server ignores its input.
+        if downed {
             brain.seq = brain.seq.wrapping_add(1);
             buffer.push(InputFrame {
                 seq: brain.seq,
@@ -2110,11 +2221,24 @@ fn think(
         };
         let mut spare = TeamStats::default();
         let team_stats = ai_stats.team(*team).unwrap_or(&mut spare);
-        let frame = brain.tick(&w, &me, &mut intel, &mut stats, team_stats, &mut covers);
+        let mut vcx = VehicleCx {
+            claims: &mut claims,
+            crews: &crews,
+        };
+        let frame = match seated {
+            Some(seated) => {
+                let started = Instant::now();
+                let frame = brain.tick_seated(&w, &me, seated, &mut vcx, &mut intel, &mut stats, team_stats);
+                seated_ms += started.elapsed().as_secs_f32() * 1000.0;
+                frame
+            }
+            None => brain.tick(&w, &me, &mut intel, &mut stats, team_stats, &mut covers, &mut vcx),
+        };
         buffer.push(frame);
     }
     let ms = started.elapsed().as_secs_f32() * 1000.0;
     stats.think_ms += ms;
+    stats.seated_ms += seated_ms;
     stats.max_think_ms = stats.max_think_ms.max(ms);
     stats.ticks += 1;
 }
@@ -2150,6 +2274,25 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.think_ms / stats.ticks.max(1) as f32,
             stats.max_think_ms,
             hotspots(&stats.stuck_spots),
+        );
+        info!(
+            "bots in vehicles: {} seats taken, {} left; {:.2} km driven in {:.0} s at the wheel ({:.1} m/s); \
+             {} vehicle stuck events ({:.1} per vehicle-minute, most at {}); {} vehicle paths ({} partial, {} failed); \
+             {} takeoffs, {} crashes; seated bots {:.3} ms per tick",
+            stats.vehicle_entries,
+            stats.vehicle_exits,
+            stats.driven / 1000.0,
+            stats.driving_seconds,
+            stats.driven / stats.driving_seconds.max(1.0),
+            stats.vehicle_stuck,
+            stats.vehicle_stuck as f32 / (stats.driving_seconds / 60.0).max(1.0),
+            hotspots(&stats.vehicle_stuck_spots),
+            stats.vehicle_paths,
+            stats.vehicle_partial_paths,
+            stats.vehicle_failed_paths,
+            stats.flights,
+            stats.crashes,
+            stats.seated_ms / stats.ticks.max(1) as f32,
         );
     }
     *stats = BotStats::default();

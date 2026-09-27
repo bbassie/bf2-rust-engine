@@ -1,0 +1,12 @@
+// Joins a server (`client --connect <ip> --port <port> --scenario scenarios/content_join.ron`),
+// downloading its content first if it shares any (scenarios download without asking), then
+// takes a screenshot once everything is loaded. The first WaitReady covers a long download.
+(
+    steps: [
+        WaitReady,
+        WaitReady,
+        Wait(2.0),
+        Screenshot("joined"),
+        Quit,
+    ],
+)

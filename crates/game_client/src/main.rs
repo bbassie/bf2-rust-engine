@@ -33,6 +33,7 @@ mod chat;
 mod combat;
 mod commander;
 mod conquest_hud;
+mod content;
 mod deploy;
 mod effects;
 mod gadgets;
@@ -88,6 +89,14 @@ pub struct Cli {
     /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
     #[arg(long)]
     mods: Option<PathBuf>,
+    /// Downloading a server's content when joining: ask, always or never (default: the
+    /// setting; scenarios and screenshots: always).
+    #[arg(long)]
+    content: Option<content::ContentDownloads>,
+    /// Content cache folder (default: `cache` next to the settings file, or
+    /// $GAME_CONTENT_CACHE).
+    #[arg(long)]
+    content_cache: Option<PathBuf>,
     /// Save a screenshot to this path once everything is loaded (plus
     /// `--screenshot-delay` seconds), then exit.
     #[arg(long)]
@@ -230,7 +239,12 @@ fn main() -> AppExit {
             })
             .set(ImagePlugin {
                 default_sampler: render::materials::default_sampler(),
-            }),
+            })
+            // Static meshes' lightmap UVs.
+            .set(bevy::gltf::GltfPlugin::default().add_custom_vertex_attribute(
+                "_LIGHTMAP_UV",
+                render::materials::ATTRIBUTE_LIGHTMAP_UV,
+            )),
     )
     .add_plugins((
         FrameTimeDiagnosticsPlugin::default(),
@@ -266,6 +280,7 @@ fn main() -> AppExit {
         // Idle until a match starts (see `net::start_match`).
         GameServerPlugin { settings: None },
         settings::SettingsPlugin,
+        content::ContentPlugin,
         effects::EffectsPlugin,
         gadgets::GadgetsPlugin,
         menu::MenuPlugin {

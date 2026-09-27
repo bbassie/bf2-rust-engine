@@ -1,8 +1,14 @@
 //! The `imported://` asset source with mods on top: a path is read from the first mod that
 //! has the file, else from `imported/` (see `game_shared::mods`). glTF files find their
 //! textures the same way, so a mod can replace a texture without touching the mesh.
+//!
+//! The layers can change while the game runs: joining a server that shares its content
+//! mounts the server's layers for the session (see `content`), leaving goes back.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Mutex, RwLock},
+};
 
 use bevy::{
     asset::io::{
@@ -12,20 +18,51 @@ use bevy::{
 };
 use game_shared::config::GamePaths;
 
-/// Reads from the mods (highest priority first), then `imported/`.
-struct LayeredReader {
-    layers: Vec<(PathBuf, FileAssetReader)>,
+/// A folder and its reader. Kept for the whole run (one per folder ever used), so readers
+/// can hand out readers borrowing it while the layers change.
+struct Layer {
+    root: PathBuf,
+    reader: FileAssetReader,
 }
+
+/// Every layer ever used, and the current ones (highest priority first).
+static ALL_LAYERS: Mutex<Vec<&'static Layer>> = Mutex::new(Vec::new());
+static LAYERS: RwLock<Vec<&'static Layer>> = RwLock::new(Vec::new());
+
+/// Reads `imported://` paths from the layers of `paths` from now on.
+pub fn set_layers(paths: &GamePaths) {
+    let mut all = ALL_LAYERS.lock().unwrap();
+    let layers = paths
+        .roots()
+        .into_iter()
+        .map(|root| match all.iter().find(|l| l.root == root) {
+            Some(layer) => *layer,
+            None => {
+                let layer: &'static Layer = Box::leak(Box::new(Layer {
+                    root: root.to_path_buf(),
+                    reader: FileAssetReader::new(root),
+                }));
+                all.push(layer);
+                layer
+            }
+        })
+        .collect();
+    *LAYERS.write().unwrap() = layers;
+}
+
+/// Reads from the mods (highest priority first), then `imported/`.
+struct LayeredReader;
 
 impl LayeredReader {
     /// The reader of the first layer that has `path` (the last layer if none has it, so
     /// errors name the imported folder).
-    fn layer(&self, path: &Path) -> &FileAssetReader {
-        self.layers
+    fn layer(&self, path: &Path) -> &'static FileAssetReader {
+        let layers = LAYERS.read().unwrap();
+        layers
             .iter()
-            .find(|(root, _)| root.join(path).exists())
-            .or(self.layers.last())
-            .map(|(_, reader)| reader)
+            .find(|layer| layer.root.join(path).exists())
+            .or(layers.last())
+            .map(|layer| &layer.reader)
             .expect("at least the imported folder")
     }
 }
@@ -55,15 +92,9 @@ impl AssetReader for LayeredReader {
     }
 }
 
-/// The `imported` asset source: the mods of `paths` over the imported folder.
+/// The `imported` asset source: the mods of `paths` over the imported folder (changed later
+/// with [`set_layers`]).
 pub fn imported_source(paths: &GamePaths) -> AssetSourceBuilder {
-    let roots: Vec<PathBuf> = paths.roots().into_iter().map(Path::to_path_buf).collect();
-    AssetSourceBuilder::new(move || {
-        Box::new(LayeredReader {
-            layers: roots
-                .iter()
-                .map(|root| (root.clone(), FileAssetReader::new(root)))
-                .collect(),
-        })
-    })
+    set_layers(paths);
+    AssetSourceBuilder::new(|| Box::new(LayeredReader))
 }

@@ -328,9 +328,13 @@ fn map(world: &mut World, args: &str) -> Answer {
 }
 
 fn next_map(world: &mut World) -> Answer {
-    rotation::advance(world);
-    let settings = world.resource::<ServerSettings>();
-    Ok(format!("Changing map to {} ({} {}).", settings.level, settings.mode, settings.size))
+    let map = world
+        .resource::<MapRotation>()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| rotation::current_map(world));
+    rotation::change_map(world, &map);
+    Ok(format!("Changing map to {} ({} {}).", map.level, map.mode, map.size))
 }
 
 fn rotation_list(world: &mut World) -> String {

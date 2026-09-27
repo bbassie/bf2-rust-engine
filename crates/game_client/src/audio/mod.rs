@@ -76,8 +76,8 @@ enum AudioSystems {
 #[derive(Resource, Default, Clone)]
 pub struct Sounds(pub Arc<SoundLibrary>);
 
-fn load_library(mut commands: Commands, paths: Res<GamePaths>) {
-    let path = paths.imported.join("sounds.ron");
+pub(crate) fn load_library(mut commands: Commands, paths: Res<GamePaths>) {
+    let path = paths.find("sounds.ron");
     let library = if path.exists() {
         game_data::read_ron(&path).unwrap_or_else(|err| {
             warn!("{err}");

@@ -92,8 +92,9 @@ pub fn flip_vertical(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Converts an uncompressed 16-bit R5G6B5 DDS into 32-bit BGRA (GPUs can't sample 565).
-/// Returns `None` if the file isn't R5G6B5.
+/// Converts an uncompressed 16-bit DDS into 32-bit BGRA: R5G6B5 (most BF2 terrain images),
+/// and the A4R4G4B4 or A1R5G5B5 a few detail maps use (Operation Smoke Screen). Bevy's
+/// loader and GPUs can't sample those. Returns `None` for any other format.
 pub fn rgb565_to_bgra8(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < HEADER || &data[..4] != b"DDS " {
         return None;
@@ -101,9 +102,19 @@ pub fn rgb565_to_bgra8(data: &[u8]) -> Option<Vec<u8>> {
     let pf_flags = u32_at(data, 80);
     let bit_count = u32_at(data, 88);
     let (r_mask, g_mask, b_mask) = (u32_at(data, 92), u32_at(data, 96), u32_at(data, 100));
-    if pf_flags & 0x4 != 0 || bit_count != 16 || (r_mask, g_mask, b_mask) != (0xF800, 0x07E0, 0x001F) {
+    // Alpha only counts with the "alpha pixels" flag.
+    let a_mask = if pf_flags & 0x1 != 0 { u32_at(data, 104) } else { 0 };
+    if pf_flags & 0x4 != 0 || bit_count != 16 || r_mask == 0 || g_mask == 0 || b_mask == 0 {
         return None;
     }
+    // A channel's value scaled to 0..255 (255 without a mask).
+    let channel = |v: u32, mask: u32| -> u8 {
+        if mask == 0 {
+            return 255;
+        }
+        let max = mask >> mask.trailing_zeros();
+        (((v & mask) >> mask.trailing_zeros()) * 255 / max) as u8
+    };
     let mut out = data[..HEADER].to_vec();
     // Pixel format: RGB + alpha, 32 bits, A8R8G8B8 masks.
     out[80..84].copy_from_slice(&0x41u32.to_le_bytes());
@@ -117,10 +128,7 @@ pub fn rgb565_to_bgra8(data: &[u8]) -> Option<Vec<u8>> {
     out[20..24].copy_from_slice(&(width * 4).to_le_bytes());
     for pixel in data[HEADER..].chunks_exact(2) {
         let v = u16::from_le_bytes([pixel[0], pixel[1]]) as u32;
-        let r = ((v >> 11) & 31) * 255 / 31;
-        let g = ((v >> 5) & 63) * 255 / 63;
-        let b = (v & 31) * 255 / 31;
-        out.extend_from_slice(&[b as u8, g as u8, r as u8, 255]);
+        out.extend_from_slice(&[channel(v, b_mask), channel(v, g_mask), channel(v, r_mask), channel(v, a_mask)]);
     }
     Some(out)
 }
@@ -195,5 +203,34 @@ mod tests {
         assert_eq!(&flipped[HEADER + 8..], &[1, 1, 1, 1, 0xA3, 0xA2, 0xA1, 0xA0]);
         // Flipping twice is the identity.
         assert_eq!(flip_vertical(&flipped).unwrap(), data);
+    }
+
+    #[test]
+    fn widens_16_bit_formats() {
+        let header = |flags: u32, masks: [u32; 4]| {
+            let mut h = dxt1_header(2, 1);
+            h[80..84].copy_from_slice(&flags.to_le_bytes());
+            h[84..88].copy_from_slice(&[0; 4]);
+            h[88..92].copy_from_slice(&16u32.to_le_bytes());
+            for (i, mask) in masks.iter().enumerate() {
+                h[92 + 4 * i..96 + 4 * i].copy_from_slice(&mask.to_le_bytes());
+            }
+            h
+        };
+        // R5G6B5: pure red, then white.
+        let mut rgb565 = header(0x40, [0xF800, 0x07E0, 0x001F, 0]);
+        rgb565.extend_from_slice(&[0x00, 0xF8, 0xFF, 0xFF]);
+        let out = rgb565_to_bgra8(&rgb565).unwrap();
+        assert_eq!(&out[HEADER..], &[0, 0, 255, 255, 255, 255, 255, 255]);
+        // A4R4G4B4: half-transparent green, then opaque blue.
+        let mut argb4444 = header(0x41, [0x0F00, 0x00F0, 0x000F, 0xF000]);
+        argb4444.extend_from_slice(&[0xF0, 0x80, 0x0F, 0xF0]);
+        let out = rgb565_to_bgra8(&argb4444).unwrap();
+        assert_eq!(&out[HEADER..], &[0, 255, 0, 136, 255, 0, 0, 255]);
+        assert_eq!(u32_at(&out, 88), 32);
+        // Already 32-bit: left alone.
+        let mut bgra = header(0x41, [0xFF0000, 0xFF00, 0xFF, 0xFF000000]);
+        bgra[88..92].copy_from_slice(&32u32.to_le_bytes());
+        assert!(rgb565_to_bgra8(&bgra).is_none());
     }
 }

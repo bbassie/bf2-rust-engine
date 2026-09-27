@@ -68,6 +68,10 @@ pub struct UndergrowthMaterial {
     #[texture(3)]
     #[sampler(4)]
     ground: Option<Handle<Image>>,
+    /// The terrain patch's lightmap: its sky visibility occludes the plants' ambient light.
+    #[texture(5)]
+    #[sampler(6)]
+    lightmap: Option<Handle<Image>>,
     alpha_cutoff: f32,
 }
 
@@ -79,6 +83,8 @@ struct UndergrowthParams {
     /// Lit like the terrain (`environment::LightScale::uniforms`).
     light_sun: Vec4,
     light_ambient: Vec4,
+    /// Baked sky occlusion (`materials::BakedSky::uniform`; strength 0 without a lightmap).
+    sky: Vec4,
 }
 
 impl Material for UndergrowthMaterial {
@@ -230,7 +236,17 @@ fn stream_undergrowth(
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<UndergrowthMaterial>>,
+    settings: Res<crate::settings::Settings>,
 ) {
+    if settings.is_changed() {
+        // The baked sky occlusion setting.
+        let sky = super::materials::BakedSky::uniform(settings.baked_ao);
+        for (_, material) in materials.iter_mut() {
+            if material.lightmap.is_some() && material.params.sky != sky {
+                material.params.sky = sky;
+            }
+        }
+    }
     let Ok(camera) = camera.single() else {
         return;
     };
@@ -254,7 +270,7 @@ fn stream_undergrowth(
             continue;
         }
         let entity = mesh.map(|mesh| {
-            let material = patch_material(undergrowth, &level, key, &asset_server, &mut materials);
+            let material = patch_material(undergrowth, &level, key, &asset_server, &mut materials, settings.baked_ao);
             commands
                 .spawn((
                     UndergrowthChunk,
@@ -301,6 +317,7 @@ fn patch_material(
     chunk: IVec2,
     asset_server: &AssetServer,
     materials: &mut Assets<UndergrowthMaterial>,
+    baked_ao: bool,
 ) -> Handle<UndergrowthMaterial> {
     let heightmap = &undergrowth.data.heightmap;
     let terrain = level.desc.terrain.as_ref();
@@ -314,18 +331,22 @@ fn patch_material(
     if let Some(material) = undergrowth.materials.get(&patch) {
         return material.clone();
     }
-    let ground = terrain
-        .and_then(|t| t.color_maps.get((patch.y * tiles + patch.x) as usize))
-        .filter(|p| !p.is_empty())
-        .map(|path| {
-            asset_server
-                .load_builder()
-                .with_settings(|s: &mut ImageLoaderSettings| {
-                    s.is_srgb = true;
-                    s.sampler = ImageSampler::Descriptor(clamped_sampler());
-                })
-                .load(format!("imported://levels/{}/{path}", level.desc.name))
-        });
+    let patch_image = |paths: Option<&Vec<String>>, srgb: bool| {
+        paths
+            .and_then(|p| p.get((patch.y * tiles + patch.x) as usize))
+            .filter(|p| !p.is_empty())
+            .map(|path| {
+                asset_server
+                    .load_builder()
+                    .with_settings(move |s: &mut ImageLoaderSettings| {
+                        s.is_srgb = srgb;
+                        s.sampler = ImageSampler::Descriptor(clamped_sampler());
+                    })
+                    .load(format!("imported://levels/{}/{path}", level.desc.name))
+            })
+    };
+    let ground = patch_image(terrain.map(|t| &t.color_maps), true);
+    let lightmap = patch_image(terrain.map(|t| &t.lightmaps), false);
     let desc = &undergrowth.data.desc;
     let corner = heightmap.origin.xz() + patch.as_vec2() * patch_size;
     let fade_start = undergrowth.view_distance * (1.0 - desc.fade.clamp(0.05, 1.0));
@@ -346,9 +367,11 @@ fn patch_material(
             wind: Vec4::new(wind.x, wind.y, desc.alpha_cutoff, KEEP_AT_FADE),
             light_sun,
             light_ambient,
+            sky: if lightmap.is_some() { super::materials::BakedSky::uniform(baked_ao) } else { Vec4::ZERO },
         },
         atlas: undergrowth.atlas.clone(),
         ground,
+        lightmap,
         alpha_cutoff: desc.alpha_cutoff,
     });
     undergrowth.materials.insert(patch, material.clone());

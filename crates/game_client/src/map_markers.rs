@@ -2,14 +2,26 @@
 //! commander's assets and what they are doing. Systems in [`MarkerSystems`] fill
 //! [`MapMarkers`] every frame (`map_icons`, `radio`, `commander`); the minimap, the big map
 //! and the commander screen draw them with [`MarkerIcons`]: a dot, an image framed by a dot of
-//! the marker's colour (flags), or an image in the marker's colour with a dark halo, turned
-//! with its heading (vehicles), with an outlined line for a turret.
+//! the marker's colour (flags), or a white silhouette in the marker's colour with a dark
+//! outline, turned with its heading and with an outlined line for a turret (vehicles, drawn
+//! by [`IconMaterial`]).
 //!
 //! On the big maps markers are labelled. [`place_labels`] keeps labels from covering each
-//! other: each tries a few spots around its icon (below first), then a smaller font, and is
-//! left out when nothing fits; labels of higher priority (control points) go first.
+//! other and the labelled icons: each tries a few spots around its icon (below first), then a
+//! smaller font, then a line further away, and is left out when nothing fits. Labels of
+//! higher priority (control points) go first, and a label pushed away gets a spot next to its
+//! icon back when the one label in the way can move to another spot next to its own.
 
-use bevy::{ecs::system::SystemParam, platform::collections::HashMap, prelude::*, ui::FocusPolicy};
+use bevy::{
+    asset::embedded_asset,
+    ecs::system::SystemParam,
+    platform::collections::HashMap,
+    prelude::*,
+    render::render_resource::{AsBindGroup, ShaderType},
+    shader::ShaderRef,
+    ui::FocusPolicy,
+    ui_render::prelude::{MaterialNode, UiMaterial, UiMaterialPlugin},
+};
 
 use crate::{camera::CameraSystems, prediction::RenderStateSystems, vehicles::VehicleViewSystems};
 
@@ -17,7 +29,9 @@ pub struct MapMarkersPlugin;
 
 impl Plugin for MapMarkersPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<MapMarkers>()
+        embedded_asset!(app, "map_icon.wgsl");
+        app.add_plugins(UiMaterialPlugin::<IconMaterial>::default())
+            .init_resource::<MapMarkers>()
             .configure_sets(
                 PostUpdate,
                 MarkerSystems
@@ -33,13 +47,16 @@ impl Plugin for MapMarkersPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MarkerSystems;
 
-/// Stacking of markers: higher layers are drawn above lower ones.
-pub const FLAG_LAYER: i32 = -1;
-pub const SOLDIER_LAYER: i32 = 0;
+/// Stacking of markers: higher layers are drawn above lower ones. Flags go above vehicles
+/// (the ones parked at a main base would hide its flag), soldiers' dots above both.
 pub const VEHICLE_LAYER: i32 = 1;
-pub const ALERT_LAYER: i32 = 2;
+pub const FLAG_LAYER: i32 = 2;
+pub const SOLDIER_LAYER: i32 = 3;
+pub const ALERT_LAYER: i32 = 4;
+/// The vehicle we sit in, above everything else.
+pub const OWN_LAYER: i32 = 5;
 /// Labels, above every icon.
-const LABEL_LAYER: i32 = 3;
+const LABEL_LAYER: i32 = 6;
 
 /// Label priorities (see [`MapMarker::priority`]).
 pub const CONTROL_POINT_LABEL: i32 = 3;
@@ -58,8 +75,8 @@ pub struct MapMarker {
     /// Labels of higher priority are placed first and win crowded spots (control point
     /// names before asset names); equal ones go by layer, higher first.
     pub priority: i32,
-    /// Drawn as this image instead of a dot: in `color` with a dark halo when `tint` (white
-    /// silhouettes), else as it is on a dot of `color`, or on a box of `color` covering
+    /// Drawn as this image instead of a dot: in `color` with a dark outline when `tint`
+    /// (white silhouettes), else as it is on a dot of `color`, or on a box of `color` covering
     /// `frame` (a part of the image, in shares of its size).
     pub image: Option<Handle<Image>>,
     pub tint: bool,
@@ -108,6 +125,11 @@ impl MapMarker {
     pub fn priority(mut self, priority: i32) -> Self {
         self.priority = priority;
         self
+    }
+
+    /// Drawn by an [`IconMaterial`]: silhouettes, and anything turned.
+    fn turned(&self) -> bool {
+        self.tint || self.heading.is_some() || self.pointer.is_some()
     }
 }
 
@@ -171,13 +193,130 @@ impl IconStyle {
     }
 }
 
+/// Draws a turned map icon in a node that isn't turned itself, since Bevy doesn't clip turned
+/// nodes (vehicles at the minimap's edge spilled out of it): a white silhouette (or a rounded
+/// box) in the marker's colour with a dark outline, turned with its heading, and a white line
+/// with a dark edge for a turret (see `map_icon.wgsl`).
+#[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
+pub struct IconMaterial {
+    #[uniform(0)]
+    params: IconParams,
+    #[texture(1)]
+    #[sampler(2)]
+    image: Handle<Image>,
+}
+
+#[derive(ShaderType, Debug, Clone, Copy, PartialEq)]
+struct IconParams {
+    color: LinearRgba,
+    halo: LinearRgba,
+    /// x, y: the icon's size; z: the node's side; w: the outline's width (logical pixels).
+    size: Vec4,
+    /// x: the icon's heading, y: the turret's (clockwise radians, on the map); z, w: the
+    /// turret line's length and width (0 without one).
+    turn: Vec4,
+    /// x: 1 to draw the image, 2 its shape in the colour (images without white), 0 a
+    /// rounded box.
+    kind: Vec4,
+}
+
+impl UiMaterial for IconMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://client/map_icon.wgsl".into()
+    }
+}
+
+/// Sizes of a turned icon, logical pixels.
+struct Turned {
+    /// Of the square node it is drawn in (room for it turned and for the turret line).
+    side: f32,
+    outline: f32,
+    /// The turret line's length and width (0 without one).
+    length: f32,
+    thickness: f32,
+}
+
+impl Turned {
+    fn new(width: f32, height: f32, pointer: bool) -> Self {
+        let big = width.max(height);
+        // About a pixel of BF2's 16 px silhouettes.
+        let outline = (big / 16.0).clamp(1.2, 2.5);
+        // Well past the hull's front, and thick enough to read on the minimap.
+        let (length, thickness) = if pointer { ((big * 0.66).round(), (big * 0.17).clamp(4.0, 6.5)) } else { (0.0, 0.0) };
+        let reach = (0.5 * width.hypot(height) + outline + 1.0).max(length + thickness / 2.0 + 1.0);
+        Self {
+            side: (reach * 2.0).ceil(),
+            outline,
+            length,
+            thickness,
+        }
+    }
+}
+
+/// Angles are rounded to this (radians), so that icons at rest don't touch their material.
+const ANGLE_STEP: f32 = 0.004;
+
+/// `mask`: the image has no white to colour (see [`all_dark`]).
+fn icon_params(marker: &MapMarker, style: IconStyle, mask: bool) -> IconParams {
+    let size = shape(marker, style).size();
+    let turned = Turned::new(size.x, size.y, marker.pointer.is_some());
+    let angle = |a: Option<f32>| a.map_or(0.0, |a| ((a - style.turn) / ANGLE_STEP).round() * ANGLE_STEP);
+    IconParams {
+        color: marker.color.to_linear(),
+        halo: HALO.to_linear(),
+        size: Vec4::new(size.x, size.y, turned.side, turned.outline),
+        turn: Vec4::new(angle(marker.heading), angle(marker.pointer), turned.length, turned.thickness),
+        kind: Vec4::new(
+            match (&marker.image, mask) {
+                (None, _) => 0.0,
+                (Some(_), false) => 1.0,
+                (Some(_), true) => 2.0,
+            },
+            0.0,
+            0.0,
+            0.0,
+        ),
+    }
+}
+
+/// Whether a silhouette has no white in it to colour (BF2's gun icons are all black): those
+/// are drawn as a shape of the marker's colour. Compressed images are taken to have some.
+fn all_dark(image: &Image) -> bool {
+    use bevy::render::render_resource::TextureFormat;
+    let Some(data) = &image.data else {
+        return false;
+    };
+    match image.texture_descriptor.format {
+        TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb | TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb => {
+            !data.chunks_exact(4).any(|p| p[3] > 128 && p[0].max(p[1]).max(p[2]) > 128)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `marker`'s silhouette is drawn as a shape (see [`all_dark`]), remembered per image
+/// once it is loaded.
+fn mask(images: &Assets<Image>, known: &mut HashMap<AssetId<Image>, bool>, marker: &MapMarker) -> bool {
+    let Some(image) = marker.image.as_ref().filter(|_| marker.tint) else {
+        return false;
+    };
+    if let Some(&dark) = known.get(&image.id()) {
+        return dark;
+    }
+    let Some(loaded) = images.get(image) else {
+        return false;
+    };
+    let dark = all_dark(loaded);
+    known.insert(image.id(), dark);
+    dark
+}
+
 /// A map's icon for a marker, a child of the map.
 #[derive(Component)]
 pub struct MarkerIcon {
     key: Entity,
     shape: IconShape,
     body: Entity,
-    pointer: Option<Entity>,
     /// A sibling of the icon (so that it draws above every icon).
     label: Option<Entity>,
 }
@@ -186,25 +325,21 @@ pub struct MarkerIcon {
 pub struct MarkerBody;
 
 #[derive(Component)]
-pub struct MarkerPointer;
-
-#[derive(Component)]
 pub struct MarkerLabel {
     /// The spot it took last (see [`LabelSpot::index`]).
     spot: Option<u8>,
 }
 
 /// Filter for queries in systems with a [`MarkerIcons`] that touch `Node`, `Visibility`,
-/// `UiTransform`, `BackgroundColor` or `TextFont`: keeps them apart from the icons'.
-pub type NotMarker = (Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerPointer>, Without<MarkerLabel>);
+/// `BackgroundColor` or `TextFont`: keeps them apart from the icons'.
+pub type NotMarker = (Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerLabel>);
 
 /// What can't change without rebuilding the icon.
 #[derive(Clone, PartialEq, Debug)]
 struct IconShape {
     image: Option<AssetId<Image>>,
     tint: bool,
-    /// The colour of a tinted image (its halo is made of copies).
-    tint_color: Option<[u8; 4]>,
+    turned: bool,
     /// Hundredths of the image.
     frame: Option<[i32; 4]>,
     /// Tenths of a pixel.
@@ -215,33 +350,38 @@ struct IconShape {
     layer: i32,
 }
 
+impl IconShape {
+    /// Width and height, logical pixels.
+    fn size(&self) -> Vec2 {
+        Vec2::new(self.width as f32, self.height as f32) / 10.0
+    }
+}
+
 /// Draws [`MapMarker`]s on a map.
 #[derive(SystemParam)]
 pub struct MarkerIcons<'w, 's> {
     commands: Commands<'w, 's>,
+    materials: ResMut<'w, Assets<IconMaterial>>,
+    images: Res<'w, Assets<Image>>,
+    /// Which images [`mask`] found without white.
+    dark: Local<'s, HashMap<AssetId<Image>, bool>>,
     icons: Query<
         'w,
         's,
         (Entity, &'static MarkerIcon, &'static ChildOf, &'static mut Node, &'static mut Visibility),
-        (Without<MarkerBody>, Without<MarkerPointer>, Without<MarkerLabel>),
+        (Without<MarkerBody>, Without<MarkerLabel>),
     >,
     bodies: Query<
         'w,
         's,
-        (&'static mut UiTransform, Option<&'static mut BackgroundColor>),
-        (With<MarkerBody>, Without<MarkerIcon>, Without<MarkerPointer>, Without<MarkerLabel>),
-    >,
-    pointers: Query<
-        'w,
-        's,
-        &'static mut UiTransform,
-        (With<MarkerPointer>, Without<MarkerBody>, Without<MarkerIcon>, Without<MarkerLabel>),
+        (Option<&'static mut BackgroundColor>, Option<&'static MaterialNode<IconMaterial>>),
+        (With<MarkerBody>, Without<MarkerIcon>, Without<MarkerLabel>),
     >,
     labels: Query<
         'w,
         's,
         (&'static mut MarkerLabel, &'static mut Node, &'static mut TextFont, &'static mut Visibility),
-        (Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerPointer>),
+        (Without<MarkerIcon>, Without<MarkerBody>),
     >,
 }
 
@@ -290,24 +430,25 @@ impl MarkerIcons<'_, '_> {
             wanted.remove(&icon.key);
             place(&mut node, point);
             visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
-            if let Ok((mut transform, background)) = self.bodies.get_mut(icon.body) {
-                let rotation = Rot2::radians(marker.heading.map_or(0.0, |h| h - style.turn));
-                if transform.rotation != rotation {
-                    transform.rotation = rotation;
+            if let Ok((background, material)) = self.bodies.get_mut(icon.body) {
+                match material {
+                    // Turned icons: heading, turret and colour live in the material.
+                    Some(material) => {
+                        let params = icon_params(marker, style, mask(&self.images, &mut self.dark, marker));
+                        if self.materials.get(&material.0).is_some_and(|m| m.params != params)
+                            && let Some(mut asset) = self.materials.get_mut(&material.0)
+                        {
+                            asset.params = params;
+                        }
+                    }
+                    None => {
+                        if let Some(mut background) = background
+                            && background.0 != marker.color
+                        {
+                            background.0 = marker.color;
+                        }
+                    }
                 }
-                // Every node has a background: a silhouette's (see `silhouette`) stays clear.
-                let painted = !(marker.tint && marker.image.is_some());
-                if let Some(mut background) = background
-                    && painted
-                    && background.0 != marker.color
-                {
-                    background.0 = marker.color;
-                }
-            }
-            if let (Some(pointer), Some(angle)) = (icon.pointer, marker.pointer)
-                && let Ok(mut transform) = self.pointers.get_mut(pointer)
-            {
-                transform.rotation = Rot2::radians(angle - style.turn);
             }
             if let Some(label) = icon.label
                 && let Ok((mut state, mut node, mut font, mut visibility)) = self.labels.get_mut(label)
@@ -340,7 +481,8 @@ impl MarkerIcons<'_, '_> {
             }
         }
         for (marker, point, shown) in wanted.into_values() {
-            spawn(&mut self.commands, parent, marker, point, shown, style, spots.get(&marker.key));
+            let mask = mask(&self.images, &mut self.dark, marker);
+            spawn(&mut self.commands, &mut self.materials, parent, marker, point, shown, style, mask, spots.get(&marker.key));
         }
     }
 }
@@ -368,7 +510,10 @@ fn label_spots(
         let label = marker.label.as_deref().filter(|l| !l.is_empty());
         // Soldiers move too much to steer labels around, unless they are labelled.
         if marker.layer != SOLDIER_LAYER || label.is_some() {
-            obstacles.push(Rect::from_corners(at + icon.min, at + icon.max));
+            obstacles.push(Obstacle {
+                rect: Rect::from_corners(at + icon.min, at + icon.max),
+                hard: label.is_some(),
+            });
         }
         if let Some(label) = label {
             requests.push(LabelRequest {
@@ -396,8 +541,7 @@ fn label_spots(
 
 /// The box an icon covers around its point, logical pixels.
 fn icon_box(marker: &MapMarker, style: IconStyle) -> Rect {
-    let shape = shape(marker, style);
-    let size = Vec2::new(shape.width as f32, shape.height as f32) / 10.0;
+    let size = shape(marker, style).size();
     match marker.bounds {
         Some(bounds) if marker.image.is_some() => Rect::from_corners(bounds.min * size - size / 2.0, bounds.max * size - size / 2.0),
         // Silhouettes don't fill their image.
@@ -413,11 +557,10 @@ fn shape(marker: &MapMarker, style: IconStyle) -> IconShape {
     } else {
         (size, size)
     };
-    let tinted = marker.image.is_some() && marker.tint;
     IconShape {
         image: marker.image.as_ref().map(|i| i.id()),
         tint: marker.tint,
-        tint_color: tinted.then(|| marker.color.to_srgba().to_u8_array()),
+        turned: marker.turned(),
         frame: marker
             .frame
             .filter(|_| marker.image.is_some() && !marker.tint)
@@ -431,18 +574,19 @@ fn shape(marker: &MapMarker, style: IconStyle) -> IconShape {
 }
 
 const OUTLINE: Color = Color::srgba(0.0, 0.0, 0.0, 0.7);
-/// The halo around silhouettes and turret lines.
-const HALO: Color = Color::srgba(0.02, 0.02, 0.03, 0.8);
+/// The outline of silhouettes and turret lines.
+const HALO: Color = Color::srgba(0.02, 0.02, 0.03, 0.85);
 const LABEL_TEXT: Color = Color::srgb(0.96, 0.97, 0.99);
 const LABEL_PLATE: Color = Color::srgba(0.02, 0.03, 0.04, 0.5);
 /// Around a label's text, logical pixels.
 const LABEL_PADDING: Vec2 = Vec2::new(3.0, 0.0);
 
-/// A white silhouette `image` in `color`, `width`×`height` pixels, with a dark halo that
-/// keeps it readable on bright maps: copies of it in black, shifted around it, then the
-/// image. Children of a node of that size (turn that one to turn it).
+/// A white silhouette `image` in `color`, `width`×`height` pixels, with a dark outline that
+/// keeps it readable on bright maps: copies of it in black, shifted all around it, then the
+/// image. Children of a node of that size (turn that one to turn it). For pictures that
+/// don't change (the maps use [`IconMaterial`]).
 pub fn silhouette(image: &Handle<Image>, color: Color, width: f32, height: f32) -> Vec<(ImageNode, Node, FocusPolicy)> {
-    let reach = (width.max(height) / 20.0).clamp(1.0, 2.0);
+    let reach = (width.max(height) / 16.0).clamp(1.0, 2.0);
     let part = |offset: Vec2, color: Color| {
         (
             ImageNode::new(image.clone()).with_color(color),
@@ -457,9 +601,8 @@ pub fn silhouette(image: &Handle<Image>, color: Color, width: f32, height: f32) 
             FocusPolicy::Pass,
         )
     };
-    let mut parts: Vec<_> = [Vec2::new(1.0, 1.0), Vec2::new(-1.0, 1.0), Vec2::new(1.0, -1.0), Vec2::new(-1.0, -1.0)]
-        .into_iter()
-        .map(|d| part(d * reach, HALO))
+    let mut parts: Vec<_> = (0..8)
+        .map(|i| part(Vec2::from_angle(i as f32 * std::f32::consts::FRAC_PI_4) * reach, HALO))
         .collect();
     parts.push(part(Vec2::ZERO, color));
     parts
@@ -505,17 +648,20 @@ pub fn label_node(left: Val, top: Val, offset: Vec2, size: Vec2) -> Node {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     commands: &mut Commands,
+    materials: &mut Assets<IconMaterial>,
     parent: Entity,
     marker: &MapMarker,
     point: MapPoint,
     shown: bool,
     style: IconStyle,
+    mask: bool,
     spot: Option<&LabelSpot>,
 ) {
     let shape = shape(marker, style);
-    let (width, height) = (shape.width as f32 / 10.0, shape.height as f32 / 10.0);
+    let Vec2 { x: width, y: height } = shape.size();
     let (left, top) = point.vals();
     let root = commands
         .spawn((
@@ -541,16 +687,31 @@ fn spawn(
         height: px(height),
         ..default()
     };
-    let rotation = UiTransform::from_rotation(Rot2::radians(marker.heading.map_or(0.0, |h| h - style.turn)));
-    let body = match (&marker.image, marker.tint) {
-        (Some(image), true) => {
-            let body = commands.spawn((MarkerBody, body_node, rotation, FocusPolicy::Pass, ChildOf(root))).id();
-            for part in silhouette(image, marker.color, width, height) {
-                commands.spawn((part, ChildOf(body)));
-            }
-            body
+    let body = match &marker.image {
+        _ if marker.turned() => {
+            let side = Turned::new(width, height, marker.pointer.is_some()).side;
+            let material = materials.add(IconMaterial {
+                params: icon_params(marker, style, mask),
+                image: marker.image.clone().unwrap_or_default(),
+            });
+            commands
+                .spawn((
+                    MarkerBody,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(-side / 2.0),
+                        top: px(-side / 2.0),
+                        width: px(side),
+                        height: px(side),
+                        ..default()
+                    },
+                    MaterialNode(material),
+                    FocusPolicy::Pass,
+                    ChildOf(root),
+                ))
+                .id()
         }
-        (Some(image), false) if marker.frame.is_some() => {
+        Some(image) if marker.frame.is_some() => {
             // A box of the marker's colour behind part of the image (a flag's cloth), the
             // image around it.
             let frame = marker.frame.unwrap_or(Rect::new(0.0, 0.0, 1.0, 1.0));
@@ -566,7 +727,6 @@ fn spawn(
                         border_radius: BorderRadius::all(px(2)),
                         ..default()
                     },
-                    rotation,
                     BackgroundColor(marker.color),
                     FocusPolicy::Pass,
                     ChildOf(root),
@@ -587,7 +747,7 @@ fn spawn(
             ));
             body
         }
-        (Some(image), false) => {
+        Some(image) => {
             let body = commands
                 .spawn((
                     MarkerBody,
@@ -596,7 +756,6 @@ fn spawn(
                         border_radius: BorderRadius::MAX,
                         ..body_node
                     },
-                    rotation,
                     BackgroundColor(marker.color),
                     BorderColor::all(OUTLINE),
                     FocusPolicy::Pass,
@@ -618,7 +777,7 @@ fn spawn(
             ));
             body
         }
-        (None, _) => commands
+        None => commands
             .spawn((
                 MarkerBody,
                 Node {
@@ -626,7 +785,6 @@ fn spawn(
                     border_radius: if marker.aspect == 1.0 { BorderRadius::MAX } else { BorderRadius::all(px(2)) },
                     ..body_node
                 },
-                rotation,
                 BackgroundColor(marker.color),
                 BorderColor::all(OUTLINE),
                 FocusPolicy::Pass,
@@ -634,40 +792,6 @@ fn spawn(
             ))
             .id(),
     };
-    // The turret: a white line with a dark edge from the middle to past the hull's front.
-    let pointer = marker.pointer.map(|angle| {
-        let length = (width.max(height) * 0.62).round();
-        let thickness = if width >= 26.0 { 5.0 } else { 4.0 };
-        commands
-            .spawn((
-                MarkerPointer,
-                Node {
-                    position_type: PositionType::Absolute,
-                    width: px(0),
-                    height: px(0),
-                    ..default()
-                },
-                UiTransform::from_rotation(Rot2::radians(angle - style.turn)),
-                FocusPolicy::Pass,
-                ChildOf(root),
-                children![(
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: px(-thickness / 2.0),
-                        top: px(-length),
-                        width: px(thickness),
-                        height: px(length + thickness / 2.0),
-                        border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(thickness / 2.0)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::WHITE),
-                    BorderColor::all(HALO),
-                    FocusPolicy::Pass,
-                )],
-            ))
-            .id()
-    });
     let label = shape.label.as_ref().map(|text| {
         let font = label_font(style);
         let (offset, size, scale) = spot.map_or((Vec2::ZERO, label_size(text.chars().count(), font), 1.0), |s| {
@@ -690,7 +814,6 @@ fn spawn(
         key: marker.key,
         shape,
         body,
-        pointer,
         label,
     });
 }
@@ -725,6 +848,13 @@ pub struct LabelSpot {
     pub index: u8,
 }
 
+impl LabelSpot {
+    /// Next to its icon at full size.
+    fn good(&self) -> bool {
+        self.index < NEAR
+    }
+}
+
 /// Size of a label with this many characters (plate included).
 pub fn label_size(chars: usize, font: f32) -> Vec2 {
     // The default font is monospaced: 0.6 em wide, lines 1.2 em high.
@@ -733,6 +863,8 @@ pub fn label_size(chars: usize, font: f32) -> Vec2 {
 
 /// Font scale of a label that doesn't fit at full size.
 const SHRUNK: f32 = 0.84;
+/// Spots next to the icon (the rest are a line further away).
+const NEAR: u8 = 8;
 const SPOTS: u8 = 10;
 
 /// Top left corner of a `size` label in spot `spot` around an icon covering `icon`.
@@ -763,48 +895,98 @@ fn overlaps(a: Rect, b: Rect) -> bool {
     a.min.x < b.max.x - 0.5 && b.min.x < a.max.x - 0.5 && a.min.y < b.max.y - 0.5 && b.min.y < a.max.y - 0.5
 }
 
-/// Places labels so that none covers another, inside `area`: by priority, each takes the
-/// first spot around its icon that is clear of the labels placed so far and of the
-/// `obstacles` (icons), then with a smaller font, then covering icons; `None` when nothing
-/// fits. The spot a label had before is tried first, so labels don't jump around.
-pub fn place_labels(requests: &[LabelRequest], obstacles: &[Rect], area: Rect) -> Vec<Option<LabelSpot>> {
+/// An icon labels keep clear of.
+#[derive(Clone, Copy, Debug)]
+pub struct Obstacle {
+    pub rect: Rect,
+    /// Never covered (labelled icons: flags, assets); others (vehicles) only when nothing
+    /// else fits.
+    pub hard: bool,
+}
+
+/// Places labels so that none covers another or a labelled icon, inside `area`: by
+/// priority, each takes the first spot next to its icon that is clear, then the same with a
+/// smaller font, then a line further away, then covering unlabelled icons; `None` when
+/// nothing fits. The spot a label had before is tried first, so labels don't jump around.
+/// Then a label that didn't get a spot next to its icon at full size takes one if the one
+/// label in the way can move to another such spot next to its own icon.
+pub fn place_labels(requests: &[LabelRequest], obstacles: &[Obstacle], area: Rect) -> Vec<Option<LabelSpot>> {
+    let candidates: Vec<(u8, f32)> = [(0..NEAR, 1.0), (0..NEAR, SHRUNK), (NEAR..SPOTS, 1.0), (NEAR..SPOTS, SHRUNK)]
+        .into_iter()
+        .flat_map(|(spots, scale)| spots.map(move |spot| (spot, scale)))
+        .collect();
+    // A label's spot and the box it covers.
+    let spot_at = |request: &LabelRequest, spot: u8, scale: f32| {
+        let size = label_size(request.chars, request.font * scale);
+        let offset = spot_offset(spot, request.icon, size);
+        let label = LabelSpot {
+            offset,
+            size,
+            scale,
+            index: spot | if scale < 1.0 { 16 } else { 0 },
+        };
+        (label, Rect::from_corners(request.at + offset, request.at + offset + size))
+    };
+    // Inside the map and clear of the icons (all of them when `strict`, else the hard ones).
+    let clear = |request: &LabelRequest, rect: Rect, strict: bool| {
+        rect.min.x >= area.min.x
+            && rect.min.y >= area.min.y
+            && rect.max.x <= area.max.x
+            && rect.max.y <= area.max.y
+            && !obstacles
+                .iter()
+                .enumerate()
+                .any(|(j, o)| (strict || o.hard) && Some(j) != request.own && overlaps(o.rect, rect))
+    };
     let mut order: Vec<usize> = (0..requests.len()).collect();
     order.sort_by_key(|&i| (std::cmp::Reverse(requests[i].priority), i));
-    let mut placed: Vec<Rect> = Vec::with_capacity(requests.len());
-    let mut spots = vec![None; requests.len()];
-    for i in order {
+    let mut placed: Vec<Option<Rect>> = vec![None; requests.len()];
+    let mut spots: Vec<Option<LabelSpot>> = vec![None; requests.len()];
+    for &i in &order {
         let request = &requests[i];
-        let found = [(1.0, true), (SHRUNK, true), (1.0, false), (SHRUNK, false)]
-            .into_iter()
-            .find_map(|(scale, clear_of_icons)| {
-                let shrunk = if scale < 1.0 { 16 } else { 0 };
-                let size = label_size(request.chars, request.font * scale);
-                let previous = request.previous.filter(|p| p & 16 == shrunk).map(|p| p & 15);
-                previous.into_iter().chain(0..SPOTS).find_map(|spot| {
-                    let offset = spot_offset(spot, request.icon, size);
-                    let rect = Rect::from_corners(request.at + offset, request.at + offset + size);
-                    let inside = rect.min.x >= area.min.x
-                        && rect.min.y >= area.min.y
-                        && rect.max.x <= area.max.x
-                        && rect.max.y <= area.max.y;
-                    let fits = inside
-                        && !placed.iter().any(|other| overlaps(*other, rect))
-                        && (!clear_of_icons
-                            || !obstacles
-                                .iter()
-                                .enumerate()
-                                .any(|(j, icon)| Some(j) != request.own && overlaps(*icon, rect)));
-                    fits.then_some(LabelSpot {
-                        offset,
-                        size,
-                        scale,
-                        index: spot | shrunk,
-                    })
-                })
-            });
-        if let Some(spot) = found {
-            placed.push(Rect::from_corners(request.at + spot.offset, request.at + spot.offset + spot.size));
-            spots[i] = Some(spot);
+        let previous = request.previous.map(|p| (p & 15, if p & 16 != 0 { SHRUNK } else { 1.0 }));
+        let found = [true, false].into_iter().find_map(|strict| {
+            previous.into_iter().chain(candidates.iter().copied()).find_map(|(spot, scale)| {
+                let (label, rect) = spot_at(request, spot, scale);
+                let fits = clear(request, rect, strict) && !placed.iter().flatten().any(|other| overlaps(*other, rect));
+                fits.then_some((label, rect))
+            })
+        });
+        if let Some((label, rect)) = found {
+            placed[i] = Some(rect);
+            spots[i] = Some(label);
+        }
+    }
+    // Labels left out, shrunk or a line away: move the one label in the way of a good spot.
+    for &i in &order {
+        if spots[i].is_some_and(|s| s.good()) {
+            continue;
+        }
+        let request = &requests[i];
+        'spots: for spot in 0..NEAR {
+            let (label, rect) = spot_at(request, spot, 1.0);
+            if !clear(request, rect, true) {
+                continue;
+            }
+            let mut blockers = (0..requests.len()).filter(|&j| j != i && placed[j].is_some_and(|r| overlaps(r, rect)));
+            let (Some(j), None) = (blockers.next(), blockers.next()) else {
+                continue;
+            };
+            let Some(current) = spots[j].filter(|s| s.good()) else {
+                continue;
+            };
+            let other = &requests[j];
+            for alternative in (0..NEAR).filter(|&s| s != current.index) {
+                let (moved, moved_rect) = spot_at(other, alternative, 1.0);
+                let fits = !overlaps(moved_rect, rect)
+                    && clear(other, moved_rect, true)
+                    && !(0..requests.len()).any(|k| k != i && k != j && placed[k].is_some_and(|r| overlaps(r, moved_rect)));
+                if fits {
+                    (placed[i], spots[i]) = (Some(rect), Some(label));
+                    (placed[j], spots[j]) = (Some(moved_rect), Some(moved));
+                    break 'spots;
+                }
+            }
         }
     }
     spots
@@ -860,5 +1042,57 @@ mod tests {
         let spot = place_labels(&requests, &[], area)[0].unwrap();
         let r = rect(&requests[0], spot);
         assert!(r.max.y <= 100.0 && r.min.y >= 0.0);
+    }
+
+    #[test]
+    fn labels_stay_clear_of_labelled_icons() {
+        let area = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let mut requests = [request(Vec2::new(200.0, 200.0), 8, 0)];
+        requests[0].own = Some(0);
+        // Its icon, a flag right below it, a vehicle right above it.
+        let obstacles = [
+            Obstacle {
+                rect: Rect::from_center_half_size(Vec2::new(200.0, 200.0), Vec2::splat(6.0)),
+                hard: true,
+            },
+            Obstacle {
+                rect: Rect::from_center_half_size(Vec2::new(200.0, 214.0), Vec2::splat(6.0)),
+                hard: true,
+            },
+            Obstacle {
+                rect: Rect::from_center_half_size(Vec2::new(200.0, 186.0), Vec2::splat(6.0)),
+                hard: false,
+            },
+        ];
+        let spot = place_labels(&requests, &obstacles, area)[0].unwrap();
+        let r = rect(&requests[0], spot);
+        assert!(!overlaps(r, obstacles[1].rect) && !overlaps(r, obstacles[2].rect));
+    }
+
+    /// Like Karkand's "Factory" and "Cement Factory": the first label takes the spot below
+    /// its flag that the second one needs, and moves aside for it.
+    #[test]
+    fn labels_make_room() {
+        let area = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let mut requests = [request(Vec2::new(147.0, 100.0), 7, 0), request(Vec2::new(100.0, 100.0), 14, 0)];
+        requests[0].own = Some(0);
+        requests[1].own = Some(1);
+        let icon = |at: Vec2| Obstacle {
+            rect: Rect::from_center_half_size(at, Vec2::splat(6.0)),
+            hard: true,
+        };
+        // Something above both.
+        let obstacles = [
+            icon(requests[0].at),
+            icon(requests[1].at),
+            Obstacle {
+                rect: Rect::new(60.0, 70.0, 140.0, 90.0),
+                hard: true,
+            },
+        ];
+        let spots = place_labels(&requests, &obstacles, area);
+        let (a, b) = (spots[0].unwrap(), spots[1].unwrap());
+        assert!(a.good() && b.good(), "{a:?} {b:?}");
+        assert!(!overlaps(rect(&requests[0], a), rect(&requests[1], b)));
     }
 }

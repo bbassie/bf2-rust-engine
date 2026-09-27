@@ -34,3 +34,7 @@ anyhow.workspace = true
 fastrand = "2"
 bytemuck.workspace = true
 flate2.workspace = true
+# Road meshes for vehicle navigation.
+gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
+# Serves the server's content (mods, optionally the imported assets) to joining clients.
+tiny_http = "0.12"

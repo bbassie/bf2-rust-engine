@@ -49,6 +49,7 @@ pub struct LevelGeometry {
     pub bounds: Option<(Vec2, Vec2)>,
 }
 
+#[derive(Clone)]
 pub struct MeshInstance {
     pub shape: SharedShape,
     pub transform: Affine3A,
@@ -751,7 +752,7 @@ impl TileRaster<'_> {
 
 /// Clips a convex polygon to the half space `p[axis] >= bound` (or `<=`), returning the
 /// number of vertices written to `out`.
-fn clip(poly: &[Vec3], out: &mut [Vec3; 12], axis: usize, bound: f32, keep_above: bool) -> usize {
+pub(super) fn clip(poly: &[Vec3], out: &mut [Vec3; 12], axis: usize, bound: f32, keep_above: bool) -> usize {
     let side = |p: Vec3| {
         if keep_above {
             p[axis] - bound
@@ -787,7 +788,7 @@ fn projected_area(poly: &[Vec3]) -> f32 {
 }
 
 /// Calls `f` with every triangle of a shape, in world space.
-fn for_each_triangle(shape: &SharedShape, transform: Affine3A, f: &mut impl FnMut([Vec3; 3])) {
+pub(super) fn for_each_triangle(shape: &SharedShape, transform: Affine3A, f: &mut impl FnMut([Vec3; 3])) {
     let owned;
     let (vertices, indices): (&[Vec3], &[[u32; 3]]) = match shape.as_typed_shape() {
         TypedShape::TriMesh(mesh) => (mesh.vertices(), mesh.indices()),
@@ -818,7 +819,7 @@ fn for_each_triangle(shape: &SharedShape, transform: Affine3A, f: &mut impl FnMu
     }
 }
 
-fn world_aabb(mesh: &MeshInstance) -> (Vec3, Vec3) {
+pub(super) fn world_aabb(mesh: &MeshInstance) -> (Vec3, Vec3) {
     let aabb = mesh.shape.compute_local_aabb();
     let (lo, hi) = (aabb.mins, aabb.maxs);
     (0..8).fold((Vec3::MAX, Vec3::MIN), |(min, max), i| {

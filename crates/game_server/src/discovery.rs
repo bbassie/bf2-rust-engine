@@ -123,6 +123,7 @@ fn answer_queries(
     settings: Res<ServerSettings>,
     level: Option<Res<LoadedLevel>>,
     players: Query<&Player>,
+    content: Option<Res<crate::content::ContentServer>>,
 ) {
     let mut buffer = [0u8; 64];
     let mut info: Option<ServerInfo> = None;
@@ -149,6 +150,7 @@ fn answer_queries(
                 bots,
                 port: settings.port,
                 protocol: PROTOCOL_ID,
+                content: content.as_ref().map(|c| c.advert()),
             }
         });
         let _ = responder.socket.send_to(&encode_reply(token, info), from);

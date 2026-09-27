@@ -4,8 +4,9 @@
 # These are EA's copyrighted data and must never be committed or redistributed.
 /imported/
 
-# Local settings
+# Local settings, and the content cache next to them
 /settings.local.ron
+/cache/
 *.log
 
 # Python

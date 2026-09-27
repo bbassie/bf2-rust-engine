@@ -13,6 +13,9 @@ mod projectiles;
 mod props;
 mod ropes;
 pub mod scope;
+pub mod sky_light;
+mod sky_occlusion;
+mod static_lightmaps;
 mod soldiers;
 mod statics;
 mod terrain;
@@ -39,6 +42,10 @@ impl Plugin for RenderPlugin {
         ))
         .add_plugins((destruction::DestructionRenderPlugin, projectiles::ProjectileRenderPlugin, hitzones::HitZoneDebugPlugin))
         .add_plugins((vegetation::VegetationRenderPlugin, water::WaterPlugin, ropes::RopeRenderPlugin))
-        .add_plugins(far_trees::FarTreesPlugin);
+        .add_plugins((
+            far_trees::FarTreesPlugin,
+            sky_occlusion::SkyOcclusionPlugin,
+            static_lightmaps::StaticLightmapsPlugin,
+        ));
     }
 }

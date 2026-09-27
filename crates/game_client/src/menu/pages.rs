@@ -226,7 +226,7 @@ fn home_page(
     let status = if catalog.scan.is_some() {
         "Looking for imported levels...".to_string()
     } else if imported == 0 {
-        "No imported levels found: run bf2-import. The test range is always available.".to_string()
+        "No imported levels found: run bf2-import, or join a server that shares its content. The test range is always available.".to_string()
     } else {
         format!("{imported} imported levels and the test range.")
     };
@@ -548,6 +548,7 @@ fn settings_page(
             row(p, "Mouse sensitivity", |c| slider(c, Slider::Sensitivity));
             row(p, "Invert mouse Y", |c| switch(c, Toggle::InvertY));
             row(p, "Field of view", |c| slider(c, Slider::FieldOfView));
+            download::settings_row(p);
         }
         SettingsTab::Graphics => {
             row(p, "Window mode", |c| {
@@ -597,6 +598,14 @@ fn settings_page(
                 switch(c, Toggle::Ssao);
                 if cli.no_ssao {
                     c.spawn(text("off for this run (--no-ssao)", 13.0, DIM));
+                }
+            });
+            row(p, "Baked occlusion", |c| switch(c, Toggle::BakedAo));
+            row(p, "Sky light", |c| switch(c, Toggle::SkyLight));
+            row(p, "Bloom", |c| switch(c, Toggle::Bloom));
+            row(p, "Tone mapping", |c| {
+                for t in ToneMapping::ALL {
+                    button(c, MenuButton::ToneMapping(t), Look::Plain, t.label());
                 }
             });
         }

@@ -1,6 +1,8 @@
 //! Soak testing: `server --soak <minutes>` logs a `soak:` line with the server's health every
 //! `--soak-every` seconds (entities, memory, frame times, players, the round) and quits with
-//! a summary after that many minutes (0: never). `scripts/soak.sh` runs one and greps the log.
+//! a summary after that many minutes (0: never). `--soak-rotate <minutes>` moves on to the
+//! next map of the rotation after that long on a map, so a run covers every map for a known
+//! time whatever the tickets do. `scripts/soak.sh` runs one and greps the log.
 
 use std::time::{Duration, Instant};
 
@@ -27,6 +29,9 @@ pub struct SoakPlugin {
     pub duration: Option<Duration>,
     /// Seconds between reports.
     pub every: f32,
+    /// Play the next map of the rotation after this long on one; `None` leaves that to the
+    /// rounds.
+    pub rotate_every: Option<Duration>,
 }
 
 impl Plugin for SoakPlugin {
@@ -34,11 +39,13 @@ impl Plugin for SoakPlugin {
         app.insert_resource(Soak {
             duration: self.duration,
             every: self.every.max(1.0),
+            rotate_every: self.rotate_every,
             ..default()
         })
         .add_systems(First, frame_start)
         .add_systems(FixedFirst, tick_start)
         .add_systems(FixedLast, tick_end)
+        .add_systems(Update, rotate.run_if(resource_exists::<LoadedLevel>))
         .add_systems(Last, (frame_end, report).chain());
     }
 }
@@ -47,6 +54,9 @@ impl Plugin for SoakPlugin {
 struct Soak {
     duration: Option<Duration>,
     every: f32,
+    rotate_every: Option<Duration>,
+    /// When the current level was loaded.
+    level_started: Option<Instant>,
     started: Option<Instant>,
     frame_started: Option<Instant>,
     tick_started: Option<Instant>,
@@ -98,6 +108,23 @@ fn tick_end(mut soak: ResMut<Soak>) {
     soak.frame_tick_ms += ms;
     soak.tick_ms_sum += ms;
     soak.tick_ms_max = soak.tick_ms_max.max(ms);
+}
+
+/// Moves on to the next map after `rotate_every` on this one.
+fn rotate(mut soak: ResMut<Soak>, level: Res<LoadedLevel>, mut commands: Commands) {
+    let now = Instant::now();
+    if level.is_changed() {
+        soak.level_started = Some(now);
+    }
+    let (Some(every), Some(started)) = (soak.rotate_every, soak.level_started) else {
+        return;
+    };
+    if now.duration_since(started) >= every {
+        info!("soak: {:.1} min on `{}`, next map", every.as_secs_f32() / 60.0, level.desc.name);
+        // Not again before the new level is there.
+        soak.level_started = None;
+        commands.queue(crate::rotation::advance);
+    }
 }
 
 fn frame_end(mut soak: ResMut<Soak>) {

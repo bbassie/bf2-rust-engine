@@ -3,6 +3,9 @@
 //
 // BF2 adds `weight_i * 2 * detail_i * colormap` per detail texture; detail textures are
 // authored around 0.5 grey. Far away the detail fades out to the plain color map.
+//
+// The patch lightmap's sky visibility (B) occludes the ambient and environment light, so the
+// ground under roofs, beside walls and between buildings is darker (BakedSky in materials.rs).
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -31,10 +34,13 @@ struct TerrainLayers {
     // occlusion, so ambient light relative to sunlight.
     light_sun: vec4<f32>,
     light_ambient: vec4<f32>,
+    // x: 1 / open sky visibility, y: strength, z: floor.
+    sky: vec4<f32>,
 }
 
 const TRI_PLANAR_0: u32 = 1u;
 const HAS_WEIGHTS: u32 = 2u;
+const HAS_LIGHTMAP: u32 = 4u;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> layers: TerrainLayers;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var weights_a: texture_2d<f32>;
@@ -47,6 +53,8 @@ const HAS_WEIGHTS: u32 = 2u;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var detail_4: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var detail_5: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var detail_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var lightmap: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var lightmap_sampler: sampler;
 
 fn top(t: texture_2d<f32>, xz: vec2<f32>, tile: f32) -> vec3<f32> {
     return textureSample(t, detail_sampler, xz / max(tile, 0.01)).rgb;
@@ -115,6 +123,14 @@ fn fragment(
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * layers.light_sun.rgb, pbr_input.material.base_color.a);
     pbr_input.diffuse_occlusion *= layers.light_ambient.rgb;
+#ifdef VERTEX_UVS_A
+    let sky = textureSample(lightmap, lightmap_sampler, in.uv).b;
+    if (layers.flags & HAS_LIGHTMAP) != 0u && layers.sky.y > 0.0 {
+        let occlusion = mix(1.0, clamp(sky * layers.sky.x, layers.sky.z, 1.0), layers.sky.y);
+        pbr_input.diffuse_occlusion *= occlusion;
+        pbr_input.specular_occlusion *= occlusion;
+    }
+#endif
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

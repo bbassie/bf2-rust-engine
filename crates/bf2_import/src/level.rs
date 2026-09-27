@@ -178,7 +178,11 @@ pub fn import_level(
         .and_then(|c| c.args.first()?.parse().ok())
         .unwrap_or(200.0);
 
-    let environment = environment(world, &converter, &terrain, &level_dir);
+    let mut environment = environment(world, &converter, &terrain, &level_dir);
+    environment.static_lightmaps = crate::lighting::static_lightmaps(&vfs, &level.name, &level_dir)
+        .map_err(|e| log::warn!("{name}: static lightmaps: {e:#}"))
+        .ok()
+        .flatten();
     let desc = LevelDesc {
         name: name.clone(),
         display_name,
@@ -568,6 +572,8 @@ fn environment(world: &World, converter: &MeshConverter, terrain: &TerrainDesc, 
         view_distance: view_distance.unwrap_or(fog_range[1]).max(fog_range[1]),
         sky: sky(world, converter),
         lighting: crate::lighting::level_lighting(world, Some(terrain), level_dir, sun_direction),
+        ground_albedo: crate::lighting::ground_albedo(level_dir, terrain),
+        static_lightmaps: None,
     }
 }
 

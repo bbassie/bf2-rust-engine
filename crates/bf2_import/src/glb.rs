@@ -16,6 +16,9 @@ pub struct Primitive {
     pub colors: Vec<[f32; 4]>,
     pub joints: Vec<[u16; 4]>,
     pub weights: Vec<[f32; 4]>,
+    /// Application-specific `vec2` vertex attributes by glTF name (starting with `_`, e.g.
+    /// `_LIGHTMAP_UV`); written when they have a value per vertex.
+    pub extra_vec2: Vec<(String, Vec<[f32; 2]>)>,
     pub indices: Vec<u32>,
     pub material: Option<usize>,
 }
@@ -231,6 +234,11 @@ impl Document {
                         if p.joints.len() == p.positions.len() && p.weights.len() == p.positions.len() {
                             attributes.insert("JOINTS_0".into(), json!(b.joints(&p.joints)));
                             attributes.insert("WEIGHTS_0".into(), json!(b.floats(&p.weights, false)));
+                        }
+                        for (name, values) in &p.extra_vec2 {
+                            if values.len() == p.positions.len() {
+                                attributes.insert(name.clone(), json!(b.floats(values, false)));
+                            }
                         }
                         let mut primitive = json!({
                             "attributes": attributes,

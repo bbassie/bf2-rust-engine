@@ -129,6 +129,11 @@ pub enum Step {
     VehicleInfo(String),
     /// Logs every moving or occupied vehicle (works connected to a remote server too).
     LogVehicles(String),
+    /// Spectating: puts the camera `distance` meters behind and `height` meters above the
+    /// fastest driven vehicle matching a filter (a template, `land`, `air`, `helicopter`,
+    /// `sea`, or `""` for any), looking at it, e.g. `ChaseDriven("land", 18.0, 7.0)`. Logs
+    /// which.
+    ChaseDriven(String, f32, f32),
     /// Adds our vehicle's state (position, speed, altitude above ground, climb rate,
     /// attitude, engine) to the report every 0.25 s for this many seconds.
     VehicleTrace(String, f32),
@@ -153,6 +158,9 @@ pub enum Step {
     ThirdPerson(bool),
     Ssao(bool),
     Shadows(bool),
+    /// Changes a setting for this run (`Settings::set`), e.g. `Setting("bloom", "on")`,
+    /// `Setting("tone_mapping", "agx")`, `Setting("sky_light", "off")`.
+    Setting(String, String),
     /// Presses and releases a key, e.g. `Key(Enter)`.
     Key(KeyCode),
     /// Types text into whatever takes typing (the chat box, after `Key(KeyT)`).
@@ -798,6 +806,42 @@ fn run_scenario(
                 writeln!(runner.report, "{line}").ok();
                 Progress::Done
             }
+            Step::ChaseDriven(filter, distance, height) => {
+                let matches = |vehicle: &Vehicle, data: &VehicleData| {
+                    let category = format!("{:?}", data.0.desc.category).to_lowercase();
+                    filter.is_empty() || vehicle.template == *filter || category == filter.to_lowercase()
+                };
+                let driven = vehicles
+                    .riders
+                    .iter()
+                    .filter(|seated| seated.seat == 0)
+                    .filter_map(|seated| vehicles.vehicles.get(seated.vehicle).ok())
+                    .filter(|(vehicle, _, data)| matches(vehicle, data))
+                    .max_by(|a, b| a.1.velocity.length().total_cmp(&b.1.velocity.length()));
+                match (driven, spectator.single_mut()) {
+                    (Some((vehicle, view, _)), Ok(mut camera)) => {
+                        let t = view.transform;
+                        let back = (t.rotation * Vec3::Z).with_y(0.0).normalize_or(Vec3::Z);
+                        let position = t.translation + back * *distance + Vec3::Y * *height;
+                        camera.position = position;
+                        let to = t.translation - position;
+                        look.yaw = (-to.x).atan2(-to.z);
+                        look.pitch = to.y.atan2(to.with_y(0.0).length());
+                        let line = format!(
+                            "chase {} at ({:.0}, {:.0}, {:.0}), {:.0} km/h",
+                            vehicle.template,
+                            t.translation.x,
+                            t.translation.y,
+                            t.translation.z,
+                            view.velocity.length() * 3.6
+                        );
+                        info!("scenario: {line}");
+                        writeln!(runner.report, "{line}").ok();
+                    }
+                    _ => warn!("scenario: no driven vehicle matching `{filter}` (or not spectating)"),
+                }
+                Progress::Done
+            }
             Step::VehicleTrace(label, seconds) => {
                 let due = runner.frames == 0 || elapsed >= runner.frames as f32 * 0.25;
                 if due {
@@ -954,6 +998,15 @@ fn run_scenario(
                 for mut sun in &mut suns {
                     sun.shadow_maps_enabled = *on;
                 }
+                Progress::Done
+            }
+            Step::Setting(key, value) => {
+                let (key, value) = (key.clone(), value.clone());
+                commands.queue(move |world: &mut World| {
+                    if let Err(err) = world.resource_mut::<crate::settings::Settings>().set(&key, &value) {
+                        warn!("scenario: {err}");
+                    }
+                });
                 Progress::Done
             }
             Step::Key(key) => {

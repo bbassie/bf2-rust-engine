@@ -179,6 +179,41 @@ pub struct EnvironmentDesc {
     /// then light everything from those two.
     #[serde(default)]
     pub lighting: Option<WorldLighting>,
+    /// Mean colour (linear, 0..1) of the terrain's colour maps: the ground that reflects
+    /// light up onto everything above it. `None`: unknown (renderers assume a grey).
+    #[serde(default)]
+    pub ground_albedo: Option<[f32; 3]>,
+    /// Baked sky visibility of the static objects ([`StaticLightmaps`] RON, relative to the
+    /// level folder), for ambient occlusion. `None` for levels without.
+    #[serde(default)]
+    pub static_lightmaps: Option<String>,
+}
+
+/// How much sky each static object's surfaces see, baked (BF2's object lightmaps, their sky
+/// channel): an atlas texture array and where each object's lightmap lies in it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct StaticLightmaps {
+    /// `.dds` texture array relative to the level folder, one layer per atlas, one channel:
+    /// sky visibility (open ground about 0.85).
+    pub atlas: String,
+    pub entries: Vec<StaticLightmapEntry>,
+}
+
+/// One object's lightmap: its mesh's lightmap UVs `uv` map to `offset + uv * scale` in atlas
+/// layer `layer` (per axis).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct StaticLightmapEntry {
+    /// Geometry name (the mesh file's stem), lower case.
+    pub name: String,
+    /// Geometry index within the object (wrecks are 1) and level of detail.
+    pub geometry: u32,
+    pub lod: u32,
+    /// Where the object stands: BF2's position rounded to whole meters, in engine
+    /// coordinates.
+    pub position: [f32; 3],
+    pub layer: u32,
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
 }
 
 /// The light of a level's world, as BF2's `sky.con` sets it for its shaders. Colours are
@@ -325,6 +360,8 @@ impl Default for EnvironmentDesc {
             view_distance: 900.0,
             sky: None,
             lighting: None,
+            ground_albedo: None,
+            static_lightmaps: None,
         }
     }
 }

@@ -12,7 +12,8 @@ use bevy::{
 };
 use game_shared::level::{Heightmap, LevelEntity, LoadedLevel, Terrain};
 
-use super::materials::{TerrainLayerParams, TerrainLayers, TerrainMaterial, clamped_sampler};
+use super::materials::{BakedSky, TerrainLayerParams, TerrainLayers, TerrainMaterial, clamped_sampler};
+use crate::settings::Settings;
 
 pub struct TerrainRenderPlugin;
 
@@ -20,8 +21,26 @@ impl Plugin for TerrainRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            build_terrain_visuals.run_if(resource_exists_and_changed::<LoadedLevel>),
+            (
+                build_terrain_visuals.run_if(resource_exists_and_changed::<LoadedLevel>),
+                apply_baked_sky.run_if(resource_changed::<Settings>),
+            ),
         );
+    }
+}
+
+/// Turns the baked sky occlusion on the terrain on or off with the setting.
+fn apply_baked_sky(settings: Res<Settings>, mut materials: ResMut<Assets<TerrainMaterial>>) {
+    let sky = BakedSky::uniform(settings.baked_ao);
+    let changed: Vec<_> = materials
+        .iter()
+        .filter(|(_, m)| m.extension.params.sky != sky)
+        .map(|(id, _)| id)
+        .collect();
+    for id in changed {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.extension.params.sky = sky;
+        }
     }
 }
 
@@ -62,6 +81,7 @@ fn build_terrain_visuals(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    settings: Res<Settings>,
 ) {
     for chunk in &old_chunks {
         commands.entity(chunk).despawn();
@@ -105,6 +125,7 @@ fn build_terrain_visuals(
         side0_fade: Vec4::new(8.0, 16.0, 80.0, 220.0),
         light_sun,
         light_ambient,
+        sky: BakedSky::uniform(settings.baked_ao),
         ..default()
     };
     if let Some(t) = desc {
@@ -146,8 +167,11 @@ fn build_terrain_visuals(
             let weights_b = weights
                 .and_then(|w| load_patch(&w[1], false))
                 .or_else(|| weights_a.is_some().then(|| no_weights.clone()));
+            // Lightmaps are data: the sky visibility is read as stored.
+            let lightmap = desc.and_then(|t| t.lightmaps.get(index)).and_then(|p| load_patch(p, false));
             let mut extension = TerrainLayers {
                 params,
+                lightmap,
                 weights_a,
                 weights_b,
                 detail_0: details[0].clone(),
@@ -159,6 +183,9 @@ fn build_terrain_visuals(
             };
             if extension.weights_a.is_some() {
                 extension.params.flags |= TerrainLayerParams::HAS_WEIGHTS;
+            }
+            if extension.lightmap.is_some() {
+                extension.params.flags |= TerrainLayerParams::HAS_LIGHTMAP;
             }
             let base = match (&color_map, tiles) {
                 (_, 0) => StandardMaterial {

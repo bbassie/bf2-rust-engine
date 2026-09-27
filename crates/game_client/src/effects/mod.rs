@@ -331,8 +331,8 @@ impl EffectLibrary {
     }
 }
 
-fn load_library(mut commands: Commands, paths: Res<GamePaths>, mut meshes: ResMut<Assets<Mesh>>) {
-    let dir = paths.imported.join("effects");
+pub(crate) fn load_library(mut commands: Commands, paths: Res<GamePaths>, mut meshes: ResMut<Assets<Mesh>>) {
+    let dir = paths.find("effects/impacts.ron").parent().map_or_else(|| paths.imported.join("effects"), |d| d.to_path_buf());
     let impacts: ImpactTable = game_data::read_ron(dir.join("impacts.ron")).unwrap_or_default();
     let weapons: WeaponEffectTable = game_data::read_ron(dir.join("weapons.ron")).unwrap_or_default();
     let decal_table: DecalTable = game_data::read_ron(dir.join("decals.ron")).unwrap_or_default();

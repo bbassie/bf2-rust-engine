@@ -13,6 +13,12 @@
 //   transparent surfaces more opaque at grazing angles (BF2's Fresnel term).
 // - BF2's Blinn-Phong highlight (exponent 32-36, scaled by gloss) becomes a fixed roughness
 //   with the reflectance scaled by gloss.
+// - Bundled and skinned meshes (soldiers, vehicles, props) whose `MeshTag` has SKY_TAG get its
+//   low byte, their measured sky visibility (sky_occlusion.rs), as ambient occlusion.
+// - Static meshes with lightmap UVs (`BF2_LIGHTMAP_UV`, their own vertex shader below) whose
+//   `MeshTag` has LIGHTMAP_TAG read their baked sky visibility from the level's atlas array
+//   (static_lightmaps.rs) as ambient occlusion, relative to what an unoccluded surface facing
+//   the same way has (BF2 baked the surface's orientation in; the sky light here has it).
 //
 // One file for the main pass and the prepass (`PREPASS_PIPELINE`: alpha test, and the normals
 // that SSAO and the main pass read), bindless (the normal case) or bound. Layer textures are
@@ -20,12 +26,16 @@
 
 #import bevy_pbr::{
     mesh_bindings::mesh,
+    mesh_functions,
     mesh_view_bindings::view,
     pbr_bindings,
     pbr_functions,
     pbr_types,
+    view_transformations::position_world_to_clip,
 }
-#import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d, bindless_textures_cube}
+#import bevy_render::bindless::{
+    bindless_samplers_filtering, bindless_textures_2d, bindless_textures_2d_array, bindless_textures_cube,
+}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
@@ -47,7 +57,8 @@ struct Bf2Layers {
     flags: u32,
     gloss: f32,
     albedo_scale: f32,
-    _pad: f32,
+    // Strength of the baked sky occlusion (0: off).
+    baked_sky: f32,
     // This kind of surface's light relative to the level's (trees: BF2's tree colours):
     // xyz scale the albedo, so sunlight, and the diffuse occlusion, so ambient light.
     light_sun: vec4<f32>,
@@ -64,6 +75,7 @@ struct Bf2LayersIndices {
     normal: u32,         // 55
     crack_normal: u32,   // 56
     env_map: u32,        // 57
+    lightmap: u32,       // 58
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage> bf2_indices: array<Bf2LayersIndices>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage> bf2_layers: array<Bf2Layers>;
@@ -76,6 +88,7 @@ struct Bf2LayersIndices {
 @group(#{MATERIAL_BIND_GROUP}) @binding(55) var normal_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(56) var crack_normal_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(57) var env_texture: texture_cube<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(58) var lightmap_texture: texture_2d_array<f32>;
 #endif
 
 const DETAIL: u32 = 1u;
@@ -94,6 +107,16 @@ const ALPHA_FROM_COLOR: u32 = 4096u;
 const ENV_MAP: u32 = 8192u;
 const UV_SUM: u32 = 16384u;
 const WRECK: u32 = 32768u;
+const DYNAMIC: u32 = 65536u;
+const LIGHTMAPPED: u32 = 131072u;
+// MeshTag bits (sky_occlusion.rs, static_lightmaps.rs).
+const SKY_TAG: u32 = 0x80000000u;
+const LIGHTMAP_TAG: u32 = 0x40000000u;
+// Baked sky visibility of unoccluded static surfaces facing down and up, and the darkest
+// occlusion (BakedSky in materials.rs).
+const OPEN_SKY_DOWN: f32 = 0.1;
+const OPEN_SKY_UP: f32 = 0.95;
+const SKY_FLOOR: f32 = 0.12;
 
 const LAYER_DETAIL: u32 = 0u;
 const LAYER_DIRT: u32 = 1u;
@@ -149,6 +172,23 @@ fn sample_layer(slot: u32, layer: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<
         case 4u: { return textureSampleGrad(crack_normal_texture, layer_sampler, uv, ddx, ddy); }
         default: { return textureSampleGrad(detail_texture, layer_sampler, uv, ddx, ddy); }
     }
+#endif
+}
+
+// Sky visibility in the static lightmap atlas array.
+fn sample_lightmap(slot: u32, uv: vec2<f32>, layer: u32, ddx: vec2<f32>, ddy: vec2<f32>) -> f32 {
+#ifdef BINDLESS
+    let indices = bf2_indices[slot];
+    return textureSampleGrad(
+        bindless_textures_2d_array[indices.lightmap],
+        bindless_samplers_filtering[indices.layer_sampler],
+        uv,
+        layer,
+        ddx,
+        ddy,
+    ).r;
+#else
+    return textureSampleGrad(lightmap_texture, layer_sampler, uv, layer, ddx, ddy).r;
 #endif
 }
 
@@ -444,9 +484,128 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) {
 
 #else  // PREPASS_PIPELINE
 
+#ifdef BF2_LIGHTMAP_UV
+// Static meshes with lightmap UVs: Bevy's vertex shader (without skinning and morphing, which
+// statics don't have) passing the lightmap UVs on.
+struct LightmapVertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) position: vec3<f32>,
+#ifdef VERTEX_NORMALS
+    @location(1) normal: vec3<f32>,
+#endif
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_TANGENTS
+    @location(4) tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+    @location(8) lightmap_uv: vec2<f32>,
+}
+
+// `forward_io::VertexOutput` plus the lightmap UVs.
+struct LightmapVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_TANGENTS
+    @location(4) world_tangent: vec4<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    @location(6) @interpolate(flat) instance_index: u32,
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    @location(7) @interpolate(flat) visibility_range_dither: i32,
+#endif
+    @location(8) lightmap_uv: vec2<f32>,
+}
+
+@vertex
+fn vertex(vertex: LightmapVertex) -> LightmapVertexOutput {
+    var out: LightmapVertexOutput;
+    let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
+#ifdef VERTEX_NORMALS
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
+#endif
+    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(vertex.position, 1.0));
+    out.position = position_world_to_clip(out.world_position.xyz);
+#ifdef VERTEX_UVS_A
+    out.uv = vertex.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    out.uv_b = vertex.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, vertex.tangent, vertex.instance_index);
+#endif
+#ifdef VERTEX_COLORS
+    out.color = vertex.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = vertex.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
+        vertex.instance_index,
+        world_from_local[3],
+    );
+#endif
+    out.lightmap_uv = vertex.lightmap_uv;
+    return out;
+}
+
+fn standard_vertex_output(lightmapped: LightmapVertexOutput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = lightmapped.position;
+    out.world_position = lightmapped.world_position;
+    out.world_normal = lightmapped.world_normal;
+#ifdef VERTEX_UVS_A
+    out.uv = lightmapped.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    out.uv_b = lightmapped.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = lightmapped.world_tangent;
+#endif
+#ifdef VERTEX_COLORS
+    out.color = lightmapped.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = lightmapped.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = lightmapped.visibility_range_dither;
+#endif
+    return out;
+}
+#endif  // BF2_LIGHTMAP_UV
+
 @fragment
+#ifdef BF2_LIGHTMAP_UV
+fn fragment(lightmapped: LightmapVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    var in = standard_vertex_output(lightmapped);
+    let lightmap_uv = clamp(lightmapped.lightmap_uv, vec2(0.0), vec2(1.0));
+    let lightmap_dx = dpdx(lightmapped.lightmap_uv);
+    let lightmap_dy = dpdy(lightmapped.lightmap_uv);
+#else
 fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var in = vertex;
+#endif
 #ifdef VISIBILITY_RANGE_DITHER
     pbr_functions::visibility_range_dither(in.position, in.visibility_range_dither);
 #endif
@@ -503,6 +662,25 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.material.base_color = pbr_functions::alpha_discard(pbr_input.material, pbr_input.material.base_color);
     pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * layers.light_sun.rgb, pbr_input.material.base_color.a);
     pbr_input.diffuse_occlusion *= layers.light_ambient.rgb;
+    let tag = mesh[in.instance_index].tag;
+    if (layers.flags & DYNAMIC) != 0u && (tag & SKY_TAG) != 0u {
+        let visibility = f32(tag & 0xffu) / 255.0;
+        pbr_input.diffuse_occlusion *= visibility;
+        pbr_input.specular_occlusion *= visibility;
+    }
+#ifdef BF2_LIGHTMAP_UV
+    if (layers.flags & LIGHTMAPPED) != 0u && (tag & (LIGHTMAP_TAG | SKY_TAG)) == LIGHTMAP_TAG && layers.baked_sky > 0.0 {
+        let layer = (tag >> 24u) & 63u;
+        let scale = vec2(exp2(-f32((tag >> 20u) & 15u)), exp2(-f32((tag >> 16u) & 15u)));
+        let cell = vec2(f32((tag >> 8u) & 255u), f32(tag & 255u));
+        let sky = sample_lightmap(slot, (cell + lightmap_uv) * scale, layer, lightmap_dx * scale, lightmap_dy * scale);
+        let facing = normalize(pbr_input.world_normal).y * 0.5 + 0.5;
+        let open = mix(OPEN_SKY_DOWN, OPEN_SKY_UP, facing);
+        let occlusion = mix(1.0, clamp(sky / open, SKY_FLOOR, 1.0), layers.baked_sky);
+        pbr_input.diffuse_occlusion *= occlusion;
+        pbr_input.specular_occlusion *= occlusion;
+    }
+#endif
 #ifdef BF2_DEBUG_LIGHTING
     pbr_input.material.base_color = vec4(vec3(0.5), pbr_input.material.base_color.a);
 #endif

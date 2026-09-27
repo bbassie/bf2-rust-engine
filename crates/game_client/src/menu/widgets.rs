@@ -275,6 +275,7 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
         MenuButton::Display(mode) => settings.window_mode == *mode,
         MenuButton::WindowSize(w, h) => settings.window_size == (*w, *h),
         MenuButton::ViewDistance(distance) => settings.view_distance == *distance,
+        MenuButton::ToneMapping(t) => settings.tone_mapping == *t,
         MenuButton::Rebind(action) => menu.rebinding == Some(*action),
         _ => false,
     }
