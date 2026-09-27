@@ -122,6 +122,10 @@ pub struct Settings {
     pub bindings: BTreeMap<Action, Binding>,
     /// What the menu last started, to offer it again.
     pub last_match: LastMatch,
+    /// Servers starred in the server browser.
+    pub favourite_servers: Vec<SavedServer>,
+    /// Servers joined lately, newest first.
+    pub recent_servers: Vec<SavedServer>,
 }
 
 impl Default for Settings {
@@ -144,6 +148,8 @@ impl Default for Settings {
                 .map(|a| (*a, a.default_binding()))
                 .collect(),
             last_match: LastMatch::default(),
+            favourite_servers: Vec::new(),
+            recent_servers: Vec::new(),
         }
     }
 }
@@ -272,6 +278,36 @@ impl Default for LastMatch {
     }
 }
 
+/// A server remembered by the browser.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct SavedServer {
+    /// IP or host name.
+    pub address: String,
+    pub port: u16,
+    /// Its name when we last heard from it.
+    pub name: String,
+}
+
+impl Default for SavedServer {
+    fn default() -> Self {
+        Self {
+            address: String::new(),
+            port: game_shared::DEFAULT_PORT,
+            name: String::new(),
+        }
+    }
+}
+
+impl SavedServer {
+    pub fn is(&self, address: &str, port: u16) -> bool {
+        self.address.eq_ignore_ascii_case(address.trim()) && self.port == port
+    }
+}
+
+/// Recent servers kept.
+pub const MAX_RECENT_SERVERS: usize = 8;
+
 /// Something a key or mouse button does.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
@@ -296,10 +332,14 @@ pub enum Action {
     /// Full-screen map while held.
     Map,
     MinimapRotation,
+    /// Type a chat message to everyone.
+    ChatAll,
+    ChatTeam,
+    ChatSquad,
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 30] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -318,6 +358,9 @@ impl Action {
         Action::Scoreboard,
         Action::Map,
         Action::MinimapRotation,
+        Action::ChatAll,
+        Action::ChatTeam,
+        Action::ChatSquad,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
         Action::WeaponSlot(3),
@@ -350,6 +393,9 @@ impl Action {
             Action::Scoreboard => "Scoreboard".into(),
             Action::Map => "Map".into(),
             Action::MinimapRotation => "Minimap rotation".into(),
+            Action::ChatAll => "Chat to everyone".into(),
+            Action::ChatTeam => "Chat to team".into(),
+            Action::ChatSquad => "Chat to squad".into(),
         }
     }
 
@@ -393,6 +439,9 @@ impl Action {
             Action::Scoreboard => Key(KeyCode::Tab),
             Action::Map => Key(KeyCode::KeyM),
             Action::MinimapRotation => Key(KeyCode::KeyN),
+            Action::ChatAll => Key(KeyCode::KeyT),
+            Action::ChatTeam => Key(KeyCode::KeyY),
+            Action::ChatSquad => Key(KeyCode::KeyU),
         }
     }
 }

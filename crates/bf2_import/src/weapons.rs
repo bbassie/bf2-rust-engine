@@ -9,8 +9,9 @@ use bf2_formats::{
     localization::Localization,
 };
 use game_data::{
-    DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, ProjectileDesc,
-    RecoilDesc, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds, ZoomDesc,
+    DetonatorDesc, DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, ProjectileDesc,
+    RecoilDesc, ReplenishDesc, ReplenishKind, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc,
+    WeaponSounds, ZoomDesc,
 };
 
 use crate::{meshes::MeshConverter, sounds::SoundConverter};
@@ -48,6 +49,7 @@ pub fn import(
             name: kit_name.to_ascii_lowercase(),
             kind: kit.get_str("kittype").unwrap_or_default().to_string(),
             weapons: items,
+            ability_restore: kit.get_f32("abilityrestorerate").unwrap_or(0.0).max(0.0),
         };
         game_data::write_ron(out.join("kits").join(format!("{}.ron", desc.name)), &desc)?;
         kit_count += 1;
@@ -234,6 +236,7 @@ pub(crate) fn weapon_desc(
         shift_delay: if f("animation.useshiftanimation", 0.0) != 0.0 { f("animation.shiftdelay", 0.0) } else { 0.0 },
         reload_amount: f("ammo.reloadamount", 0.0) as u32,
         fire: fire_desc(t),
+        detonator: detonator_desc(interp, converter, t, out),
         projectile,
         deviation,
         recoil,
@@ -243,7 +246,37 @@ pub(crate) fn weapon_desc(
             .collect(),
         zoom,
         sounds,
+        replenish: replenish_desc(t, projectile_template.as_ref()),
     }
+}
+
+/// Medic and ammo bags, shock paddles and the wrench: `ReplenishingAmmoComp` on the weapon,
+/// with what its thrown bags (`ReplenishDetonationComp`) or its projectile
+/// (`ResurrectCollisionComp`) do.
+fn replenish_desc(t: &Template, projectile: Option<&Template>) -> Option<ReplenishDesc> {
+    if !has_component(t, "ReplenishingAmmoComp") {
+        return None;
+    }
+    let f = |method: &str| t.get_f32(method).unwrap_or(0.0).max(0.0);
+    let p = |method: &str| projectile.and_then(|p| p.get_f32(method)).unwrap_or(0.0).max(0.0);
+    let kind = match t.get_str("ammo.replenishingtype").map(str::to_ascii_lowercase).as_deref() {
+        Some("rtammo") => ReplenishKind::Ammo,
+        _ => ReplenishKind::Health,
+    };
+    let bag = projectile.is_some_and(|p| has_component(p, "ReplenishDetonationComp"));
+    let reviver = projectile.is_some_and(|p| has_component(p, "ResurrectCollisionComp"));
+    Some(ReplenishDesc {
+        kind,
+        material: f("ammo.abilitymaterial") as u32,
+        radius: f("ammo.abilityradius"),
+        strength: f("ammo.abilitystrength"),
+        while_firing: f("ammo.onlyactivewhilefiring") != 0.0,
+        cost: f("ammo.abilitycost"),
+        drain: f("ammo.abilitydrain"),
+        pickup_radius: if bag { p("detonation.triggerradius") } else { 0.0 },
+        pickup_strength: if bag { p("detonation.replenishingstrength") } else { 0.0 },
+        revive_health: if reviver { p("collision.restorehp") } else { 0.0 },
+    })
 }
 
 fn has_component(t: &Template, component: &str) -> bool {
@@ -277,6 +310,30 @@ fn fire_desc(t: &Template) -> FireDesc {
         max_in_world: f("fire.maxprojectilesinworld") as u32,
         guidance: if wire { Guidance::Wire } else { Guidance::None },
     }
+}
+
+/// C4's detonator (`fire.detonatorObject`): its first-person model and animation set.
+fn detonator_desc(interp: &mut Interpreter, converter: &MeshConverter, t: &Template, out: &Path) -> Option<DetonatorDesc> {
+    let name = t.get_str("fire.detonatorobject")?.to_ascii_lowercase();
+    interp.ensure_template(&name);
+    let detonator = interp.world.template(&name)?.clone();
+    let mesh_1p = detonator
+        .geometry
+        .as_deref()
+        .and_then(|g| interp.world.geometry(g))
+        .and_then(|g| g.mesh_path())
+        .and_then(|path| {
+            converter
+                .convert_mesh_lod(&path, 0, 0, "_1p")
+                .map_err(|e| log::debug!("detonator {name}: {e:#}"))
+                .ok()
+        });
+    let dir = detonator.source.split(':').next().unwrap_or_default();
+    let animations_1p = dir
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/animations/1p.glb"))
+        .filter(|path| out.join(path).exists());
+    Some(DetonatorDesc { mesh_1p, animations_1p })
 }
 
 /// Smoke clouds look about this big once spread (the effect's particles fly out a few

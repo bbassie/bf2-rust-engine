@@ -14,7 +14,15 @@ use game_shared::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Controls, RespawnTimer, ServerSettings, bots::BotBrain, nav};
+use crate::{
+    Controls, RespawnTimer, ServerSettings,
+    ai::{
+        squad::SquadSnapshot,
+        strategy::{StrategicMap, Strategy, TeamIntel},
+    },
+    bots::BotBrain,
+    nav,
+};
 
 pub struct RotationPlugin;
 
@@ -59,15 +67,21 @@ pub struct MapRotation {
 }
 
 impl MapRotation {
-    pub fn new(settings: &ServerSettings) -> Self {
+    /// The rotation of `settings`, positioned at its map (whose bots it applies).
+    pub fn new(settings: &mut ServerSettings) -> Self {
         let maps = settings.rotation.clone();
         let current = maps
             .iter()
-            .position(|m| m.level == settings.level && m.mode == settings.mode);
+            .position(|m| m.level == settings.level && m.mode == settings.mode && m.size == settings.size)
+            .or_else(|| maps.iter().position(|m| m.level == settings.level));
+        let default_bots = settings.bots;
+        if let Some(bots) = current.and_then(|i| maps[i].bots) {
+            settings.bots = bots;
+        }
         Self {
             maps,
             current,
-            default_bots: settings.bots,
+            default_bots,
         }
     }
 
@@ -157,9 +171,7 @@ pub fn change_map(world: &mut World, map: &MapEntry) {
             deployment.respawn_in = 0.0;
         }
     }
-    world.remove_resource::<LoadedLevel>();
-    world.remove_resource::<nav::Navigation>();
-    world.insert_resource(Armory::default());
+    forget_level(world);
     world.spawn((
         MatchInfo {
             level: map.level.clone(),
@@ -168,6 +180,18 @@ pub fn change_map(world: &mut World, map: &MapEntry) {
         },
         Replicated,
     ));
+}
+
+/// Drops what the server keeps about the loaded level: the level itself, navigation, the
+/// armory and the bots' plans (which refer to its areas).
+pub fn forget_level(world: &mut World) {
+    world.remove_resource::<LoadedLevel>();
+    world.remove_resource::<nav::Navigation>();
+    world.insert_resource(Armory::default());
+    world.insert_resource(StrategicMap::default());
+    world.insert_resource(Strategy::default());
+    world.insert_resource(TeamIntel::default());
+    world.insert_resource(SquadSnapshot::default());
 }
 
 /// Whether `level` can be played: the built-in test range or an imported level.

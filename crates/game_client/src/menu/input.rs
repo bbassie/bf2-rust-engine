@@ -99,6 +99,8 @@ pub(super) fn press_buttons(
     window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
     deploy: Res<DeployScreen>,
     scripted: Option<Res<ScenarioInput>>,
+    mut browser: ResMut<ServerBrowser>,
+    time: Res<Time<Real>>,
 ) {
     let (window, mut cursor) = window.into_inner();
     if std::mem::take(&mut menu.swallow_click) {
@@ -183,6 +185,31 @@ pub(super) fn press_buttons(
             MenuButton::ResetBindings => {
                 settings.bindings = Settings::default().bindings;
             }
+            MenuButton::Refresh => browser.refresh(&settings, time.elapsed_secs(), scripted.is_none()),
+            MenuButton::Server(index) => {
+                if let Some(entry) = browser.entries.get(*index) {
+                    let last = &mut settings.last_match;
+                    last.address = entry.address.clone();
+                    last.port = entry.port;
+                    // The address fields show the pick.
+                    menu.rebuild += 1;
+                }
+            }
+            MenuButton::Favourite(index) => toggle_favourite(&mut settings, &mut browser, *index),
+            MenuButton::AddFavourite => {
+                let last = settings.last_match.clone();
+                let address = last.address.trim();
+                if address.is_empty() {
+                    notice.0 = Some("Enter the server's address.".into());
+                } else if !settings.favourite_servers.iter().any(|f| f.is(address, last.port)) {
+                    settings.favourite_servers.push(crate::settings::SavedServer {
+                        address: address.to_string(),
+                        port: last.port,
+                        name: String::new(),
+                    });
+                    browser.refresh(&settings, time.elapsed_secs(), scripted.is_none());
+                }
+            }
         }
     }
 }
@@ -224,6 +251,7 @@ fn local_setup(settings: &Settings, host: bool) -> MatchSetup {
         public: host && last.public,
         local_player: (!last.spectate).then(|| settings.player_name.clone()),
         local_team: last.team,
+        name: format!("{}'s server", settings.player_name),
         ..default()
     })
 }

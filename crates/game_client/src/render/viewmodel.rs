@@ -414,6 +414,12 @@ fn animate_view_model(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
+    // Both hands on a ladder: the weapon is slung, as in BF2's ladder seat.
+    if motion.climbing {
+        visibility.set_if_neq(Visibility::Hidden);
+        state.animated_weapon.clear();
+        return;
+    }
     let weapon = local_weapon(&armory, loadout, inventory);
     let set = weapon.and_then(|w| w.animations_1p.clone());
     let (Some(weapon), Some(set)) = (weapon, set) else {

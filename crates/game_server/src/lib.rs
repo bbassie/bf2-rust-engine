@@ -25,18 +25,27 @@ use game_shared::{
     input::{InputFrame, InputPacket},
     level::{LevelEntity, LoadedLevel},
     protocol::{ClientHello, ControlledBy, MatchInfo, Player, PlayerNetId, Team},
+    revive::Downed,
     soldier::{InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, step_soldier},
     vehicle::Seated,
     weapons::{Armory, Inventory, Loadout, WeaponState},
 };
 
+pub mod abilities;
+pub mod admin;
 pub mod ai;
 pub mod bots;
+pub mod chat;
 pub mod combat;
 pub mod conquest;
+pub mod discovery;
+pub mod rotation;
+pub mod server_config;
+pub mod stats;
 pub mod squads;
 pub mod destruction;
 pub mod nav;
+pub mod roadkill;
 pub mod vehicles;
 
 /// How the server was configured to run.
@@ -64,6 +73,14 @@ pub struct ServerSettings {
     pub friendly_fire: bool,
     /// How well bots aim and how quickly they react, 0..1 (BF2's bot skill).
     pub bot_skill: f32,
+    /// Shown in server browsers and greetings.
+    pub name: String,
+    /// Percent of the level's tickets each team starts a round with.
+    pub ticket_ratio: f32,
+    /// Maps to play in turn (see [`rotation`]); empty keeps playing `level`.
+    pub rotation: Vec<rotation::MapEntry>,
+    /// Remote console, bans, stats and the message of the day.
+    pub admin: admin::AdminSettings,
 }
 
 impl Default for ServerSettings {
@@ -82,6 +99,10 @@ impl Default for ServerSettings {
             respawn_seconds: 10.0,
             friendly_fire: false,
             bot_skill: 0.5,
+            name: "BF2 Rust server".into(),
+            ticket_ratio: 100.0,
+            rotation: Vec::new(),
+            admin: default(),
         }
     }
 }
@@ -99,7 +120,14 @@ impl Plugin for GameServerPlugin {
         }
         app.insert_resource(self.settings.clone().unwrap_or_default())
             .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin, nav::NavPlugin, squads::SquadPlugin, vehicles::VehiclesPlugin))
-            .add_plugins(destruction::DestructionPlugin)
+            .add_plugins((destruction::DestructionPlugin, roadkill::RoadkillPlugin, abilities::AbilitiesPlugin))
+            .add_plugins((
+                admin::AdminPlugin,
+                chat::ChatPlugin,
+                discovery::DiscoveryPlugin,
+                rotation::RotationPlugin,
+                stats::StatsPlugin,
+            ))
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
             .add_systems(
@@ -248,9 +276,13 @@ fn start_match(mut commands: Commands, settings: Res<ServerSettings>) {
 
 /// Starts serving a match: listens for connections if `settings.network`, then spawns the
 /// match (which loads the level) and the local player. [`stop_server`] ends it.
-pub fn start_server(world: &mut World, settings: ServerSettings) -> Result<()> {
+pub fn start_server(world: &mut World, mut settings: ServerSettings) -> Result<()> {
+    world.insert_resource(rotation::MapRotation::new(&mut settings));
     world.insert_resource(settings);
     world.run_system_cached::<(), _, _>(start_networking)?;
+    discovery::start(world);
+    admin::start(world);
+    stats::start(world);
     world.run_system_cached(start_match)?;
     Ok(())
 }
@@ -259,6 +291,9 @@ pub fn start_server(world: &mut World, settings: ServerSettings) -> Result<()> {
 /// match, its players, soldiers and control points, and the level. Another match can start
 /// afterwards. Does nothing when no match is running.
 pub fn stop_server(world: &mut World) {
+    stats::stop(world);
+    admin::stop(world);
+    discovery::stop(world);
     if let Some(mut transport) = world.remove_resource::<NetcodeServerTransport>() {
         if let Some(mut server) = world.get_resource_mut::<RenetServer>() {
             transport.disconnect_all(&mut server);
@@ -282,10 +317,8 @@ pub fn stop_server(world: &mut World) {
         // Children went with their parents.
         let _ = world.try_despawn(entity);
     }
-    world.remove_resource::<LoadedLevel>();
     world.remove_resource::<HostPlayer>();
-    world.remove_resource::<nav::Navigation>();
-    world.insert_resource(Armory::default());
+    rotation::forget_level(world);
 }
 
 fn create_client_player(
@@ -407,6 +440,7 @@ fn apply_inputs(
             &mut InputAck,
             &mut Transform,
             &mut AppliedInput,
+            Option<&Downed>,
         ),
         // Seated soldiers ride along; `vehicles` takes their input.
         (With<Soldier>, Without<Seated>),
@@ -414,11 +448,15 @@ fn apply_inputs(
     mut buffers: Query<&mut InputBuffer>,
 ) {
     let dt = time.delta_secs();
-    for (controlled_by, mut motion, mut ack, mut transform, mut applied) in &mut soldiers {
+    for (controlled_by, mut motion, mut ack, mut transform, mut applied, downed) in &mut soldiers {
         let Ok(mut buffer) = buffers.get_mut(controlled_by.0) else {
             continue;
         };
-        let input = buffer.next();
+        let mut input = buffer.next();
+        // Critically wounded: lying still (see `abilities`).
+        if let Some(downed) = downed {
+            input = game_shared::revive::downed_input(input, downed);
+        }
         applied.0 = input;
         let mut next = *motion;
         step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover);
@@ -444,7 +482,8 @@ fn respawn_players(
         (With<Player>, Without<Controls>),
     >,
     leaders: Query<(&Team, &SquadMember, &Controls)>,
-    soldiers: Query<&SoldierMotion>,
+    // Nobody spawns on a critically wounded leader.
+    soldiers: Query<&SoldierMotion, Without<Downed>>,
 ) {
     let (match_info, round) = *match_state;
     // Where each squad's leader is, for spawning on them.

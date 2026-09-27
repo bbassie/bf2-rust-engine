@@ -99,6 +99,35 @@ pub(super) fn spawn_loading_screen(mut commands: Commands, mut progress: ResMut<
         });
 }
 
+/// The server changed the map while we play (rotation or admin): back to the loading
+/// screen until the new level is there, and into the game again after.
+pub(super) fn level_changed(
+    add: On<Add, MatchInfo>,
+    infos: Query<&MatchInfo>,
+    screen: Res<State<Screen>>,
+    mut next_screen: ResMut<NextState<Screen>>,
+    mut menu: ResMut<Menu>,
+    mut active: ResMut<ActiveMatch>,
+    cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+) {
+    if *screen.get() != Screen::InGame {
+        return;
+    }
+    let Ok(info) = infos.get(add.entity) else {
+        return;
+    };
+    info!("map change: loading {}", info.level);
+    (*next_screen).set_if_neq(Screen::Loading);
+    menu.paused = false;
+    // Take the mouse again afterwards if we had it.
+    menu.grab_on_start = cursor.single().is_ok_and(crate::local_input::cursor_locked);
+    if let Some(MatchSetup::Local(settings)) = active.setup.as_mut() {
+        settings.level = info.level.clone();
+        settings.mode = info.mode.clone();
+        settings.size = info.size;
+    }
+}
+
 pub(super) fn start_pending(mut commands: Commands, mut menu: ResMut<Menu>) {
     let Some((_, frames)) = menu.pending.as_mut() else {
         return;

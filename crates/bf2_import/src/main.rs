@@ -27,6 +27,7 @@ mod dds;
 mod destruction;
 mod effects;
 mod glb;
+mod hitzones;
 mod level;
 mod meshes;
 mod roads;

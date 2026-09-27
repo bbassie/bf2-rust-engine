@@ -39,7 +39,7 @@ use bevy::{
     gltf::Gltf,
     input::{
         ButtonState,
-        keyboard::{Key, KeyboardInput, NativeKey},
+        keyboard::{Key, KeyboardInput, NativeKey, NativeKeyCode},
     },
     window::PrimaryWindow,
     pbr::ScreenSpaceAmbientOcclusion,
@@ -130,6 +130,8 @@ pub enum Step {
     Shadows(bool),
     /// Presses and releases a key, e.g. `Key(Enter)`.
     Key(KeyCode),
+    /// Types text into whatever takes typing (the chat box, after `Key(KeyT)`).
+    Type(String),
     /// Presses a key and keeps it down until `ReleaseKey`.
     HoldKey(KeyCode),
     ReleaseKey(KeyCode),
@@ -146,7 +148,7 @@ pub enum Step {
     /// the given seconds (0: the effect's own length), e.g.
     /// `Effect("e_exp_grenade", (-184.0, 157.0, -100.0), 20, 0.0)`.
     Effect(String, (f32, f32, f32), u32, f32),
-    /// Adds our soldier's movement state (and the last prediction correction when
+    /// Adds our soldier's movement state, stamina (and the last prediction correction when
     /// connected) to the report every frame for this many seconds.
     Trace(String, f32),
     Quit,
@@ -316,6 +318,8 @@ struct Runner {
     report: String,
     /// Keys pressed by the last `Key` step, released the next frame.
     released: Vec<KeyCode>,
+    /// Text of the last `Type` step, typed the next frame.
+    typed: String,
 }
 
 /// What a player can do, for [`run_scenario`].
@@ -377,6 +381,19 @@ fn run_scenario(
         mut effects,
     } = player;
     let now = time.elapsed_secs();
+    // Typed characters: text without a key the game reacts to.
+    for c in std::mem::take(&mut runner.typed).chars() {
+        for state in [ButtonState::Pressed, ButtonState::Released] {
+            keyboard.write(KeyboardInput {
+                key_code: KeyCode::Unidentified(NativeKeyCode::Unidentified),
+                logical_key: Key::Character(c.to_string().into()),
+                state,
+                text: (state == ButtonState::Pressed).then(|| c.to_string().into()),
+                repeat: false,
+                window: *window,
+            });
+        }
+    }
     // Keys go through the same input events as a real keyboard, so every system sees them.
     let mut key_event = |key_code: KeyCode, state: ButtonState| {
         keyboard.write(KeyboardInput {
@@ -637,6 +654,10 @@ fn run_scenario(
                 runner.released.push(*key);
                 Progress::Done
             }
+            Step::Type(text) => {
+                runner.typed.push_str(text);
+                Progress::Done
+            }
             Step::HoldKey(key) => {
                 key_event(*key, ButtonState::Pressed);
                 Progress::Done
@@ -697,7 +718,7 @@ fn run_scenario(
                     let (p, v) = (m.position, m.velocity);
                     writeln!(
                         runner.report,
-                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} correction {:.4}",
+                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} stamina {:.3}{}{} correction {:.4}",
                         p.x,
                         p.y,
                         p.z,
@@ -706,6 +727,9 @@ fn run_scenario(
                         v.z,
                         if m.grounded { "G" } else { "-" },
                         m.stance,
+                        m.stamina,
+                        if m.sprinting { " sprint" } else { "" },
+                        if m.can_fire() { "" } else { " nofire" },
                         prediction.last_correction,
                     )
                     .ok();

@@ -20,7 +20,7 @@ use bf2_formats::{
     mesh::{MeshKind, VisMesh},
     vfs::normalize,
 };
-use game_data::{ArmorDesc, DebrisPiece, DestructionEffect, ExplosionDesc, MaterialTable, Spread};
+use game_data::{ArmorDesc, DebrisPiece, DestructionEffect, EffectPlacement, ExplosionDesc, MaterialTable, Spread};
 use glam::{Affine3A, Vec3};
 
 use crate::{coords, glb, meshes::MeshConverter};
@@ -109,6 +109,11 @@ pub fn armor(world: &World, template: &Template, converter: &MeshConverter) -> O
             Vec3::from_array(coords::position(armor_effect.position)),
         );
         collect_effect(world, &armor_effect.template, transform, converter, &mut effect, 0);
+        effect.effects.push(EffectPlacement {
+            name: armor_effect.template.clone(),
+            position: transform.translation.to_array(),
+            rotation: coords::rotation_ypr(armor_effect.rotation).to_array(),
+        });
     }
     Some(ArmorDesc {
         hit_points: get("maxhitpoints").or(get("hitpoints")).unwrap_or(DEFAULT_HIT_POINTS),

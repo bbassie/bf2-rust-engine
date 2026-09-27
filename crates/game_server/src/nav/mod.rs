@@ -358,20 +358,22 @@ fn start_build(
             && let Some(grid) = cache::load(path, key, params)
         {
             info!(
-                "nav: loaded {} ({} cells) in {:.2} s",
+                "nav: loaded {} ({} cells, {} ladders) in {:.2} s",
                 path.display(),
                 grid.cell_count(),
+                grid.ladders().len(),
                 started.elapsed().as_secs_f32()
             );
             return grid;
         }
         let grid = build::build(&geometry, params);
         info!(
-            "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {:.1} MB",
+            "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {} ladders, {:.1} MB",
             grid.width,
             grid.depth,
             started.elapsed().as_secs_f32(),
             grid.cell_count(),
+            grid.ladders().len(),
             grid.memory_bytes() as f32 / 1e6
         );
         if let Some(path) = &cache_path

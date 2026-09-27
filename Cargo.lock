@@ -3224,6 +3224,7 @@ dependencies = [
  "flate2",
  "game_data",
  "game_shared",
+ "ron 0.10.1",
  "serde",
 ]
 

@@ -96,8 +96,12 @@ mod clips {
         WALK.into_iter().chain(RUN).chain(CROUCH_MOVE).chain(PRONE_MOVE).chain([SPRINT])
     }
 
+    /// Climbing a ladder, and sliding down one (BF2's `objects/common/ladder` clips).
+    pub const CLIMB: &str = "3p_climbup";
+    pub const SLIDE: &str = "3p_climbdownfast";
+
     pub fn legs() -> impl Iterator<Item = &'static str> {
-        [STAND, CROUCH, PRONE]
+        [STAND, CROUCH, PRONE, CLIMB, SLIDE]
             .into_iter()
             .chain(cycles())
             .chain(STAND_TURN)
@@ -133,6 +137,8 @@ const RUN_SPEED: f32 = 3.9;
 const SPRINT_SPEED: f32 = 6.3;
 const CROUCH_SPEED: f32 = 1.7;
 const PRONE_SPEED: f32 = 0.7;
+/// Climbing speed the ladder clip is made for (its feet move about 1.25 m/s).
+const CLIMB_SPEED: f32 = 1.25;
 
 /// Crossfade times (seconds), roughly BF2's bundle fade times.
 const FADE: f32 = 0.2;
@@ -286,6 +292,8 @@ enum Legs {
     /// Stepped off something: straight into the airborne loop.
     Fall(usize),
     Land(usize),
+    /// On a ladder: climbing, or sliding down it if `true`.
+    Climb(bool),
 }
 
 impl Legs {
@@ -692,6 +700,9 @@ fn jump_direction(velocity: Vec2) -> usize {
 fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, render: &SoldierRender) -> Legs {
     let velocity = local_velocity(render);
     let speed = velocity.length();
+    if render.climbing {
+        return Legs::Climb(render.velocity.y < -CLIMB_SPEED * 1.5);
+    }
     match state {
         // A blip off the ground (a step or slope edge) is no jump worth landing from.
         Some(Legs::Jump(dir) | Legs::Fall(dir)) if render.grounded => {
@@ -728,7 +739,8 @@ fn fade_time(from: Option<Legs>, to: Legs) -> f32 {
         return 0.0;
     };
     match (from, to) {
-        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_)) => FADE_JUMP,
+        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_) | Legs::Climb(_))
+        | (Legs::Climb(_), _) => FADE_JUMP,
         _ if from.stance() != to.stance() => {
             if from.stance() == Stance::Prone || to.stance() == Stance::Prone {
                 FADE_PRONE
@@ -835,6 +847,12 @@ impl SoldierAnimator {
                 targets[0] = (clips::JUMP[dir][2], 1.0);
                 once = Some(entered);
             }
+            // Holding still on the rungs pauses the climb.
+            Legs::Climb(false) => {
+                targets[0] = (clips::CLIMB, 1.0);
+                speed = (render.velocity.y / CLIMB_SPEED).clamp(-2.0, 2.0);
+            }
+            Legs::Climb(true) => targets[0] = (clips::SLIDE, 1.0),
         }
         let targets = targets.iter().filter(|(_, weight)| *weight > 0.02);
 
@@ -859,6 +877,15 @@ impl SoldierAnimator {
             self.legs.play(player, clip, play);
         }
         self.legs.update(player, dt);
+
+        // Both hands on the rungs: no weapon, and the ladder clip moves the arms too.
+        if matches!(state, Legs::Climb(_)) {
+            self.action = None;
+            self.upper.begin();
+            self.upper.update(player, dt);
+            self.hand = None;
+            return;
+        }
 
         // Upper body: a one-shot (weapon switch, shot, reload) or else the weapon set's
         // clips paired with the legs clips, in step with them.

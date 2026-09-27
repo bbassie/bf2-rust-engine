@@ -21,6 +21,8 @@ use crate::{
 const SKELETON: &str = "objects/soldiers/common/animations/3p_setup.ske";
 const SKELETON_1P: &str = "objects/soldiers/common/animations/1p_setup.ske";
 const ANIMATIONS: &str = "objects/soldiers/common/animations/3p/";
+/// Climbing ladders (BF2 plays these through the ladder's seat animation system).
+const LADDER_ANIMATIONS: &str = "objects/common/ladder/animations/";
 const FLAGS: &str = "objects/common/flags/";
 
 /// Z-mirror of a (true, un-conjugated) BF2 rotation.
@@ -173,7 +175,9 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
         };
         let skeleton = Skeleton::parse(&skeleton_data).context("parsing 3p_setup.ske")?;
 
-        let clips = load_clips(&vfs, ANIMATIONS);
+        let mut clips = load_clips(&vfs, ANIMATIONS);
+        clips.extend(load_clips(&vfs, LADDER_ANIMATIONS));
+        clips.sort_by(|a, b| a.0.cmp(&b.0));
         let skeleton_1p = vfs
             .read(SKELETON_1P)
             .ok()
@@ -187,6 +191,7 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
         }
 
         let converter = MeshConverter::new(&vfs, out);
+        let mut interp = bf2_formats::con::Interpreter::new(&vfs);
         match export_flags(&vfs, &converter, out) {
             Ok(0) => {}
             Ok(count) => log::info!("{mod_name}: {count} flags"),
@@ -215,6 +220,7 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
                         mesh: glb_path,
                         animations: clips.iter().map(|(n, _)| n.clone()).collect(),
                         mesh_1p,
+                        hit_zones: crate::hitzones::hit_zones(&mut interp, &vfs, &skeleton, &name),
                     };
                     game_data::write_ron(out.join("soldiers").join(format!("{name}.ron")), &desc)?;
                     done.push(name);

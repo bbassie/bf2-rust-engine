@@ -82,27 +82,42 @@ pub struct SoldierRender {
     pub stance: Stance,
     pub velocity: Vec3,
     pub grounded: bool,
+    /// On a ladder.
+    pub climbing: bool,
     /// Eye height above the feet, easing toward the stance's so the view moves with the
     /// body when crouching or going prone instead of jumping.
     pub eye_height: f32,
+    /// Vertical offset of the eye easing out steps up and down (stairs, curbs) so the view
+    /// doesn't jerk. Part of [`Self::eye_position`].
+    pub step_offset: f32,
 }
 
 impl SoldierRender {
     pub fn eye_position(&self) -> Vec3 {
-        self.position + Vec3::Y * self.eye_height
+        self.position + Vec3::Y * (self.eye_height + self.step_offset)
     }
 }
 
 /// How quickly the eye height follows a stance change (per second; about 0.25 s).
 const EYE_HEIGHT_RATE: f32 = 12.0;
+/// Most the eye lags behind the feet when they step up or snap down (stairs, curbs).
+const STEP_SMOOTHING: f32 = 0.25;
 
 /// Predicted state of our own soldier.
 #[derive(Component)]
-struct Predicted {
+pub struct Predicted {
     previous: SoldierMotion,
     current: SoldierMotion,
     /// Visual offset left over from corrections, decays to zero.
     error: Vec3,
+}
+
+impl Predicted {
+    /// Our soldier as of the latest input, ahead of the server's replicated state (for
+    /// things that must agree with our own input, like being allowed to fire).
+    pub fn motion(&self) -> &SoldierMotion {
+        &self.current
+    }
 }
 
 /// Received states of a remote soldier, by local receive time.
@@ -125,7 +140,9 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             stance: motion.stance,
             velocity: motion.velocity,
             grounded: motion.grounded,
+            climbing: motion.climbing,
             eye_height: motion.stance.eye_height(),
+            step_offset: 0.0,
         },
         Snapshots::default(),
         TickHistory {
@@ -261,15 +278,27 @@ fn update_render_state(
         } else {
             (ticks.previous, ticks.current, alpha)
         };
+        let position = from.position.lerp(to.position, t);
+        let dt = time.delta_secs();
         let eye_target = to.stance.eye_height();
-        let eye_blend = 1.0 - (-EYE_HEIGHT_RATE * time.delta_secs()).exp();
+        let eye_blend = 1.0 - (-EYE_HEIGHT_RATE * dt).exp();
+        // Stepping up stairs and ledges or snapping down them moves the feet by up to half
+        // a meter in a tick. The eye stays where it was and catches up like it does after a
+        // stance change; walking up and down slopes (the vertical velocity) isn't smoothed.
+        let mut step = render.step_offset;
+        let rise = position.y - render.position.y - to.velocity.y * dt;
+        if to.grounded && render.grounded && rise.abs() < 1.0 {
+            step -= rise;
+        }
         *render = SoldierRender {
-            position: from.position.lerp(to.position, t),
+            position,
             yaw: lerp_angle(from.yaw, to.yaw, t),
             stance: to.stance,
             velocity: to.velocity,
             grounded: to.grounded,
+            climbing: to.climbing,
             eye_height: render.eye_height + (eye_target - render.eye_height) * eye_blend,
+            step_offset: (step * (1.0 - eye_blend)).clamp(-STEP_SMOOTHING, STEP_SMOOTHING),
         };
     }
 }

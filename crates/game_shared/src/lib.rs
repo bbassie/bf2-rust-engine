@@ -19,6 +19,7 @@ pub mod level;
 pub mod physics;
 pub mod projectile;
 pub mod protocol;
+pub mod revive;
 pub mod soldier;
 pub mod squad;
 pub mod statics;

@@ -12,6 +12,7 @@ use game_shared::{
     },
     level::LoadedLevel,
     protocol::{ControlledBy, MatchInfo, Player, Score, Team},
+    revive::Downed,
     soldier::{Soldier, SoldierMotion},
 };
 
@@ -50,6 +51,7 @@ impl Plugin for ConquestPlugin {
                 .chain()
                 .after(ServerSimSystems::ApplyInputs)
                 .after(crate::combat::CombatSystems)
+                .after(crate::abilities::AbilitySystems)
                 .run_if(resource_exists::<LoadedLevel>)
                 .run_if(in_state(ClientState::Disconnected)),
         );
@@ -163,7 +165,8 @@ fn update_flags(
     round: Single<&RoundState>,
     mut tickets: Single<&mut Tickets>,
     mut control_points: Query<(Entity, &ControlPoint, &mut FlagState, &ControlPointRules)>,
-    soldiers: Query<(&SoldierMotion, &ControlledBy), With<Soldier>>,
+    // The critically wounded don't hold flags (BF2 `onPlayerKilledCQ`).
+    soldiers: Query<(&SoldierMotion, &ControlledBy), (With<Soldier>, Without<Downed>)>,
     teams: Query<&Team>,
     mut scores: Query<&mut Score>,
     mut events: MessageWriter<ToClients<FlagEvent>>,
@@ -353,6 +356,7 @@ fn next_round(
     soldiers: Query<Entity, With<Soldier>>,
     mut players: Query<(Entity, &mut Score, &mut Deployment), With<Player>>,
     mut remaining: Local<Option<f32>>,
+    rotation: Res<crate::rotation::MapRotation>,
 ) {
     let (match_entity, match_info, mut round) = match_state.into_inner();
     let RoundState::Ended { winner, restart_in } = *round else {
@@ -372,6 +376,11 @@ fn next_round(
         return;
     }
     *remaining = None;
+    // A server with a map rotation plays the next map instead.
+    if rotation.moves_on() {
+        commands.queue(crate::rotation::advance);
+        return;
+    }
     for soldier in &soldiers {
         commands.entity(soldier).despawn();
     }

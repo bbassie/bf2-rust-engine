@@ -8,7 +8,7 @@ use std::{
 };
 
 use bevy::prelude::*;
-use bevy_replicon::{prelude::*, shared::backend::connected_client::NetworkId};
+use bevy_replicon::shared::backend::connected_client::NetworkId;
 use bevy_replicon_renet::netcode::NetcodeServerTransport;
 use game_shared::protocol::Player;
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,7 @@ pub(super) fn enforce_bans(
                 format!("You are banned from this server: {}", ban.reason)
             };
             info!("{name} is banned, kicking");
-            super::commands::kick(world, entity, &reason, false);
+            let _ = super::commands::kick(world, entity, &reason, false);
         });
     }
 }

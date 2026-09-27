@@ -47,7 +47,7 @@ impl Plugin for VoicePlugin {
 pub const MAX_VOICES: usize = 40;
 pub const PER_EMITTER: usize = 3;
 /// Quieter sounds aren't started (-54 dB).
-pub(super) const AUDIBLE: f32 = 0.002;
+const AUDIBLE: f32 = 0.002;
 /// Seconds to fade out a voice that makes room for another.
 const FADE: f32 = 0.05;
 /// Distance of a positional voice from the listener: rodio's own attenuation (`1 / d²`,
@@ -216,11 +216,6 @@ impl PlaySound {
     /// A voice-over (see [`Channel::Announcement`]).
     pub fn announcement(mut self) -> Self {
         self.channel = Channel::Announcement;
-        self
-    }
-
-    pub fn channel(mut self, channel: Channel) -> Self {
-        self.channel = channel;
         self
     }
 }
@@ -477,6 +472,7 @@ fn update_voices(
     global: Res<GlobalVolume>,
     mix: Res<AudioMix>,
     mut ducking: ResMut<Ducking>,
+    mut was_announcing: Local<bool>,
     listener: Query<&Transform, (With<SpatialListener>, Without<Voice>)>,
     mut voices: Query<(
         Entity,
@@ -492,6 +488,10 @@ fn update_voices(
     let master = global.volume.to_linear();
     let announcing = voices.iter().any(|(_, v, ..)| v.channel == Channel::Announcement && v.fade.is_none());
     let target = if announcing { DUCKED } else { 1.0 };
+    if announcing != *was_announcing {
+        *was_announcing = announcing;
+        debug!(target: "audio", "{}", if announcing { "ducking for an announcement" } else { "announcement over" });
+    }
     ducking.0 += (target - ducking.0) * (1.0 - (-DUCK_RATE * dt).exp());
     for (entity, mut voice, held, transform, sink, spatial_sink) in &mut voices {
         let mut fade = 1.0;

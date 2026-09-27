@@ -113,6 +113,8 @@ const GRENADE_SAFETY: f32 = 9.0;
 pub struct BotStats {
     elapsed: f32,
     stuck_events: u32,
+    /// Stuck events by 10 m square, to find the places bots get stuck at.
+    stuck_spots: bevy::platform::collections::HashMap<(i32, i32), u32>,
     stuck_seconds: f32,
     /// Bot-seconds spent alive and trying to move (the time stuck events can happen in).
     moving_seconds: f32,
@@ -125,6 +127,8 @@ pub struct BotStats {
     failed_paths: u32,
     path_seconds: f32,
     max_path_seconds: f32,
+    /// Ladders bots got on.
+    climbs: u32,
     /// Milliseconds spent in `think`.
     think_ms: f32,
     max_think_ms: f32,
@@ -216,6 +220,8 @@ pub struct BotBrain {
     via: Option<Vec3>,
     /// Squad leaders: seconds spent waiting for the squad.
     regroup: f32,
+    /// Squad leaders: the squad gathered before the assault.
+    staged: bool,
     /// Phase of looking around while holding a position.
     sweep: f32,
     /// Kit and spawn were chosen for this death.
@@ -224,6 +230,8 @@ pub struct BotBrain {
     spawn_on_leader: bool,
     /// Jump was pressed last tick.
     jump_held: bool,
+    /// On a ladder last tick.
+    climbing: bool,
 
     goal: Option<Vec3>,
     /// Walking straight to the goal without a path; and the goal that was checked for.
@@ -285,10 +293,12 @@ impl Default for BotBrain {
             spot_timer: 0.0,
             via: None,
             regroup: 0.0,
+            staged: false,
             sweep: fastrand::f32() * TAU,
             deployed: false,
             spawn_on_leader: false,
             jump_held: false,
+            climbing: false,
             goal: None,
             direct: false,
             direct_goal: None,
@@ -785,6 +795,10 @@ impl BotBrain {
             consider(&mut best, cover, Activity::Cover { spot, time });
         }
 
+        // TODO: kit abilities, once they exist: medics revive downed teammates nearby (BF2's
+        // revive weight is 3, like its medic assist) and drop medic bags for hurt ones;
+        // support bots drop ammo bags; badly hurt or empty bots go to them.
+
         // A grenade at enemies behind cover, or at one it can't get.
         if let Some(grenade) = self.grenade
             && self.grenade_cooldown <= 0.0
@@ -1049,9 +1063,10 @@ impl BotBrain {
             self.order = order;
             self.spot = None;
             self.regroup = 0.0;
+            self.staged = false;
             self.via = order
                 .filter(|(_, area)| w.map.areas[*area].position.distance(position) > 120.0)
-                .and_then(|(_, area)| w.map.route_waypoint(position, area));
+                .and_then(|(_, area)| w.map.route_waypoint(position, area).or_else(|| self.flank_via(w, me, area)));
         }
         let area = order.map(|(_, a)| (a, &w.map.areas[a]));
 
@@ -1086,18 +1101,33 @@ impl BotBrain {
         };
         let distance = area.position.distance(position);
 
-        // Leaders wait for a squad that fell behind, a while.
+        // Leaders wait for a squad that fell behind, a while, and gather it before an
+        // assault so it arrives together rather than one by one.
         if is_leader
-            && let Some(spread) = squad.and_then(|s| s.spread())
+            && let Some(squad) = squad
+            && let Some(spread) = squad.spread()
         {
-            if spread < 15.0 {
+            let others = squad.alive.len().saturating_sub(1);
+            let close = squad
+                .alive
+                .iter()
+                .filter(|m| m.player != me.player && m.position.distance(position) < 25.0)
+                .count();
+            let assault = order.is_some_and(|(k, _)| k == OrderKind::Attack)
+                && distance < 2.0 * APPROACH_DISTANCE
+                && self.target.is_none();
+            let gathering = assault && !self.staged && close * 10 < others * 6 && self.regroup < 20.0;
+            if assault && !gathering {
+                self.staged = true;
+            }
+            if spread < 15.0 && !gathering {
                 self.regroup = 0.0;
-            } else if spread > 30.0 && distance > APPROACH_DISTANCE && self.regroup < 10.0 {
+            } else if distance > APPROACH_DISTANCE && (gathering || (spread > 30.0 && self.regroup < 10.0)) {
                 self.regroup += dt;
-                if let Some(center) = squad.and_then(|s| {
-                    let others: Vec<Vec3> = s.alive.iter().filter(|m| m.player != me.player).map(|m| m.position).collect();
-                    (!others.is_empty()).then(|| others.iter().sum::<Vec3>() / others.len() as f32)
-                }) {
+                let others: Vec<Vec3> =
+                    squad.alive.iter().filter(|m| m.player != me.player).map(|m| m.position).collect();
+                if !others.is_empty() {
+                    let center = others.iter().sum::<Vec3>() / others.len() as f32;
                     intent.look = Look::At(center + Vec3::Y * 1.5);
                 }
                 intent.buttons |= Buttons::CROUCH;
@@ -1146,6 +1176,23 @@ impl BotBrain {
                 intent.buttons |= Buttons::CROUCH;
             }
         }
+    }
+
+    /// For squads without a route laid out by the level: a waypoint off to one side of the
+    /// straight line to the objective, so squads attacking the same flag come at it from
+    /// several directions.
+    fn flank_via(&self, w: &Senses, me: &Me, area: usize) -> Option<Vec3> {
+        let squad = me.member?.squad;
+        let angle = [0.0f32, 45.0, -45.0][squad as usize % 3];
+        if angle == 0.0 {
+            return None;
+        }
+        let target = w.map.areas[area].position;
+        let from = (me.motion.position - target).with_y(0.0).normalize_or_zero();
+        let via = target + Quat::from_rotation_y(angle.to_radians()) * from * 80.0;
+        let nav = w.nav()?;
+        let region = nav.cell(nav.locate(me.motion.position, 2.0, None)?).region;
+        nav.locate(via, 12.0, Some(region)).map(|cell| nav.position(cell))
     }
 
     /// A spot in or around an area for this bot: inside the capture radius to attack, in a
@@ -1254,6 +1301,10 @@ impl BotBrain {
             direction = intent.step;
         }
         let wants_move = direction.length_squared() > 0.01;
+        if me.motion.climbing && !self.climbing {
+            stats.climbs += 1;
+        }
+        self.climbing = me.motion.climbing;
 
         // Detect being stuck on geometry: wiggle free, then find a new path from there.
         let moved = flat(position - self.last_position).length();
@@ -1272,6 +1323,8 @@ impl BotBrain {
             }
             if self.stuck_time > 0.75 {
                 stats.stuck_events += 1;
+                let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
+                *stats.stuck_spots.entry(square).or_default() += 1;
                 self.stuck_time = 0.0;
                 self.unstuck_timer = 0.6 + fastrand::f32() * 0.8;
                 // First try jumping ahead (a ledge the grid thinks is lower), then sideways.
@@ -1648,7 +1701,8 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
         info!(
             "bots: {} stuck events in the last minute ({:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
-             {:.1} ms avg, {:.1} ms max; thinking {:.2} ms per tick, {:.1} ms max",
+             {:.1} ms avg, {:.1} ms max; {} ladders climbed; thinking {:.2} ms per tick, {:.1} ms max; \
+             stuck most at {}",
             stats.stuck_events,
             stats.stuck_seconds,
             stats.moving_seconds,
@@ -1660,11 +1714,25 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.no_progress,
             stats.path_seconds * 1000.0 / stats.paths.max(1) as f32,
             stats.max_path_seconds * 1000.0,
+            stats.climbs,
             stats.think_ms / stats.ticks.max(1) as f32,
             stats.max_think_ms,
+            hotspots(&stats.stuck_spots),
         );
     }
     *stats = BotStats::default();
+}
+
+/// The three 10 m squares with the most stuck events, as `x z (count)`.
+fn hotspots(spots: &bevy::platform::collections::HashMap<(i32, i32), u32>) -> String {
+    let mut spots: Vec<_> = spots.iter().collect();
+    spots.sort_by(|a, b| b.1.cmp(a.1));
+    let list: Vec<String> = spots
+        .iter()
+        .take(3)
+        .map(|((x, z), n)| format!("{} {} ({n})", x * 10 + 5, z * 10 + 5))
+        .collect();
+    if list.is_empty() { "-".into() } else { list.join(", ") }
 }
 
 /// A random spot on the level, for levels without control points.

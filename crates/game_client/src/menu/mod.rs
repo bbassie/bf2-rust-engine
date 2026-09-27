@@ -6,6 +6,7 @@
 //! `start`, `pause:leave`, `tab:graphics`, `toggle:shadows`, ...) so scenarios can press it
 //! with `Click`. A scenario with `menu: true` starts here instead of in a match.
 
+mod browser;
 mod input;
 mod levels;
 mod loading;
@@ -49,7 +50,7 @@ use crate::{
     settings::{Action, Binding, DisplayMode, Settings},
 };
 
-use self::{input::*, levels::*, loading::*, pages::*, widgets::*};
+use self::{browser::*, input::*, levels::*, loading::*, pages::*, widgets::*};
 
 pub struct MenuPlugin {
     /// Where the client starts: the main menu, or loading a match from the command line.
@@ -70,8 +71,10 @@ impl Plugin for MenuPlugin {
             .init_resource::<Menu>()
             .init_resource::<LevelCatalog>()
             .init_resource::<LoadingProgress>()
+            .init_resource::<ServerBrowser>()
+            .add_observer(level_changed)
             .add_systems(Startup, scan_levels)
-            .add_systems(PreUpdate, menu_keys.after(InputSystems))
+            .add_systems(PreUpdate, menu_keys.in_set(MenuKeys).after(InputSystems))
             .add_systems(OnEnter(Screen::Menu), spawn_main_menu)
             .add_systems(OnEnter(Screen::Loading), spawn_loading_screen)
             .add_systems(OnExit(Screen::InGame), |mut menu: ResMut<Menu>| {
@@ -80,9 +83,9 @@ impl Plugin for MenuPlugin {
             .add_systems(
                 Update,
                 (
-                    collect_levels,
+                    (collect_levels, open_browser, poll_browser),
                     (press_buttons, drag_sliders, sync_text_fields),
-                    (sync_pause_overlay, build_pages, build_level_details),
+                    (sync_pause_overlay, build_pages, build_level_details, build_server_list),
                     (
                         paint_buttons,
                         paint_switches,
@@ -103,6 +106,10 @@ impl Plugin for MenuPlugin {
             .add_systems(Update, pause_time.run_if(in_state(Screen::InGame)));
     }
 }
+
+/// Where the menus take the keyboard (Esc, Enter); the chat box goes first.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuKeys;
 
 /// What the client is doing.
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -171,6 +178,9 @@ pub struct Menu {
     grab_on_start: bool,
     /// Enter was pressed: the page's main button.
     submit: bool,
+    /// Bumped to rebuild the page, e.g. when a server picked from the list fills in the
+    /// address fields.
+    rebuild: u32,
 }
 
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
@@ -217,6 +227,14 @@ enum MenuButton {
     WindowSize(u32, u32),
     Rebind(Action),
     ResetBindings,
+    /// Join page: ask for servers again.
+    Refresh,
+    /// Join page: pick the listed server with this index.
+    Server(usize),
+    /// Join page: star or unstar the listed server with this index.
+    Favourite(usize),
+    /// Join page: star the address typed in.
+    AddFavourite,
 }
 
 impl MenuButton {
@@ -243,6 +261,10 @@ impl MenuButton {
             MenuButton::WindowSize(w, h) => format!("size:{w}x{h}"),
             MenuButton::Rebind(action) => format!("bind:{}", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
+            MenuButton::Refresh => "browser:refresh".into(),
+            MenuButton::Server(index) => format!("server:{index}"),
+            MenuButton::Favourite(index) => format!("favourite:{index}"),
+            MenuButton::AddFavourite => "favourite:add".into(),
         }
     }
 }

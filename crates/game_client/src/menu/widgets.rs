@@ -297,9 +297,13 @@ pub(super) fn map_preview(
     }
 }
 
-fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
+fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings, browser: &ServerBrowser) -> bool {
     let last = &settings.last_match;
     match button {
+        MenuButton::Server(index) => browser
+            .entries
+            .get(*index)
+            .is_some_and(|e| e.port == last.port && e.address.eq_ignore_ascii_case(last.address.trim())),
         MenuButton::Page(page) => menu.page == *page,
         MenuButton::Level(name) => last.level == *name,
         MenuButton::Layout(mode, size) => last.mode == *mode && last.size == *size,
@@ -315,11 +319,12 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
 pub(super) fn paint_buttons(
     menu: Res<Menu>,
     settings: Res<Settings>,
+    browser: Res<ServerBrowser>,
     mut buttons: Query<(&MenuButton, &Look, &Interaction, &mut BackgroundColor)>,
 ) {
     for (button, look, interaction, mut background) in &mut buttons {
         let hovered = *interaction != Interaction::None;
-        let selected = is_selected(button, &menu, &settings);
+        let selected = is_selected(button, &menu, &settings, &browser);
         let color = match look {
             Look::Custom => continue,
             Look::Nav | Look::Item if selected => ACCENT.with_alpha(0.3),

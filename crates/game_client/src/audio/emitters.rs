@@ -9,7 +9,7 @@ use game_data::SoundDesc;
 
 use super::{
     AudioSystems,
-    voices::{AUDIBLE, Channel, DEFAULT_FALLOFF, HeldVoice, SoundCache, spawn_held},
+    voices::{Channel, DEFAULT_FALLOFF, HeldVoice, SoundCache, spawn_held},
 };
 
 pub struct EmitterPlugin;
@@ -19,6 +19,11 @@ impl Plugin for EmitterPlugin {
         app.add_systems(PostUpdate, emitters.in_set(AudioSystems::Trigger));
     }
 }
+
+/// Loops start above this gain (before mix and ducking) and stop below `STOP` (-40 dB):
+/// BF2's inverse falloff would keep a flag's flapping audible, barely, half a map away.
+const START: f32 = 0.012;
+const STOP: f32 = 0.01;
 
 /// Plays `sound` looping where this entity is (its `GlobalTransform`), while audible.
 #[derive(Component, Clone, Debug)]
@@ -63,8 +68,10 @@ fn emitters(
         let level = emitter.sound.volume * emitter.volume;
         let falloff = emitter.sound.falloff.unwrap_or(DEFAULT_FALLOFF);
         // Before mix and ducking: a loop turned down by the settings keeps playing.
-        let audible = level * falloff.gain(at.distance(ear)) > AUDIBLE;
-        match (voices.get(&entity).copied(), audible) {
+        let gain = level * falloff.gain(at.distance(ear));
+        let playing = voices.get(&entity).copied();
+        let audible = gain > if playing.is_some() { STOP } else { START };
+        match (playing, audible) {
             (None, true) if !emitter.sound.files.is_empty() => {
                 let voice = HeldVoice {
                     at: Some(at),

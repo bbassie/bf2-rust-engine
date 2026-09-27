@@ -46,6 +46,7 @@ impl Plugin for ProtocolPlugin {
             .replicate::<VehicleState>()
             .replicate::<Seated>()
             .replicate::<VehicleHealth>()
+            .replicate::<crate::revive::Downed>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
             .add_client_message::<DeployRequest>(Channel::Ordered)
@@ -59,7 +60,9 @@ impl Plugin for ProtocolPlugin {
             .add_client_message::<crate::chat::ChatRequest>(Channel::Ordered)
             .add_server_message::<crate::chat::ChatLine>(Channel::Ordered)
             .add_server_message::<crate::chat::Kicked>(Channel::Ordered)
-            .add_server_message::<crate::summary::RoundSummary>(Channel::Ordered);
+            .add_server_message::<crate::summary::RoundSummary>(Channel::Ordered)
+            .add_client_message::<crate::revive::GiveUp>(Channel::Ordered)
+            .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered);
     }
 }
 

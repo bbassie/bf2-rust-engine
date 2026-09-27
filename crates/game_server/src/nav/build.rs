@@ -27,7 +27,7 @@ use game_shared::{ladder::Ladder, level::Heightmap};
 use super::{NavCell, NavGrid, NavLadder, NavParams, SLOPE_SCALE};
 
 /// Bump when the build changes, to invalidate cached grids.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// Columns per side of the tiles rasterized in parallel.
 const TILE: u32 = 64;
@@ -352,7 +352,7 @@ fn place_ladders(grid: &mut NavGrid, ladders: &[Ladder]) {
         let hold = ladder.half.z + 0.35;
         let foot = ladder.world(Vec3::new(0.0, -ladder.top(), hold + 0.3));
         let head = ladder.world(Vec3::new(0.0, ladder.top(), -(hold + 0.4)));
-        let (Some(bottom), Some(top)) = (grid.locate(foot, 1.2, None), grid.locate(head, 1.2, None)) else {
+        let (Some(bottom), Some(top)) = (nearest_cell(grid, foot, 1.2), nearest_cell(grid, head, 1.2)) else {
             continue;
         };
         let (low, high) = (grid.position(bottom), grid.position(top));
@@ -370,6 +370,38 @@ fn place_ladders(grid: &mut NavGrid, ladders: &[Ladder]) {
         grid.ladder_ends.entry(bottom.index).or_default().push(index);
         grid.ladder_ends.entry(top.index).or_default().push(index);
     }
+}
+
+/// Like [`NavGrid::locate`], before there are regions.
+fn nearest_cell(grid: &NavGrid, pos: Vec3, radius: f32) -> Option<super::CellRef> {
+    let (lo, hi) = (pos.xz() - radius, pos.xz() + radius);
+    let (Some((x0, z0)), Some((x1, z1))) = (
+        grid.column_at(lo.x.max(grid.origin.x), lo.y.max(grid.origin.y)),
+        grid.column_at(
+            hi.x.min(grid.origin.x + grid.width as f32 * grid.params.cell - 0.01),
+            hi.y.min(grid.origin.y + grid.depth as f32 * grid.params.cell - 0.01),
+        ),
+    ) else {
+        return None;
+    };
+    let mut best: Option<(f32, super::CellRef)> = None;
+    for z in z0..=z1 {
+        for x in x0..=x1 {
+            for index in grid.column(x, z) {
+                let c = super::CellRef { x, z, index };
+                let p = grid.position(c);
+                let dy = p.y - pos.y;
+                if !(-3.0..=1.0).contains(&dy) || p.xz().distance(pos.xz()) > radius + grid.params.cell {
+                    continue;
+                }
+                let score = p.xz().distance_squared(pos.xz()) + 4.0 * dy * dy;
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, c));
+                }
+            }
+        }
+    }
+    best.map(|(_, c)| c)
 }
 
 /// Connected regions (ignoring which way drops go, and joined by ladders); tiny ones get

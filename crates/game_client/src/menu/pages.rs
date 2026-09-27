@@ -124,12 +124,12 @@ pub(super) fn build_pages(
     asset_server: Res<AssetServer>,
     monitors: Query<&Monitor, With<PrimaryMonitor>>,
     roots: Query<(Entity, Option<&Children>), With<PageRoot>>,
-    mut built: Local<Option<(Entity, Page, SettingsTab, u32, Option<String>)>>,
+    mut built: Local<Option<(Entity, Page, SettingsTab, u32, Option<String>, u32)>>,
 ) {
     let Ok((root, children)) = roots.single() else {
         return;
     };
-    let key = (root, menu.page, menu.tab, catalog.version, notice.0.clone());
+    let key = (root, menu.page, menu.tab, catalog.version, notice.0.clone(), menu.rebuild);
     if built.as_ref() == Some(&key) {
         return;
     }
@@ -434,9 +434,46 @@ fn join_page(p: &mut ChildSpawnerCommands, settings: &Settings, notice: Option<&
     if let Some(notice) = notice {
         notice_box(p, notice);
     }
+    p.spawn(Node {
+        align_items: AlignItems::Center,
+        column_gap: px(12),
+        max_width: px(760),
+        ..default()
+    })
+    .with_children(|row| {
+        section(row, "Servers");
+        row.spawn((
+            BrowserStatus,
+            text("", 13.0, DIM),
+            Node {
+                flex_grow: 1.0,
+                margin: UiRect::top(px(6)),
+                ..default()
+            },
+        ));
+        button(row, MenuButton::Refresh, Look::Plain, "Refresh");
+    });
+    p.spawn((
+        ServerList,
+        ScrollArea,
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: px(2),
+            padding: UiRect::all(px(6)),
+            max_width: px(760),
+            min_height: px(120),
+            max_height: px(300),
+            overflow: Overflow::scroll_y(),
+            border_radius: BorderRadius::all(px(10)),
+            margin: UiRect::bottom(px(14)),
+            ..default()
+        },
+        BackgroundColor(CARD),
+    ));
     let last = &settings.last_match;
     row(p, "Address", |c| {
-        text_field(c, TextField::Address, &last.address, 300.0)
+        text_field(c, TextField::Address, &last.address, 300.0);
+        button(c, MenuButton::AddFavourite, Look::Plain, "Add to favourites");
     });
     row(p, "Port", |c| {
         text_field(c, TextField::Port, &last.port.to_string(), 110.0)

@@ -1,4 +1,4 @@
-//! The HUD: crosshair with spread, hit marker, health, ammo, kill feed, death notice,
+//! The HUD: crosshair with spread, hit marker, health, stamina, ammo, kill feed, death notice,
 //! scoreboard (Tab) and a small status line. A clean modern style rather than BF2's.
 
 use bevy::{
@@ -11,7 +11,7 @@ use game_data::FireMode;
 use game_shared::{
     level::LoadedLevel,
     protocol::{Player, Score, Team},
-    soldier::Health,
+    soldier::{Health, SoldierMotion},
     squad::{SquadMember, squad_name},
     weapons::{Armory, Inventory, Loadout},
 };
@@ -19,7 +19,7 @@ use game_shared::{
 use crate::{
     combat::{CombatFeedback, weapon_display_name},
     net::{LocalPlayer, LocalSoldier},
-    prediction::PredictionStats,
+    prediction::{Predicted, PredictionStats},
     settings::{Action, Actions, Settings},
 };
 
@@ -33,6 +33,7 @@ impl Plugin for HudPlugin {
                 update_status,
                 update_crosshair,
                 update_vitals,
+                update_stamina,
                 update_kill_feed,
                 update_death_notice,
                 update_scoreboard,
@@ -45,6 +46,7 @@ const PANEL: Color = Color::srgba(0.05, 0.06, 0.08, 0.55);
 const ACCENT: Color = Color::srgb(0.95, 0.75, 0.3);
 const TEXT: Color = Color::srgb(0.92, 0.93, 0.95);
 const DIM: Color = Color::srgba(0.85, 0.87, 0.9, 0.65);
+const STAMINA: Color = Color::srgb(0.6, 0.78, 0.95);
 
 #[derive(Component)]
 struct StatusText;
@@ -56,6 +58,8 @@ struct HitMarker;
 struct HealthFill;
 #[derive(Component)]
 struct HealthText;
+#[derive(Component)]
+struct StaminaFill;
 #[derive(Component)]
 struct WeaponText;
 #[derive(Component)]
@@ -182,6 +186,27 @@ fn spawn_hud(mut commands: Commands) {
                         ..default()
                     },
                     BackgroundColor(Color::srgb(0.45, 0.85, 0.5)),
+                ));
+            // Sprint stamina, thin, under the health bar.
+            panel
+                .spawn((
+                    Node {
+                        width: px(180),
+                        height: px(3),
+                        border_radius: BorderRadius::all(px(2)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.1)),
+                ))
+                .with_child((
+                    StaminaFill,
+                    Node {
+                        width: percent(100),
+                        height: percent(100),
+                        border_radius: BorderRadius::all(px(2)),
+                        ..default()
+                    },
+                    BackgroundColor(STAMINA),
                 ));
         });
     commands
@@ -376,6 +401,21 @@ fn update_crosshair(
     for mut background in &mut marker {
         background.0 = color;
     }
+}
+
+/// Our predicted stamina when connected (the replicated one is a round trip behind).
+fn update_stamina(
+    soldier: Query<(&SoldierMotion, Option<&Predicted>), With<LocalSoldier>>,
+    mut fill: Single<(&mut Node, &mut BackgroundColor), With<StaminaFill>>,
+) {
+    let Ok((motion, predicted)) = soldier.single() else {
+        return;
+    };
+    let stamina = predicted.map_or(motion, |p| p.motion()).stamina.clamp(0.0, 1.0);
+    let (node, color) = &mut *fill;
+    node.width = percent(stamina * 100.0);
+    // Amber when too low to start sprinting again soon.
+    color.0 = if stamina < 0.2 { ACCENT } else { STAMINA };
 }
 
 #[allow(clippy::type_complexity)]

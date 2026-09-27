@@ -29,6 +29,7 @@ game_shared.workspace = true
 game_data.workspace = true
 clap.workspace = true
 serde.workspace = true
+ron.workspace = true
 anyhow.workspace = true
 fastrand = "2"
 bytemuck.workspace = true

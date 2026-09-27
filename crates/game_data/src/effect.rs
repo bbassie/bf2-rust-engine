@@ -1,7 +1,7 @@
 //! Particle effects (`effects/<name>.ron`) and the tables that pick them: bullet impacts per
 //! surface (`effects/impacts.ron`), muzzle flashes and detonations per weapon
-//! (`effects/weapons.ron`) and what a level's surfaces are made of
-//! (`levels/<name>/surfaces.ron`).
+//! (`effects/weapons.ron`), marks left on surfaces (`effects/decals.ron`) and what a level's
+//! surfaces are made of (`levels/<name>/surfaces.ron`).
 //!
 //! An effect is a set of sprite emitters, light flashes, flash meshes, debris and sounds, all
 //! placed in the effect's frame: +Y is up (impacts turn it along the surface normal), -Z is
@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::DebrisPiece;
+use crate::{DebrisPiece, Falloff};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct EffectDesc {
@@ -269,8 +269,65 @@ pub struct EffectSound {
     pub files: Vec<String>,
     #[serde(default = "one")]
     pub volume: f32,
+    /// Random playback speed factor, `[min, max]`.
+    #[serde(default = "unit_range")]
+    pub pitch: [f32; 2],
+    /// How it fades with distance; `None`: a default for effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub falloff: Option<Falloff>,
     #[serde(default, skip_serializing_if = "Views::is_both")]
     pub views: Views,
+}
+
+fn unit_range() -> [f32; 2] {
+    [1.0, 1.0]
+}
+
+/// An effect placed in the frame of the object it belongs to.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EffectPlacement {
+    /// `effects/<name>.ron`.
+    pub name: String,
+    pub position: [f32; 3],
+    /// Quaternion xyzw.
+    pub rotation: [f32; 4],
+}
+
+/// `effects/decals.ron`: marks left on surfaces. Bullet holes by (projectile material,
+/// surface material), scorch marks by (explosion material, surface material).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DecalTable {
+    pub cells: BTreeMap<(u32, u32), String>,
+    pub decals: BTreeMap<String, DecalDesc>,
+}
+
+impl DecalTable {
+    pub fn decal(&self, attacker: u32, surface: u32) -> Option<(&str, &DecalDesc)> {
+        let name = self.cells.get(&(attacker, surface))?;
+        Some((name, self.decals.get(name)?))
+    }
+}
+
+/// A mark laid onto a surface.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DecalDesc {
+    /// `.dds` relative to the imported root.
+    pub texture: String,
+    /// Variations in the texture: one is picked at random (`fps` unused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Frames>,
+    /// Width in meters, `[min, max]`.
+    pub size: [f32; 2],
+    /// Random turn `±rotation` degrees.
+    #[serde(default)]
+    pub rotation: f32,
+    /// Linear RGB tint.
+    #[serde(default = "white")]
+    pub color: [f32; 3],
+}
+
+fn white() -> [f32; 3] {
+    [1.0; 3]
 }
 
 /// `effects/impacts.ron`: the effect for a projectile of material `a` hitting a surface of

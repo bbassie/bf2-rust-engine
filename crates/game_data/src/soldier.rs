@@ -15,6 +15,23 @@ pub struct SoldierDesc {
     /// First-person arms (`.glb` with the `1p_setup` skeleton), relative to the imported root.
     #[serde(default)]
     pub mesh_1p: Option<String>,
+    /// Where bullets hit it: BF2's capsules on the skeleton's bones
+    /// (`setSkeletonCollisionBone`), posed the way the soldier stands, crouches and lies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hit_zones: Vec<HitZone>,
+}
+
+/// A capsule around one bone. Ends are in the body's frame: feet at the origin, facing -Z.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct HitZone {
+    pub bone: String,
+    /// Damage table column of this body part (BF2: 25 head, 24 body, 23 body armour, 77
+    /// limbs).
+    pub material: u32,
+    pub radius: f32,
+    pub standing: [[f32; 3]; 2],
+    pub crouching: [[f32; 3]; 2],
+    pub prone: [[f32; 3]; 2],
 }
 
 /// One side of a match.

@@ -29,6 +29,7 @@ mod announcer;
 mod audio;
 mod bigmap;
 mod camera;
+mod chat;
 mod combat;
 mod conquest_hud;
 mod deploy;
@@ -43,6 +44,7 @@ mod prediction;
 mod render;
 mod scenario;
 mod settings;
+mod summary;
 mod vehicles;
 
 #[derive(Parser, Debug, Clone, Resource)]
@@ -218,7 +220,13 @@ fn main() -> AppExit {
         nav_debug::NavDebugPlugin,
         vehicles::ClientVehiclesPlugin,
     ))
-    .add_plugins((announcer::AnnouncerPlugin, bigmap::BigMapPlugin, audio::AudioPlugin))
+    .add_plugins((
+        announcer::AnnouncerPlugin,
+        bigmap::BigMapPlugin,
+        audio::AudioPlugin,
+        chat::ChatPlugin,
+        summary::SummaryPlugin,
+    ))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).
         GameServerPlugin { settings: None },

@@ -53,6 +53,7 @@ fn apply_environment(
     mut cameras: Query<(&mut DistanceFog, &mut Projection), With<PlayerCamera>>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     cli: Res<crate::Cli>,
 ) {
     let env = &level.desc.environment;
@@ -126,8 +127,63 @@ fn apply_environment(
             Transform::from_rotation(Quat::from_rotation_y(-sky.rotation.to_radians()))
                 .with_scale(Vec3::splat(scale)),
             Visibility::default(),
+        ))
+        // Below eye level the dome would show its (grey) lower half past the edge of the
+        // map: cover it with the fog colour, which everything out there fades to anyway.
+        .with_child((
+            Mesh3d(meshes.add(horizon_skirt(sky.radius.max(1.0) * 0.98, rgb(env.fog_color)))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                fog_enabled: false,
+                cull_mode: None,
+                ..default()
+            })),
+            NotShadowCaster,
+            NotShadowReceiver,
         ));
     }
+}
+
+/// A tube with a floor around the camera, from well below eye level up to a haze band just
+/// above it that fades into the sky, in `color`.
+fn horizon_skirt(radius: f32, color: Color) -> Mesh {
+    const SIDES: u32 = 48;
+    let solid = color.to_linear().to_f32_array();
+    let clear = color.to_linear().with_alpha(0.0).to_f32_array();
+    // Rings from the top: fading haze, eye level, bottom.
+    let rings = [(radius * 0.05, clear), (0.0, solid), (-radius, solid)];
+    let mut positions = Vec::new();
+    let mut colors = Vec::new();
+    for i in 0..SIDES {
+        let angle = i as f32 / SIDES as f32 * std::f32::consts::TAU;
+        for (y, c) in rings {
+            positions.push([angle.cos() * radius, y, angle.sin() * radius]);
+            colors.push(c);
+        }
+    }
+    let floor = positions.len() as u32;
+    positions.push([0.0, -radius, 0.0]);
+    colors.push(solid);
+    let at = |side: u32, ring: u32| (side % SIDES) * 3 + ring;
+    let mut indices = Vec::new();
+    for i in 0..SIDES {
+        for ring in 0..2 {
+            let (a, b, c, d) = (at(i, ring), at(i, ring + 1), at(i + 1, ring), at(i + 1, ring + 1));
+            indices.extend([a, b, c, c, b, d]);
+        }
+        indices.extend([at(i, 2), floor, at(i + 1, 2)]);
+    }
+    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 fn spawn_sky_mesh(

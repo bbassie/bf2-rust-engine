@@ -1,0 +1,31 @@
+// The Join page's server browser: finds a server on this machine (scenarios never broadcast
+// to the LAN), stars it, picks it and joins. Favourites and recent servers go to --settings.
+// server --config <dir>/server.ron      (port 16611)
+// client --scenario scenarios/infra_browser.ron --settings target/scenarios/infra/settings.ron --out target/scenarios/infra/browser
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:join"),
+        Wait(1.0),
+        Screenshot("browser"),
+        Click("favourite:0"),
+        Wait(0.3),
+        Click("server:0"),
+        Wait(0.5),
+        Screenshot("picked"),
+        Click("connect"),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("joined"),
+        Key(Escape),
+        Wait(0.3),
+        Click("pause:leave"),
+        Wait(0.5),
+        WaitReady,
+        Click("menu:join"),
+        Wait(1.0),
+        Screenshot("browser_again"),
+        Quit,
+    ],
+)

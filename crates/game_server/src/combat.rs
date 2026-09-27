@@ -21,7 +21,8 @@ use game_shared::{
         self, Projectile, ProjectileMotion, SmokeCloud, collision_layers, in_trigger, launch_origin, launch_velocity,
         steer,
     },
-    protocol::{ControlledBy, HitConfirmed, KillFeed, Player, Score, ShotFired, Team},
+    protocol::{ControlledBy, HitConfirmed, Player, ShotFired, Team},
+    revive::WRECK_HIT_POINTS,
     soldier::{Health, Hitbox, Soldier, SoldierMotion, Stance, stance_height},
     statics::Destructible,
     vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
@@ -29,8 +30,9 @@ use game_shared::{
 };
 
 use crate::{
-    AppliedInput, Controls, HostPlayer, PlayerClient, RespawnTimer, ServerSettings,
-    ServerSimSystems, destruction::Materials,
+    AppliedInput, HostPlayer, PlayerClient, ServerSettings, ServerSimSystems,
+    abilities::{BleedOut, Deaths, hurts_downed},
+    destruction::Materials,
 };
 
 pub struct CombatPlugin;
@@ -124,11 +126,11 @@ pub struct StaticHit {
 
 /// Server-side: damage for a soldier this tick.
 #[derive(Message, Clone, Debug)]
-struct SoldierHit {
-    victim: Entity,
-    damage: f32,
-    headshot: bool,
-    attacker: Attacker,
+pub(crate) struct SoldierHit {
+    pub victim: Entity,
+    pub damage: f32,
+    pub headshot: bool,
+    pub attacker: Attacker,
 }
 
 /// Server-side: damage for a vehicle this tick, through its armor already.
@@ -827,22 +829,23 @@ fn damage_vehicles(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Damage to soldiers. At 0 hit points a soldier is critically wounded, or dead if the blow
+/// took him beyond [`WRECK_HIT_POINTS`] below zero or he sat in a vehicle (see
+/// `abilities`). Downed soldiers only take blasts and enemy shock paddles.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn damage_soldiers(
-    mut commands: Commands,
     settings: Res<ServerSettings>,
     host: Option<Res<HostPlayer>>,
     clients: Query<&PlayerClient>,
+    armory: Res<Armory>,
     mut hits: MessageReader<SoldierHit>,
-    mut soldiers: Query<(&mut Health, &ControlledBy), With<Soldier>>,
+    mut soldiers: Query<(&mut Health, &ControlledBy, &SoldierMotion, Option<&BleedOut>, Has<Seated>), With<Soldier>>,
     teams: Query<&Team>,
-    mut players: Query<(&mut Score, &Player)>,
     mut confirmations: MessageWriter<ToClients<HitConfirmed>>,
-    mut kills: MessageWriter<ToClients<KillFeed>>,
-    mut died: MessageWriter<Died>,
+    mut deaths: Deaths,
 ) {
     for hit in hits.read() {
-        let Ok((mut health, controlled_by)) = soldiers.get_mut(hit.victim) else {
+        let Ok((mut health, controlled_by, motion, bleeding, seated)) = soldiers.get_mut(hit.victim) else {
             continue;
         };
         let attacker = &hit.attacker;
@@ -855,10 +858,22 @@ fn damage_soldiers(
         {
             continue;
         }
+        if let Some(bleeding) = bleeding {
+            let enemy = victim_team != attacker_team;
+            if health.current <= -WRECK_HIT_POINTS || !hurts_downed(&armory, &attacker.weapon, enemy) {
+                continue;
+            }
+            health.current -= hit.damage;
+            if health.current <= -WRECK_HIT_POINTS {
+                deaths.die(hit.victim, victim_player, bleeding.down_for);
+            }
+            continue;
+        }
         if health.current <= 0.0 {
             continue;
         }
         health.current -= hit.damage;
+        deaths.record_damage(hit.victim, attacker.player, hit.damage);
         let killed = health.current <= 0.0;
         if let Some(client) = attacker.player.and_then(|p| player_client(p, &clients, host.as_deref())) {
             confirmations.write(ToClients {
@@ -872,21 +887,12 @@ fn damage_soldiers(
             });
         }
         if killed {
-            kill(
-                &mut commands,
-                hit.victim,
-                victim_player,
-                attacker.player,
-                &attacker.weapon,
-                hit.headshot,
-                settings.respawn_seconds,
-                &mut players,
-                &mut kills,
-            );
-            died.write(Died {
-                player: victim_player,
-                team: victim_team,
-            });
+            deaths.kill(hit.victim, victim_player, attacker.player, &attacker.weapon, hit.headshot);
+            if health.current <= -WRECK_HIT_POINTS || seated {
+                deaths.die(hit.victim, victim_player, 0.0);
+            } else {
+                deaths.wound(hit.victim, victim_player, motion.yaw);
+            }
         }
     }
 }
@@ -920,87 +926,28 @@ pub fn spawn_projectile(
     ));
 }
 
-/// Soldiers whose health ran out some other way (scripts, and later falls and crashes).
+/// Soldiers whose health ran out some other way (scripts, wrecked vehicles, and later
+/// falls): critically wounded, or dead if far below zero or in a vehicle. Downed soldiers
+/// taken beyond [`WRECK_HIT_POINTS`] below zero die.
+#[allow(clippy::type_complexity)]
 fn kill_the_dead(
-    mut commands: Commands,
-    settings: Res<ServerSettings>,
-    soldiers: Query<(Entity, &Health, &ControlledBy), With<Soldier>>,
-    teams: Query<&Team>,
-    mut players: Query<(&mut Score, &Player)>,
-    mut kills: MessageWriter<ToClients<KillFeed>>,
-    mut died: MessageWriter<Died>,
+    soldiers: Query<(Entity, &Health, &ControlledBy, &SoldierMotion, Option<&BleedOut>, Has<Seated>), With<Soldier>>,
+    mut deaths: Deaths,
 ) {
-    for (soldier, health, controlled_by) in &soldiers {
-        if health.current > 0.0 {
-            continue;
-        }
+    for (soldier, health, controlled_by, motion, bleeding, seated) in &soldiers {
         let player = controlled_by.0;
-        kill(
-            &mut commands,
-            soldier,
-            player,
-            None,
-            "",
-            false,
-            settings.respawn_seconds,
-            &mut players,
-            &mut kills,
-        );
-        died.write(Died {
-            player,
-            team: teams.get(player).copied().unwrap_or_default(),
-        });
+        match bleeding {
+            Some(bleeding) if health.current <= -WRECK_HIT_POINTS => deaths.die(soldier, player, bleeding.down_for),
+            Some(_) => {}
+            None if health.current > 0.0 => {}
+            None => {
+                deaths.kill(soldier, player, None, "", false);
+                if health.current <= -WRECK_HIT_POINTS || seated {
+                    deaths.die(soldier, player, 0.0);
+                } else {
+                    deaths.wound(soldier, player, motion.yaw);
+                }
+            }
+        }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn kill(
-    commands: &mut Commands,
-    soldier: Entity,
-    victim: Entity,
-    killer: Option<Entity>,
-    weapon: &str,
-    headshot: bool,
-    respawn_seconds: f32,
-    players: &mut Query<(&mut Score, &Player)>,
-    kills: &mut MessageWriter<ToClients<KillFeed>>,
-) {
-    let name = |player: Entity| {
-        players
-            .get(player)
-            .map(|(_, p)| p.name.clone())
-            .unwrap_or_else(|_| "?".into())
-    };
-    match killer.filter(|k| *k != victim) {
-        Some(killer) => info!(
-            "{} killed {} ({weapon}{})",
-            name(killer),
-            name(victim),
-            if headshot { ", headshot" } else { "" }
-        ),
-        None => info!("{} died", name(victim)),
-    }
-    commands.entity(soldier).despawn();
-    commands
-        .entity(victim)
-        .remove::<Controls>()
-        .insert(RespawnTimer(Timer::from_seconds(respawn_seconds, TimerMode::Once)));
-    if let Ok((mut score, _)) = players.get_mut(victim) {
-        score.deaths += 1;
-    }
-    if let Some(killer) = killer.filter(|k| *k != victim)
-        && let Ok((mut score, _)) = players.get_mut(killer)
-    {
-        score.kills += 1;
-        score.score += 2;
-    }
-    kills.write(ToClients {
-        targets: SendTargets::All,
-        message: KillFeed {
-            killer,
-            victim,
-            weapon: weapon.to_string(),
-            headshot,
-        },
-    });
 }

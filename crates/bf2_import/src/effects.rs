@@ -1,5 +1,6 @@
 //! Particle effects: BF2 effect bundles to `effects/<name>.ron`, and the tables that pick
-//! them: `effects/impacts.ron`, `effects/weapons.ron` and `levels/<name>/surfaces.ron`.
+//! them: `effects/impacts.ron`, `effects/weapons.ron`, `effects/decals.ron` and
+//! `levels/<name>/surfaces.ron`.
 //!
 //! BF2 effects are `EffectBundle` templates (`objects/effects/**/e_*.con`). Their children
 //! are placed like any template's: `SpriteParticleSystem` (camera-facing sprites),
@@ -13,7 +14,9 @@
 //! Weapons add their muzzle flash as a child (`e_muzz_*`, placed at the muzzle), projectiles
 //! name a `detonation.endEffectTemplate`, destroyable objects list theirs with
 //! `armor.addArmorEffect`, and bullet impacts come from the material manager's cells
-//! (`MaterialManager.createCell <projectile> <surface>` then `setEffectTemplate 0 <effect>`).
+//! (`MaterialManager.createCell <projectile> <surface>` then `setEffectTemplate 0 <effect>`,
+//! and `setDecalTemplate 0 <decal>` for the mark it leaves: a `Decal` template with a
+//! texture, size and random variations).
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -30,13 +33,13 @@ use bf2_formats::{
     vfs::normalize,
 };
 use game_data::{
-    Blend, Curve, DebrisPiece, EffectDesc, EffectSound, EmitShape, EmitterDesc, Facing,
-    FlashMeshDesc, Frames, ImpactTable, LightDesc, ObjectDesc, Spread, SurfaceMap, Views,
-    WeaponEffectTable, WeaponEffects,
+    Blend, Curve, DebrisPiece, DecalDesc, DecalTable, EffectDesc, EffectSound, EmitShape,
+    EmitterDesc, Facing, FlashMeshDesc, Frames, ImpactTable, LightDesc, ObjectDesc, Spread,
+    SurfaceMap, Views, WeaponEffectTable, WeaponEffects,
 };
 use glam::{Affine3A, Vec3};
 
-use crate::{coords, destruction, meshes::MeshConverter};
+use crate::{coords, destruction, meshes::MeshConverter, sounds::SoundConverter};
 
 /// Folders under `objects/effects/` whose bundles are all imported.
 const EFFECT_FOLDERS: [&str; 3] = ["objects/effects/impacts/", "objects/effects/weapons/", "objects/effects/misc/"];
@@ -69,13 +72,10 @@ pub fn import(
     for effects in weapons.weapons.values() {
         names.extend(effects.muzzle.iter().chain(&effects.detonation).cloned());
     }
-    let impacts = match impact_table(vfs) {
-        Ok(table) => table,
-        Err(err) => {
-            log::warn!("impact effects: {err:#}");
-            ImpactTable::default()
-        }
-    };
+    let (impacts, decal_cells) = material_cells(vfs);
+    if impacts.effects.is_empty() {
+        log::warn!("no impact effects in the material manager");
+    }
     names.extend(impacts.effects.values().cloned());
     for template in static_templates.iter().filter_map(|n| interp.world.template(n)) {
         for args in template.get_all("armor.addarmoreffect") {
@@ -86,6 +86,7 @@ pub fn import(
     names.sort();
     names.dedup();
     let atlas = Atlas::load(vfs);
+    let sounds = SoundConverter::new(vfs, &converter.out);
     let mut written = WRITTEN.lock().unwrap();
     let written = written.get_or_insert_with(HashSet::new);
     let (mut count, mut failed) = (0, 0);
@@ -94,7 +95,7 @@ pub fn import(
             continue;
         }
         load_effect(interp, name);
-        match convert_effect(&interp.world, name, converter, &atlas) {
+        match convert_effect(&interp.world, name, converter, &sounds, &atlas) {
             Some(effect) => match game_data::write_ron(out.join("effects").join(format!("{name}.ron")), &effect) {
                 Ok(()) => count += 1,
                 Err(err) => log::warn!("{name}: {err}"),
@@ -109,7 +110,15 @@ pub fn import(
     if let Err(err) = merge_weapon_effects(out, weapons) {
         log::warn!("weapons.ron: {err:#}");
     }
-    log::info!("effects: {count} converted, {failed} empty or missing, {} impact cells", impacts.effects.len());
+    let decals = decal_table(interp, converter, decal_cells);
+    if let Err(err) = game_data::write_ron(out.join("effects/decals.ron"), &decals) {
+        log::warn!("decals.ron: {err}");
+    }
+    log::info!(
+        "effects: {count} converted, {failed} empty or missing, {} impact cells, {} decals",
+        impacts.effects.len(),
+        decals.decals.len()
+    );
 }
 
 /// Loads an effect bundle and every template it names.
@@ -203,11 +212,12 @@ fn merge_weapon_effects(out: &Path, table: WeaponEffectTable) -> Result<()> {
     Ok(())
 }
 
-/// The first effect of every material manager cell.
-fn impact_table(vfs: &Vfs) -> Result<ImpactTable> {
+/// The first effect and the first decal of every material manager cell.
+fn material_cells(vfs: &Vfs) -> (ImpactTable, BTreeMap<(u32, u32), String>) {
     let mut interp = Interpreter::new(vfs);
     interp.run("common/material/materialmanagersettings.con", &[]);
     let mut table = ImpactTable::default();
+    let mut decals = BTreeMap::new();
     let mut cell = None;
     for command in &interp.world.commands {
         let arg = |i: usize| command.args.get(i).map(|a| a.trim_matches('"'));
@@ -222,11 +232,63 @@ fn impact_table(vfs: &Vfs) -> Result<ImpactTable> {
                     table.effects.insert(cell, effect.to_ascii_lowercase());
                 }
             }
+            "materialmanager.setdecaltemplate" if arg(0) == Some("0") => {
+                if let (Some(cell), Some(decal)) = (cell, arg(1)) {
+                    decals.insert(cell, decal.to_ascii_lowercase());
+                }
+            }
             _ => {}
         }
     }
-    anyhow::ensure!(!table.effects.is_empty(), "no impact effects in the material manager");
-    Ok(table)
+    (table, decals)
+}
+
+/// The decals the cells name. BF2's decal `size` is taken as the radius.
+fn decal_table(interp: &mut Interpreter, converter: &MeshConverter, cells: BTreeMap<(u32, u32), String>) -> DecalTable {
+    let mut table = DecalTable::default();
+    let mut names: Vec<&String> = cells.values().collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        interp.ensure_template(name);
+        let Some(t) = interp.world.template(name).filter(|t| t.ty.eq_ignore_ascii_case("decal")) else {
+            continue;
+        };
+        let Some(texture) = t.get_str("decaltexturename").and_then(|n| converter.texture(n)) else {
+            continue;
+        };
+        let (size, random_size) = (f(t, "size", 0.05), f(t, "randomsize", 0.0).abs());
+        let count = f(t, "animationframecount", 0.0) as u32;
+        let columns = f(t, "animationframecountx", 0.0) as u32;
+        let frames = (count > 1 && columns > 0).then(|| {
+            let rows = count.div_ceil(columns);
+            let size = [f(t, "setanimationframewidthrelative", 0.0), f(t, "setanimationframeheightrelative", 0.0)];
+            Frames {
+                count,
+                columns,
+                frame_size: [
+                    if size[0] > 0.0 { size[0] } else { 1.0 / columns as f32 },
+                    if size[1] > 0.0 { size[1] } else { 1.0 / rows as f32 },
+                ],
+                fps: 0.0,
+                once: false,
+                random_start: true,
+            }
+        });
+        let color = t.get_str("color").and_then(parse_vec3).unwrap_or([1.0; 3]);
+        table.decals.insert(
+            name.clone(),
+            DecalDesc {
+                texture,
+                frames,
+                size: [2.0 * (size - random_size).max(0.005), 2.0 * (size + random_size)],
+                rotation: f(t, "randomrotation", 0.0).abs(),
+                color,
+            },
+        );
+    }
+    table.cells = cells.into_iter().filter(|(_, name)| table.decals.contains_key(name)).collect();
+    table
 }
 
 /// Sprites packed into shared textures: `<texture> <atlas>, <index>, <u>, <v>, <w>, <h>`.
@@ -266,7 +328,13 @@ fn texture_key(name: &str) -> String {
 }
 
 /// Converts one effect bundle; `None` if it doesn't exist or shows nothing.
-fn convert_effect(world: &World, name: &str, converter: &MeshConverter, atlas: &Atlas) -> Option<EffectDesc> {
+fn convert_effect(
+    world: &World,
+    name: &str,
+    converter: &MeshConverter,
+    sounds: &SoundConverter,
+    atlas: &Atlas,
+) -> Option<EffectDesc> {
     let bundle = world.template(name)?;
     let mut effect = EffectDesc {
         name: name.to_string(),
@@ -277,7 +345,14 @@ fn convert_effect(world: &World, name: &str, converter: &MeshConverter, atlas: &
         .map(|s| parse_spread(s).max)
         .filter(|l| *l > 0.0)
         .unwrap_or(DEFAULT_LIGHT_LIFE);
-    let context = EffectBuilder { world, converter, atlas, light_life: life, muzzle: name.starts_with("e_muzz") };
+    let context = EffectBuilder {
+        world,
+        converter,
+        sounds,
+        atlas,
+        light_life: life,
+        muzzle: name.starts_with("e_muzz"),
+    };
     context.collect(bundle, Affine3A::IDENTITY, &mut effect, 0);
     let empty = effect.emitters.is_empty()
         && effect.lights.is_empty()
@@ -290,6 +365,7 @@ fn convert_effect(world: &World, name: &str, converter: &MeshConverter, atlas: &
 struct EffectBuilder<'a> {
     world: &'a World,
     converter: &'a MeshConverter<'a>,
+    sounds: &'a SoundConverter<'a>,
     atlas: &'a Atlas,
     light_life: f32,
     /// Weapons play their own fire sounds.
@@ -521,17 +597,12 @@ impl EffectBuilder<'_> {
     }
 
     fn sound(&self, t: &Template) -> Option<EffectSound> {
-        let files: Vec<String> = t
-            .get_str("soundfilename")?
-            .trim_matches('"')
-            .split(',')
-            .map(str::trim)
-            .filter(|f| !f.is_empty())
-            .filter_map(|file| self.converter.file(file))
-            .collect();
-        (!files.is_empty()).then(|| EffectSound {
-            files,
-            volume: f(t, "volume", 1.0),
+        let sound = self.sounds.desc(&t.name, &t.props)?;
+        Some(EffectSound {
+            files: sound.files,
+            volume: sound.volume,
+            pitch: sound.pitch,
+            falloff: sound.falloff,
             views: Views::Both,
         })
     }

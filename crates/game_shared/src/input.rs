@@ -34,6 +34,9 @@ pub struct InputFrame {
     pub buttons: Buttons,
     /// Selected weapon: index into the soldier's loadout.
     pub weapon: u8,
+    /// Server tick of the world the player saw when he pressed this (other soldiers are shown
+    /// in the past), so hits are judged against what he aimed at. 0 = the present.
+    pub view_tick: u32,
     /// In a vehicle: the seat to move to, counting from 1 (0 = stay).
     pub seat: u8,
 }
