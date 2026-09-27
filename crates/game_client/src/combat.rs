@@ -215,7 +215,10 @@ fn predict_local_shots(
     history: Res<InputHistory>,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
-    mut soldier: Query<(&SoldierMotion, &Loadout, &Inventory, &mut LocalWeapon), With<LocalSoldier>>,
+    mut soldier: Query<
+        (&SoldierMotion, &Loadout, &Inventory, &mut LocalWeapon),
+        (With<LocalSoldier>, Without<game_shared::vehicle::Seated>),
+    >,
     mut shots: MessageWriter<LocalShot>,
 ) {
     let (Some(input), Ok((motion, loadout, inventory, mut local))) = (history.latest(), soldier.single_mut()) else {
@@ -459,7 +462,7 @@ fn apply_zoom(
     time: Res<Time>,
     history: Res<InputHistory>,
     armory: Res<Armory>,
-    soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, With<SoldierRender>)>,
+    soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, With<SoldierRender>, Without<game_shared::vehicle::Seated>)>,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
     mut camera: Single<&mut Projection, With<PlayerCamera>>,

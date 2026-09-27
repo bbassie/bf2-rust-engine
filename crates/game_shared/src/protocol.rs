@@ -11,6 +11,7 @@ use crate::{
     conquest::{ControlPoint, DeployRequest, Deployment, FlagEvent, FlagState, RoundState, Tickets},
     input::InputPacket,
     soldier::{Health, InputAck, Soldier, SoldierMotion},
+    vehicle::{Seated, Vehicle, VehicleMotion, VehicleState},
     weapons::{Inventory, Loadout},
 };
 
@@ -35,6 +36,10 @@ impl Plugin for ProtocolPlugin {
             .replicate::<Tickets>()
             .replicate::<RoundState>()
             .replicate::<Deployment>()
+            .replicate::<Vehicle>()
+            .replicate::<VehicleMotion>()
+            .replicate::<VehicleState>()
+            .replicate::<Seated>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
             .add_client_message::<DeployRequest>(Channel::Ordered)

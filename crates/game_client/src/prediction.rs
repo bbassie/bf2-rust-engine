@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
+use game_shared::vehicle::Seated;
 use game_shared::soldier::{
     InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, Stance, step_soldier,
 };
@@ -134,12 +135,19 @@ fn predict(
     shapes: Res<SoldierShapes>,
     mover: MoveAndSlide,
     history: Res<InputHistory>,
-    mut soldiers: Query<(Entity, &SoldierMotion, Option<&mut Predicted>), With<LocalSoldier>>,
+    mut soldiers: Query<(Entity, &SoldierMotion, Option<&mut Predicted>, Has<Seated>), With<LocalSoldier>>,
 ) {
     let Some(input) = history.latest() else {
         return;
     };
-    for (entity, motion, predicted) in &mut soldiers {
+    for (entity, motion, predicted, seated) in &mut soldiers {
+        // Riding in a vehicle: the server moves us (vehicles aren't predicted yet).
+        if seated {
+            if predicted.is_some() {
+                commands.entity(entity).remove::<Predicted>();
+            }
+            continue;
+        }
         let Some(mut predicted) = predicted else {
             commands.entity(entity).insert(Predicted {
                 previous: *motion,
@@ -167,7 +175,7 @@ fn reconcile(
     mover: MoveAndSlide,
     history: Res<InputHistory>,
     mut stats: ResMut<PredictionStats>,
-    mut soldiers: Query<(Ref<SoldierMotion>, Ref<InputAck>, &mut Predicted), With<LocalSoldier>>,
+    mut soldiers: Query<(Ref<SoldierMotion>, Ref<InputAck>, &mut Predicted), (With<LocalSoldier>, Without<Seated>)>,
 ) {
     let dt = fixed.timestep().as_secs_f32();
     for (motion, ack, mut predicted) in &mut soldiers {

@@ -28,6 +28,7 @@ mod meshes;
 mod roads;
 mod soldiers;
 mod terrain;
+mod vehicles;
 mod weapons;
 
 #[derive(Parser)]
@@ -101,12 +102,13 @@ fn main() -> Result<()> {
                 match level::import_level(&install, &level, &localization, &cli.out) {
                     Ok(report) => {
                         log::info!(
-                            "{}: {} statics, {} roads, {} kits, {} weapons, {} templates, {} mesh files, modes [{}] in {:.1}s",
+                            "{}: {} statics, {} roads, {} kits, {} weapons, {} vehicles, {} templates, {} mesh files, modes [{}] in {:.1}s",
                             level.name,
                             report.statics,
                             report.roads,
                             report.kits,
                             report.weapons,
+                            report.vehicles,
                             report.templates,
                             report.meshes,
                             report.game_modes.join(", "),

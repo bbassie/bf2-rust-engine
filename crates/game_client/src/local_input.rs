@@ -117,6 +117,7 @@ pub fn build_input(
     mut packets: MessageWriter<InputPacket>,
     cli: Res<crate::Cli>,
     selection: Res<crate::combat::WeaponSelection>,
+    seat: Res<crate::vehicles::SeatRequest>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
 ) {
     if cli.debug_walk {
@@ -127,6 +128,7 @@ pub fn build_input(
         yaw: look.yaw,
         pitch: look.pitch,
         weapon: selection.index,
+        seat: seat.0,
         ..default()
     };
     history.next_seq = history.next_seq.wrapping_add(1);

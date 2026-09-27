@@ -29,6 +29,7 @@ mod net;
 mod prediction;
 mod render;
 mod scenario;
+mod vehicles;
 
 #[derive(Parser, Debug, Clone, Resource)]
 #[command(version, about = "Game client")]
@@ -159,6 +160,7 @@ fn main() -> AppExit {
         conquest_hud::ConquestHudPlugin,
         deploy::DeployPlugin,
         minimap::MinimapPlugin,
+        vehicles::ClientVehiclesPlugin,
     ))
     .insert_resource(paths);
 

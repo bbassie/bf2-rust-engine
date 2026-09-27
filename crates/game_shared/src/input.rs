@@ -34,6 +34,8 @@ pub struct InputFrame {
     pub buttons: Buttons,
     /// Selected weapon: index into the soldier's loadout.
     pub weapon: u8,
+    /// In a vehicle: the seat to move to, counting from 1 (0 = stay).
+    pub seat: u8,
 }
 
 impl InputFrame {

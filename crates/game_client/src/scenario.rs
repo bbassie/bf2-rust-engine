@@ -47,6 +47,7 @@ use game_shared::{
     input::Buttons,
     level::LoadedLevel,
     soldier::{Health, SoldierMotion},
+    vehicle::{Seated, Vehicle, VehicleData},
 };
 use serde::Deserialize;
 
@@ -57,6 +58,7 @@ use crate::{
     local_input::LookState,
     net::LocalSoldier,
     render::environment::Sun,
+    vehicles::{SeatRequest, VehicleView},
 };
 
 /// A scenario file. Fields other than `steps` override the command line.
@@ -70,6 +72,8 @@ pub struct Scenario {
     pub third_person: Option<bool>,
     /// Our team, 1 or 2.
     pub team: Option<u8>,
+    /// Layout size (16, 32, 64).
+    pub size: Option<u32>,
     pub steps: Vec<Step>,
 }
 
@@ -88,6 +92,15 @@ pub enum Step {
     Teleport((f32, f32, f32), f32, f32),
     /// Look direction: yaw, pitch in degrees.
     Look(f32, f32),
+    /// Moves our soldier next to the first entry point of the nearest vehicle with this
+    /// template (e.g. `"usjep_hmmwv"`), facing it. Singleplayer and listen server only.
+    NearVehicle(String),
+    /// In a vehicle: moves to this seat (1-based), like pressing F1..F8.
+    Seat(u8),
+    /// In a vehicle: look direction relative to its heading (yaw, pitch in degrees).
+    VehicleLook(f32, f32),
+    /// Logs our vehicle's position, speed and orientation, and adds it to the report.
+    VehicleInfo(String),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
     Release(Vec<Button>),
@@ -175,6 +188,9 @@ impl Scenario {
         }
         if let Some(team) = self.team {
             cli.team = team;
+        }
+        if let Some(size) = self.size {
+            cli.size = size;
         }
     }
 
@@ -286,6 +302,14 @@ struct PlayerControls<'w, 's> {
     buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
 }
 
+/// The vehicles around, for [`run_scenario`].
+#[derive(bevy::ecs::system::SystemParam)]
+struct Vehicles<'w, 's> {
+    vehicles: Query<'w, 's, (&'static Vehicle, &'static VehicleView, &'static VehicleData)>,
+    seated: Query<'w, 's, &'static Seated, With<LocalSoldier>>,
+    seat: ResMut<'w, SeatRequest>,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Progress {
     Done,
@@ -302,6 +326,7 @@ fn run_scenario(
     waiting_pipelines: Res<WaitingPipelines>,
     level: Option<Res<LoadedLevel>>,
     player: PlayerControls,
+    mut vehicles: Vehicles,
     mut soldier: Query<(&mut SoldierMotion, &mut Health), With<LocalSoldier>>,
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
@@ -368,6 +393,73 @@ fn run_scenario(
             }
             Step::Look(yaw, pitch) => {
                 set_look(&mut look, *yaw, *pitch);
+                Progress::Done
+            }
+            Step::NearVehicle(template) => {
+                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                let nearest = vehicles
+                    .vehicles
+                    .iter()
+                    .filter(|(v, ..)| v.template == *template)
+                    .min_by(|a, b| {
+                        let d = |v: &VehicleView| v.transform.translation.distance(origin);
+                        d(a.1).total_cmp(&d(b.1))
+                    });
+                match (nearest, soldier.single_mut()) {
+                    (Some((_, view, data)), Ok((mut motion, _))) => {
+                        let desc = &data.0.desc;
+                        let entry = desc.entry_points.first().map_or(Vec3::ZERO, |e| Vec3::from_array(e.position));
+                        // Beside the door, outside the hull.
+                        let side = desc.physics.bounds[0][0] - 0.8;
+                        let target = view.transform.transform_point(Vec3::new(side, 0.0, entry.z));
+                        motion.position = target;
+                        motion.velocity = Vec3::ZERO;
+                        let to = view.transform.translation - target;
+                        look.yaw = (-to.x).atan2(-to.z);
+                        look.pitch = -0.2;
+                    }
+                    _ => warn!("scenario: no {template} (or no soldier) to go to"),
+                }
+                Progress::Done
+            }
+            Step::Seat(seat) => {
+                vehicles.seat.0 = *seat;
+                Progress::Done
+            }
+            Step::VehicleLook(yaw, pitch) => {
+                let heading = vehicles
+                    .seated
+                    .single()
+                    .ok()
+                    .and_then(|s| vehicles.vehicles.get(s.vehicle).ok())
+                    .map_or(0.0, |(_, view, _)| crate::vehicles::heading(view.transform.rotation));
+                look.yaw = heading + yaw.to_radians();
+                look.pitch = pitch.to_radians();
+                Progress::Done
+            }
+            Step::VehicleInfo(label) => {
+                let line = match vehicles.seated.single().ok().and_then(|s| {
+                    vehicles.vehicles.get(s.vehicle).ok().map(|(_, v, d)| (s, v, d))
+                }) {
+                    Some((seated, view, data)) => {
+                        let t = view.transform;
+                        let up = (t.rotation * Vec3::Y).angle_between(Vec3::Y).to_degrees();
+                        format!(
+                            "{label}: {} seat {} at ({:.1}, {:.1}, {:.1}), {:.1} km/h, heading {:.0} deg, tilt {:.0} deg",
+                            data.0.desc.name,
+                            seated.seat + 1,
+                            t.translation.x,
+                            t.translation.y,
+                            t.translation.z,
+                            view.speed * 3.6,
+                            crate::vehicles::heading(t.rotation).to_degrees(),
+                            up
+                        )
+                    }
+                    None => format!("{label}: not in a vehicle"),
+                };
+                info!("scenario: {line}");
+                writeln!(runner.report, "{line}").ok();
                 Progress::Done
             }
             Step::Hold(buttons) => {

@@ -20,13 +20,14 @@ use game_data::{
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{coords, meshes::MeshConverter, roads, terrain, weapons};
+use crate::{coords, meshes::MeshConverter, roads, terrain, vehicles, weapons};
 
 pub struct LevelReport {
     pub statics: usize,
     pub roads: usize,
     pub kits: usize,
     pub weapons: usize,
+    pub vehicles: usize,
     pub templates: usize,
     pub meshes: usize,
     pub failed_meshes: Vec<String>,
@@ -129,6 +130,15 @@ pub fn import_level(
             build_game_mode(world, localization, mode, *size, &world.instances[range.clone()])
         })
         .collect();
+
+    // Vehicles the spawners of any layout create.
+    let mut vehicle_names: Vec<String> = game_modes
+        .iter()
+        .flat_map(|g| &g.vehicle_spawners)
+        .flat_map(|s| s.templates.iter().flatten().cloned())
+        .collect();
+    vehicle_names.sort();
+    vehicle_names.dedup();
     // The top-down map BF2 shows in game, copied as-is (north up, not flipped).
     let minimap = converter.file(&format!("{base}/hud/minimap/ingamemap.dds"));
     let ticket_loss_at_end_per_minute = world
@@ -154,16 +164,19 @@ pub fn import_level(
         ticket_loss_at_end_per_minute,
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
+    let missing_templates = interp.missing_templates.keys().cloned().collect();
+    let vehicles = vehicles::import(&mut interp, &converter, localization, &vehicle_names, out)?;
 
     Ok(LevelReport {
         statics: desc.statics.len(),
         roads: desc.roads.len(),
         kits: kit_count,
         weapons: weapon_count,
+        vehicles: vehicles.len(),
         templates: objects.values().filter(|o| !o.parts.is_empty()).count(),
         meshes: *mesh_count.lock().unwrap(),
         failed_meshes: failed.into_inner().unwrap(),
-        missing_templates: interp.missing_templates.keys().cloned().collect(),
+        missing_templates,
         game_modes: desc
             .game_modes
             .iter()

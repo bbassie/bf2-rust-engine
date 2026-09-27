@@ -357,7 +357,7 @@ fn animate_view_model(
     feedback: Res<CombatFeedback>,
     history: Res<InputHistory>,
     third_person: Res<ThirdPerson>,
-    soldier: Query<(&Loadout, &Inventory, &SoldierMotion), With<LocalSoldier>>,
+    soldier: Query<(&Loadout, &Inventory, &SoldierMotion), (With<LocalSoldier>, Without<game_shared::vehicle::Seated>)>,
     mut roots: Query<(&ViewRig, &mut ViewState, &mut Visibility)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {

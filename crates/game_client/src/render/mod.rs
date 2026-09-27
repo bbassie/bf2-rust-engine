@@ -9,6 +9,7 @@ mod props;
 mod soldiers;
 mod statics;
 mod terrain;
+mod vehicles;
 pub mod viewmodel;
 
 pub struct RenderPlugin;
@@ -24,6 +25,7 @@ impl Plugin for RenderPlugin {
             soldiers::SoldierRenderPlugin,
             statics::StaticRenderPlugin,
             viewmodel::ViewModelPlugin,
+            vehicles::VehicleRenderPlugin,
         ));
     }
 }
