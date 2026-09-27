@@ -1,0 +1,16 @@
+// The minimap: flags, teammates and our heading (north, then east).
+// client --scenario scenarios/minimap.ron
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    steps: [
+        WaitReady,
+        Teleport((-184.0, 157.0, -85.0), 0.0, -4.0),
+        Wait(1.5),
+        Screenshot("north"),
+        Look(-90.0, -4.0),
+        Wait(0.3),
+        Screenshot("east"),
+        Quit,
+    ],
+)

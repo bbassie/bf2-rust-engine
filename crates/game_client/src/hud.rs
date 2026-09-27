@@ -213,7 +213,8 @@ fn spawn_hud(mut commands: Commands) {
         TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
-            top: px(12),
+            // Below the minimap.
+            top: px(crate::minimap::SIZE + 24.0),
             right: px(16),
             ..default()
         },

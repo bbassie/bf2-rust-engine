@@ -24,6 +24,7 @@ mod conquest_hud;
 mod deploy;
 mod hud;
 mod local_input;
+mod minimap;
 mod net;
 mod prediction;
 mod render;
@@ -157,6 +158,7 @@ fn main() -> AppExit {
         combat::ClientCombatPlugin,
         conquest_hud::ConquestHudPlugin,
         deploy::DeployPlugin,
+        minimap::MinimapPlugin,
     ))
     .insert_resource(paths);
 
