@@ -21,6 +21,12 @@
         Click("toggle:ssao"),
         Wait(0.3),
         Screenshot("graphics"),
+        // Applied live: this screenshot is 1600x900.
+        Click("size:1600x900"),
+        Wait(1.0),
+        Screenshot("graphics_1600x900"),
+        Click("size:1280x720"),
+        Wait(1.0),
         Click("tab:audio"),
         Wait(0.3),
         Click("step:volume:-"),

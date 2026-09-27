@@ -26,10 +26,13 @@ use net::MatchSetup;
 use settings::{Settings, SettingsFile};
 
 mod announcer;
+mod audio;
+mod bigmap;
 mod camera;
 mod combat;
 mod conquest_hud;
 mod deploy;
+mod effects;
 mod hud;
 mod local_input;
 mod menu;
@@ -50,6 +53,9 @@ pub struct Cli {
     /// Host a listen server that others can join.
     #[arg(long)]
     host: bool,
+    /// With --host: accept players from other machines (listen on all interfaces).
+    #[arg(long)]
+    public: bool,
     #[arg(long, default_value_t = game_shared::DEFAULT_PORT)]
     port: u16,
     /// Your player name (default: the one in the settings).
@@ -139,6 +145,7 @@ impl Cli {
                 bots: self.bots,
                 port: self.port,
                 network: self.host,
+                public: self.public,
                 local_player: (!self.spectate).then_some(name),
                 local_team: self.team,
                 ..default()
@@ -207,13 +214,14 @@ fn main() -> AppExit {
         conquest_hud::ConquestHudPlugin,
         deploy::DeployPlugin,
         minimap::MinimapPlugin,
-        announcer::AnnouncerPlugin,
         nav_debug::NavDebugPlugin,
     ))
+    .add_plugins((announcer::AnnouncerPlugin, bigmap::BigMapPlugin, audio::AudioPlugin))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).
         GameServerPlugin { settings: None },
         settings::SettingsPlugin,
+        effects::EffectsPlugin,
         menu::MenuPlugin {
             start: if start.is_some() { Screen::Loading } else { Screen::Menu },
         },

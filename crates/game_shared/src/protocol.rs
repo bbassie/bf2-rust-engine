@@ -37,6 +37,9 @@ impl Plugin for ProtocolPlugin {
             .replicate::<Deployment>()
             .replicate::<crate::squad::SquadMember>()
             .replicate::<crate::statics::DestroyedStatics>()
+            .replicate::<crate::projectile::Projectile>()
+            .replicate::<crate::projectile::ProjectileMotion>()
+            .replicate::<crate::projectile::SmokeCloud>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
             .add_client_message::<DeployRequest>(Channel::Ordered)
@@ -44,7 +47,8 @@ impl Plugin for ProtocolPlugin {
             .add_mapped_server_message::<FlagEvent>(Channel::Ordered)
             .add_mapped_server_message::<ShotFired>(Channel::Unreliable)
             .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
-            .add_mapped_server_message::<KillFeed>(Channel::Ordered);
+            .add_mapped_server_message::<KillFeed>(Channel::Ordered)
+            .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered);
     }
 }
 

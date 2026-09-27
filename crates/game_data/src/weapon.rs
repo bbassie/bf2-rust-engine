@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::SoundDesc;
+
 /// A kit: the loadout of one soldier class.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct KitDesc {
@@ -55,6 +57,21 @@ pub struct WeaponDesc {
     /// Projectiles per trigger pull (shotguns fire several).
     #[serde(default = "one")]
     pub projectiles_per_shot: u32,
+    /// Spread of each pellet around the shot's direction, in degrees (BF2
+    /// `deviation.subProjectileDev`).
+    #[serde(default)]
+    pub pellet_spread: f32,
+    /// Bolt-action rifles: seconds from one shot until the next can fire (BF2
+    /// `animation.shiftDelay`), when longer than `rounds_per_minute` allows.
+    #[serde(default)]
+    pub shift_delay: f32,
+    /// Rounds loaded per `reload_time` (BF2 `ammo.reloadAmount`: shotguns load shell by
+    /// shell). 0 fills the magazine at once.
+    #[serde(default)]
+    pub reload_amount: u32,
+    /// How the weapon launches its projectiles: guns, throwing, placing charges.
+    #[serde(default)]
+    pub fire: FireDesc,
     pub projectile: ProjectileDesc,
     pub deviation: DeviationDesc,
     pub recoil: RecoilDesc,
@@ -113,6 +130,168 @@ pub struct ProjectileDesc {
     pub explosion_damage: f32,
     #[serde(default)]
     pub explosion_radius: f32,
+    /// Damage table row of the explosion (BF2 `detonation.explosionMaterial`), against the
+    /// armor material of whatever is caught in it. `material` is for direct hits only.
+    #[serde(default)]
+    pub explosion_material: u32,
+    /// Directional charges (claymores): the blast only reaches this many degrees off the
+    /// charge's forward axis. 0 = all around.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub explosion_cone: f32,
+    /// Effect where it detonates (`effects/<name>.ron`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detonation_effect: Option<String>,
+    /// Effect that follows it in flight (rocket exhaust, grenade trails).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail_effect: Option<String>,
+    /// Model shown in flight and where it lies (`.glb`, relative to the imported root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<String>,
+    /// What happens when it hits something.
+    #[serde(default)]
+    pub impact: Impact,
+    /// Seconds after launch before it can detonate on impact or be triggered (BF2
+    /// `detonation.timeUntilCanDetonate`, `armingDelay`). Earlier impacts bounce it off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub arming_delay: f32,
+    /// Rocket motor: `motor_delay` seconds after launch it accelerates by `acceleration`
+    /// (m/s²) up to `max_speed` (m/s) (BF2 `startDelay`, `acceleration`, `maxSpeed`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub acceleration: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_speed: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub motor_delay: f32,
+    /// Guided missiles: turn rate in radians per second (BF2 `follow.maxYaw`/`maxPitch`;
+    /// the unit is inferred), and the distance to the aim point within which they stop
+    /// steering (`follow.minDist`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub turn_rate: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub guidance_min_distance: f32,
+    /// Mines and claymores: what sets them off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerDesc>,
+    /// Smoke grenades: the cloud they leave when they go off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoke: Option<SmokeDesc>,
+}
+
+impl ProjectileDesc {
+    pub fn explodes(&self) -> bool {
+        self.explosion_damage > 0.0 && self.explosion_radius > 0.0
+    }
+
+    /// Grenades, rockets and charges: objects that fly, bounce or lie around for a while and
+    /// that everyone sees, unlike bullets (which clients show as tracers).
+    pub fn is_object(&self) -> bool {
+        self.explodes() || self.smoke.is_some() || self.trigger.is_some() || self.impact != Impact::Stop
+    }
+}
+
+/// What a projectile does when it hits something.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
+pub enum Impact {
+    /// Stops at the first thing it hits, hurting it and exploding if it can (bullets,
+    /// rockets, rifle grenades).
+    #[default]
+    Stop,
+    /// Bounces off everything until its fuse (`time_to_live`) runs out (hand grenades; BF2
+    /// `collision.bouncing`).
+    Bounce,
+    /// Sticks to surfaces tilted at most `max_angle` degrees from level ground and bounces
+    /// off steeper ones (C4, claymores; BF2 `StickyCollisionComp`).
+    Stick { max_angle: f32 },
+}
+
+/// What sets a mine off (BF2 `detonation.trigger*`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TriggerDesc {
+    pub by: TriggerBy,
+    /// Meters.
+    pub radius: f32,
+    /// Only what is in front: at most this many degrees off the mine's forward axis.
+    /// 0 = all around.
+    #[serde(default)]
+    pub angle: f32,
+    /// Slower targets don't set it off (m/s).
+    #[serde(default)]
+    pub min_speed: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerBy {
+    /// Soldiers of the other team (BF2 `MTYPco`).
+    Soldiers,
+    /// Anything heavy moving over it (BF2 `MTYVehicle`).
+    Vehicles,
+}
+
+/// A cloud that hides what is behind it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SmokeDesc {
+    /// Meters, once it has spread.
+    pub radius: f32,
+    /// Seconds from the grenade going off until the cloud is gone.
+    pub duration: f32,
+}
+
+/// How a weapon launches its projectiles (BF2 fire and target components).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FireDesc {
+    #[serde(default)]
+    pub kind: FireKind,
+    /// Thrown weapons: seconds of winding up before the throw can leave (BF2
+    /// `fire.pullBackTime`). Holding on longer cooks a grenade: its fuse is running.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pull_back: f32,
+    /// Seconds from letting go of the trigger (thrown weapons) or pulling it (charges)
+    /// until the projectile leaves the hand (`fire.fireLaunchDelay`), and for the underhand
+    /// throw on the alternative fire button (`fire.fireLaunchDelaySoft`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub launch_delay: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub launch_delay_soft: f32,
+    /// Where projectiles start, relative to the eye in view space (+X right, +Y up,
+    /// -Z forward) (`fire.projectileStartPosition`).
+    #[serde(default)]
+    pub start_offset: [f32; 3],
+    /// Most projectiles of one soldier in the world at once (`fire.maxProjectilesInWorld`):
+    /// the oldest goes when another is placed. 0 = no limit.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_in_world: u32,
+    #[serde(default)]
+    pub guidance: Guidance,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FireKind {
+    /// Fires while the trigger is pulled, by fire mode.
+    #[default]
+    Gun,
+    /// Grenades and mines: hold the trigger to wind up (and cook a grenade), let go to throw
+    /// (BF2 `ThrownFireComp`). The alternative fire button throws underhand.
+    Thrown,
+    /// C4: the trigger throws charges; the alternative fire button takes out the detonator,
+    /// whose trigger sets them all off (BF2 `ExplosivesFireComp`).
+    Explosives,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Guidance {
+    #[default]
+    None,
+    /// Wire guided (BF2 `TSWireGuided`): flies towards whatever the shooter aims at while
+    /// he keeps the launcher in his hands.
+    Wire,
+}
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 /// BF2 deviation (spread) settings, in degrees. See docs/formats/gameplay-data.md §6.4.
@@ -158,13 +337,34 @@ pub struct RecoilDesc {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct WeaponSounds {
-    /// `.wav` paths relative to the imported root.
-    #[serde(default)]
-    pub fire_1p: Option<String>,
-    #[serde(default)]
-    pub fire_3p: Option<String>,
-    #[serde(default)]
-    pub reload_1p: Option<String>,
+    /// Every shot, heard by the shooter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_1p: Option<SoundDesc>,
+    /// Every shot, heard by everyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_3p: Option<SoundDesc>,
+    /// `fire_3p` as heard from far away: muffled, with echoes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_3p_distant: Option<SoundDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload_1p: Option<SoundDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload_3p: Option<SoundDesc>,
+    /// Taking the weapon out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_1p: Option<SoundDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_3p: Option<SoundDesc>,
+    /// Pulling the trigger with nothing left to fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_fire: Option<SoundDesc>,
+    /// The bolt catching after the last round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bolt: Option<SoundDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_fire_mode: Option<SoundDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<SoundDesc>,
 }
 
 fn one() -> u32 {

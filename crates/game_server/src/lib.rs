@@ -49,6 +49,9 @@ pub struct ServerSettings {
     pub port: u16,
     /// Accept connections over the network. Off for singleplayer.
     pub network: bool,
+    /// Listen on all network interfaces so other machines can join. Otherwise only this
+    /// machine can connect (127.0.0.1), which also avoids firewall prompts while testing.
+    pub public: bool,
     /// Create a player for the local user (listen server / singleplayer).
     pub local_player: Option<String>,
     /// Team of the local player (1 or 2).
@@ -68,6 +71,7 @@ impl Default for ServerSettings {
             max_clients: 64,
             port: game_shared::DEFAULT_PORT,
             network: true,
+            public: false,
             local_player: None,
             local_team: 1,
             respawn_seconds: 10.0,
@@ -191,7 +195,8 @@ fn start_networking(
         ..default()
     });
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, settings.port))?;
+    let address = if settings.public { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST };
+    let socket = UdpSocket::bind((address, settings.port))?;
     let transport = NetcodeServerTransport::new(
         ServerConfig {
             current_time,

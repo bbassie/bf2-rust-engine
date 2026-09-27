@@ -41,7 +41,8 @@ fn configure_gizmos(mut store: ResMut<GizmoConfigStore>) {
 }
 
 /// Each cell as lines to its +X and +Z neighbours: green in the open, orange near walls, red
-/// at the edge, blue where a jump is needed. Cells without any link are magenta crosses.
+/// at the edge, blue where a jump or drop is needed. Cells without any link are magenta
+/// crosses.
 fn draw_grid(
     mut gizmos: Gizmos,
     nav: Res<Navigation>,
@@ -56,7 +57,11 @@ fn draw_grid(
         let cell = grid.cell(c);
         let at = grid.position(c) + lift;
         if cell.links.iter().all(|&l| l == NavGrid::NONE) {
-            gizmos.cross(Isometry3d::from_translation(at), 0.1, Color::srgb(1.0, 0.0, 1.0));
+            gizmos.cross(
+                Isometry3d::from_translation(at),
+                0.1,
+                Color::srgb(1.0, 0.0, 1.0),
+            );
             continue;
         }
         let color = match cell.dist {
@@ -69,7 +74,7 @@ fn draw_grid(
                 continue;
             };
             let other = grid.cell(n);
-            let color = if grid.needs_jump(cell, other) || grid.needs_jump(other, cell) {
+            let color = if (other.y - cell.y).abs() > grid.walk_climb(cell, other) {
                 Color::srgb(0.2, 0.5, 1.0)
             } else {
                 color
@@ -102,11 +107,18 @@ fn draw_paths(
             color,
         );
         for waypoint in path.iter().filter(|w| w.jump) {
-            gizmos.sphere(Isometry3d::from_translation(waypoint.position + lift), 0.3, Color::srgb(1.0, 1.0, 0.2));
+            gizmos.sphere(
+                Isometry3d::from_translation(waypoint.position + lift),
+                0.3,
+                Color::srgb(1.0, 1.0, 0.2),
+            );
         }
         if let Some(goal) = brain.goal() {
             gizmos.circle(
-                Isometry3d::new(goal + lift, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                Isometry3d::new(
+                    goal + lift,
+                    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                ),
                 1.0,
                 color,
             );

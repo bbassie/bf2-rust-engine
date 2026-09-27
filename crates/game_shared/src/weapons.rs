@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use bevy::prelude::*;
 use game_data::{
-    DeviationDesc, FireMode, KitDesc, LevelDesc, ProjectileDesc, RecoilDesc, WeaponDesc,
-    WeaponSounds,
+    DeviationDesc, FireKind, FireMode, Impact, KitDesc, LevelDesc, ProjectileDesc, RecoilDesc,
+    WeaponDesc, WeaponSounds,
 };
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +114,10 @@ fn test_rifle() -> WeaponDesc {
         reload_time: 3.0,
         deploy_time: 0.8,
         projectiles_per_shot: 1,
+        pellet_spread: 0.0,
+        shift_delay: 0.0,
+        reload_amount: 0,
+        fire: Default::default(),
         projectile: ProjectileDesc {
             velocity: 900.0,
             damage: 30.0,
@@ -123,8 +127,7 @@ fn test_rifle() -> WeaponDesc {
             gravity: 1.0,
             time_to_live: 1.0,
             material: 38,
-            explosion_damage: 0.0,
-            explosion_radius: 0.0,
+            ..Default::default()
         },
         deviation: DeviationDesc {
             min: 0.35,
@@ -208,11 +211,49 @@ pub struct WeaponState {
     pub deploy: f32,
     pub burst_left: u8,
     pub trigger_was_down: bool,
+    pub alt_was_down: bool,
+    pub mode_was_down: bool,
     /// Spread accumulators in degrees.
     pub fire_dev: f32,
     pub speed_dev: f32,
     pub misc_dev: f32,
+    /// Thrown weapons: seconds the trigger has been held for the throw being wound up.
+    pub wind_up: Option<f32>,
+    /// The throw being wound up or launched is underhand (the alternative fire button).
+    pub soft: bool,
+    /// A released throw or a placed charge on its way out of the hand: seconds until it
+    /// leaves, and seconds of its fuse already burnt.
+    pub launch: Option<(f32, f32)>,
+    /// C4: the detonator is in hand instead of the charges.
+    pub detonator: bool,
 }
+
+/// What a weapon did this tick (see [`WeaponState::trigger`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fired {
+    /// Projectiles leave now. `cooked` seconds of a grenade's fuse burnt in the hand; `soft`
+    /// is the underhand throw.
+    Launch { cooked: f32, soft: bool },
+    /// The grenade's fuse ran out in the hand.
+    InHand,
+    /// The detonator was pressed: the soldier's charges go off.
+    Detonate,
+}
+
+/// The buttons that work a weapon, for one tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Trigger {
+    pub fire: bool,
+    /// The alternative fire button (BF2 `PIAltFire`, which is also zoom): underhand throws,
+    /// taking out the C4 detonator.
+    pub alt: bool,
+    pub reload: bool,
+    /// Sprinting lowers the weapon.
+    pub lowered: bool,
+}
+
+/// Seconds the C4 detonator needs between presses (its `fire.roundsPerMinute 60`).
+const DETONATOR_INTERVAL: f32 = 1.0;
 
 /// BF2 tunes spread decay per 30 Hz server frame.
 const BF2_FRAME: f32 = 1.0 / 30.0;
@@ -249,10 +290,182 @@ impl WeaponState {
     }
 
     pub fn on_shot(&mut self, weapon: &WeaponDesc) {
-        self.cooldown = 60.0 / weapon.rounds_per_minute.max(1.0);
+        self.cooldown = shot_interval(weapon);
         let [max, add, _] = weapon.deviation.fire;
         self.fire_dev = (self.fire_dev + add).min(max);
     }
+
+    /// Takes `weapon` in hand: whatever the previous one was doing stops.
+    pub fn switch_to(&mut self, weapon: &WeaponDesc) {
+        self.deploy = weapon.deploy_time;
+        self.reload = 0.0;
+        self.burst_left = 0;
+        self.wind_up = None;
+        self.launch = None;
+        self.detonator = false;
+    }
+
+    /// Works the trigger for one tick, after [`Self::tick`]: reloading, fire modes, winding
+    /// up and throwing, placing charges and the detonator. `ammo` (`[in magazine, spare]`)
+    /// is used up and refilled here.
+    pub fn trigger(
+        &mut self,
+        weapon: &WeaponDesc,
+        mode: FireMode,
+        ammo: &mut [u16; 2],
+        input: Trigger,
+        dt: f32,
+    ) -> Option<Fired> {
+        let pressed = input.fire && !self.trigger_was_down;
+        let alt_pressed = input.alt && !self.alt_was_down;
+        self.trigger_was_down = input.fire;
+        self.alt_was_down = input.alt;
+        let [in_mag, spare] = *ammo;
+        let magazine = weapon.magazine_size as u16;
+        let unlimited = magazine == 0;
+
+        // A throw or charge on its way out leaves whatever else happens.
+        if let Some((left, cooked)) = &mut self.launch {
+            *left -= dt;
+            if *left > 0.0 {
+                return None;
+            }
+            let cooked = *cooked;
+            return Some(self.release(weapon, ammo, cooked));
+        }
+
+        if self.reload > 0.0 {
+            self.reload -= dt;
+            if self.reload <= 0.0 {
+                let step = if weapon.reload_amount > 0 { weapon.reload_amount as u16 } else { u16::MAX };
+                let taken = magazine.saturating_sub(in_mag).min(spare).min(step);
+                *ammo = [in_mag + taken, spare - taken];
+                // Shell by shell until full, unless the trigger wants to fire.
+                if weapon.reload_amount > 0 && ammo[0] < magazine && ammo[1] > 0 && !input.fire {
+                    self.reload = weapon.reload_time;
+                }
+            }
+            return None;
+        }
+        // Grenades and charges come out of the pouch by themselves.
+        let auto_reload = weapon.fire.kind != FireKind::Gun;
+        let wants_reload = input.reload && in_mag < magazine;
+        let empty = in_mag == 0 && !unlimited && (input.fire || auto_reload);
+        if (wants_reload || empty) && spare > 0 && self.wind_up.is_none() {
+            self.reload = weapon.reload_time;
+            self.burst_left = 0;
+            return None;
+        }
+
+        let ready = !input.lowered
+            && self.cooldown <= 0.0
+            && self.deploy <= 0.0
+            && (in_mag > 0 || unlimited)
+            && weapon.projectile.velocity > 0.0;
+        match weapon.fire.kind {
+            FireKind::Gun => {
+                let wants_shot = match mode {
+                    FireMode::Auto => input.fire,
+                    FireMode::Single => pressed,
+                    FireMode::Burst => pressed || self.burst_left > 0,
+                };
+                if !wants_shot || !ready {
+                    if in_mag == 0 {
+                        self.burst_left = 0;
+                    }
+                    return None;
+                }
+                if mode == FireMode::Burst {
+                    self.burst_left = if pressed { 2 } else { self.burst_left.saturating_sub(1) };
+                }
+                if !unlimited {
+                    ammo[0] = in_mag - 1;
+                }
+                self.on_shot(weapon);
+                Some(Fired::Launch { cooked: 0.0, soft: false })
+            }
+            FireKind::Thrown => self.throw(weapon, ammo, input, pressed || alt_pressed, ready, dt),
+            FireKind::Explosives => {
+                // With nothing left to place, the detonator is all there is.
+                let used_up = in_mag == 0 && spare == 0;
+                if alt_pressed || used_up {
+                    self.detonator = !self.detonator || used_up;
+                }
+                if self.detonator {
+                    if pressed && self.cooldown <= 0.0 && self.deploy <= 0.0 {
+                        self.cooldown = DETONATOR_INTERVAL;
+                        return Some(Fired::Detonate);
+                    }
+                    return None;
+                }
+                if !(pressed && ready) {
+                    return None;
+                }
+                self.soft = false;
+                self.launch = Some((weapon.fire.launch_delay, 0.0));
+                (weapon.fire.launch_delay <= 0.0).then(|| self.release(weapon, ammo, 0.0))
+            }
+        }
+    }
+
+    /// Winding up while the trigger is held (a grenade's fuse starts once wound up),
+    /// throwing when it is let go.
+    fn throw(
+        &mut self,
+        weapon: &WeaponDesc,
+        ammo: &mut [u16; 2],
+        input: Trigger,
+        pressed: bool,
+        ready: bool,
+        dt: f32,
+    ) -> Option<Fired> {
+        let fire = &weapon.fire;
+        let Some(held) = self.wind_up else {
+            if pressed && ready {
+                self.wind_up = Some(0.0);
+                self.soft = !input.fire;
+            }
+            return None;
+        };
+        let held = held + dt;
+        let cooked = (held - fire.pull_back).max(0.0);
+        if cooks(&weapon.projectile) && cooked >= weapon.projectile.time_to_live {
+            self.wind_up = None;
+            ammo[0] = ammo[0].saturating_sub(1);
+            self.cooldown = shot_interval(weapon);
+            return Some(Fired::InHand);
+        }
+        let holding = if self.soft { input.alt } else { input.fire };
+        if holding || held < fire.pull_back {
+            self.wind_up = Some(held);
+            return None;
+        }
+        self.wind_up = None;
+        let delay = if self.soft { fire.launch_delay_soft } else { fire.launch_delay };
+        self.launch = Some((delay, cooked));
+        (delay <= 0.0).then(|| self.release(weapon, ammo, cooked))
+    }
+
+    fn release(&mut self, weapon: &WeaponDesc, ammo: &mut [u16; 2], cooked: f32) -> Fired {
+        self.launch = None;
+        if weapon.magazine_size > 0 {
+            ammo[0] = ammo[0].saturating_sub(1);
+        }
+        self.cooldown = shot_interval(weapon);
+        Fired::Launch { cooked, soft: self.soft }
+    }
+}
+
+/// Seconds from one shot until the next can fire.
+pub fn shot_interval(weapon: &WeaponDesc) -> f32 {
+    (60.0 / weapon.rounds_per_minute.max(1.0)).max(weapon.shift_delay)
+}
+
+/// Grenades with a fuse cook in the hand once wound up; mines and charges don't.
+pub fn cooks(projectile: &ProjectileDesc) -> bool {
+    projectile.impact == Impact::Bounce
+        && (projectile.explodes() || projectile.smoke.is_some())
+        && projectile.time_to_live < 100.0
 }
 
 /// Damage of a projectile after travelling `distance` meters.

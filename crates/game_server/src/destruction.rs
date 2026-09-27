@@ -144,6 +144,9 @@ fn damage_statics(
                 let closest = aabb.map_or(transform.translation, |aabb| {
                     explosion.position.clamp(aabb.min, aabb.max)
                 });
+                if !explosion.reaches(closest) {
+                    continue;
+                }
                 let distance = closest.distance(explosion.position);
                 match nearest.entry((index, part.instance)) {
                     Entry::Occupied(mut e) if distance < e.get().0 => *e.get_mut() = (distance, part),
@@ -200,6 +203,7 @@ fn damage_statics(
                     weapon: "explosion".into(),
                     ..attacker.clone()
                 },
+                cone: None,
             });
         }
     }

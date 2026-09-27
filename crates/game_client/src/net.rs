@@ -41,7 +41,10 @@ impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveMatch>()
             .init_resource::<MatchNotice>()
-            .add_systems(OnEnter(ClientState::Connected), (send_hello, || info!("connected")))
+            .add_systems(
+                OnEnter(ClientState::Connected),
+                (send_hello, || info!("connected")),
+            )
             .add_systems(OnExit(ClientState::Connected), || warn!("disconnected"))
             .add_systems(OnEnter(ClientState::Disconnected), connection_lost)
             .add_systems(PreUpdate, tag_local_entities.after(ClientSystems::Receive));
@@ -168,7 +171,10 @@ pub fn leave_match(world: &mut World) {
 }
 
 fn set_screen(world: &mut World, screen: Screen) {
-    world.resource_mut::<NextState<Screen>>().into_inner().set_if_neq(screen);
+    world
+        .resource_mut::<NextState<Screen>>()
+        .into_inner()
+        .set_if_neq(screen);
 }
 
 fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
@@ -181,7 +187,10 @@ fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     // Never 0, which is reserved for the local host player.
     let client_id = (current_time.as_nanos() as u64).max(1);
+    // Loopback servers get a loopback socket: no firewall prompt for local tests.
     let bind_ip: IpAddr = match server.ip() {
+        IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),
+        IpAddr::V6(ip) if ip.is_loopback() => Ipv6Addr::LOCALHOST.into(),
         IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
         IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     };
@@ -201,10 +210,7 @@ fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-fn send_hello(
-    mut hello: MessageWriter<ClientHello>,
-    mut active: ResMut<ActiveMatch>,
-) {
+fn send_hello(mut hello: MessageWriter<ClientHello>, mut active: ResMut<ActiveMatch>) {
     active.connected = true;
     if let Some(MatchSetup::Join { name, .. }) = &active.setup {
         hello.write(ClientHello { name: name.clone() });
@@ -237,7 +243,10 @@ fn tag_local_entities(
     mut commands: Commands,
     local_id: Option<Res<LocalClientId>>,
     players: Query<(Entity, &PlayerNetId, Has<LocalPlayer>), With<Player>>,
-    soldiers: Query<(Entity, &ControlledBy, &SoldierMotion), (With<Soldier>, Without<LocalSoldier>)>,
+    soldiers: Query<
+        (Entity, &ControlledBy, &SoldierMotion),
+        (With<Soldier>, Without<LocalSoldier>),
+    >,
     mut look: ResMut<LookState>,
 ) {
     let Some(local_id) = local_id else {

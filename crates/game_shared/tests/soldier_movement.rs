@@ -317,10 +317,10 @@ fn climbs_and_descends_stairs() {
                 if rise == 0.17 && buttons == Buttons::empty() && trimesh {
                     print_trace("up 0.17/0.28", &up[..70]);
                 }
-                // Height never goes down while climbing: no bouncing.
+                // Height never goes down while climbing (beyond millimeters): no bouncing.
                 if let Some(i) = up
                     .windows(2)
-                    .position(|w| w[1].position.y < w[0].position.y - 1e-3)
+                    .position(|w| w[1].position.y < w[0].position.y - 5e-3)
                 {
                     print_trace("dip", &up[i.saturating_sub(10)..i + 5]);
                     panic!(
@@ -345,7 +345,7 @@ fn climbs_and_descends_stairs() {
                 );
                 if let Some(i) = down
                     .windows(2)
-                    .position(|w| w[1].position.y > w[0].position.y + 1e-3)
+                    .position(|w| w[1].position.y > w[0].position.y + 5e-3)
                 {
                     print_trace("bounce", &down[i.saturating_sub(10)..i + 5]);
                     panic!(

@@ -33,6 +33,10 @@ struct Cli {
     /// Number of bots.
     #[arg(long, default_value_t = 0)]
     bots: u32,
+    /// Accept players from other machines (listen on all interfaces). Without it only
+    /// clients on this machine can connect.
+    #[arg(long)]
+    public: bool,
     /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
@@ -69,6 +73,7 @@ fn main() -> AppExit {
                 max_clients: cli.max_players,
                 port: cli.port,
                 network: true,
+                public: cli.public,
                 local_player: None,
                 ..default()
             }),

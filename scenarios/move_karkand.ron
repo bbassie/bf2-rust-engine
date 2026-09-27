@@ -55,6 +55,18 @@
         Release([Prone]),
         Move(0.0, 0.0),
 
+        // Into the barrack at the eastern spawn, jump onto its 0.6 m ledge and keep pushing
+        // against the wall above it: should rest still, not jitter.
+        Teleport((226.73, 153.5, -181.0), 0.0, 0.0),
+        Wait(1.0),
+        Hold([Sprint]),
+        Move(0.0, 1.0),
+        Wait(1.5),
+        Hold([Jump]),
+        Trace("ledge", 3.0),
+        Release([Jump, Sprint]),
+        Move(0.0, 0.0),
+
         // Standing jump, then a running jump with the button held (one jump only). Getting
         // up from prone blocks jumping for 0.8 s, and a press during that is lost.
         Teleport((-184.0, 157.0, -85.0), 180.0, 0.0),

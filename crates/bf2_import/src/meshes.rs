@@ -2,7 +2,8 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    io::Read,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -10,15 +11,19 @@ use anyhow::{Context, Result};
 use bf2_formats::{
     Vfs,
     collision::{ColType, CollisionMesh},
-    mesh::{AlphaMode, MeshKind, Usage, VisMesh},
+    mesh::{AlphaMode, Material, MeshKind, Usage, VisMesh},
     vfs::normalize,
 };
+use glam::{Vec2, Vec3};
 use serde_json::json;
 
 use crate::{
     coords,
     glb::{self, Document},
 };
+
+/// Version of the visible mesh conversion; older `.glb` files are converted again.
+const MESH_VERSION: u64 = 2;
 
 /// Shared state for converting many meshes: output folder and already-copied textures.
 pub struct MeshConverter<'a> {
@@ -135,7 +140,7 @@ impl<'a> MeshConverter<'a> {
     fn convert_mesh_inner(&self, key: String, geom: usize, lod: usize, suffix: &str) -> Result<String> {
         let kind = MeshKind::from_path(&key).context("not a mesh file")?;
         let out_rel = format!("{}{suffix}.glb", key.rsplit_once('.').map_or(key.as_str(), |(s, _)| s));
-        if self.out.join(&out_rel).exists() {
+        if mesh_version(&self.out.join(&out_rel)).is_some_and(|v| v >= MESH_VERSION) {
             return Ok(out_rel);
         }
         let data = self.vfs.read(&key)?;
@@ -162,15 +167,19 @@ impl<'a> MeshConverter<'a> {
 
         let positions = mesh.attribute::<3>(Usage::Position, 0).unwrap_or_default();
         let normals = mesh.attribute::<3>(Usage::Normal, 0);
-        let tangents = mesh.attribute::<3>(Usage::Tangent, 0);
         let blend = mesh.blend_indices();
         let uv_sets: Vec<Vec<[f32; 2]>> = (0..mesh.texcoord_sets())
             .map(|i| mesh.attribute::<2>(Usage::TexCoord, i).unwrap_or_default())
             .collect();
+        let uv = |channel: usize, vertex: usize| -> [f32; 2] {
+            let set = uv_sets.get(channel).or(uv_sets.last());
+            sanitize_uv(set.and_then(|s| s.get(vertex)).copied().unwrap_or([0.0, 0.0]))
+        };
 
         let Some(lod) = mesh.geoms.get(geom).and_then(|g| g.lods.get(lod)) else {
             return doc;
         };
+        doc.extras = json!({ "bf2_mesh_version": MESH_VERSION });
 
         // Bundled meshes: one glTF mesh per part (vertices are part-local and placed by the
         // template hierarchy). Other kinds: a single mesh.
@@ -188,6 +197,7 @@ impl<'a> MeshConverter<'a> {
                 .collect();
             let (base_slot, base_uv) = base_color_slot(mesh.kind, &material.technique);
             let base = maps.get(base_slot).and_then(|(_, t)| t.clone());
+            let layers = (mesh.kind == MeshKind::Static).then(|| StaticLayers::parse(&material.technique));
             let normal = match mesh.kind {
                 MeshKind::Bundled => maps
                     .iter()
@@ -195,6 +205,14 @@ impl<'a> MeshConverter<'a> {
                     .and_then(|(_, t)| t.clone()),
                 _ => None,
             };
+            // Normal maps follow the UV set their tangents are built for: static detail
+            // normals the detail set, everything else the base set.
+            let tangent_uv = match &layers {
+                Some(layers) => layers.normal_mapped().then_some(1),
+                None => normal.is_some().then_some(0),
+            };
+            let tangents = tangent_uv.map(|channel| tangent_frames(mesh, material, channel));
+            let color_uvs = layers.as_ref().and_then(StaticLayers::color_uvs);
             let alpha = match material.alpha_mode {
                 AlphaMode::Opaque => glb::AlphaMode::Opaque,
                 AlphaMode::Test => glb::AlphaMode::Mask(0.5),
@@ -211,6 +229,11 @@ impl<'a> MeshConverter<'a> {
                 double_sided: alpha != glb::AlphaMode::Opaque,
                 extras: json!({
                     "bf2": {
+                        "kind": match mesh.kind {
+                            MeshKind::Static => "static",
+                            MeshKind::Bundled => "bundled",
+                            MeshKind::Skinned => "skinned",
+                        },
                         "technique": material.technique,
                         "alpha_mode": format!("{:?}", material.alpha_mode),
                         "maps": maps.iter().map(|(m, t)| json!({ "ref": m, "path": t })).collect::<Vec<_>>(),
@@ -245,18 +268,18 @@ impl<'a> MeshConverter<'a> {
                         if let Some(n) = &normals {
                             prim.normals.push(normalize_or_up(coords::direction(n[vi])));
                         }
-                        if let Some(t) = &tangents {
-                            let flip = blend.as_ref().map_or(0, |b| b[vi][2]);
-                            let t = coords::direction(t[vi]);
-                            let w = if flip == 0 { 1.0 } else { -1.0 };
-                            prim.tangents.push([t[0], t[1], t[2], w]);
+                        if let Some(tangents) = &tangents {
+                            prim.tangents.push(tangents.get(&v).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]));
                         }
-                        for (set, uv) in prim.uvs.iter_mut().enumerate() {
+                        for (set, value) in prim.uvs.iter_mut().enumerate() {
                             // UV set 0 = BF2 channel 0; set 1 = the base color channel if it
                             // isn't 0 (detail), so the glTF base color texCoord works.
                             let channel = if set == 1 { base_uv.max(1) as usize } else { 0 };
-                            let value = uv_sets.get(channel).and_then(|s| s.get(vi)).copied().unwrap_or([0.0, 0.0]);
-                            uv.push(sanitize_uv(value));
+                            value.push(uv(channel, vi));
+                        }
+                        if let Some([a, b]) = color_uvs {
+                            let (a, b) = (uv(a, vi), uv(b, vi));
+                            prim.colors.push([a[0], a[1], b[0], b[1]]);
                         }
                         (prim.positions.len() - 1) as u32
                     });
@@ -266,15 +289,6 @@ impl<'a> MeshConverter<'a> {
             for (part, prim) in prims.into_iter().enumerate() {
                 if !prim.indices.is_empty() {
                     part_primitives[part].push(prim);
-                }
-            }
-        }
-
-        // Tangents are unreliable in old files; drop them if any are degenerate.
-        for prims in &mut part_primitives {
-            for prim in prims {
-                if prim.tangents.iter().any(|t| t[0] * t[0] + t[1] * t[1] + t[2] * t[2] < 0.5) {
-                    prim.tangents.clear();
                 }
             }
         }
@@ -357,11 +371,128 @@ impl<'a> MeshConverter<'a> {
 /// Which texture map is the main color and which UV channel it uses.
 ///
 /// Static meshes list maps in technique-layer order (Base, Detail, Dirt, ...), bundled and
-/// skinned meshes start with the color map. All of these put the first map on UV0. Proper
-/// BF2 layering (Base × Detail × Dirt, cracks, lightmaps) needs a custom material; the full
-/// map list is kept in the material extras for that.
+/// skinned meshes start with the color map. All of these put the first map on UV0. The
+/// other layers are applied by the game's BF2 material from the map list in the extras.
 fn base_color_slot(_kind: MeshKind, _technique: &str) -> (usize, u32) {
     (0, 0)
+}
+
+/// `bf2_mesh_version` of an exported `.glb` (`None` if missing or older than versioning).
+fn mesh_version(path: &Path) -> Option<u64> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 20];
+    file.read_exact(&mut header).ok()?;
+    let len = u32::from_le_bytes([header[12], header[13], header[14], header[15]]) as usize;
+    let mut json = vec![0; len];
+    file.read_exact(&mut json).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&json).ok()?["extras"]["bf2_mesh_version"].as_u64()
+}
+
+/// Which layers of a static mesh technique (`BaseDetailDirtCrackNDetailNCrack`, ...) need
+/// more than the base and detail UV sets.
+struct StaticLayers {
+    dirt: bool,
+    crack: bool,
+    /// Detail or crack normal maps, or parallax (which needs the detail normal map's height).
+    normal: bool,
+}
+
+impl StaticLayers {
+    fn parse(technique: &str) -> Self {
+        let t = technique.to_ascii_lowercase();
+        let colors = t.replace("ndetail", "").replace("ncrack", "");
+        Self {
+            dirt: colors.contains("dirt"),
+            crack: colors.contains("crack"),
+            normal: t.contains("ndetail") || t.contains("ncrack") || t.contains("parallax"),
+        }
+    }
+
+    fn normal_mapped(&self) -> bool {
+        self.normal
+    }
+
+    /// BF2 UV channels packed into `COLOR_0`: dirt (xy) and crack (zw). The crack takes the
+    /// dirt's channel when there is no dirt layer.
+    fn color_uvs(&self) -> Option<[usize; 2]> {
+        (self.dirt || self.crack).then_some([2, if self.dirt { 3 } else { 2 }])
+    }
+}
+
+/// Tangents (engine space, `w` = binormal sign) of a material's vertices for normal maps on
+/// UV channel `channel`. BF2's own tangents where usable; zero or broken ones (old files)
+/// are rebuilt from the UV layout the way BF2's are made: tangent along +u, binormal
+/// (`cross(T, N) * w` in BF2 space) along -v.
+pub fn tangent_frames(mesh: &VisMesh, material: &Material, channel: u8) -> HashMap<u32, [f32; 4]> {
+    let vec3 = |usage: Usage, v: u32| {
+        mesh.element(usage, 0).map(|e| {
+            let f = mesh.read_floats(v as usize, e);
+            Vec3::new(f[0], f[1], f[2])
+        })
+    };
+    let uv_element = mesh.element(Usage::TexCoord, channel).or_else(|| mesh.element(Usage::TexCoord, 0));
+    let uv = |v: u32| {
+        uv_element.map_or(Vec2::ZERO, |e| {
+            let f = mesh.read_floats(v as usize, e);
+            Vec2::new(f[0], f[1])
+        })
+    };
+    let flip = |v: u32| {
+        mesh.element(Usage::BlendIndices, 0)
+            .is_some_and(|e| mesh.read_bytes4(v as usize, e)[2] != 0)
+    };
+    let triangles: Vec<[u32; 3]> = mesh
+        .material_triangles(material)
+        .into_iter()
+        .filter(|t| t.iter().all(|&v| (v as usize) < mesh.vertex_count))
+        .collect();
+
+    // Accumulated position derivatives along u and v per vertex.
+    let mut derivatives: HashMap<u32, (Vec3, Vec3)> = HashMap::new();
+    for tri in &triangles {
+        let p = tri.map(|v| vec3(Usage::Position, v).unwrap_or_default());
+        let t = tri.map(uv);
+        let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
+        let (d1, d2) = (t[1] - t[0], t[2] - t[0]);
+        let det = d1.x * d2.y - d2.x * d1.y;
+        if det.abs() < 1e-12 || !det.is_finite() {
+            continue;
+        }
+        let dpdu = (e1 * d2.y - e2 * d1.y) / det;
+        let dpdv = (e2 * d1.x - e1 * d2.x) / det;
+        if !dpdu.is_finite() || !dpdv.is_finite() {
+            continue;
+        }
+        for &v in tri {
+            let d = derivatives.entry(v).or_default();
+            d.0 += dpdu;
+            d.1 += dpdv;
+        }
+    }
+
+    let mut frames = HashMap::new();
+    for &v in triangles.iter().flatten() {
+        if frames.contains_key(&v) {
+            continue;
+        }
+        let n = vec3(Usage::Normal, v).and_then(Vec3::try_normalize).unwrap_or(Vec3::Y);
+        let stored = vec3(Usage::Tangent, v)
+            .map(|t| t - n * n.dot(t))
+            .filter(|t| t.is_finite() && t.length_squared() > 0.01);
+        let (t, w) = match stored {
+            Some(t) => (t.normalize(), if flip(v) { -1.0 } else { 1.0 }),
+            None => {
+                let (dpdu, dpdv) = derivatives.get(&v).copied().unwrap_or_default();
+                let t = (dpdu - n * n.dot(dpdu))
+                    .try_normalize()
+                    .unwrap_or_else(|| n.any_orthonormal_vector());
+                (t, if t.cross(n).dot(-dpdv) < 0.0 { -1.0 } else { 1.0 })
+            }
+        };
+        let t = coords::direction(t.to_array());
+        frames.insert(v, [t[0], t[1], t[2], w]);
+    }
+    frames
 }
 
 fn normalize_or_up(v: [f32; 3]) -> [f32; 3] {

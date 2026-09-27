@@ -111,6 +111,9 @@ pub enum Step {
     Shadows(bool),
     /// Presses and releases a key, e.g. `Key(Enter)`.
     Key(KeyCode),
+    /// Presses a key and keeps it down until `ReleaseKey`.
+    HoldKey(KeyCode),
+    ReleaseKey(KeyCode),
     /// Clicks the UI button with this `Name`, e.g. `Click("kit:5")`.
     Click(String),
     /// Our soldier dies (singleplayer and listen server only).
@@ -120,6 +123,10 @@ pub enum Step {
     /// Frame time statistics over this many seconds, logged and added to the report.
     Measure(String, f32),
     Log(String),
+    /// Plays an effect this many times around a point (spread over 40 m), emitting for
+    /// the given seconds (0: the effect's own length), e.g.
+    /// `Effect("e_exp_grenade", (-184.0, 157.0, -100.0), 20, 0.0)`.
+    Effect(String, (f32, f32, f32), u32, f32),
     /// Adds our soldier's movement state (and the last prediction correction when
     /// connected) to the report every frame for this many seconds.
     Trace(String, f32),
@@ -299,6 +306,7 @@ struct PlayerControls<'w, 's> {
     keyboard: MessageWriter<'w, KeyboardInput>,
     window: Single<'w, 's, Entity, With<PrimaryWindow>>,
     buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
+    effects: MessageWriter<'w, crate::effects::SpawnEffect>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -333,6 +341,7 @@ fn run_scenario(
         mut keyboard,
         window,
         mut buttons,
+        mut effects,
     } = player;
     let now = time.elapsed_secs();
     // Keys go through the same input events as a real keyboard, so every system sees them.
@@ -453,6 +462,14 @@ fn run_scenario(
                 runner.released.push(*key);
                 Progress::Done
             }
+            Step::HoldKey(key) => {
+                key_event(*key, ButtonState::Pressed);
+                Progress::Done
+            }
+            Step::ReleaseKey(key) => {
+                key_event(*key, ButtonState::Released);
+                Progress::Done
+            }
             Step::Click(name) => {
                 match buttons.iter_mut().find(|(n, _)| n.as_str() == name) {
                     Some((_, mut interaction)) => *interaction = Interaction::Pressed,
@@ -519,6 +536,10 @@ fn run_scenario(
                     .ok();
                 }
                 done_if(elapsed >= *seconds)
+            }
+            Step::Effect(name, position, count, seconds) => {
+                crate::effects::spawn_around(&mut effects, name, Vec3::from(*position), *count, *seconds);
+                Progress::Done
             }
             Step::Log(text) => {
                 info!("scenario: {text}");

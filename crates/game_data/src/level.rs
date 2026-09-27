@@ -40,6 +40,10 @@ pub struct LevelDesc {
     /// nobody alive.
     #[serde(default = "default_ticket_loss_at_end")]
     pub ticket_loss_at_end_per_minute: f32,
+    /// Draw-only grass, plants and trees: a [`crate::VegetationDesc`] file relative to the
+    /// level folder.
+    #[serde(default)]
+    pub vegetation: Option<String>,
 }
 
 /// A square heightmap terrain.
@@ -73,6 +77,28 @@ pub struct TerrainDesc {
     /// Per patch baked lighting: G = sun visibility, B = sky light. Relative to the level folder.
     #[serde(default)]
     pub lightmaps: Vec<String>,
+    /// Low-detail scenery terrain around this one, so the world doesn't end at its edge.
+    #[serde(default)]
+    pub surrounding: Option<SurroundingTerrainDesc>,
+}
+
+/// A coarse heightmap covering a 3x3 grid of terrain-sized cells centred on the terrain.
+/// Only the 8 outer cells are drawn; nothing collides with it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SurroundingTerrainDesc {
+    /// Little-endian `u16` heightmap relative to the level folder (row 0 at -Z).
+    pub heightmap: String,
+    /// Samples per side.
+    pub resolution: u32,
+    pub spacing: f32,
+    /// Meters per heightmap unit.
+    pub height_scale: f32,
+    /// World position of sample (0, 0).
+    pub origin: [f32; 3],
+    /// Colour map per cell, row-major from -Z (index 4 is the centre and unused). Relative to
+    /// the level folder; empty where a cell has none.
+    #[serde(default)]
+    pub color_maps: Vec<String>,
 }
 
 /// One tiling ground texture.
@@ -101,6 +127,28 @@ pub struct WaterDesc {
     pub height: f32,
     #[serde(default = "default_water_color")]
     pub color: [f32; 4],
+    /// Water deeper than this (meters) hides the ground below completely.
+    #[serde(default = "default_water_opaque_depth")]
+    pub opaque_depth: f32,
+    /// Sun glint colour (rgb) and strength (a).
+    #[serde(default = "default_water_specular")]
+    pub specular: [f32; 4],
+    #[serde(default = "default_water_specular_power")]
+    pub specular_power: f32,
+    /// Drift of the wave pattern in meters per second along X and Z.
+    #[serde(default)]
+    pub wave_drift: [f32; 2],
+    /// How fast the wave pattern changes shape (normal map slices per second).
+    #[serde(default = "default_water_wave_speed")]
+    pub wave_speed: f32,
+    /// Tiling normal map (`.dds`, relative to the imported root, xyz = world normal with +Y
+    /// up); a 3D texture animates through its slices.
+    #[serde(default)]
+    pub normal_map: Option<String>,
+    /// Cube map the surface reflects (`.dds`, relative to the imported root). Without one it
+    /// reflects the fog colour.
+    #[serde(default)]
+    pub reflection_map: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -266,4 +314,20 @@ fn one() -> u32 {
 
 fn default_water_color() -> [f32; 4] {
     [0.1, 0.25, 0.3, 0.8]
+}
+
+fn default_water_opaque_depth() -> f32 {
+    4.0
+}
+
+fn default_water_specular() -> [f32; 4] {
+    [1.0, 0.95, 0.85, 1.0]
+}
+
+fn default_water_specular_power() -> f32 {
+    40.0
+}
+
+fn default_water_wave_speed() -> f32 {
+    0.5
 }

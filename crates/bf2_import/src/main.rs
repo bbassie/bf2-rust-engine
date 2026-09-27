@@ -30,7 +30,9 @@ mod level;
 mod meshes;
 mod roads;
 mod soldiers;
+mod sounds;
 mod terrain;
+mod vegetation;
 mod weapons;
 
 #[derive(Parser)]

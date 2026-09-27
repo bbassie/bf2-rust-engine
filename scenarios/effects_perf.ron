@@ -1,0 +1,29 @@
+// Frame times with many effects on Strike at Karkand: hundreds of bullet impacts and
+// explosions re-firing for 10 s, then smoke grenades on top. Run with
+// `RUST_LOG=info,client::effects=debug` to log effect and particle counts.
+// client --scenario scenarios/effects_perf.ron --out target/scenarios/effects/perf
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        // The square, looking north along the street.
+        Teleport((-184.0, 157.0, -85.0), 20.0, -4.0),
+        Wait(1.5),
+        Measure("baseline", 3.0),
+        // 300 impacts and 60 explosions, each firing again every half particle life.
+        Effect("e_bhit_s_concrete", (-189.0, 156.3, -99.0), 150, 10.0),
+        Effect("e_bhit_s_dirt", (-189.0, 156.3, -99.0), 150, 10.0),
+        Effect("e_exp_grenade", (-189.0, 156.3, -110.0), 60, 10.0),
+        Wait(1.0),
+        Screenshot("many"),
+        Measure("impacts_and_explosions", 4.0),
+        Wait(6.0),
+        // 20 smoke grenades: large overlapping sprites, the worst case for fill rate.
+        Effect("e_hgr_smokegrenade", (-189.0, 156.3, -105.0), 20, 20.0),
+        Wait(4.0),
+        Screenshot("smoke"),
+        Measure("smoke", 4.0),
+        Quit,
+    ],
+)

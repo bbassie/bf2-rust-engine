@@ -86,9 +86,11 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         (Some((lo, hi)), Some((t_lo, t_hi))) => (lo.max(t_lo), hi.min(t_hi)),
         (Some(bounds), None) => bounds,
         (None, Some(area)) => area,
-        (None, None) => instances.iter().fold((Vec2::MAX, Vec2::MIN), |(lo, hi), i| {
-            (lo.min(i.min.xz()), hi.max(i.max.xz()))
-        }),
+        (None, None) => instances
+            .iter()
+            .fold((Vec2::MAX, Vec2::MIN), |(lo, hi), i| {
+                (lo.min(i.min.xz()), hi.max(i.max.xz()))
+            }),
     };
     if !(lo.x < hi.x && lo.y < hi.y) {
         return NavGrid {
@@ -102,7 +104,9 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
     }
     // Huge areas get coarser cells to bound memory (about 16 bytes per column).
     let size = hi - lo;
-    params.cell = params.cell.max(((size.x * size.y / MAX_COLUMNS).sqrt() * 4.0).ceil() / 4.0);
+    params.cell = params
+        .cell
+        .max(((size.x * size.y / MAX_COLUMNS).sqrt() * 4.0).ceil() / 4.0);
     let cell = params.cell;
     let origin = (lo / cell).floor() * cell;
     let width = ((hi.x - origin.x) / cell).ceil() as u32;
@@ -118,7 +122,11 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         }
     }
     for i in &instances {
-        if i.max.x >= origin.x && i.min.x <= area_max.x && i.max.z >= origin.y && i.min.z <= area_max.y {
+        if i.max.x >= origin.x
+            && i.min.x <= area_max.x
+            && i.max.z >= origin.y
+            && i.min.z <= area_max.y
+        {
             y_lo = y_lo.min(i.min.y);
             y_hi = y_hi.max(i.max.y);
         }
@@ -135,7 +143,10 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         let t0 = ((i.min.xz() - origin) / tile_size).floor();
         let t1 = ((i.max.xz() - origin) / tile_size).floor();
         let (x0, z0) = ((t0.x as i64).max(0), (t0.y as i64).max(0));
-        let (x1, z1) = ((t1.x as i64).min(tiles_x as i64 - 1), (t1.y as i64).min(tiles_z as i64 - 1));
+        let (x1, z1) = (
+            (t1.x as i64).min(tiles_x as i64 - 1),
+            (t1.y as i64).min(tiles_z as i64 - 1),
+        );
         for tz in z0..=z1 {
             for tx in x0..=x1 {
                 buckets[(tz * tiles_x as i64 + tx) as usize].push(index as u32);
@@ -158,7 +169,9 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
     let tile_count = buckets.len();
     let next = AtomicUsize::new(0);
     // Half the cores, so the running game keeps its share.
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get() / 2).clamp(1, 8);
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get() / 2)
+        .clamp(1, 8);
     let mut tiles: Vec<Option<TileCells>> = (0..tile_count).map(|_| None).collect();
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
@@ -189,7 +202,9 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
     columns.push(0);
     for z in 0..depth {
         for x in 0..width {
-            let tile = tiles[((z / TILE) * tiles_x + x / TILE) as usize].as_ref().unwrap();
+            let tile = tiles[((z / TILE) * tiles_x + x / TILE) as usize]
+                .as_ref()
+                .unwrap();
             let local = ((z % TILE) * tile.width + x % TILE) as usize;
             let (start, end) = (tile.starts[local] as usize, tile.starts[local + 1] as usize);
             raw.extend_from_slice(&tile.cells[start..end]);
@@ -198,7 +213,9 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         if z % TILE == TILE - 1 {
             // Done with this row of tiles.
             let row = (z / TILE * tiles_x) as usize;
-            tiles[row..row + tiles_x as usize].iter_mut().for_each(|t| *t = None);
+            tiles[row..row + tiles_x as usize]
+                .iter_mut()
+                .for_each(|t| *t = None);
         }
     }
     drop(tiles);
@@ -286,16 +303,17 @@ fn distance_field(grid: &mut NavGrid) {
             }
         }
     }
-    let relax = |grid: &NavGrid, dist: &mut [u32], c: super::CellRef, first: usize, second: usize| {
-        let mut d = dist[c.index as usize];
-        if let Some(a) = walk(grid, c, first) {
-            d = d.min(dist[a.index as usize] + 2);
-            if let Some(b) = walk(grid, a, second) {
-                d = d.min(dist[b.index as usize] + 3);
+    let relax =
+        |grid: &NavGrid, dist: &mut [u32], c: super::CellRef, first: usize, second: usize| {
+            let mut d = dist[c.index as usize];
+            if let Some(a) = walk(grid, c, first) {
+                d = d.min(dist[a.index as usize] + 2);
+                if let Some(b) = walk(grid, a, second) {
+                    d = d.min(dist[b.index as usize] + 3);
+                }
             }
-        }
-        dist[c.index as usize] = d;
-    };
+            dist[c.index as usize] = d;
+        };
     for z in 0..grid.depth {
         for x in 0..grid.width {
             for index in grid.column(x, z) {
@@ -494,7 +512,11 @@ impl SpanPool {
                 s.walkable = c.walkable;
                 s.slope = c.slope;
             } else if rise >= -merge && c.walkable {
-                s.slope = if s.walkable { s.slope.max(c.slope) } else { c.slope };
+                s.slope = if s.walkable {
+                    s.slope.max(c.slope)
+                } else {
+                    c.slope
+                };
                 s.walkable = true;
             }
             s.min = s.min.min(c.min);
@@ -560,11 +582,19 @@ impl TileRaster<'_> {
                 corners.push(terrain.height_at(p.x, p.y));
             }
         }
-        let max_tan = (1.0 - self.min_normal_y * self.min_normal_y).max(0.0).sqrt() / self.min_normal_y;
+        let max_tan = (1.0 - self.min_normal_y * self.min_normal_y)
+            .max(0.0)
+            .sqrt()
+            / self.min_normal_y;
         for z in 0..d {
             for x in 0..w {
                 let i = z as usize * stride + x as usize;
-                let (h00, h10, h01, h11) = (corners[i], corners[i + 1], corners[i + stride], corners[i + stride + 1]);
+                let (h00, h10, h01, h11) = (
+                    corners[i],
+                    corners[i + 1],
+                    corners[i + stride],
+                    corners[i + stride + 1],
+                );
                 // The two triangles of the terrain's diagonal split (see `Heightmap::height_at`).
                 let tan_a = Vec2::new(h10 - h00, h11 - h10).length() / cell;
                 let tan_b = Vec2::new(h11 - h01, h01 - h00).length() / cell;
@@ -581,7 +611,11 @@ impl TileRaster<'_> {
         let t_max = tri[0].max(tri[1]).max(tri[2]);
         let (w, d, cell) = (self.w, self.d, self.cell);
         let tile_max = self.min + Vec2::new(w as f32, d as f32) * cell;
-        if t_max.x < self.min.x || t_min.x > tile_max.x || t_max.z < self.min.y || t_min.z > tile_max.y {
+        if t_max.x < self.min.x
+            || t_min.x > tile_max.x
+            || t_max.z < self.min.y
+            || t_min.z > tile_max.y
+        {
             return;
         }
         let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
@@ -593,7 +627,9 @@ impl TileRaster<'_> {
         let ny = normal.y.abs() / area;
         let walkable = ny >= self.min_normal_y;
         let slope = if walkable {
-            ((1.0 - ny * ny).max(0.0).sqrt() / ny * SLOPE_SCALE).ceil().min(255.0) as u8
+            ((1.0 - ny * ny).max(0.0).sqrt() / ny * SLOPE_SCALE)
+                .ceil()
+                .min(255.0) as u8
         } else {
             0
         };
@@ -612,7 +648,9 @@ impl TileRaster<'_> {
             }
             let (row_min, row_max) = row[..n_row]
                 .iter()
-                .fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+                .fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                    (lo.min(p.x), hi.max(p.x))
+                });
             let x0 = (((row_min - self.min.x) / cell).floor() as i32).max(0);
             let x1 = (((row_max - self.min.x) / cell).floor() as i32).min(w as i32 - 1);
             for x in x0..=x1 {
@@ -626,7 +664,9 @@ impl TileRaster<'_> {
                 }
                 let (y_min, y_max) = poly[..n_poly]
                     .iter()
-                    .fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                        (lo.min(p.y), hi.max(p.y))
+                    });
                 self.add(x as u32, z as u32, y_min, y_max, walkable, slope);
             }
         }
@@ -636,7 +676,13 @@ impl TileRaster<'_> {
 /// Clips a convex polygon to the half space `p[axis] >= bound` (or `<=`), returning the
 /// number of vertices written to `out`.
 fn clip(poly: &[Vec3], out: &mut [Vec3; 12], axis: usize, bound: f32, keep_above: bool) -> usize {
-    let side = |p: Vec3| if keep_above { p[axis] - bound } else { bound - p[axis] };
+    let side = |p: Vec3| {
+        if keep_above {
+            p[axis] - bound
+        } else {
+            bound - p[axis]
+        }
+    };
     let mut n = 0;
     for i in 0..poly.len() {
         let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
@@ -714,7 +760,15 @@ fn world_aabb(mesh: &MeshInstance) -> (Vec3, Vec3) {
 pub fn geometry_key(geometry: &LevelGeometry, params: &NavParams) -> u64 {
     let mut h = Fnv::default();
     h.bytes(&VERSION.to_le_bytes());
-    for v in [params.cell, params.voxel, params.height, params.min_normal_y, params.step, params.jump, params.drop] {
+    for v in [
+        params.cell,
+        params.voxel,
+        params.height,
+        params.min_normal_y,
+        params.step,
+        params.jump,
+        params.drop,
+    ] {
         h.f32(v);
     }
     if let Some((lo, hi)) = geometry.bounds {
@@ -741,7 +795,10 @@ pub fn geometry_key(geometry: &LevelGeometry, params: &NavParams) -> u64 {
         });
         let mut instance = Fnv::default();
         instance.bytes(&shape.to_le_bytes());
-        mesh.transform.to_cols_array().into_iter().for_each(|v| instance.f32(v));
+        mesh.transform
+            .to_cols_array()
+            .into_iter()
+            .for_each(|v| instance.f32(v));
         instances = instances.wrapping_add(instance.0);
     }
     h.bytes(&instances.to_le_bytes());

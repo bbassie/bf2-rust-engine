@@ -25,6 +25,7 @@ use game_shared::{
 use super::{
     blend::{BlendLayer, Clip, Play},
     environment::Sun,
+    materials::Bf2Materials,
     scope::Zoom,
 };
 use crate::{
@@ -112,6 +113,7 @@ struct ViewState {
     layer: BlendLayer,
     shots_seen: u32,
     was_reloading: bool,
+    was_cooking: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -282,6 +284,7 @@ fn attach_weapon(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    mut materials: Bf2Materials,
     soldier: Query<(&Loadout, &Inventory), With<LocalSoldier>>,
     mut roots: Query<(&ViewRig, &mut ViewState)>,
 ) {
@@ -312,20 +315,24 @@ fn attach_weapon(
     let Some(gltf) = gltfs.get(handle) else {
         return;
     };
-    for (index, mesh) in gltf.meshes.iter().enumerate() {
-        let (Some(bone), Some(mesh)) = (rig.bones.get(index).copied().flatten(), gltf_meshes.get(mesh)) else {
-            continue;
-        };
-        for primitive in &mesh.primitives {
-            let material: Handle<StandardMaterial> = primitive
-                .material
-                .as_ref()
-                .and_then(|m| m.path())
-                .and_then(|path| {
-                    let label = format!("{}/std", path.label()?);
-                    Some(asset_server.load(path.clone().with_label(label)))
-                })
-                .unwrap_or_default();
+    let meshes: Vec<_> = gltf
+        .meshes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, mesh)| Some((index, rig.bones.get(index).copied().flatten()?, gltf_meshes.get(mesh)?)))
+        .collect();
+    // Wait until the glTF's materials are ready.
+    let Some(part_materials) = meshes
+        .iter()
+        .flat_map(|(_, _, mesh)| &mesh.primitives)
+        .map(|primitive| materials.for_primitive(primitive))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    let mut part_materials = part_materials.into_iter();
+    for (index, bone, mesh) in meshes {
+        for (primitive, material) in mesh.primitives.iter().zip(part_materials.by_ref()) {
             let part = commands
                 .spawn((
                     super::scope::WeaponPart(index),
@@ -382,9 +389,6 @@ const FADE_FIRE_OUT: f32 = 0.08;
 const FADE_BOLT_IN: f32 = 0.1;
 const FADE_ONE_SHOT_IN: f32 = 0.12;
 const FADE_ONE_SHOT_OUT: f32 = 0.25;
-/// Seconds from a bolt-action rifle's shot until it is ready again: BF2's
-/// `animation.shiftDelay` of all its bolt-action rifles.
-const SHIFT_DELAY: f32 = 1.8;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn animate_view_model(
@@ -451,21 +455,30 @@ fn animate_view_model(
         // Bolt-action rifles leave the zoom to work the bolt, so their shot plays unzoomed
         // and the bolt ("load", BF2's shift animation) follows within the shift delay.
         let bolt_action = weapon.zoom.out_after_fire;
+        // Grenades and charges have only a throw.
         let fire = match zoomed && !bolt_action {
             true => clip("zoom_fire").or(clip("fire")),
-            false => clip("fire"),
+            false => clip("fire").or(clip("fire_throw")),
         };
         let fire_time = fire.map_or(0.0, |c| c.duration);
+        // Seconds from the shot until the rifle is ready again (BF2 `animation.shiftDelay`).
+        let shift_delay = weapon.shift_delay.max(fire_time);
         state.next = clip("load").filter(|_| bolt_action).map(|load| OneShot {
-            speed: (load.duration / (SHIFT_DELAY - fire_time).max(0.1)).max(1.0),
+            speed: (load.duration / (shift_delay - fire_time).max(0.1)).max(1.0),
             ..OneShot::new(load, FADE_ONE_SHOT_OUT)
         });
         if bolt_action {
-            zoom.bolt = if state.next.is_some() { SHIFT_DELAY } else { fire_time };
+            zoom.bolt = if state.next.is_some() { shift_delay } else { fire_time };
         }
         // Cuts in so every shot shows at once.
         started = fire.map(|c| (OneShot::new(c, FADE_FIRE_OUT), 0.0));
     }
+    // Winding up a throw pulls the pin; the grenade is then held ready.
+    if feedback.cooking && !state.was_cooking {
+        started = clip("fire_pinremove").map(|c| (OneShot::new(c, FADE_ONE_SHOT_OUT), FADE_ONE_SHOT_IN));
+        state.next = None;
+    }
+    state.was_cooking = feedback.cooking;
     if feedback.reloading && !state.was_reloading {
         started = clip("reload").map(|c| (OneShot::new(c, FADE_ONE_SHOT_OUT), FADE_ONE_SHOT_IN));
         state.next = None;
@@ -498,6 +511,11 @@ fn animate_view_model(
             (false, true, _) => ("sprint", (speed / 6.3).clamp(0.5, 1.5)),
             (false, false, true) => ("run", (speed / 4.2).clamp(0.5, 1.5)),
             _ => ("stand", 1.0),
+        };
+        let base = match (feedback.cooking, clip("stand_loaded_ready").is_some()) {
+            (true, true) => "stand_loaded_ready",
+            (true, false) => "stand_loaded",
+            _ => base,
         };
         if state.base != base {
             if !state.base.is_empty() {

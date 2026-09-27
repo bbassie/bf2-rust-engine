@@ -3,8 +3,11 @@
 
 use bevy::{
     asset::embedded_asset,
-    image::{ImageAddressMode, ImageSamplerDescriptor},
+    ecs::system::SystemParam,
+    gltf::{GltfMaterialExtras, GltfPrimitive},
+    image::{ImageAddressMode, ImageLoaderSettings, ImageSamplerDescriptor},
     pbr::{ExtendedMaterial, MaterialExtension},
+    platform::collections::HashMap,
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
@@ -14,12 +17,14 @@ pub struct MaterialsPlugin;
 
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/static_layers.wgsl");
+        embedded_asset!(app, "shaders/bf2_material.wgsl");
         embedded_asset!(app, "shaders/terrain_layers.wgsl");
         app.add_plugins((
-            MaterialPlugin::<StaticMaterial>::default(),
+            MaterialPlugin::<Bf2Material>::default(),
             MaterialPlugin::<TerrainMaterial>::default(),
-        ));
+        ))
+        .init_resource::<Bf2MaterialCache>()
+        .add_systems(PostUpdate, swap_scene_materials);
     }
 }
 
@@ -93,47 +98,311 @@ pub fn default_sampler() -> ImageSamplerDescriptor {
     sampler
 }
 
-/// Static meshes: base color (UV0) multiplied by a tiling detail texture (UV1).
-pub type StaticMaterial = ExtendedMaterial<StandardMaterial, StaticLayers>;
+/// BF2's materials for static, bundled and skinned meshes: `StandardMaterial` (PBR lighting,
+/// shadows, fog) with BF2's texture layers, normal maps and gloss on top, following the
+/// game's `RaShaderSTM/BM/SM.fx`. Build them with [`Bf2Materials`].
+pub type Bf2Material = ExtendedMaterial<StandardMaterial, Bf2Layers>;
 
-/// Bindless, so the thousands of static objects with different textures still batch into
-/// few draw calls (in the main pass and every shadow cascade).
+/// Bindless, so the thousands of objects with different textures still batch into few draw
+/// calls (in the main pass, the prepass and every shadow cascade). All layers share the
+/// detail texture's sampler; the base color is the `StandardMaterial`'s.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
-#[data(50, StaticLayersUniform, binding_array(101))]
-#[bindless(index_table(range(50..53), binding(100)))]
-pub struct StaticLayers {
+#[data(50, Bf2LayersUniform, binding_array(101))]
+#[bindless(index_table(range(50..58), binding(100)))]
+pub struct Bf2Layers {
+    /// [`Bf2Layers`] flag constants.
     pub flags: u32,
-    pub detail_scale: f32,
+    /// Gloss where no texture provides it (BF2's `StaticGloss`).
+    pub gloss: f32,
+    /// Albedo factor: BF2 doubles the lighting of static meshes.
+    pub albedo_scale: f32,
+    /// Detail texture (UV1), multiplies the base color.
     #[texture(51)]
     #[sampler(52)]
     pub detail: Option<Handle<Image>>,
+    /// Dirt texture (UVs in `COLOR_0.xy`), multiplies the color.
+    #[texture(53)]
+    pub dirt: Option<Handle<Image>>,
+    /// Crack texture (UVs in `COLOR_0.zw`), blended over by its alpha.
+    #[texture(54)]
+    pub crack: Option<Handle<Image>>,
+    /// Normal map: static meshes' detail normals (UV1), others' tangent or object space
+    /// normals (UV0).
+    #[texture(55)]
+    pub normal: Option<Handle<Image>>,
+    /// Crack normal map, blended over the detail normals by the crack's alpha.
+    #[texture(56)]
+    pub crack_normal: Option<Handle<Image>>,
+    /// Reflection cube map for `EnvMap` techniques.
+    #[texture(57, dimension = "cube")]
+    pub env_map: Option<Handle<Image>>,
 }
 
-impl StaticLayers {
-    pub const HAS_DETAIL: u32 = 1;
-    pub const ALPHA_FROM_DETAIL: u32 = 2;
+impl Bf2Layers {
+    pub const DETAIL: u32 = 1 << 0;
+    pub const DIRT: u32 = 1 << 1;
+    pub const CRACK: u32 = 1 << 2;
+    /// Tangent space normal map.
+    pub const NORMAL_MAP: u32 = 1 << 3;
+    /// The normal map uses UV1 (static detail normals).
+    pub const NORMAL_UV_B: u32 = 1 << 4;
+    /// Object space normal map (skinned meshes); the unskinned vertex frame is packed into
+    /// `COLOR_0` and `TEXCOORD_1`.
+    pub const OBJECT_SPACE: u32 = 1 << 5;
+    pub const CRACK_NORMAL: u32 = 1 << 6;
+    /// Parallax on the detail UVs, height from the normal map's alpha.
+    pub const PARALLAX: u32 = 1 << 7;
+    pub const GLOSS_FROM_DETAIL: u32 = 1 << 8;
+    pub const GLOSS_FROM_NORMAL: u32 = 1 << 9;
+    /// `ColormapGloss`: the color map's alpha is gloss and the surface is opaque.
+    pub const GLOSS_FROM_BASE: u32 = 1 << 10;
+    /// Alpha test on base alpha x detail alpha.
+    pub const ALPHA_FROM_DETAIL: u32 = 1 << 11;
+    /// Alpha test on the color's brightness (`ColormapGloss` with `Alpha_Test`).
+    pub const ALPHA_FROM_COLOR: u32 = 1 << 12;
+    pub const ENV_MAP: u32 = 1 << 13;
+    /// `AnimatedUV` at rest: the color map's UV is UV0 + UV1.
+    pub const UV_SUM: u32 = 1 << 14;
 }
 
 #[derive(ShaderType, Clone, Default)]
-pub struct StaticLayersUniform {
+pub struct Bf2LayersUniform {
     pub flags: u32,
-    pub detail_scale: f32,
-    pub _pad: Vec2,
+    pub gloss: f32,
+    pub albedo_scale: f32,
+    pub _pad: f32,
 }
 
-impl From<&StaticLayers> for StaticLayersUniform {
-    fn from(layers: &StaticLayers) -> Self {
+impl From<&Bf2Layers> for Bf2LayersUniform {
+    fn from(layers: &Bf2Layers) -> Self {
         Self {
             flags: layers.flags,
-            detail_scale: layers.detail_scale,
-            _pad: Vec2::ZERO,
+            gloss: layers.gloss,
+            albedo_scale: layers.albedo_scale,
+            _pad: 0.0,
         }
     }
 }
 
-impl MaterialExtension for StaticLayers {
+impl MaterialExtension for Bf2Layers {
+    // `embedded_asset!` names paths after the crate, which is the `client` binary. One file
+    // serves both pipelines (`PREPASS_PIPELINE`).
     fn fragment_shader() -> ShaderRef {
-        // `embedded_asset!` names paths after the crate, which is the `client` binary.
-        "embedded://client/render/shaders/static_layers.wgsl".into()
+        "embedded://client/render/shaders/bf2_material.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://client/render/shaders/bf2_material.wgsl".into()
     }
 }
+
+/// One BF2 material per glTF material, shared by everything using it.
+#[derive(Resource, Default)]
+struct Bf2MaterialCache {
+    materials: HashMap<AssetId<StandardMaterial>, Handle<Bf2Material>>,
+    untextured: Option<Handle<Bf2Material>>,
+}
+
+/// Makes BF2 materials from glTF materials: the `StandardMaterial` Bevy's glTF loader
+/// creates for each, plus the material's `bf2` extras written by the importer
+/// (`kind`, `technique`, `maps`).
+#[derive(SystemParam)]
+pub struct Bf2Materials<'w> {
+    cache: ResMut<'w, Bf2MaterialCache>,
+    standard: Res<'w, Assets<StandardMaterial>>,
+    materials: ResMut<'w, Assets<Bf2Material>>,
+    asset_server: Res<'w, AssetServer>,
+}
+
+impl Bf2Materials<'_> {
+    /// The material of a glTF primitive; `None` while the glTF's materials are loading.
+    pub fn for_primitive(&mut self, primitive: &GltfPrimitive) -> Option<Handle<Bf2Material>> {
+        let Some(gltf_material) = &primitive.material else {
+            let materials = &mut self.materials;
+            return Some(
+                self.cache
+                    .untextured
+                    .get_or_insert_with(|| materials.add(Bf2Material::default()))
+                    .clone(),
+            );
+        };
+        // Bevy's glTF loader stores a StandardMaterial next to every glTF material.
+        let path = gltf_material.path()?;
+        let standard = self
+            .asset_server
+            .load(path.clone().with_label(format!("{}/std", path.label()?)));
+        self.from_standard(&standard, primitive.material_extras.as_ref().map(|e| e.value.as_str()))
+    }
+
+    /// The material for a glTF material's `StandardMaterial` and extras JSON; `None` while
+    /// the `StandardMaterial` is loading.
+    pub fn from_standard(
+        &mut self,
+        standard: &Handle<StandardMaterial>,
+        extras: Option<&str>,
+    ) -> Option<Handle<Bf2Material>> {
+        if let Some(done) = self.cache.materials.get(&standard.id()) {
+            return Some(done.clone());
+        }
+        let base = self.standard.get(standard)?.clone();
+        let bf2 = extras
+            .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+            .map(|v| v["bf2"].clone())
+            .unwrap_or_default();
+        let path = standard
+            .path()
+            .map(|p| p.path().to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let material = describe(base, &bf2, &path, &self.asset_server);
+        let handle = self.materials.add(material);
+        self.cache.materials.insert(standard.id(), handle.clone());
+        Some(handle)
+    }
+}
+
+/// The layers of a static mesh technique (`BaseDetailDirtCrackNDetailNCrack`, ...) in the
+/// order its maps are listed, and whether it has the `parallaxdetail` suffix.
+fn static_layers(technique: &str) -> (Vec<&'static str>, bool) {
+    let technique = technique.to_ascii_lowercase();
+    let mut rest = technique.as_str();
+    let mut layers = Vec::new();
+    'layers: loop {
+        for name in ["ndetail", "ncrack", "base", "detail", "dirt", "crack"] {
+            if let Some(after) = rest.strip_prefix(name) {
+                layers.push(name);
+                rest = after;
+                continue 'layers;
+            }
+        }
+        break;
+    }
+    (layers, rest.contains("parallax"))
+}
+
+/// Gloss of surfaces without a gloss map (BF2's global `StaticGloss`, value unknown).
+const STATIC_GLOSS: f32 = 0.15;
+
+fn describe(mut base: StandardMaterial, bf2: &serde_json::Value, path: &str, asset_server: &AssetServer) -> Bf2Material {
+    let technique = bf2["technique"].as_str().unwrap_or_default().to_ascii_lowercase();
+    let maps: Vec<Option<&str>> = bf2["maps"]
+        .as_array()
+        .map(|maps| maps.iter().map(|m| m["path"].as_str()).collect())
+        .unwrap_or_default();
+    let map = |i: usize| maps.get(i).copied().flatten().map(|p| format!("imported://{p}"));
+    let color = |i: usize| map(i).map(|p| asset_server.load::<Image>(p));
+    let linear = |i: usize| {
+        map(i).map(|p| asset_server.load_with_settings::<Image, ImageLoaderSettings>(p, |s| s.is_srgb = false))
+    };
+    // Older files have no `kind`; static techniques are the ones made of layers.
+    let kind = bf2["kind"]
+        .as_str()
+        .unwrap_or(if technique.starts_with("base") { "static" } else { "bundled" });
+    let alpha_test = matches!(base.alpha_mode, AlphaMode::Mask(_));
+
+    let mut layers = Bf2Layers {
+        gloss: STATIC_GLOSS,
+        albedo_scale: 1.0,
+        ..default()
+    };
+    // The glTF normal texture (loaded as linear data) is applied by the extension.
+    let normal_map = base.normal_map_texture.take();
+    base.metallic = 0.0;
+
+    if kind == "static" {
+        let (names, parallax) = static_layers(&technique);
+        let mut crack = false;
+        for (i, name) in names.iter().enumerate() {
+            match *name {
+                "detail" => layers.detail = color(i),
+                "dirt" => layers.dirt = color(i),
+                "crack" => {
+                    layers.crack = color(i);
+                    crack = layers.crack.is_some();
+                }
+                "ndetail" => layers.normal = linear(i),
+                "ncrack" => layers.crack_normal = linear(i),
+                _ => {}
+            }
+        }
+        let detail = layers.detail.is_some();
+        let normal = layers.normal.is_some();
+        // BF2 only draws cracks on its per-pixel lit path (techniques with normal maps).
+        let per_pixel = normal || layers.crack_normal.is_some() || parallax;
+        for (on, flag) in [
+            (detail, Bf2Layers::DETAIL),
+            (layers.dirt.is_some(), Bf2Layers::DIRT),
+            (crack && per_pixel, Bf2Layers::CRACK),
+            (normal, Bf2Layers::NORMAL_MAP | Bf2Layers::NORMAL_UV_B),
+            (crack && per_pixel && layers.crack_normal.is_some(), Bf2Layers::CRACK_NORMAL),
+            (parallax && normal, Bf2Layers::PARALLAX),
+            (detail && !alpha_test, Bf2Layers::GLOSS_FROM_DETAIL),
+            (detail && alpha_test, Bf2Layers::ALPHA_FROM_DETAIL),
+        ] {
+            if on {
+                layers.flags |= flag;
+            }
+        }
+        // With a detail layer and no alpha test, BF2 replaces the alpha with the object's
+        // transparency (normally opaque).
+        if detail && !alpha_test && base.alpha_mode != AlphaMode::Opaque {
+            base.alpha_mode = AlphaMode::Opaque;
+        }
+        if path.contains("vegitation") {
+            // Trees use BF2's leaf and trunk shaders: no specular, leaves without the 2x.
+            layers.flags &= !Bf2Layers::GLOSS_FROM_DETAIL;
+            layers.gloss = 0.0;
+            layers.albedo_scale = if alpha_test { 1.0 } else { 2.0 };
+        } else {
+            layers.albedo_scale = 2.0;
+        }
+    } else {
+        let colormap_gloss = technique.contains("colormapgloss");
+        if let Some(normal) = normal_map {
+            layers.normal = Some(normal);
+            layers.flags |= if kind == "skinned" && !technique.contains("tangent") {
+                Bf2Layers::OBJECT_SPACE
+            } else {
+                Bf2Layers::NORMAL_MAP
+            };
+            if !colormap_gloss {
+                layers.flags |= Bf2Layers::GLOSS_FROM_NORMAL;
+            }
+        }
+        if colormap_gloss {
+            layers.flags |= Bf2Layers::GLOSS_FROM_BASE;
+            if alpha_test {
+                layers.flags |= Bf2Layers::ALPHA_FROM_COLOR;
+            }
+        }
+        if technique.contains("animateduv") {
+            layers.flags |= Bf2Layers::UV_SUM;
+        }
+    }
+    Bf2Material { base, extension: layers }
+}
+
+/// glTF scenes (soldiers, first-person arms, flags) spawn with Bevy's `StandardMaterial`;
+/// swap in the BF2 material where the glTF material has `bf2` extras.
+#[allow(clippy::type_complexity)]
+fn swap_scene_materials(
+    mut commands: Commands,
+    meshes: Query<(Entity, &MeshMaterial3d<StandardMaterial>, &GltfMaterialExtras), Without<Bf2Checked>>,
+    mut bf2: Bf2Materials,
+) {
+    for (entity, material, extras) in &meshes {
+        if !extras.value.contains("\"bf2\"") {
+            commands.entity(entity).insert(Bf2Checked);
+            continue;
+        }
+        if let Some(handle) = bf2.from_standard(&material.0, Some(&extras.value)) {
+            commands
+                .entity(entity)
+                .remove::<MeshMaterial3d<StandardMaterial>>()
+                .insert((MeshMaterial3d(handle), Bf2Checked));
+        }
+    }
+}
+
+/// A scene mesh [`swap_scene_materials`] has handled.
+#[derive(Component)]
+struct Bf2Checked;

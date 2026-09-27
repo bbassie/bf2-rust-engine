@@ -43,12 +43,13 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Health, death, respawn, kill feed, scoreboard
 - [x] Deploy screen with kit and spawn point selection on the level's map
 - Movement like BF2: stairs and ledges, slopes, jumping (in progress)
-- Smooth animation blending, first and third person (in progress)
-- Scopes: zoomed scope view and reticles (in progress)
-- Destructible objects (barricades, barrels, signs) and BF2's material damage table
-  (in progress)
+- [x] Smooth animation blending, first and third person: crossfades, directional
+  movement, speed-matched playback, jumps, turning in place, remote fire/reload
+- [x] Scopes: BF2's zoom models with reticles, bolt-action rifles leave the scope
+- [x] Destructible objects (barricades, barrels, signs, wrecks, chain explosions) and
+  BF2's material damage table
 - Ladders: climbing up and down, getting on and off at the top
-- Thrown and launched projectiles: hand grenades (cooking, bouncing, fuse), smoke grenades
+- Thrown and launched projectiles (in progress): hand grenades (cooking, bouncing, fuse), smoke grenades
   with smoke that blocks sight, under-barrel grenade launchers, rocket launchers, C4 and
   claymores, shotgun pellets
 - Lag compensation
@@ -64,8 +65,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Scoreboard, kill feed, capture notifications, flag and ticket HUD
 - [x] Flag models moving on their poles
 - [x] Minimap (north up or turning with the view)
-- Capture sounds, a full-screen map
-- Squads and commander (basic)
+- [x] Commander announcements (captures, losses, ticket bleed) in the team's language
+- [x] Full-screen map (hold M)
+- [x] Squads: create/join/leave, squad leader spawning, bots in squads
+- Commander: orders to squads, commander assets
 
 ## M3: Vehicles
 
@@ -83,9 +86,12 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 ## M5: Presentation
 
-- BF2-accurate materials (detail/dirt/crack/lightmap layers on statics, normal-mapped
-  bundled meshes), terrain splatting, water, undergrowth/overgrowth, effects, audio
-- Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
+- BF2-accurate materials: dirt/crack layers on statics, normal-mapped bundled and skinned
+  meshes, environment maps (in progress)
+- Water, undergrowth/overgrowth, surrounding terrain (in progress)
+- Effects: particles for muzzle flashes, impacts, explosions, smoke (in progress)
+- Audio: footsteps, distance falloff, flybys, ambience (in progress)
+- Main menu (in progress) (play/host/join, level and mode selection), server browser, settings (graphics,
   audio, controls, key bindings, mouse sensitivity, field of view) saved to disk, pause menu:
   a modern design of our own, not a copy of BF2's UI
 

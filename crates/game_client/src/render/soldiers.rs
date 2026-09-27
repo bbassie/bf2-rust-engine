@@ -27,7 +27,10 @@ use game_shared::{
     weapons::{Armory, Inventory, Loadout},
 };
 
-use super::blend::{BlendLayer, Clip, Play};
+use super::{
+    blend::{BlendLayer, Clip, Play},
+    materials::Bf2Materials,
+};
 use crate::{
     combat::CombatFeedback,
     net::LocalSoldier,
@@ -561,6 +564,7 @@ fn attach_weapons(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
+    mut materials: Bf2Materials,
     soldiers: Query<(Option<&Loadout>, Option<&Inventory>)>,
     mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&SoldierAnimator>, Option<&mut HeldWeapon>)>,
 ) {
@@ -602,21 +606,25 @@ fn attach_weapons(
             }
             continue;
         };
+        let meshes: Vec<_> = gltf
+            .meshes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mesh)| Some((rig.weapon_bones.get(index).copied().flatten()?, gltf_meshes.get(mesh)?)))
+            .collect();
+        // Wait until the glTF's materials are ready.
+        let Some(part_materials) = meshes
+            .iter()
+            .flat_map(|(_, mesh)| &mesh.primitives)
+            .map(|primitive| materials.for_primitive(primitive))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let mut part_materials = part_materials.into_iter();
         let mut parts = Vec::new();
-        for (index, mesh) in gltf.meshes.iter().enumerate() {
-            let (Some(bone), Some(mesh)) = (rig.weapon_bones.get(index).copied().flatten(), gltf_meshes.get(mesh)) else {
-                continue;
-            };
-            for primitive in &mesh.primitives {
-                let material: Handle<StandardMaterial> = primitive
-                    .material
-                    .as_ref()
-                    .and_then(|m| m.path())
-                    .and_then(|path| {
-                        let label = format!("{}/std", path.label()?);
-                        Some(asset_server.load(path.clone().with_label(label)))
-                    })
-                    .unwrap_or_default();
+        for (bone, mesh) in meshes {
+            for (primitive, material) in mesh.primitives.iter().zip(part_materials.by_ref()) {
                 parts.push(
                     commands
                         .spawn((Mesh3d(primitive.mesh.clone()), MeshMaterial3d(material), ChildOf(bone)))

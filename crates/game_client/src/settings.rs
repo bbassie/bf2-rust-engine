@@ -15,7 +15,10 @@ use bevy::{
     ecs::system::SystemParam,
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
-    window::{MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution},
+    window::{
+        MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode,
+        WindowResolution,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +38,9 @@ impl Plugin for SettingsPlugin {
             (
                 apply_look.run_if(resource_changed::<Settings>),
                 apply_volume.run_if(resource_changed::<Settings>),
-                apply_window.run_if(resource_changed::<Settings>),
+                apply_window
+                    .run_if(resource_changed::<Settings>)
+                    .before(bevy::camera::CameraUpdateSystems),
                 apply_graphics,
                 save_settings,
             ),
@@ -78,7 +83,11 @@ impl SettingsFile {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    let env = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let env = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
     if cfg!(windows) {
         env("APPDATA")
     } else if cfg!(target_os = "macos") {
@@ -123,7 +132,10 @@ impl Default for Settings {
             vsync: false,
             shadows: true,
             ambient_occlusion: true,
-            bindings: Action::ALL.iter().map(|a| (*a, a.default_binding())).collect(),
+            bindings: Action::ALL
+                .iter()
+                .map(|a| (*a, a.default_binding()))
+                .collect(),
             last_match: LastMatch::default(),
         }
     }
@@ -131,13 +143,19 @@ impl Default for Settings {
 
 impl Settings {
     pub fn binding(&self, action: Action) -> Binding {
-        self.bindings.get(&action).copied().unwrap_or(action.default_binding())
+        self.bindings
+            .get(&action)
+            .copied()
+            .unwrap_or(action.default_binding())
     }
 
     /// Binds `action`, giving its old binding to whichever action had `binding`.
     pub fn rebind(&mut self, action: Action, binding: Binding) {
         let old = self.binding(action);
-        if let Some(other) = Action::ALL.iter().find(|a| **a != action && self.binding(**a) == binding) {
+        if let Some(other) = Action::ALL
+            .iter()
+            .find(|a| **a != action && self.binding(**a) == binding)
+        {
             self.bindings.insert(*other, old);
         }
         self.bindings.insert(action, binding);
@@ -145,7 +163,9 @@ impl Settings {
 
     fn fill_missing_bindings(&mut self) {
         for action in Action::ALL {
-            self.bindings.entry(action).or_insert(action.default_binding());
+            self.bindings
+                .entry(action)
+                .or_insert(action.default_binding());
         }
     }
 
@@ -172,7 +192,11 @@ impl Settings {
     }
 
     fn present_mode(&self) -> PresentMode {
-        if self.vsync { PresentMode::AutoVsync } else { PresentMode::AutoNoVsync }
+        if self.vsync {
+            PresentMode::AutoVsync
+        } else {
+            PresentMode::AutoNoVsync
+        }
     }
 }
 
@@ -185,7 +209,11 @@ pub enum DisplayMode {
 }
 
 impl DisplayMode {
-    pub const ALL: [DisplayMode; 3] = [DisplayMode::Windowed, DisplayMode::Borderless, DisplayMode::Fullscreen];
+    pub const ALL: [DisplayMode; 3] = [
+        DisplayMode::Windowed,
+        DisplayMode::Borderless,
+        DisplayMode::Fullscreen,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -214,6 +242,8 @@ pub struct LastMatch {
     pub bots: u32,
     pub team: u8,
     pub spectate: bool,
+    /// Host: let players on other machines join (otherwise only this machine can).
+    pub public: bool,
     /// Server address for Join (IP or host name).
     pub address: String,
     pub port: u16,
@@ -228,6 +258,7 @@ impl Default for LastMatch {
             bots: 7,
             team: 1,
             spectate: false,
+            public: true,
             address: "127.0.0.1".into(),
             port: game_shared::DEFAULT_PORT,
         }
@@ -255,11 +286,13 @@ pub enum Action {
     ThirdPerson,
     Deploy,
     Scoreboard,
+    /// Full-screen map while held.
+    Map,
     MinimapRotation,
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 27] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -276,6 +309,7 @@ impl Action {
         Action::ThirdPerson,
         Action::Deploy,
         Action::Scoreboard,
+        Action::Map,
         Action::MinimapRotation,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
@@ -307,6 +341,7 @@ impl Action {
             Action::ThirdPerson => "Third person view".into(),
             Action::Deploy => "Deploy screen".into(),
             Action::Scoreboard => "Scoreboard".into(),
+            Action::Map => "Map".into(),
             Action::MinimapRotation => "Minimap rotation".into(),
         }
     }
@@ -349,6 +384,7 @@ impl Action {
             Action::ThirdPerson => Key(KeyCode::KeyV),
             Action::Deploy => Key(KeyCode::Enter),
             Action::Scoreboard => Key(KeyCode::Tab),
+            Action::Map => Key(KeyCode::KeyM),
             Action::MinimapRotation => Key(KeyCode::KeyN),
         }
     }
@@ -466,6 +502,7 @@ fn apply_volume(
 fn apply_window(
     settings: Res<Settings>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
+    mut projections: Query<&mut Projection>,
     mut applied: Local<Option<(DisplayMode, (u32, u32), bool)>>,
 ) {
     let wanted = (settings.window_mode, settings.window_size, settings.vsync);
@@ -478,7 +515,17 @@ fn apply_window(
     }
     if (last.0 != wanted.0 || last.1 != wanted.1) && wanted.0 == DisplayMode::Windowed {
         let (width, height) = wanted.1;
-        window.resolution.set(width.max(640) as f32, height.max(360) as f32);
+        window
+            .resolution
+            .set(width.max(640) as f32, height.max(360) as f32);
+    }
+    if last.0 != wanted.0 || last.1 != wanted.1 {
+        // Every camera must pick up the new size this frame: cameras on one window share
+        // their depth and color textures, and would otherwise disagree about their size
+        // until the window's resize event (a crash in the render passes).
+        for mut projection in &mut projections {
+            projection.set_changed();
+        }
     }
     if last.2 != wanted.2 {
         window.present_mode = settings.present_mode();

@@ -86,6 +86,7 @@ pub fn import_level(
 
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
+    let vegetation = crate::vegetation::import(&mut interp, &converter, &name, &level_dir, &terrain);
     let static_templates: HashSet<String> = interp.world.instances[static_range.clone()]
         .iter()
         .map(|i| i.template.to_ascii_lowercase())
@@ -123,6 +124,9 @@ pub fn import_level(
     }
     if let Err(err) = crate::effects::import_surfaces(world, &converter, &objects, &level_dir) {
         log::warn!("surfaces: {err:#}");
+    }
+    if let Err(err) = crate::sounds::import_level(&vfs, world, &level_dir, out) {
+        log::warn!("sounds: {err:#}");
     }
 
     let statics: Vec<StaticInstance> = static_instances
@@ -167,6 +171,7 @@ pub fn import_level(
         minimap,
         flag_models,
         ticket_loss_at_end_per_minute,
+        vegetation,
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
 

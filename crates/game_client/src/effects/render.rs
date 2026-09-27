@@ -272,7 +272,7 @@ fn chunk_mesh(chunk: usize) -> Mesh {
         positions.extend([[index, 0.0, 0.0], [index, 1.0, 0.0], [index, 1.0, 1.0], [index, 0.0, 1.0]]);
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_indices(Indices::U32(indices))
 }

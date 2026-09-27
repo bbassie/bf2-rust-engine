@@ -132,7 +132,6 @@ pub struct BotBrain {
     /// Closest the bot got to the current waypoint, and for how long it hasn't got closer.
     waypoint_best: f32,
     waypoint_timer: f32,
-    debug_slow: f32,
 }
 
 impl Default for BotBrain {
@@ -163,7 +162,6 @@ impl Default for BotBrain {
             repath_cooldown: 0.0,
             waypoint_best: f32::MAX,
             waypoint_timer: 0.0,
-            debug_slow: 0.0,
         }
     }
 }
@@ -458,41 +456,6 @@ fn think(
         if moved < 0.5 * dt && brain.unstuck_timer <= 0.0 {
             brain.stuck_time += dt;
             stats.stuck_seconds += dt;
-            brain.debug_slow += dt;
-            if brain.debug_slow > 5.0 {
-                brain.debug_slow = 0.0;
-                let target = brain.path.as_ref().and_then(|p| p.waypoints.get(brain.waypoint)).map(|w| w.position);
-                warn!(
-                    "DEBUG slow bot at {:?} goal {:?} target {:?} wp {}/{} task {} unstuck {:.2} stuck_time {:.2} grounded {} vel {:?}",
-                    motion.position,
-                    brain.goal,
-                    target,
-                    brain.waypoint,
-                    brain.path.as_ref().map_or(0, |p| p.waypoints.len()),
-                    brain.path_task.is_some(),
-                    brain.unstuck_timer,
-                    brain.stuck_time,
-                    motion.grounded,
-                    motion.velocity,
-                );
-                if let Some(nav) = nav.as_deref()
-                    && let Some((cx, cz)) = nav.0.column_at(motion.position.x, motion.position.z)
-                {
-                    let mut dump = String::new();
-                    for z in cz.saturating_sub(4)..cz + 5 {
-                        for x in cx.saturating_sub(4)..cx + 5 {
-                            let cells: Vec<String> = nav.0.column(x, z).map(|i| {
-                                let c = nav.0.cell(crate::nav::CellRef { x, z, index: i });
-                                let links: String = c.links.iter().map(|&l| if l == 255 { '-' } else { char::from(b'0' + l.min(9)) }).collect();
-                                format!("{:.2}/{}/{}", c.y, c.dist, links)
-                            }).collect();
-                            dump += &format!("{:>28}", cells.join(","));
-                        }
-                        dump += "\n";
-                    }
-                    warn!("DEBUG grid around {cx},{cz} (+x right, +z down):\n{dump}");
-                }
-            }
         } else {
             brain.stuck_time = 0.0;
         }

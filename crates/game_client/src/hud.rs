@@ -12,6 +12,7 @@ use game_shared::{
     level::LoadedLevel,
     protocol::{Player, Score, Team},
     soldier::Health,
+    squad::{SquadMember, squad_name},
     weapons::{Armory, Inventory, Loadout},
 };
 
@@ -448,7 +449,7 @@ fn update_death_notice(
 
 fn update_scoreboard(
     actions: Actions,
-    players: Query<(&Player, &Team, &Score, Has<LocalPlayer>)>,
+    players: Query<(&Player, &Team, &Score, Option<&SquadMember>, Has<LocalPlayer>)>,
     mut board: Single<&mut Visibility, With<Scoreboard>>,
     mut columns: Query<(&ScoreboardColumn, &mut Text)>,
     level: Option<Res<LoadedLevel>>,
@@ -466,14 +467,18 @@ fn update_scoreboard(
             .map(|t| t.name.clone())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| format!("Team {}", column.0 + 1));
-        let mut rows: Vec<_> = players.iter().filter(|(_, t, _, _)| **t == team).collect();
+        let mut rows: Vec<_> = players.iter().filter(|(_, t, ..)| **t == team).collect();
         rows.sort_by(|a, b| b.2.score.cmp(&a.2.score));
-        let mut out = format!("{name}\n{:<24}{:>6}{:>6}{:>7}\n", "", "K", "D", "SCORE");
-        for (player, _, score, local) in rows {
+        let mut out = format!("{name}\n{:<22}{:<9}{:>5}{:>5}{:>7}\n", "", "SQUAD", "K", "D", "SCORE");
+        for (player, _, score, squad, local) in rows {
             let marker = if local { "> " } else { "  " };
-            let name: String = player.name.chars().take(20).collect();
+            let name: String = player.name.chars().take(19).collect();
+            // `*` marks the squad leader.
+            let squad = squad.map_or(String::new(), |s| {
+                format!("{}{}", squad_name(s.squad), if s.leader { "*" } else { "" })
+            });
             out += &format!(
-                "{marker}{name:<22}{:>6}{:>6}{:>7}\n",
+                "{marker}{name:<20}{squad:<9}{:>5}{:>5}{:>7}\n",
                 score.kills, score.deaths, score.score
             );
         }

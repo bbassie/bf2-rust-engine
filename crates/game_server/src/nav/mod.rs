@@ -232,7 +232,8 @@ impl NavGrid {
                 for index in self.column(x, z) {
                     let c = &self.cells[index as usize];
                     let dy = c.y - pos.y;
-                    if c.region == 0 || region.is_some_and(|r| r != c.region) || !(-3.0..=1.0).contains(&dy) {
+                    let wanted = c.region != 0 && region.is_none_or(|r| r == c.region);
+                    if !wanted || !(-3.0..=1.0).contains(&dy) {
                         continue;
                     }
                     let edge = if c.dist == 0 { 0.2 } else { 0.0 };
@@ -249,7 +250,9 @@ impl NavGrid {
     /// Usable cells in the columns within `radius` of `center` (XZ).
     pub fn cells_near(&self, center: Vec2, radius: f32) -> impl Iterator<Item = CellRef> + '_ {
         let cell = self.params.cell;
-        let lo = ((center - radius - self.origin) / cell).floor().max(Vec2::ZERO);
+        let lo = ((center - radius - self.origin) / cell)
+            .floor()
+            .max(Vec2::ZERO);
         let hi = ((center + radius - self.origin) / cell)
             .floor()
             .min(Vec2::new(self.width as f32 - 1.0, self.depth as f32 - 1.0));
@@ -272,7 +275,10 @@ fn start_build(
     match_info: Query<&MatchInfo>,
     tuning: Res<SoldierTuning>,
     terrain: Query<&Terrain, With<LevelEntity>>,
-    colliders: Query<(&Collider, &Transform, &CollisionLayers), (With<LevelEntity>, Without<ColliderDisabled>)>,
+    colliders: Query<
+        (&Collider, &Transform, &CollisionLayers),
+        (With<LevelEntity>, Without<ColliderDisabled>),
+    >,
 ) {
     commands.remove_resource::<Navigation>();
     let params = NavParams::from_tuning(&tuning);
@@ -296,8 +302,10 @@ fn start_build(
         bounds: layout.and_then(gameplay_bounds),
     };
     let cache_path = level.dir.as_ref().map(|dir| {
-        let name = layout.map_or("navgrid.bin".into(), |l| format!("navgrid_{}_{}.bin", l.mode, l.size));
-        dir.join(name)
+        dir.join(match layout {
+            Some(l) => format!("navgrid_{}_{}.bin", l.mode, l.size),
+            None => "navgrid.bin".into(),
+        })
     });
     let name = level.desc.name.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
@@ -398,7 +406,12 @@ mod tests {
 
     /// A 3 m wall along z = 0 over the whole level, with a gap from `door.0` to `door.1`.
     fn wall(door: Option<(f32, f32)>) -> Vec<MeshInstance> {
-        let segment = |x0: f32, x1: f32| cuboid(Vec3::new((x0 + x1) / 2.0, 1.5, 0.0), Vec3::new(x1 - x0, 3.0, 0.3));
+        let segment = |x0: f32, x1: f32| {
+            cuboid(
+                Vec3::new((x0 + x1) / 2.0, 1.5, 0.0),
+                Vec3::new(x1 - x0, 3.0, 0.3),
+            )
+        };
         match door {
             Some((a, b)) => vec![segment(-32.0, a), segment(b, 32.0)],
             None => vec![segment(-32.0, 32.0)],
@@ -420,18 +433,26 @@ mod tests {
     #[test]
     fn walks_through_a_door() {
         let grid = grid(wall(Some((4.1, 5.1))));
-        let path = grid.find_path(Vec3::new(-10.0, 0.0, -10.0), Vec3::new(-10.0, 0.0, 10.0)).unwrap();
+        let path = grid
+            .find_path(Vec3::new(-10.0, 0.0, -10.0), Vec3::new(-10.0, 0.0, 10.0))
+            .unwrap();
         assert!(path.complete);
         let crossings = crossings(&path);
         assert_eq!(crossings.len(), 1, "{path:?}");
-        assert!((4.1..=5.1).contains(&crossings[0]), "crossed the wall at x = {}", crossings[0]);
+        assert!(
+            (4.1..=5.1).contains(&crossings[0]),
+            "crossed the wall at x = {}",
+            crossings[0]
+        );
         assert!(path.waypoints.len() <= 6, "path not smoothed: {path:?}");
     }
 
     #[test]
     fn walls_separate_regions() {
         let grid = grid(wall(None));
-        let path = grid.find_path(Vec3::new(-10.0, 0.0, -10.0), Vec3::new(-10.0, 0.0, 10.0)).unwrap();
+        let path = grid
+            .find_path(Vec3::new(-10.0, 0.0, -10.0), Vec3::new(-10.0, 0.0, 10.0))
+            .unwrap();
         assert!(!path.complete);
         assert!(crossings(&path).is_empty());
     }
@@ -440,10 +461,19 @@ mod tests {
     fn jumps_onto_ledges() {
         let params = NavParams::from_tuning(&SoldierTuning::default());
         let height = (params.step + params.jump) / 2.0;
-        let grid = grid(vec![cuboid(Vec3::new(0.0, height / 2.0, 10.0), Vec3::new(6.0, height, 6.0))]);
-        let path = grid.find_path(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, height, 10.0)).unwrap();
+        let grid = grid(vec![cuboid(
+            Vec3::new(0.0, height / 2.0, 10.0),
+            Vec3::new(6.0, height, 6.0),
+        )]);
+        let path = grid
+            .find_path(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, height, 10.0))
+            .unwrap();
         assert!(path.complete);
-        assert_eq!(path.waypoints.iter().filter(|w| w.jump).count(), 1, "{path:?}");
+        assert_eq!(
+            path.waypoints.iter().filter(|w| w.jump).count(),
+            1,
+            "{path:?}"
+        );
         assert!((path.waypoints.last().unwrap().position.y - height).abs() < 0.1);
     }
 
@@ -455,17 +485,29 @@ mod tests {
         assert!(super::cache::load(&path, 43, grid.params).is_none());
         let loaded = super::cache::load(&path, 42, grid.params).unwrap();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!((loaded.origin, loaded.width, loaded.depth), (grid.origin, grid.width, grid.depth));
+        assert_eq!(
+            (loaded.origin, loaded.width, loaded.depth),
+            (grid.origin, grid.width, grid.depth)
+        );
         assert_eq!(loaded.columns, grid.columns);
-        assert_eq!(bytemuck::cast_slice::<_, u8>(&loaded.cells), bytemuck::cast_slice::<_, u8>(&grid.cells));
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&loaded.cells),
+            bytemuck::cast_slice::<_, u8>(&grid.cells)
+        );
     }
 
     #[test]
     fn drops_down_but_not_up() {
-        let grid = grid(vec![cuboid(Vec3::new(0.0, 1.0, 0.0), Vec3::new(6.0, 2.0, 6.0))]);
+        let grid = grid(vec![cuboid(
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(6.0, 2.0, 6.0),
+        )]);
         let (top, ground) = (Vec3::new(0.0, 2.0, 0.0), Vec3::new(0.0, 0.0, 10.0));
         let down = grid.find_path(top, ground).unwrap();
-        assert!(down.complete && down.waypoints.iter().all(|w| !w.jump), "{down:?}");
+        assert!(
+            down.complete && down.waypoints.iter().all(|w| !w.jump),
+            "{down:?}"
+        );
         assert!(!grid.find_path(ground, top).unwrap().complete);
     }
 
@@ -488,13 +530,21 @@ mod tests {
         let platform = cuboid(Vec3::new(0.0, 1.5, 10.0), Vec3::new(4.0, 3.0, 10.0));
         let bridge = cuboid(Vec3::new(10.0, 3.1, 10.0), Vec3::new(3.0, 0.2, 10.0));
         let grid = grid(vec![ramp, platform, bridge]);
-        let path = grid.find_path(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 3.0, 12.0)).unwrap();
+        let path = grid
+            .find_path(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 3.0, 12.0))
+            .unwrap();
         assert!(path.complete, "{path:?}");
         assert!(path.waypoints.iter().all(|w| !w.jump), "{path:?}");
 
         let (x, z) = grid.column_at(10.0, 10.0).unwrap();
-        let heights: Vec<f32> = grid.column(x, z).map(|i| grid.cells[i as usize].y).collect();
+        let heights: Vec<f32> = grid
+            .column(x, z)
+            .map(|i| grid.cells[i as usize].y)
+            .collect();
         assert_eq!(heights.len(), 2, "{heights:?}");
-        assert!(heights[0].abs() < 0.1 && (heights[1] - 3.2).abs() < 0.1, "{heights:?}");
+        assert!(
+            heights[0].abs() < 0.1 && (heights[1] - 3.2).abs() < 0.1,
+            "{heights:?}"
+        );
     }
 }

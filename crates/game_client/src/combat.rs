@@ -1,29 +1,28 @@
-//! Client side of weapons: weapon selection, locally predicted shots (tracer, sound,
-//! recoil), zoom, and effects for everyone else's shots. Hits are decided by the server.
+//! Client side of weapons: weapon selection, locally predicted shots (tracer, recoil), zoom,
+//! and effects for everyone else's shots. Hits are decided by the server. Weapon sounds are
+//! in `audio`.
 
 use std::{collections::VecDeque, sync::Arc};
 
 use avian3d::prelude::*;
-use bevy::{
-    audio::Volume,
-    input::mouse::AccumulatedMouseScroll,
-    prelude::*,
-};
+use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 use game_data::{FireMode, WeaponDesc};
 use game_shared::{
     input::Buttons,
     physics::GameLayer,
     protocol::{HitConfirmed, KillFeed, Player, ShotFired},
-    soldier::SoldierMotion,
-    weapons::{Armory, Inventory, Loadout, WeaponState, spread_direction},
+    soldier::{Hitbox, SoldierMotion},
+    projectile::{launch_origin, launch_velocity},
+    weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, spread_direction},
 };
 
 use crate::{
-    camera::PlayerCamera,
+    camera::{PlayerCamera, ThirdPerson},
+    effects::{EffectLibrary, SpawnEffect, SurfaceQuery},
     local_input::{InputHistory, LocalInputSystems, LookState},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
-    render::scope::Zoom,
+    render::scope::{WeaponPart, Zoom},
 };
 
 pub struct ClientCombatPlugin;
@@ -33,6 +32,7 @@ impl Plugin for ClientCombatPlugin {
         app.init_resource::<WeaponSelection>()
             .init_resource::<CombatFeedback>()
             .add_message::<LocalShot>()
+            .add_message::<LocalLaunch>()
             .add_systems(Startup, load_effect_assets)
             .add_observer(init_local_weapon)
             .add_systems(FixedUpdate, predict_local_shots.after(LocalInputSystems))
@@ -72,6 +72,10 @@ pub struct CombatFeedback {
     pub shots_fired: u32,
     /// Our weapon is reloading (predicted).
     pub reloading: bool,
+    /// We are winding up a throw (and cooking a grenade) (predicted).
+    pub cooking: bool,
+    /// The C4 detonator is in our hand instead of the charges (predicted).
+    pub detonator: bool,
 }
 
 impl Default for CombatFeedback {
@@ -85,6 +89,8 @@ impl Default for CombatFeedback {
             zoom: 1.0,
             shots_fired: 0,
             reloading: false,
+            cooking: false,
+            detonator: false,
         }
     }
 }
@@ -94,13 +100,28 @@ impl Default for CombatFeedback {
 struct LocalWeapon {
     state: WeaponState,
     selected: u8,
+    /// Predicted ammo per weapon, reset whenever the server's arrives.
+    ammo: Vec<[u16; 2]>,
+    /// A throw was on its way out of the hand last tick.
+    launching: bool,
 }
 
-/// A shot we predicted this tick, spawned as visuals in `Update`.
+/// A shot we predicted this tick, spawned as visuals in `Update` (and heard, see `audio`).
 #[derive(Message)]
-struct LocalShot {
-    direction: Vec3,
-    weapon: Arc<WeaponDesc>,
+pub(crate) struct LocalShot {
+    pub direction: Vec3,
+    pub weapon: Arc<WeaponDesc>,
+}
+
+/// A grenade, rocket or charge we predicted leaving our hands this tick (see
+/// `render::projectiles`).
+#[derive(Message)]
+pub(crate) struct LocalLaunch {
+    pub origin: Vec3,
+    pub velocity: Vec3,
+    pub weapon: Arc<WeaponDesc>,
+    /// Our facing, which placed mines keep.
+    pub yaw: f32,
 }
 
 #[derive(Resource)]
@@ -116,6 +137,12 @@ struct Tracer {
     velocity: Vec3,
     gravity: f32,
     life: f32,
+    /// The shooter's hitbox, which the tracer may start inside of.
+    ignore: Option<Entity>,
+    /// Projectile material, for the impact effect.
+    material: u32,
+    /// Effect where the projectile detonates (grenades, rockets), instead of an impact.
+    detonation: Option<String>,
 }
 
 #[derive(Component)]
@@ -204,15 +231,19 @@ fn select_weapon(
     }
 }
 
-#[allow(clippy::type_complexity)]
+/// Runs the same weapon rules as the server for our soldier, so shots, throws and reloads
+/// show at once.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn predict_local_shots(
     time: Res<Time>,
     armory: Res<Armory>,
     history: Res<InputHistory>,
+    spatial: SpatialQuery,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
-    mut soldier: Query<(&SoldierMotion, &Loadout, &Inventory, &mut LocalWeapon), With<LocalSoldier>>,
+    mut soldier: Query<(&SoldierMotion, &Loadout, Ref<Inventory>, &mut LocalWeapon), With<LocalSoldier>>,
     mut shots: MessageWriter<LocalShot>,
+    mut launches: MessageWriter<LocalLaunch>,
 ) {
     let (Some(input), Ok((motion, loadout, inventory, mut local))) = (history.latest(), soldier.single_mut()) else {
         return;
@@ -222,61 +253,73 @@ fn predict_local_shots(
     let Some(weapon) = loadout.weapons.get(active as usize).and_then(|w| armory.weapon(w)).cloned() else {
         return;
     };
+    let local = &mut *local;
     if local.selected != active {
         local.selected = active;
-        local.state.deploy = weapon.deploy_time;
-        local.state.reload = 0.0;
-        local.state.burst_left = 0;
+        local.state.switch_to(&weapon);
+    }
+    if inventory.is_changed() || local.ammo.len() != inventory.ammo.len() {
+        local.ammo = inventory.ammo.clone();
     }
     let state = &mut local.state;
     let local_velocity = Quat::from_rotation_y(-input.yaw) * motion.velocity;
     state.tick(&weapon.deviation, dt, -local_velocity.z, local_velocity.x, !motion.grounded);
     let zoomed = input.pressed(Buttons::AIM);
-    feedback.spread = state.deviation(&weapon.deviation, motion.stance, zoomed);
+    let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
+    feedback.spread = cone;
 
     // Hands are on the rungs while climbing.
-    let trigger = input.pressed(Buttons::FIRE) && !motion.climbing;
-    let [in_mag, spare] = inventory.ammo.get(active as usize).copied().unwrap_or([0, 0]);
-    feedback.reloading = state.reload > 0.0;
-    if state.reload > 0.0 {
-        state.reload -= dt;
-        state.trigger_was_down = trigger;
-        return;
-    }
-    let wants_reload = input.pressed(Buttons::RELOAD) && in_mag < weapon.magazine_size as u16;
-    if (wants_reload || (in_mag == 0 && trigger)) && spare > 0 {
-        state.reload = weapon.reload_time;
-        state.trigger_was_down = trigger;
-        return;
-    }
-
+    let trigger = Trigger {
+        fire: input.pressed(Buttons::FIRE) && !motion.climbing,
+        alt: input.pressed(Buttons::AIM) && !motion.climbing,
+        reload: input.pressed(Buttons::RELOAD),
+        lowered: input.pressed(Buttons::SPRINT) && input.movement[1] > 64,
+    };
     let mode = weapon
         .fire_modes
         .get(inventory.fire_mode as usize)
         .copied()
         .unwrap_or(FireMode::Single);
-    let pressed_now = trigger && !state.trigger_was_down;
-    let wants_shot = match mode {
-        FireMode::Auto => trigger,
-        FireMode::Single => pressed_now,
-        FireMode::Burst => pressed_now || state.burst_left > 0,
-    };
-    state.trigger_was_down = trigger;
-    let sprinting = input.pressed(Buttons::SPRINT) && input.movement[1] > 64;
-    if !wants_shot || sprinting || state.cooldown > 0.0 || state.deploy > 0.0 || in_mag == 0 {
+    let mut ammo = local.ammo.get(active as usize).copied().unwrap_or([0, 0]);
+    let fired = state.trigger(&weapon, mode, &mut ammo, trigger, dt);
+    if let Some(slot) = local.ammo.get_mut(active as usize) {
+        *slot = ammo;
+    }
+    feedback.reloading = state.reload > 0.0;
+    feedback.cooking = state.wind_up.is_some();
+    feedback.detonator = state.detonator;
+    // A throw animates from letting go, before the grenade leaves the hand.
+    let launching = state.launch.is_some();
+    let released = launching && !local.launching;
+    let launched = matches!(fired, Some(Fired::Launch { .. })) && !local.launching;
+    local.launching = launching;
+    if released || launched {
+        feedback.shots_fired = feedback.shots_fired.wrapping_add(1);
+    }
+    let Some(Fired::Launch { soft, .. }) = fired else {
         return;
+    };
+    let view = Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0);
+    let direction = spread_direction(view * Vec3::NEG_Z, cone, (fastrand::f32(), fastrand::f32()));
+    let pellets = weapon.projectiles_per_shot.max(1);
+    for _ in 0..pellets {
+        let direction = match pellets {
+            1 => direction,
+            _ => spread_direction(direction, weapon.pellet_spread, (fastrand::f32(), fastrand::f32())),
+        };
+        shots.write(LocalShot {
+            direction,
+            weapon: weapon.clone(),
+        });
     }
-    if mode == FireMode::Burst {
-        state.burst_left = if pressed_now { 2 } else { state.burst_left.saturating_sub(1) };
+    if weapon.projectile.is_object() {
+        launches.write(LocalLaunch {
+            origin: launch_origin(&spatial, motion.eye_position(), view, Vec3::from(weapon.fire.start_offset)),
+            velocity: launch_velocity(&weapon, direction, soft, motion.velocity),
+            weapon: weapon.clone(),
+            yaw: input.yaw,
+        });
     }
-    let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
-    state.on_shot(&weapon);
-    feedback.shots_fired = feedback.shots_fired.wrapping_add(1);
-    let aim = Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0) * Vec3::NEG_Z;
-    shots.write(LocalShot {
-        direction: spread_direction(aim, cone, (fastrand::f32(), fastrand::f32())),
-        weapon: weapon.clone(),
-    });
 
     // Recoil kicks the view, which also moves the aim of the next shots.
     let recoil = &weapon.recoil;
@@ -286,24 +329,16 @@ fn predict_local_shots(
     look.yaw -= range(recoil.left_right).to_radians() * scale;
 }
 
-fn play(commands: &mut Commands, asset_server: &AssetServer, path: Option<&String>, at: Option<Vec3>, volume: f32) {
-    let Some(path) = path else {
-        return;
-    };
-    let settings = PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume));
-    let source = AudioPlayer::new(asset_server.load(format!("imported://{path}")));
-    match at {
-        Some(position) => {
-            commands.spawn((source, settings.with_spatial(true), Transform::from_translation(position)));
-        }
-        None => {
-            commands.spawn((source, settings));
-        }
-    }
-}
-
-fn spawn_tracer(commands: &mut Commands, assets: &EffectAssets, origin: Vec3, direction: Vec3, weapon: &WeaponDesc) {
-    if weapon.projectile.velocity <= 0.0 {
+fn spawn_tracer(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    origin: Vec3,
+    direction: Vec3,
+    weapon: &WeaponDesc,
+    ignore: Option<Entity>,
+    library: Option<&EffectLibrary>,
+) {
+    if weapon.projectile.velocity <= 0.0 || weapon.projectile.is_object() {
         return;
     }
     commands.spawn((
@@ -311,6 +346,13 @@ fn spawn_tracer(commands: &mut Commands, assets: &EffectAssets, origin: Vec3, di
             velocity: direction * weapon.projectile.velocity,
             gravity: weapon.projectile.gravity,
             life: weapon.projectile.time_to_live.min(3.0),
+            ignore,
+            material: weapon.projectile.material,
+            detonation: weapon
+                .projectile
+                .detonation_effect
+                .clone()
+                .or_else(|| library.and_then(|l| l.detonation(&weapon.name)).map(str::to_string)),
         },
         Mesh3d(assets.tracer.clone()),
         MeshMaterial3d(assets.tracer_material.clone()),
@@ -319,41 +361,76 @@ fn spawn_tracer(commands: &mut Commands, assets: &EffectAssets, origin: Vec3, di
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_local_shots(
     mut commands: Commands,
     mut shots: MessageReader<LocalShot>,
     assets: Res<EffectAssets>,
-    asset_server: Res<AssetServer>,
     camera: Single<&Transform, With<PlayerCamera>>,
+    library: Option<Res<EffectLibrary>>,
+    zoom: Res<Zoom>,
+    third_person: Res<ThirdPerson>,
+    soldier: Query<(&SoldierMotion, &Hitbox), With<LocalSoldier>>,
+    weapon_parts: Query<(&WeaponPart, &GlobalTransform)>,
+    mut effects: MessageWriter<SpawnEffect>,
 ) {
+    let soldier = soldier.single().ok();
+    let library = library.as_deref();
     for shot in shots.read() {
         // From roughly where the muzzle is, just below and right of the eye.
         let origin = camera.translation + camera.rotation * Vec3::new(0.12, -0.1, -0.4);
-        spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon);
-        play(&mut commands, &asset_server, shot.weapon.sounds.fire_1p.as_ref(), None, 0.5);
+        let hitbox = soldier.map(|(_, hitbox)| hitbox.entity);
+        spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon, hitbox, library);
+        let Some((muzzle, offset)) = library.and_then(|l| l.muzzle(&shot.weapon.name)) else {
+            continue;
+        };
+        if third_person.0 {
+            if let Some((motion, _)) = soldier {
+                let at = motion.eye_position() - Vec3::Y * 0.15 + shot.direction * 0.8;
+                effects.write(SpawnEffect::new(muzzle, at).with_forward(shot.direction));
+            }
+        } else if !zoom.scoped {
+            // At the muzzle of the view model's weapon.
+            let at = weapon_parts
+                .iter()
+                .find(|(part, _)| part.0 == 0)
+                .map_or(origin, |(_, transform)| transform.transform_point(offset));
+            effects.write(SpawnEffect::new(muzzle, at).with_forward(camera.forward().as_vec3()).first_person());
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn receive_shots(
     mut commands: Commands,
     mut shots: MessageReader<ShotFired>,
     assets: Res<EffectAssets>,
-    asset_server: Res<AssetServer>,
     armory: Res<Armory>,
-    loadouts: Query<&Loadout>,
+    loadouts: Query<(&Loadout, Option<&Hitbox>)>,
+    library: Option<Res<EffectLibrary>>,
+    mut effects: MessageWriter<SpawnEffect>,
+    mut flashed: Local<Vec<Entity>>,
 ) {
+    flashed.clear();
+    let library = library.as_deref();
     for shot in shots.read() {
-        let Some(weapon) = loadouts
-            .get(shot.soldier)
-            .ok()
-            .and_then(|l| l.weapons.get(shot.weapon as usize))
-            .and_then(|w| armory.weapon(w))
-        else {
+        let Ok((loadout, hitbox)) = loadouts.get(shot.soldier) else {
+            continue;
+        };
+        let Some(weapon) = loadout.weapons.get(shot.weapon as usize).and_then(|w| armory.weapon(w)) else {
             continue;
         };
         // Tracer from the gun rather than the eye.
-        spawn_tracer(&mut commands, &assets, shot.origin - Vec3::Y * 0.15, shot.direction, weapon);
-        play(&mut commands, &asset_server, weapon.sounds.fire_3p.as_ref(), Some(shot.origin), 1.0);
+        let gun = shot.origin - Vec3::Y * 0.15;
+        spawn_tracer(&mut commands, &assets, gun, shot.direction, weapon, hitbox.map(|h| h.entity), library);
+        // Shotguns fire several pellets but flash once.
+        if flashed.contains(&shot.soldier) {
+            continue;
+        }
+        flashed.push(shot.soldier);
+        if let Some((muzzle, _)) = library.and_then(|l| l.muzzle(&weapon.name)) {
+            effects.write(SpawnEffect::new(muzzle, gun + shot.direction * 0.8).with_forward(shot.direction));
+        }
     }
 }
 
@@ -400,16 +477,24 @@ pub fn weapon_display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_tracers(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,
     assets: Res<EffectAssets>,
+    library: Option<Res<EffectLibrary>>,
+    surfaces: SurfaceQuery,
+    mut effects: MessageWriter<SpawnEffect>,
     mut tracers: Query<(Entity, &mut Tracer, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
-    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier]);
+    let layers = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier]);
     for (entity, mut tracer, mut transform) in &mut tracers {
+        let filter = match tracer.ignore {
+            Some(hitbox) => layers.clone().with_excluded_entities([hitbox]),
+            None => layers.clone(),
+        };
         tracer.life -= dt;
         let start = tracer.velocity;
         let gravity = tracer.gravity;
@@ -420,13 +505,28 @@ fn update_tracers(
             .and_then(|dir| spatial.cast_ray(transform.translation, dir, step.length(), true, &filter));
         if let Some(hit) = hit {
             let point = transform.translation + step.normalize() * hit.distance;
-            commands.spawn((
-                Impact { age: 0.0 },
-                Mesh3d(assets.impact.clone()),
-                MeshMaterial3d(assets.impact_material.clone()),
-                Transform::from_translation(point).with_scale(Vec3::splat(0.3)),
-                bevy::light::NotShadowCaster,
-            ));
+            let effect = match &tracer.detonation {
+                Some(detonation) => Some(SpawnEffect::new(detonation.clone(), point)),
+                None => library
+                    .as_ref()
+                    .and_then(|l| l.impact(tracer.material, surfaces.material(hit.entity, point)))
+                    .map(|name| SpawnEffect::new(name, point).with_up(hit.normal)),
+            };
+            match effect {
+                Some(effect) => {
+                    effects.write(effect);
+                }
+                // Without imported effects: a puff.
+                None => {
+                    commands.spawn((
+                        Impact { age: 0.0 },
+                        Mesh3d(assets.impact.clone()),
+                        MeshMaterial3d(assets.impact_material.clone()),
+                        Transform::from_translation(point).with_scale(Vec3::splat(0.3)),
+                        bevy::light::NotShadowCaster,
+                    ));
+                }
+            }
             commands.entity(entity).despawn();
             continue;
         }

@@ -1,6 +1,7 @@
 // Bot navigation grid and paths on Karkand, for checking them by eye.
 // client --scenario scenarios/nav_grid.ron --debug-nav
-// Grid colors: green open, orange near walls, red at the edge, blue jumps, magenta unlinked.
+// Grid colors: green open, orange near walls, red at the edge, blue jumps and drops,
+// magenta unlinked.
 (
     level: "strike_at_karkand",
     bots: 16,

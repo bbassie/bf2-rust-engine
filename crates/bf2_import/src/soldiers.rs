@@ -331,28 +331,36 @@ fn export_skinned(
                 .unwrap_or(0)
         };
         let maps = material.texture_maps();
-        let color = maps.first().and_then(|m| converter.texture(m));
-        let image = color.map(|t| {
-            doc.images.push(glb::relative_uri(&out_rel, &t));
-            doc.images.len() - 1
-        });
+        let mut image = |texture: Option<String>| {
+            texture.map(|t| {
+                doc.images.push(glb::relative_uri(&out_rel, &t));
+                doc.images.len() - 1
+            })
+        };
+        let color = image(maps.first().and_then(|m| converter.texture(m)));
+        let normal = image(maps.get(1).and_then(|m| converter.texture(m)));
+        // Without `tangent` in the technique the normal map is in object (bind pose) space.
+        // The game rebuilds the object-to-world rotation per pixel from the vertex frame
+        // before skinning, packed as COLOR_0 = (tangent, normal.x), TEXCOORD_1 = normal.yz.
+        let object_space = normal.is_some() && !material.technique.to_ascii_lowercase().contains("tangent");
+        let tangents = normal.map(|_| crate::meshes::tangent_frames(&mesh, material, 0));
         doc.materials.push(glb::Material {
             name: material.technique.clone(),
-            base_color: image,
+            base_color: color,
             base_color_uv: 0,
-            normal: None,
+            normal,
             alpha: if material.technique.to_ascii_lowercase().contains("alpha_test") {
                 glb::AlphaMode::Mask(0.5)
             } else {
                 glb::AlphaMode::Opaque
             },
             double_sided: false,
-            extras: json!({ "bf2": { "technique": material.technique, "maps": maps } }),
+            extras: json!({ "bf2": { "kind": "skinned", "technique": material.technique, "maps": maps } }),
         });
 
         let mut primitive = glb::Primitive {
             material: Some(doc.materials.len() - 1),
-            uvs: vec![Vec::new()],
+            uvs: vec![Vec::new(); if object_space { 2 } else { 1 }],
             ..Default::default()
         };
         let mut remap = std::collections::HashMap::new();
@@ -363,9 +371,18 @@ fn export_skinned(
             for &v in [tri[0], tri[2], tri[1]].iter() {
                 let index = *remap.entry(v).or_insert_with(|| {
                     let vi = v as usize;
+                    let normal = translation(normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0])).normalize_or(Vec3::Y);
                     primitive.positions.push(translation(positions[vi]).to_array());
-                    primitive.normals.push(translation(normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0])).normalize_or(Vec3::Y).to_array());
+                    primitive.normals.push(normal.to_array());
                     primitive.uvs[0].push(uvs.get(vi).copied().unwrap_or_default());
+                    if let Some(tangents) = &tangents {
+                        let t = tangents.get(&v).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
+                        primitive.tangents.push(t);
+                        if object_space {
+                            primitive.colors.push([t[0], t[1], t[2], normal.x]);
+                            primitive.uvs[1].push([normal.y, normal.z]);
+                        }
+                    }
                     let b = blend.get(vi).copied().unwrap_or_default();
                     let w = weights.get(vi).map_or(1.0, |w| w[0]).clamp(0.0, 1.0);
                     primitive.joints.push([joint(b[0]), joint(b[1]), 0, 0]);

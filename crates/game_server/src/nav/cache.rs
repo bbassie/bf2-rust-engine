@@ -64,7 +64,10 @@ fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
     ensure!(data.len() == HEADER + columns_len + cells_len, "wrong size");
     let columns: Vec<u32> = bytemuck::pod_collect_to_vec(&data[HEADER..HEADER + columns_len]);
     let cells: Vec<NavCell> = bytemuck::pod_collect_to_vec(&data[HEADER + columns_len..]);
-    ensure!(columns.last() == Some(&(count as u32)), "inconsistent columns");
+    ensure!(
+        columns.last() == Some(&(count as u32)),
+        "inconsistent columns"
+    );
     Ok(NavGrid {
         params,
         origin,

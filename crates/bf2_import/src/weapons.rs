@@ -1,5 +1,5 @@
 //! Kits and handheld weapons: `kits/<name>.ron`, `weapons/<name>.ron`, weapon models and
-//! fire sounds.
+//! sounds.
 
 use std::{collections::BTreeSet, path::Path};
 
@@ -9,11 +9,11 @@ use bf2_formats::{
     localization::Localization,
 };
 use game_data::{
-    DeviationDesc, FireMode, KitDesc, ProjectileDesc, RecoilDesc, WeaponDesc, WeaponSounds,
-    ZoomDesc,
+    DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, ProjectileDesc,
+    RecoilDesc, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds, ZoomDesc,
 };
 
-use crate::meshes::MeshConverter;
+use crate::{meshes::MeshConverter, sounds::SoundConverter};
 
 /// Imports the given kits and every weapon they carry. Returns (kits, weapons) written.
 pub fn import(
@@ -54,11 +54,12 @@ pub fn import(
     }
 
     let mut weapon_count = 0;
+    let sounds = SoundConverter::new(converter.vfs, out);
     for name in &weapons {
         let Some(template) = interp.world.template(name).cloned() else {
             continue;
         };
-        let mut desc = weapon_desc(interp, converter, &template, out);
+        let mut desc = weapon_desc(interp, converter, &sounds, &template, out);
         desc.display_name = localization.resolve(&desc.display_name);
         game_data::write_ron(out.join("weapons").join(format!("{name}.ron")), &desc)?;
         weapon_count += 1;
@@ -87,6 +88,7 @@ fn floats<const N: usize>(template: &Template, method: &str) -> Option<[f32; N]>
 fn weapon_desc(
     interp: &mut Interpreter,
     converter: &MeshConverter,
+    sound_converter: &SoundConverter,
     t: &Template,
     out: &Path,
 ) -> WeaponDesc {
@@ -106,32 +108,13 @@ fn weapon_desc(
         if modes.is_empty() { vec![FireMode::Single] } else { modes }
     };
 
-    let projectile = t
+    let projectile_template = t
         .get_str("projectiletemplate")
         .map(str::to_string)
         .and_then(|p| {
             interp.ensure_template(&p);
             interp.world.template(&p).cloned()
         });
-    let projectile = match &projectile {
-        Some(p) => ProjectileDesc {
-            velocity: f("velocity", 300.0),
-            damage: p.get_f32("damage").unwrap_or(0.0),
-            min_damage: p.get_f32("mindamage").unwrap_or(0.0),
-            falloff_start: p.get_f32("disttostartlosedamage").unwrap_or(0.0),
-            falloff_end: p.get_f32("disttomindamage").unwrap_or(0.0),
-            gravity: p.get_f32("gravitymodifier").unwrap_or(1.0),
-            time_to_live: p.get_str("timetolive").and_then(crd).map_or(5.0, |v| v[0]),
-            material: p.get_f32("material").unwrap_or(0.0) as u32,
-            explosion_damage: p.get_f32("detonation.explosiondamage").unwrap_or(0.0),
-            explosion_radius: p.get_f32("detonation.explosionradius").unwrap_or(0.0),
-        },
-        None => ProjectileDesc {
-            velocity: f("velocity", 300.0),
-            time_to_live: 1.0,
-            ..Default::default()
-        },
-    };
 
     let deviation = DeviationDesc {
         min: f("deviation.mindev", 0.5),
@@ -174,6 +157,7 @@ fn weapon_desc(
         fov_delay: f("zoom.changefovdelay", 0.0),
         out_after_fire: f("zoom.zoomoutafterfire", 0.0) != 0.0,
     };
+    let projectile = projectile_desc(interp, converter, t, projectile_template.as_ref(), mesh_3p.as_deref());
 
     // Third-person animations were exported per weapon folder by the soldier import.
     let dir = t.source.split(':').next().unwrap_or_default();
@@ -202,18 +186,29 @@ fn weapon_desc(
     let animations_1p = animation_set("1p");
 
     // Sounds are child templates like `S_usrif_m16a2_Fire3P`.
-    let sound = |suffix: &str| -> Option<String> {
+    let sound = |suffix: &str| -> Option<SoundDesc> {
         let child = t
             .children
             .iter()
             .find(|c| c.template.to_ascii_lowercase().ends_with(suffix))?;
-        let file = interp.world.template(&child.template)?.get_str("soundfilename")?;
-        converter.file(file)
+        let mut desc = sound_converter.template(&interp.world, &child.template)?;
+        // BF2 loops fire sounds while the trigger is held; here every shot plays its own.
+        desc.looping = false;
+        Some(desc)
     };
+    let fire_3p = sound("_fire3p");
     let sounds = WeaponSounds {
         fire_1p: sound("_fire1p").or_else(|| sound("_fire1p_outdoor")),
-        fire_3p: sound("_fire3p"),
+        fire_3p_distant: fire_3p.as_ref().and_then(|near| crate::sounds::distant(near, out)),
+        fire_3p,
         reload_1p: sound("_reload1p"),
+        reload_3p: sound("_reload3p"),
+        deploy_1p: sound("_deploy1p"),
+        deploy_3p: sound("_deploy3p"),
+        dry_fire: sound("_triggerclick"),
+        bolt: sound("_boltclick"),
+        switch_fire_mode: sound("_switchfirerate"),
+        zoom: sound("_zoom"),
     };
 
     WeaponDesc {
@@ -234,7 +229,11 @@ fn weapon_desc(
         magazines: f("ammo.nrofmags", 6.0) as u32,
         reload_time: f("ammo.reloadtime", 3.0),
         deploy_time: f("delaytouse", 1.0),
-        projectiles_per_shot: 1,
+        projectiles_per_shot: f("fire.batchsize", 1.0).max(1.0) as u32,
+        pellet_spread: f("deviation.subprojectiledev", 0.0),
+        shift_delay: if f("animation.useshiftanimation", 0.0) != 0.0 { f("animation.shiftdelay", 0.0) } else { 0.0 },
+        reload_amount: f("ammo.reloadamount", 0.0) as u32,
+        fire: fire_desc(t),
         projectile,
         deviation,
         recoil,
@@ -245,4 +244,160 @@ fn weapon_desc(
         zoom,
         sounds,
     }
+}
+
+fn has_component(t: &Template, component: &str) -> bool {
+    t.get_all("createcomponent")
+        .any(|a| a.first().is_some_and(|c| c.eq_ignore_ascii_case(component)))
+}
+
+/// `x/y/z` in BF2's left-handed space to ours.
+fn position(t: &Template, method: &str) -> Option<[f32; 3]> {
+    let values: Vec<f32> = t.get_str(method)?.split('/').filter_map(|v| v.parse().ok()).collect();
+    (values.len() == 3).then(|| [values[0], values[1], -values[2]])
+}
+
+/// The fire and target components of a weapon.
+fn fire_desc(t: &Template) -> FireDesc {
+    let f = |method: &str| t.get_f32(method).unwrap_or(0.0).max(0.0);
+    let kind = if has_component(t, "ThrownFireComp") {
+        FireKind::Thrown
+    } else if has_component(t, "ExplosivesFireComp") {
+        FireKind::Explosives
+    } else {
+        FireKind::Gun
+    };
+    let wire = t.get_str("target.targetsystem").is_some_and(|s| s.eq_ignore_ascii_case("TSWireGuided"));
+    FireDesc {
+        kind,
+        pull_back: f("fire.pullbacktime"),
+        launch_delay: f("fire.firelaunchdelay"),
+        launch_delay_soft: f("fire.firelaunchdelaysoft"),
+        start_offset: position(t, "fire.projectilestartposition").unwrap_or_default(),
+        max_in_world: f("fire.maxprojectilesinworld") as u32,
+        guidance: if wire { Guidance::Wire } else { Guidance::None },
+    }
+}
+
+/// Smoke clouds look about this big once spread (the effect's particles fly out a few
+/// meters and are up to 9 m across).
+const SMOKE_RADIUS: f32 = 6.0;
+
+fn projectile_desc(
+    interp: &mut Interpreter,
+    converter: &MeshConverter,
+    weapon: &Template,
+    projectile: Option<&Template>,
+    weapon_mesh_3p: Option<&str>,
+) -> ProjectileDesc {
+    let velocity = weapon.get_f32("velocity").unwrap_or(300.0);
+    let Some(p) = projectile else {
+        return ProjectileDesc {
+            velocity,
+            time_to_live: 1.0,
+            ..Default::default()
+        };
+    };
+    let f = |method: &str| p.get_f32(method).unwrap_or(0.0);
+    let lowercase = |method: &str| p.get_str(method).map(|s| s.trim_matches('"').to_ascii_lowercase());
+
+    let impact = if has_component(p, "StickyCollisionComp") {
+        Impact::Stick { max_angle: p.get_f32("collision.maxstickangle").unwrap_or(180.0) }
+    } else if f("collision.bouncing") != 0.0 {
+        Impact::Bounce
+    } else {
+        Impact::Stop
+    };
+    // Medic and ammo bags have triggers too, but replenish instead of exploding.
+    let trigger = lowercase("detonation.triggertype")
+        .filter(|_| has_component(p, "DefaultDetonationComp"))
+        .and_then(|kind| match kind.as_str() {
+            "mtypco" => Some(TriggerBy::Soldiers),
+            "mtyvehicle" => Some(TriggerBy::Vehicles),
+            _ => None,
+        })
+        .map(|by| TriggerDesc {
+            by,
+            radius: f("detonation.triggerradius"),
+            angle: f("detonation.triggerangle"),
+            min_speed: f("detonation.triggervictimminspeed"),
+        });
+    let detonation_effect = lowercase("detonation.endeffecttemplate");
+    let explosion_damage = f("detonation.explosiondamage");
+    let smoke = detonation_effect
+        .as_deref()
+        .filter(|e| explosion_damage <= 0.0 && (e.contains("smoke") || e.contains("teargas")))
+        .map(|effect| SmokeDesc {
+            radius: SMOKE_RADIUS,
+            duration: effect_length(interp, effect).unwrap_or(10.0),
+        });
+    // Rocket exhaust and grenade trails are effect bundles among the children.
+    let trail_effect = p.children.iter().find_map(|child| {
+        interp.ensure_template(&child.template);
+        let child = interp.world.template(&child.template)?;
+        child.ty.eq_ignore_ascii_case("EffectBundle").then(|| child.name.to_ascii_lowercase())
+    });
+    // Thrown weapons fly as their own third-person model; shells and rockets have theirs.
+    let weapon_geometry = weapon.geometry.as_deref().map(str::to_ascii_lowercase);
+    let mesh = match p.geometry.as_deref() {
+        Some(g) if Some(g.to_ascii_lowercase()) == weapon_geometry => weapon_mesh_3p.map(str::to_string),
+        Some(g) => {
+            // Shared shells are declared in a file of their own, found by their name.
+            interp.ensure_template(g);
+            interp
+                .world
+                .geometry(g)
+                .and_then(|g| g.mesh_path())
+                .and_then(|path| {
+                    converter
+                        .convert_mesh(&path)
+                        .map_err(|e| log::debug!("projectile {}: {e:#}", p.name))
+                        .ok()
+                })
+        }
+        None => None,
+    };
+
+    ProjectileDesc {
+        velocity,
+        damage: f("damage"),
+        min_damage: f("mindamage"),
+        falloff_start: f("disttostartlosedamage"),
+        falloff_end: f("disttomindamage"),
+        gravity: p.get_f32("gravitymodifier").unwrap_or(1.0),
+        time_to_live: p.get_str("timetolive").and_then(crd).map_or(5.0, |v| v[0]),
+        material: f("material") as u32,
+        explosion_damage,
+        explosion_radius: f("detonation.explosionradius"),
+        explosion_material: f("detonation.explosionmaterial") as u32,
+        explosion_cone: f("detonation.explosionconeangle"),
+        detonation_effect,
+        trail_effect,
+        mesh,
+        impact,
+        arming_delay: f("detonation.timeuntilcandetonate").max(f("armingdelay")),
+        acceleration: f("acceleration"),
+        max_speed: f("maxspeed"),
+        motor_delay: f("startdelay"),
+        turn_rate: f("follow.maxyaw").max(f("follow.maxpitch")),
+        guidance_min_distance: f("follow.mindist"),
+        trigger,
+        smoke,
+    }
+}
+
+/// Seconds until the last particle of an effect bundle is gone: the longest particle life
+/// among its emitters (smoke grenades emit everything at once).
+fn effect_length(interp: &mut Interpreter, effect: &str) -> Option<f32> {
+    interp.ensure_template(effect);
+    let children: Vec<String> = interp.world.template(effect)?.children.iter().map(|c| c.template.clone()).collect();
+    let mut longest = 0.0f32;
+    for child in children {
+        interp.ensure_template(&child);
+        if let Some(emitter) = interp.world.template(&child) {
+            let life = emitter.get_f32("timetolive").unwrap_or(0.0) + emitter.get_f32("randomtimetolive").unwrap_or(0.0);
+            longest = longest.max(life);
+        }
+    }
+    (longest > 0.0).then_some(longest)
 }

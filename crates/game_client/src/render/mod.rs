@@ -7,6 +7,7 @@ mod destruction;
 pub mod environment;
 mod flags;
 pub mod materials;
+mod projectiles;
 mod props;
 pub mod scope;
 mod soldiers;
@@ -29,6 +30,6 @@ impl Plugin for RenderPlugin {
             viewmodel::ViewModelPlugin,
             scope::ScopePlugin,
         ))
-        .add_plugins(destruction::DestructionRenderPlugin);
+        .add_plugins((destruction::DestructionRenderPlugin, projectiles::ProjectileRenderPlugin));
     }
 }

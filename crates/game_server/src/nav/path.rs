@@ -7,14 +7,14 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use super::{CellRef, NavCell, NavGrid};
 
 /// Nodes A* may expand before giving up with the best partial path.
-const MAX_EXPANDED: usize = 200_000;
+const MAX_EXPANDED: usize = 120_000;
 /// The same when the goal isn't reachable and the search only gets as close as it can.
 const MAX_EXPANDED_UNREACHABLE: usize = 30_000;
 /// How far a goal snaps to a reachable cell, meters.
 const GOAL_SNAP: f32 = 8.0;
 /// Heuristic weight: slightly greedy search expands far fewer nodes; string pulling
 /// straightens out the result anyway.
-const HEURISTIC_WEIGHT: f32 = 1.3;
+const HEURISTIC_WEIGHT: f32 = 1.5;
 /// Extra cost of a jump, in meters of walking.
 const JUMP_COST: f32 = 3.0;
 /// Extra cost of dropping down a ledge, in meters of walking.
@@ -80,7 +80,9 @@ impl NavGrid {
     /// reachable cell within a few meters; if there is none, the path gets as close as it
     /// can. `None` if `from` isn't near any walkable cell.
     pub fn find_path(&self, from: Vec3, to: Vec3) -> Option<NavPath> {
-        let start = self.locate(from, 2.5, None)?;
+        let start = self
+            .locate(from, 2.5, None)
+            .or_else(|| self.locate(from, 6.0, None))?;
         let region = self.cell(start).region;
         let goal = self.locate(to, GOAL_SNAP, Some(region));
         let target = goal.map_or(to, |g| self.position(g));
@@ -102,7 +104,7 @@ impl NavGrid {
             let (dx, dz) = ((x as f32 - tx).abs(), (z as f32 - tz).abs());
             (dx.max(dz) + (SQRT_2 - 1.0) * dx.min(dz)) * cell * HEURISTIC_WEIGHT
         };
-        let mut nodes: HashMap<u32, Node> = HashMap::default();
+        let mut nodes: HashMap<u32, Node> = HashMap::with_capacity(4096);
         let mut open = BinaryHeap::new();
         nodes.insert(
             start.index,
@@ -121,7 +123,11 @@ impl NavGrid {
         let mut closest = (heuristic(start.x, start.z), start.index);
         let mut end = None;
         let mut expanded = 0;
-        let budget = if goal.is_some() { MAX_EXPANDED } else { MAX_EXPANDED_UNREACHABLE };
+        let budget = if goal.is_some() {
+            MAX_EXPANDED
+        } else {
+            MAX_EXPANDED_UNREACHABLE
+        };
         while let Some(Open { index, .. }) = open.pop() {
             let node = nodes[&index];
             if node.closed {
@@ -146,7 +152,8 @@ impl NavGrid {
                 index,
             };
             let a = *self.cell(here);
-            let straight: [Option<CellRef>; 4] = std::array::from_fn(|dir| self.neighbour(here, dir));
+            let straight: [Option<CellRef>; 4] =
+                std::array::from_fn(|dir| self.neighbour(here, dir));
             let mut moves: [(Option<CellRef>, f32); 8] = [(None, 0.0); 8];
             for dir in 0..4 {
                 moves[dir] = (straight[dir], 1.0);
@@ -232,7 +239,8 @@ impl NavGrid {
             let mut best = i + 1;
             if walkable(cells[i], cells[i + 1]) {
                 for k in i + 2..cells.len().min(i + MAX_LOOKAHEAD) {
-                    if !walkable(cells[k - 1], cells[k]) || !self.straight_walk(cells[i], cells[k]) {
+                    if !walkable(cells[k - 1], cells[k]) || !self.straight_walk(cells[i], cells[k])
+                    {
                         break;
                     }
                     best = k;
@@ -254,10 +262,20 @@ impl NavGrid {
     fn straight_walk(&self, a: CellRef, b: CellRef) -> bool {
         let (dx, dz) = (b.x as f32 - a.x as f32, b.z as f32 - a.z as f32);
         let length = (dx * dx + dz * dz).sqrt().max(1e-6);
-        let off_line = |c: CellRef| ((c.x as f32 - a.x as f32) * dz - (c.z as f32 - a.z as f32) * dx).abs() / length;
+        let off_line = |c: CellRef| {
+            ((c.x as f32 - a.x as f32) * dz - (c.z as f32 - a.z as f32) * dx).abs() / length
+        };
         let (step_x, step_z) = (if dx > 0.0 { 0 } else { 2 }, if dz > 0.0 { 1 } else { 3 });
-        let delta_x = if dx != 0.0 { 1.0 / dx.abs() } else { f32::INFINITY };
-        let delta_z = if dz != 0.0 { 1.0 / dz.abs() } else { f32::INFINITY };
+        let delta_x = if dx != 0.0 {
+            1.0 / dx.abs()
+        } else {
+            f32::INFINITY
+        };
+        let delta_z = if dz != 0.0 {
+            1.0 / dz.abs()
+        } else {
+            f32::INFINITY
+        };
         // Starting in the middle of a cell, the first boundary is half a cell away.
         let (mut t_x, mut t_z) = (0.5 * delta_x, 0.5 * delta_z);
         let step = |c: CellRef, dir: usize| {

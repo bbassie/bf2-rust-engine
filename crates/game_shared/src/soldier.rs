@@ -6,8 +6,9 @@
 //!
 //! The soldier is a kinematic capsule moved with avian's move-and-slide. On the ground it
 //! walks along the surface (constant horizontal speed on slopes), steps up ledges up to
-//! [`SoldierTuning::step_height`] and snaps down to stay glued to slopes and stairs. Numbers
-//! follow BF2's engine defaults where they are known (see [`SoldierTuning`]).
+//! [`SoldierTuning::step_height`] and snaps down to stay glued to slopes and stairs. Walking
+//! into a ladder climbs it (see [`crate::ladder`]). Numbers follow BF2's engine defaults
+//! where they are known (see [`SoldierTuning`]).
 
 use core::time::Duration;
 
@@ -406,7 +407,7 @@ pub fn step_soldier(
     // Walking into a ladder (or over the edge onto one from the top) gets on it.
     if wish != Vec3::ZERO
         && let Some(ladder) = world.ladder(m.position, shapes)
-        && let Some(feet) = world.mount(m, &ladder, wish, shapes)
+        && let Some(feet) = mount(m, &ladder, wish)
     {
         m.position = feet;
         m.velocity = Vec3::ZERO;
@@ -588,20 +589,12 @@ fn climb(
     };
     let speed = dir * climb_speed(tuning, dir);
 
-    // Up or down the rails, pulled onto the line the soldier holds on to.
-    let shape = shapes.movement(Stance::Standing);
-    let center = Stance::Standing.collision_center();
+    // Up or down the rails, pulled onto the line the soldier holds on to. Like BF2's
+    // ladder "seat" this ignores collisions: eaves often hang over the top of a ladder.
     let height = ladder.local(m.position).y;
     let hold = ladder.world(Vec3::new(0.0, height, ladder_hold(&ladder)));
     let pull = ((hold - m.position) / dt).clamp_length_max(3.0);
-    let moved = world.slide(
-        shape,
-        m.position + center,
-        pull + ladder.up * speed,
-        dt,
-        Contact::Air,
-    );
-    m.position = moved.center - center;
+    m.position += (pull + ladder.up * speed) * dt;
     m.velocity = ladder.up * speed;
 
     let height = ladder.local(m.position).y;
@@ -610,7 +603,9 @@ fn climb(
         m.climbing = false;
         m.velocity = -ladder.front * 2.5 + Vec3::Y * 3.0;
     } else if speed < 0.0 {
-        if let Some(ground) = world.ground(shape, moved.center, 5.0 * SKIN) {
+        let shape = shapes.movement(Stance::Standing);
+        let center = m.position + Stance::Standing.collision_center();
+        if let Some(ground) = world.ground(shape, center, 5.0 * SKIN) {
             m.position.y -= ground.gap();
             m.velocity = Vec3::ZERO;
             m.climbing = false;
@@ -632,6 +627,30 @@ fn climb_speed(tuning: &SoldierTuning, dir: f32) -> f32 {
 /// Distance of a climbing soldier's axis from the ladder's center plane.
 fn ladder_hold(ladder: &Ladder) -> f32 {
     ladder.half.z + SOLDIER_RADIUS + 0.05
+}
+
+/// Where the soldier's feet go when getting on `ladder`, if moving towards it: in front of
+/// it, or from the top onto it (BF2 lets you get on from the roof).
+fn mount(m: &SoldierMotion, ladder: &Ladder, wish: Vec3) -> Option<Vec3> {
+    let local = ladder.local(m.position);
+    let hold = ladder_hold(ladder);
+    if local.x.abs() > ladder.half.x + 0.15 {
+        return None;
+    }
+    if local.z >= 0.0 {
+        let within = local.z <= hold + LADDER_REACH
+            && local.y >= -ladder.top() - 0.5
+            && local.y <= ladder.top() - 0.6;
+        // Not right after jumping off it.
+        let towards = wish.dot(-ladder.front) > 0.5 && m.velocity.dot(ladder.front) <= 0.5;
+        (within && towards).then_some(m.position)
+    } else {
+        let on_top = m.grounded
+            && local.z >= -(hold + LADDER_REACH + 0.3)
+            && (local.y - ladder.top()).abs() < 0.7;
+        (on_top && wish.dot(ladder.front) > 0.5)
+            .then(|| ladder.world(Vec3::new(0.0, ladder.top() - 1.2, hold)))
+    }
 }
 
 fn wanted_stance(input: &InputFrame) -> Stance {
@@ -796,7 +815,7 @@ impl Surroundings<'_, '_, '_> {
         // it, seen from the axis.
         let off_axis = Vec3::new(hit.point1.x - center.x, 0.0, hit.point1.z - center.z);
         let mut origin = hit.point1 + Vec3::Y * 0.05;
-        if off_axis.length_squared() > 0.01 * 0.01 {
+        if off_axis.length_squared() > 0.02 * 0.02 {
             origin += off_axis.normalize() * 0.02;
         }
         let (normal, height) =
@@ -823,7 +842,9 @@ impl Surroundings<'_, '_, '_> {
             to_plane
         } else if hit.distance > to_plane {
             let across = Vec2::new(hit.point1.x - sphere.x, hit.point1.z - sphere.z).length();
-            let below = (SOLDIER_RADIUS * SOLDIER_RADIUS - across * across).max(0.0).sqrt();
+            let below = (SOLDIER_RADIUS * SOLDIER_RADIUS - across * across)
+                .max(0.0)
+                .sqrt();
             sphere.y - below - hit.point1.y
         } else {
             hit.distance
@@ -875,47 +896,6 @@ impl Surroundings<'_, '_, '_> {
                     .distance_squared(center)
                     .total_cmp(&b.center.distance_squared(center))
             })
-    }
-
-    /// Where the soldier's feet go when getting on `ladder`, if moving towards it: in
-    /// front of it, or from the top onto it (BF2 lets you get on from the roof).
-    fn mount(
-        &self,
-        m: &SoldierMotion,
-        ladder: &Ladder,
-        wish: Vec3,
-        shapes: &SoldierShapes,
-    ) -> Option<Vec3> {
-        let local = ladder.local(m.position);
-        let hold = ladder_hold(ladder);
-        if local.x.abs() > ladder.half.x + 0.15 {
-            return None;
-        }
-        let feet = if local.z >= 0.0 {
-            let within = local.z <= hold + LADDER_REACH
-                && local.y >= -ladder.top() - 0.5
-                && local.y <= ladder.top() - 0.6;
-            // Not right after jumping off it.
-            let towards = wish.dot(-ladder.front) > 0.5 && m.velocity.dot(ladder.front) <= 0.5;
-            (within && towards).then_some(m.position)?
-        } else {
-            let on_top = m.grounded
-                && local.z >= -(hold + LADDER_REACH + 0.3)
-                && (local.y - ladder.top()).abs() < 0.7;
-            (on_top && wish.dot(ladder.front) > 0.5)
-                .then(|| ladder.world(Vec3::new(0.0, ladder.top() - 1.2, hold)))?
-        };
-        let standing = shapes.movement(Stance::Standing);
-        self.mover
-            .spatial_query
-            .shape_intersections(
-                standing,
-                feet + SOLDIER_CENTER,
-                Quat::IDENTITY,
-                &self.filter,
-            )
-            .is_empty()
-            .then_some(feet)
     }
 
     /// The wanted stance, or the tallest one in between that has room.
