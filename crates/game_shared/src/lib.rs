@@ -8,8 +8,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
+pub mod chat;
 pub mod config;
 pub mod conquest;
+pub mod discovery;
 pub mod effects;
 pub mod input;
 pub mod ladder;
@@ -20,6 +22,7 @@ pub mod protocol;
 pub mod soldier;
 pub mod squad;
 pub mod statics;
+pub mod summary;
 pub mod vehicle;
 pub mod weapons;
 

@@ -3,7 +3,7 @@
 //! explosive objects, and the sound.
 
 use avian3d::prelude::*;
-use bevy::{audio::Volume, gltf::Gltf, prelude::*};
+use bevy::{gltf::Gltf, prelude::*};
 use game_data::Spread;
 use game_shared::{
     physics::GameLayer,
@@ -107,7 +107,7 @@ fn spawn_effects(
     parts: Query<(&Destructible, &Transform, Option<&ColliderAabb>)>,
     assets: Res<EffectAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    asset_server: Res<AssetServer>,
+    mut sounds: MessageWriter<crate::audio::PlaySound>,
 ) {
     for event in destroyed.read() {
         let Some((part, transform, aabb)) = parts
@@ -199,15 +199,8 @@ fn spawn_effects(
                 Transform::from_translation(center + Vec3::Y),
             ));
         }
-        if !effect.sounds.is_empty() {
-            let sound = &effect.sounds[fastrand::usize(..effect.sounds.len())];
-            commands.spawn((
-                AudioPlayer::new(asset_server.load(format!("imported://{sound}"))),
-                PlaybackSettings::DESPAWN
-                    .with_volume(Volume::Linear(1.0))
-                    .with_spatial(true),
-                Transform::from_translation(center),
-            ));
+        for sound in &effect.sounds {
+            sounds.write(crate::audio::PlaySound::at(sound, center).reason("destruction"));
         }
     }
 }

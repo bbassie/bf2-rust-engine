@@ -11,6 +11,7 @@
 //! - [`footsteps`]: every soldier's steps by stance and speed on the surface under them,
 //!   landings and ladder rungs.
 //! - [`ambience`]: the level's looping background sounds, fading in around their areas.
+//! - [`emitters`]: loops that belong to something in the world (flags), while audible.
 //! - [`vehicles`]: engines following the revs while someone drives.
 //!
 //! Sounds come from `sounds.ron` (shared: footsteps, impacts, voices), the weapon and vehicle
@@ -20,12 +21,13 @@
 use std::sync::Arc;
 
 use bevy::{prelude::*, transform::TransformSystems};
-use game_data::SoundLibrary;
-use game_shared::config::GamePaths;
+use game_data::{SoundDesc, SoundLibrary};
+use game_shared::{config::GamePaths, level::LoadedLevel};
 
 use crate::{camera::CameraSystems, prediction::RenderStateSystems};
 
 mod ambience;
+mod emitters;
 mod footsteps;
 mod vehicles;
 mod voices;
@@ -33,7 +35,9 @@ mod weapons;
 
 // For whatever else makes noise (explosions, effects) and the audio settings.
 #[allow(unused_imports)]
-pub use voices::{AudioMix, PlaySound, Sound};
+pub use emitters::SoundEmitter;
+#[allow(unused_imports)]
+pub use voices::{AudioMix, Channel, PlaySound, Sound};
 
 pub struct AudioPlugin;
 
@@ -48,11 +52,13 @@ impl Plugin for AudioPlugin {
                 .before(TransformSystems::Propagate),
         )
         .add_systems(Startup, load_library)
+        .add_systems(Update, preload_voices.run_if(resource_exists_and_changed::<LoadedLevel>))
         .add_plugins((
             voices::VoicePlugin,
             weapons::WeaponAudioPlugin,
             footsteps::FootstepPlugin,
             ambience::AmbiencePlugin,
+            emitters::EmitterPlugin,
             vehicles::VehicleAudioPlugin,
         ));
     }
@@ -82,4 +88,22 @@ fn load_library(mut commands: Commands, paths: Res<GamePaths>) {
         SoundLibrary::default()
     };
     commands.insert_resource(Sounds(Arc::new(library)));
+}
+
+/// The commander's voice-overs of the level's teams, so announcements aren't late.
+fn preload_voices(level: Res<LoadedLevel>, mut cache: ResMut<voices::SoundCache>, assets: Res<AssetServer>) {
+    for team in &level.desc.teams {
+        let voice = &team.voice;
+        let lines = [
+            &voice.we_captured,
+            &voice.we_lost,
+            &voice.enemy_captured,
+            &voice.bleed_start,
+            &voice.bleed_end,
+            &voice.low_tickets,
+        ];
+        for line in lines.into_iter().flatten() {
+            cache.preload(&assets, &SoundDesc::file(line.clone()));
+        }
+    }
 }

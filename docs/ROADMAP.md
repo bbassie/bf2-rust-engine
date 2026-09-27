@@ -42,13 +42,15 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   explosions
 - [x] Health, death, respawn, kill feed, scoreboard
 - [x] Deploy screen with kit and spawn point selection on the level's map
-- Movement like BF2: stairs and ledges, slopes, jumping (in progress)
+- [x] Movement like BF2: stairs and ledges, slopes, jumping, stance capsules (values from
+  the original executable)
+- [x] Ladders
+- Sprint stamina, stance/fire delays, soldiers vs vehicles (roadkill) (in progress)
 - [x] Smooth animation blending, first and third person: crossfades, directional
   movement, speed-matched playback, jumps, turning in place, remote fire/reload
 - [x] Scopes: BF2's zoom models with reticles, bolt-action rifles leave the scope
 - [x] Destructible objects (barricades, barrels, signs, wrecks, chain explosions) and
   BF2's material damage table
-- Ladders: climbing up and down, getting on and off at the top
 - Thrown and launched projectiles (in progress): hand grenades (cooking, bouncing, fuse), smoke grenades
   with smoke that blocks sight, under-barrel grenade launchers, rocket launchers, C4 and
   claymores, shotgun pellets
@@ -84,6 +86,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Vehicle guns (main guns, coaxial and pintle MGs, firing ports), hit points through an
   excerpt of the material damage table, wrecks
 - Vehicle prediction on clients (vehicles are interpolated 100 ms in the past for now)
+  (phase 2 in progress: aircraft, helicopters, boats, stationary weapons, prediction)
 - Engine/gearbox/tyre model fitted to the original (`newCar2.*`, gear ratios); per-face armour
   materials (front/side/rear/tracks) for direct hits
 - Wings for jets, rotors for helicopters, floating for boats and amphibious APCs
@@ -93,7 +96,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 ## M4: BF2-style bots
 
-- Navigation from our collision data (infantry: in progress), path costs per vehicle class
+- [x] Infantry navigation from our collision data: layered walkability grid, cached,
+  background A*; stuck events down from ~250/min to 1-3/min
+- Path costs per vehicle class
+- Strategy, squad orders and behaviours (in progress)
 - Strategic layer from `StrategicAreas.ai`, squad orders, individual utility behaviours
   seeded from `AIBehaviours.ai` and per-object AI templates
 - Bots driving vehicles and flying through the same input channels as players
@@ -105,12 +111,13 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - Water, undergrowth/overgrowth, surrounding terrain (in progress)
 - Effects: particles for muzzle flashes, impacts, explosions, smoke (in progress)
 - Audio: footsteps, distance falloff, flybys, ambience (in progress)
-- Main menu (in progress) (play/host/join, level and mode selection), server browser, settings (graphics,
+- [x] Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
   audio, controls, key bindings, mouse sensitivity, field of view) saved to disk, pause menu:
   a modern design of our own, not a copy of BF2's UI
+- Server browser (LAN discovery), chat, end-of-round summary (in progress)
 
 ## Later
 
 - Special Forces gadgets (zipline, grappling hook, night vision), co-op
 - Modding workflow: authoring new content directly in glTF + RON
-- Admin tools (RCON), master server / server list, stats
+- Admin tools (RCON), map rotation, server config, stats (in progress); master server

@@ -193,7 +193,8 @@ fn surrounding(
             continue;
         };
         let Ok(data) = vfs.read(path) else { continue };
-        if data.len() != (n * n) as usize {
+        // Devils_Perch's R1 has 130 stray bytes at the end.
+        if data.len() < (n * n) as usize {
             log::debug!("{path}: {} bytes, expected {n}x{n} 8-bit", data.len());
             continue;
         }

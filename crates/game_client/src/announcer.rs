@@ -1,15 +1,16 @@
 //! The commander's announcements, BF2's voice-overs in our team's language: flags captured
-//! and lost, ticket bleed starting and stopping, and running low on tickets.
+//! and lost, ticket bleed starting and stopping, and running low on tickets. They play as
+//! announcements (see `audio`): never dropped for other sounds, which duck under them.
 
 use bevy::prelude::*;
-use game_data::TeamVoice;
+use game_data::{SoundDesc, TeamVoice};
 use game_shared::{
     conquest::{FlagEvent, FlagEventKind, Tickets, team_index},
     level::LoadedLevel,
     protocol::Team,
 };
 
-use crate::net::LocalPlayer;
+use crate::{audio::PlaySound, net::LocalPlayer};
 
 pub struct AnnouncerPlugin;
 
@@ -33,7 +34,7 @@ struct Announcer {
 }
 
 impl Announcer {
-    fn say(&mut self, commands: &mut Commands, asset_server: &AssetServer, now: f64, lines: &[String]) {
+    fn say(&mut self, sounds: &mut MessageWriter<PlaySound>, now: f64, lines: &[String]) {
         let Some(line) = fastrand::choice(lines) else {
             return;
         };
@@ -41,10 +42,7 @@ impl Announcer {
             return;
         }
         self.last = now;
-        commands.spawn((
-            AudioPlayer::new(asset_server.load(format!("imported://{line}"))),
-            PlaybackSettings::DESPAWN,
-        ));
+        sounds.write(PlaySound::local(SoundDesc::file(line.clone())).announcement().reason("commander"));
     }
 }
 
@@ -53,9 +51,8 @@ fn voice<'a>(level: &'a LoadedLevel, team: Team) -> Option<&'a TeamVoice> {
 }
 
 fn announce_flags(
-    mut commands: Commands,
+    mut sounds: MessageWriter<PlaySound>,
     time: Res<Time>,
-    asset_server: Res<AssetServer>,
     level: Option<Res<LoadedLevel>>,
     players: Query<&Team, With<LocalPlayer>>,
     mut events: MessageReader<FlagEvent>,
@@ -78,14 +75,13 @@ fn announce_flags(
             (FlagEventKind::Neutralized, false) => &voice.we_lost,
             (FlagEventKind::Neutralized, true) => continue,
         };
-        announcer.say(&mut commands, &asset_server, time.elapsed_secs_f64(), lines);
+        announcer.say(&mut sounds, time.elapsed_secs_f64(), lines);
     }
 }
 
 fn announce_tickets(
-    mut commands: Commands,
+    mut sounds: MessageWriter<PlaySound>,
     time: Res<Time>,
-    asset_server: Res<AssetServer>,
     level: Option<Res<LoadedLevel>>,
     players: Query<&Team, With<LocalPlayer>>,
     tickets: Query<&Tickets, Changed<Tickets>>,
@@ -102,13 +98,13 @@ fn announce_tickets(
     if bleeding != announcer.bleeding {
         announcer.bleeding = bleeding;
         let lines = if bleeding { &voice.bleed_start } else { &voice.bleed_end };
-        announcer.say(&mut commands, &asset_server, now, lines);
+        announcer.say(&mut sounds, now, lines);
     }
     let low = tickets.remaining[index] < tickets.start[index] * LOW_TICKETS;
     if low && !announcer.warned_low {
         announcer.warned_low = true;
         announcer.last = 0.0;
-        announcer.say(&mut commands, &asset_server, now, &voice.low_tickets);
+        announcer.say(&mut sounds, now, &voice.low_tickets);
     } else if !low {
         // A new round.
         announcer.warned_low = false;

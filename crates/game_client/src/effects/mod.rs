@@ -42,7 +42,11 @@ use game_shared::{
     statics::StaticMesh,
 };
 
-use crate::{audio::PlaySound, camera::PlayerCamera, render::viewmodel::VIEW_MODEL_LAYER};
+use crate::{
+    audio::{PlaySound, Sound},
+    camera::PlayerCamera,
+    render::viewmodel::VIEW_MODEL_LAYER,
+};
 
 pub mod impacts;
 mod render;
@@ -196,8 +200,10 @@ struct Prepared {
     textures: Vec<Handle<Image>>,
     /// Per flash mesh.
     flashes: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
-    /// Longest light, flash or particle life: how long the effect can last.
+    /// Longest light or flash life.
     lights_until: f32,
+    /// Explosions without a sound of their own get a generic one for a blast about this big.
+    explosion_radius: Option<f32>,
 }
 
 impl EffectLibrary {
@@ -255,11 +261,14 @@ impl EffectLibrary {
                     .map(|l| l.life)
                     .chain(desc.meshes.iter().map(|m| m.life))
                     .fold(0.0, f32::max);
+                let explosion_radius = (name.starts_with("e_exp") && desc.sounds.is_empty())
+                    .then(|| desc.emitters.iter().map(|e| e.size[1]).fold(0.0, f32::max) * 1.5);
                 Arc::new(Prepared {
                     desc,
                     textures,
                     flashes,
                     lights_until,
+                    explosion_radius,
                 })
             });
         self.effects.insert(name, prepared.clone());
@@ -568,6 +577,9 @@ fn spawn_effects(
         }
         for sound in desc.sounds.iter().filter(|s| s.views.shows(request.first_person) && !s.files.is_empty()) {
             sounds.write(PlaySound::at(sound, request.position).reason("effect"));
+        }
+        if let Some(radius) = effect.explosion_radius {
+            sounds.write(PlaySound::at(Sound::Explosion { radius }, request.position).reason("explosion effect"));
         }
         world.instances.push(instance);
     }

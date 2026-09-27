@@ -84,7 +84,7 @@ impl Stance {
 /// Everything [`step_soldier`] depends on is in here, so a client can replay inputs from
 /// any received state. Timers count down to zero and then stay put, so a soldier standing
 /// still stops changing (and replicating).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct SoldierMotion {
     /// Feet position.
     pub position: Vec3,
@@ -105,6 +105,41 @@ pub struct SoldierMotion {
     pub jump_held: bool,
     /// On a ladder. Which one is found again from the position every tick.
     pub climbing: bool,
+    /// Sprint stamina, 1 full, 0 empty.
+    pub stamina: f32,
+    pub sprinting: bool,
+    /// Seconds until stamina recovers again after a jump.
+    pub stamina_delay: f32,
+    /// Heavy kit (BF2's `*_heavy_soldier`): less stamina, see [`SoldierTuning::heavy`].
+    pub heavy: bool,
+    /// Seconds until the weapon may fire again (after jumping or getting up from prone).
+    pub fire_lock: f32,
+    /// Seconds until a prone soldier may get up, or a soldier who got up may go prone.
+    pub stance_lock: f32,
+}
+
+impl Default for SoldierMotion {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            grounded: false,
+            stance: Stance::Standing,
+            air_control: 0.0,
+            recovery: 0.0,
+            prone_lock: 0.0,
+            jump_held: false,
+            climbing: false,
+            stamina: 1.0,
+            sprinting: false,
+            stamina_delay: 0.0,
+            heavy: false,
+            fire_lock: 0.0,
+            stance_lock: 0.0,
+        }
+    }
 }
 
 impl SoldierMotion {
@@ -114,6 +149,13 @@ impl SoldierMotion {
             yaw,
             ..default()
         }
+    }
+
+    /// Whether the soldier's hands are free to fire: not on a ladder, and not just after
+    /// jumping or getting up from prone (BF2's `fire-delay-after-jump` and
+    /// `fire-delay-from-prone`).
+    pub fn can_fire(&self) -> bool {
+        !self.climbing && self.fire_lock <= 0.0
     }
 
     pub fn eye_position(&self) -> Vec3 {
@@ -197,6 +239,46 @@ pub struct SoldierTuning {
     pub climb_down_speed: f32,
     /// Speed away from the ladder when jumping off it.
     pub ladder_jump_speed: f32,
+    /// Sprint stamina of light and heavy kits.
+    pub light: StaminaTuning,
+    pub heavy: StaminaTuning,
+    /// Stamina needed to start sprinting (soldier template `SprintLimit`). Running out
+    /// stops the sprint until it has recovered this far.
+    pub sprint_min_stamina: f32,
+    /// Seconds stamina doesn't recover after a jump (`sprint-recharge-delay-after-jump`).
+    pub stamina_delay_after_jump: f32,
+    /// Seconds the weapon can't fire after jumping (`fire-delay-after-jump`) and after
+    /// getting up from prone (`fire-delay-from-prone`).
+    pub fire_delay_after_jump: f32,
+    pub fire_delay_after_prone: f32,
+    /// Seconds a soldier who went prone stays down (`stand-delay-from-prone`), and a soldier
+    /// who got up can't go prone again (`prone-delay-from-stand`).
+    pub prone_switch_delay: f32,
+    /// Seconds after a jump before going prone (`prone-delay-after-jump`).
+    pub prone_delay_after_jump: f32,
+}
+
+/// Sprint stamina, from BF2's soldier templates (`us_light_soldier.tweak` and friends).
+#[derive(Clone, Copy, Debug)]
+pub struct StaminaTuning {
+    /// Seconds of sprinting on a full stamina (`SprintDissipationTime`).
+    pub sprint_time: f32,
+    /// Seconds from empty to full (`SprintRecoverTime`).
+    pub recover_time: f32,
+    /// Stamina a jump costs (`SprintLossAtJump`).
+    pub jump_cost: f32,
+}
+
+impl SoldierTuning {
+    pub fn stamina(&self, heavy: bool) -> &StaminaTuning {
+        if heavy { &self.heavy } else { &self.light }
+    }
+}
+
+/// Whether a kit class carries BF2's heavy soldier (body armour, less stamina): the level
+/// scripts give it to Assault, Support and AT.
+pub fn heavy_kit(kind: &str) -> bool {
+    matches!(kind, "Assault" | "Support" | "AT")
 }
 
 impl Default for SoldierTuning {
@@ -224,6 +306,22 @@ impl Default for SoldierTuning {
             climb_speed: 2.0,
             climb_down_speed: 3.0,
             ladder_jump_speed: 3.0,
+            light: StaminaTuning {
+                sprint_time: 10.0,
+                recover_time: 17.0,
+                jump_cost: 0.15,
+            },
+            heavy: StaminaTuning {
+                sprint_time: 8.0,
+                recover_time: 20.0,
+                jump_cost: 0.2,
+            },
+            sprint_min_stamina: 0.05,
+            stamina_delay_after_jump: 0.7,
+            fire_delay_after_jump: 0.7,
+            fire_delay_after_prone: 0.6,
+            prone_switch_delay: 0.8,
+            prone_delay_after_jump: 0.3,
         }
     }
 }
@@ -356,21 +454,43 @@ pub fn step_soldier(
 
     m.yaw = input.yaw;
     m.pitch = input.pitch.clamp(-1.55, 1.55);
-    m.air_control = (m.air_control - dt).max(0.0);
-    m.recovery = (m.recovery - dt).max(0.0);
-    m.prone_lock = (m.prone_lock - dt).max(0.0);
+    for timer in [
+        &mut m.air_control,
+        &mut m.recovery,
+        &mut m.prone_lock,
+        &mut m.stamina_delay,
+        &mut m.fire_lock,
+        &mut m.stance_lock,
+    ] {
+        *timer = (*timer - dt).max(0.0);
+    }
     let jump_pressed = input.pressed(Buttons::JUMP);
     let fresh_jump = jump_pressed && !m.jump_held;
     m.jump_held = jump_pressed;
 
     if m.climbing {
+        m.sprinting = false;
+        update_stamina(m, tuning, false, dt);
         climb(m, &world, tuning, shapes, input, fresh_jump, dt);
         return;
     }
 
-    // Stance follows the buttons while on the ground, if there is room to stand up.
+    // Stance follows the buttons while on the ground, if there is room to stand up, and
+    // not straight back after going prone or getting up.
     if m.grounded {
-        m.stance = world.fit_stance(m.position, m.stance, wanted_stance(input), shapes);
+        let mut wanted = wanted_stance(input);
+        let prone = m.stance == Stance::Prone;
+        if m.stance_lock > 0.0 && prone != (wanted == Stance::Prone) {
+            wanted = m.stance;
+        }
+        let stance = world.fit_stance(m.position, m.stance, wanted, shapes);
+        if (stance == Stance::Prone) != prone {
+            m.stance_lock = tuning.prone_switch_delay;
+            if prone {
+                m.fire_lock = m.fire_lock.max(tuning.fire_delay_after_prone);
+            }
+        }
+        m.stance = stance;
     }
     if m.stance == Stance::Prone {
         m.prone_lock = tuning.jump_delay_after_prone;
@@ -391,10 +511,11 @@ pub fn step_soldier(
     // Wanted horizontal velocity.
     let intent = input.movement_vec();
     let wish = Quat::from_rotation_y(m.yaw) * Vec3::new(intent.x, 0.0, -intent.y);
-    let sprinting =
+    let wants_sprint =
         input.pressed(Buttons::SPRINT) && intent.y > 0.5 && m.stance == Stance::Standing;
+    update_stamina(m, tuning, wants_sprint, dt);
     let mut speed = match m.stance {
-        Stance::Standing if sprinting => tuning.sprint_speed,
+        Stance::Standing if m.sprinting => tuning.sprint_speed,
         Stance::Standing => tuning.run_speed,
         Stance::Crouching => tuning.crouch_speed,
         Stance::Prone => tuning.prone_speed,
@@ -433,6 +554,10 @@ pub fn step_soldier(
             m.velocity = horizontal * tuning.jump_momentum + Vec3::Y * tuning.jump_speed;
             m.air_control = tuning.air_control_time;
             m.grounded = false;
+            m.stamina = (m.stamina - tuning.stamina(m.heavy).jump_cost).max(0.0);
+            m.stamina_delay = tuning.stamina_delay_after_jump;
+            m.fire_lock = m.fire_lock.max(tuning.fire_delay_after_jump);
+            m.stance_lock = m.stance_lock.max(tuning.prone_delay_after_jump);
         } else {
             walk(
                 m,
@@ -656,6 +781,23 @@ fn mount(m: &SoldierMotion, ladder: &Ladder, wish: Vec3) -> Option<Vec3> {
             && (local.y - ladder.top()).abs() < 0.7;
         (on_top && wish.dot(ladder.front) > 0.5)
             .then(|| ladder.world(Vec3::new(0.0, ladder.top() - 1.2, hold)))
+    }
+}
+
+/// BF2's sprint: stamina drains while sprinting and recovers otherwise (not right after a
+/// jump). Starting needs a little stamina; running out stops the sprint.
+fn update_stamina(m: &mut SoldierMotion, tuning: &SoldierTuning, wants_sprint: bool, dt: f32) {
+    let stamina = tuning.stamina(m.heavy);
+    if m.sprinting {
+        m.stamina = (m.stamina - dt / stamina.sprint_time).max(0.0);
+        if !wants_sprint || m.stamina <= 0.0 {
+            m.sprinting = false;
+        }
+    } else {
+        if m.stamina_delay <= 0.0 {
+            m.stamina = (m.stamina + dt / stamina.recover_time).min(1.0);
+        }
+        m.sprinting = wants_sprint && m.stamina >= tuning.sprint_min_stamina;
     }
 }
 

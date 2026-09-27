@@ -313,6 +313,8 @@ enum Slider {
     Sensitivity,
     FieldOfView,
     Volume,
+    EffectsVolume,
+    AmbienceVolume,
     Bots,
 }
 
@@ -322,6 +324,8 @@ impl Slider {
             Slider::Sensitivity => "sensitivity",
             Slider::FieldOfView => "fov",
             Slider::Volume => "volume",
+            Slider::EffectsVolume => "effects_volume",
+            Slider::AmbienceVolume => "ambience_volume",
             Slider::Bots => "bots",
         }
     }
@@ -331,7 +335,7 @@ impl Slider {
         match self {
             Slider::Sensitivity => (0.1, 4.0, 0.05),
             Slider::FieldOfView => (60.0, 100.0, 1.0),
-            Slider::Volume => (0.0, 1.0, 0.05),
+            Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => (0.0, 1.0, 0.05),
             Slider::Bots => (0.0, 63.0, 1.0),
         }
     }
@@ -341,6 +345,8 @@ impl Slider {
             Slider::Sensitivity => settings.mouse_sensitivity,
             Slider::FieldOfView => settings.field_of_view,
             Slider::Volume => settings.master_volume,
+            Slider::EffectsVolume => settings.effects_volume,
+            Slider::AmbienceVolume => settings.ambience_volume,
             Slider::Bots => settings.last_match.bots as f32,
         }
     }
@@ -359,6 +365,8 @@ impl Slider {
             Slider::Sensitivity => settings.mouse_sensitivity = value,
             Slider::FieldOfView => settings.field_of_view = value,
             Slider::Volume => settings.master_volume = value,
+            Slider::EffectsVolume => settings.effects_volume = value,
+            Slider::AmbienceVolume => settings.ambience_volume = value,
             Slider::Bots => settings.last_match.bots = value as u32,
         }
     }
@@ -373,7 +381,7 @@ impl Slider {
         match self {
             Slider::Sensitivity => format!("{value:.2}"),
             Slider::FieldOfView => format!("{value:.0} deg"),
-            Slider::Volume => format!("{:.0}%", value * 100.0),
+            Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => format!("{:.0}%", value * 100.0),
             Slider::Bots => format!("{value:.0}"),
         }
     }

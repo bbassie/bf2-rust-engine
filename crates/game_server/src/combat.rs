@@ -445,6 +445,7 @@ fn simulate_projectiles(
     colliders: Query<&ColliderOf>,
     soldiers: Query<&SoldierMotion, With<Soldier>>,
     vehicles: Query<&VehicleData>,
+    materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
     mut soldier_hits: MessageWriter<SoldierHit>,
     mut vehicle_hits: MessageWriter<VehicleHit>,
@@ -550,7 +551,7 @@ fn simulate_projectiles(
                 });
             }
         } else if let Ok(vehicle) = vehicles.get(body) {
-            let armor = armor_damage_modifier(desc.material, vehicle.0.desc.armor_material);
+            let armor = damage_mod(materials.as_deref(), desc.material, vehicle.0.desc.armor_material);
             let damage = damage_at(desc, live.travelled) * armor;
             if damage > 0.0 {
                 vehicle_hits.write(VehicleHit {
@@ -751,7 +752,7 @@ fn explode(
             // Measured to the hull's surface, roughly.
             let reach = Vec3::from_array(desc.physics.bounds[1]).length().min(4.0);
             let distance = (position.0.distance(explosion.position) - reach).max(0.0);
-            let sensitivity = armor_damage_modifier(material, desc.blast_material);
+            let sensitivity = damage_mod(materials.as_deref(), material, desc.blast_material);
             if distance < explosion.radius && sensitivity > 0.0 && explosion.reaches(position.0) {
                 vehicle_hits.write(VehicleHit {
                     vehicle,
@@ -760,6 +761,16 @@ fn explode(
                 });
             }
         }
+    }
+}
+
+/// The damage table's factor for `attacker` against `target`: BF2's whole table when it is
+/// imported (pairs it leaves out deal full damage, which is what lets AT mines and C4 wreck
+/// vehicles), else the vehicle armor stopgap.
+fn damage_mod(materials: Option<&Materials>, attacker: u32, target: u32) -> f32 {
+    match materials {
+        Some(materials) if !materials.0.damage.is_empty() => materials.0.damage_mod(attacker, target),
+        _ => armor_damage_modifier(attacker, target),
     }
 }
 

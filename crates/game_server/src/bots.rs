@@ -46,7 +46,7 @@ use crate::{
         strategy::{self, OrderKind, StrategicMap, Strategy, TeamIntel, hash01},
         tactics,
     },
-    nav::{NavGrid, NavPath, Navigation, Waypoint},
+    nav::{LadderStep, NavGrid, NavPath, Navigation, Waypoint},
 };
 
 pub struct BotPlugin;
@@ -222,6 +222,8 @@ pub struct BotBrain {
     deployed: bool,
     /// It chose to spawn on its squad leader.
     spawn_on_leader: bool,
+    /// Jump was pressed last tick.
+    jump_held: bool,
 
     goal: Option<Vec3>,
     /// Walking straight to the goal without a path; and the goal that was checked for.
@@ -286,6 +288,7 @@ impl Default for BotBrain {
             sweep: fastrand::f32() * TAU,
             deployed: false,
             spawn_on_leader: false,
+            jump_held: false,
             goal: None,
             direct: false,
             direct_goal: None,
@@ -308,7 +311,8 @@ impl Default for BotBrain {
 
 /// Where path following wants to go this tick.
 enum Steer {
-    Toward { target: Vec3, jump: bool },
+    /// `ladder`: the waypoint is reached by climbing.
+    Toward { target: Vec3, jump: bool, ladder: Option<LadderStep> },
     /// At the end of the path.
     Arrived,
 }
@@ -716,6 +720,13 @@ impl BotBrain {
     /// Weighs the options (utility) and switches activity when another is worth more.
     /// `covers`: cover searches left this tick (they cast rays).
     fn decide(&mut self, w: &Senses, me: &Me, team_stats: &mut TeamStats, covers: &mut u32) {
+        if me.motion.climbing {
+            // Hands on the rungs: nothing to do but climb on.
+            if matches!(self.activity, Activity::Engage | Activity::Throw { .. } | Activity::Search { .. }) {
+                self.activity = Activity::Objective;
+            }
+            return;
+        }
         if matches!(self.activity, Activity::Throw { .. }) {
             return;
         }
@@ -1217,6 +1228,7 @@ impl BotBrain {
         let position = me.motion.position;
         let mut direction = Vec3::ZERO;
         let mut jump = false;
+        let mut ladder = None;
         self.goal = intent.goal.map(|g| g.position);
         if let Some(goal) = intent.goal {
             // Short, clear moves need no path.
@@ -1225,13 +1237,14 @@ impl BotBrain {
                 self.direct = flat(goal.position - position).length() < 15.0
                     && w.nav().is_none_or(|nav| nav.walkable_line(position, goal.position));
             }
-            let (target, j) = match (w.nav.as_deref(), self.direct) {
+            let (target, j, step) = match (w.nav.as_deref(), self.direct) {
                 (Some(nav), false) => match self.follow_path(nav, goal.position, goal.tolerance, me.motion, dt, stats) {
-                    Steer::Toward { target, jump } => (target, jump),
-                    Steer::Arrived => (goal.position, false),
+                    Steer::Toward { target, jump, ladder } => (target, jump, ladder),
+                    Steer::Arrived => (goal.position, false, None),
                 },
-                _ => (goal.position, false),
+                _ => (goal.position, false, None),
             };
+            ladder = step;
             let to = flat(target - position);
             if to.length() > 0.3 {
                 direction = to.normalize();
@@ -1248,7 +1261,7 @@ impl BotBrain {
         let moved = if moved > 1.0 { 0.0 } else { moved };
         self.last_position = position;
         self.stuck_strikes = (self.stuck_strikes - dt / 10.0).max(0.0);
-        if intent.goal.is_some() && wants_move {
+        if intent.goal.is_some() && wants_move && !me.motion.climbing {
             stats.moving_seconds += dt;
             stats.moved += moved;
             if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && me.motion.grounded {
@@ -1340,6 +1353,25 @@ impl BotBrain {
         {
             frame.buttons |= Buttons::RELOAD;
         }
+        if me.motion.climbing {
+            match ladder.filter(|_| intent.goal.is_some()) {
+                // Forward climbs; looking down, forward climbs down.
+                Some(step) => {
+                    movement = Vec2::Y;
+                    self.yaw = turn_towards(self.yaw, yaw_to(-step.front), 5.0 * dt);
+                    self.pitch = if step.up { 0.1 } else { -0.9 };
+                    frame.yaw = self.yaw;
+                    frame.pitch = self.pitch;
+                    frame.buttons.remove(Buttons::JUMP | Buttons::CROUCH | Buttons::PRONE | Buttons::SPRINT);
+                }
+                // On a ladder it didn't mean to take: jump off.
+                None => frame.buttons |= Buttons::JUMP,
+            }
+        }
+        // Jumping takes a fresh press: holding the button would jump once.
+        let jump = frame.buttons.contains(Buttons::JUMP) && !self.jump_held;
+        frame.buttons.set(Buttons::JUMP, jump);
+        self.jump_held = jump;
         frame.set_movement(movement);
         frame
     }
@@ -1404,6 +1436,7 @@ impl BotBrain {
             return Steer::Toward {
                 target: goal,
                 jump: false,
+                ladder: None,
             };
         };
         while let Some(waypoint) = path.waypoints.get(self.waypoint) {
@@ -1420,6 +1453,15 @@ impl BotBrain {
             self.path = None;
             return Steer::Arrived;
         };
+        if motion.climbing {
+            // Height changes and no progress along the ground are what climbing is.
+            self.waypoint_timer = 0.0;
+            return Steer::Toward {
+                target: waypoint.position,
+                jump: false,
+                ladder: waypoint.ladder,
+            };
+        }
         // Pushed off the path (by fighting, say) or fell off a ledge: find a new one.
         let previous = path.waypoints[self.waypoint.saturating_sub(1)].position;
         let (off_path, t) = segment_offset(flat(position), flat(previous), flat(waypoint.position));
@@ -1446,6 +1488,7 @@ impl BotBrain {
         Steer::Toward {
             target: waypoint.position,
             jump: waypoint.jump && motion.grounded && flat(waypoint.position - position).length() < 1.2,
+            ladder: waypoint.ladder,
         }
     }
 

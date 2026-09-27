@@ -507,8 +507,11 @@ pub fn spawn_soldier(
     yaw: f32,
     armory: &Armory,
 ) -> Entity {
-    let motion = SoldierMotion::at(position, yaw);
+    let mut motion = SoldierMotion::at(position, yaw);
     let team_index = if team == Team::Two { 1 } else { 0 };
+    motion.heavy = armory
+        .kit_for(team_index, kit as usize)
+        .is_some_and(|k| game_shared::soldier::heavy_kit(&k.kind));
     let loadout = armory
         .kit_for(team_index, kit as usize)
         .map(|k| Loadout {

@@ -110,7 +110,10 @@ pub fn step(
             return result;
         }
         let support = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
-        if spatial.cast_ray(motion.position + Vec3::Y * 0.05, Dir3::NEG_Y, 0.2, true, &support).is_some() {
+        if spatial
+            .cast_ray(motion.position + Vec3::Y * 0.05, Dir3::NEG_Y, 0.2, true, &support)
+            .is_some()
+        {
             return result;
         }
         motion.resting = false;
@@ -121,7 +124,8 @@ pub fn step(
         let speed = motion.velocity.length();
         if speed < desc.max_speed {
             let forward = motion.rotation * Vec3::NEG_Z;
-            motion.velocity = motion.velocity.normalize_or(forward) * (speed + desc.acceleration * dt).min(desc.max_speed);
+            motion.velocity =
+                motion.velocity.normalize_or(forward) * (speed + desc.acceleration * dt).min(desc.max_speed);
         }
     }
     let start_velocity = motion.velocity;
@@ -204,7 +208,11 @@ pub const SOFT_THROW: f32 = 0.5;
 /// keeps the thrower's momentum.
 pub fn launch_velocity(weapon: &WeaponDesc, direction: Vec3, soft: bool, thrower: Vec3) -> Vec3 {
     let speed = weapon.projectile.velocity * if soft { SOFT_THROW } else { 1.0 };
-    let carried = if weapon.fire.kind == FireKind::Gun { Vec3::ZERO } else { thrower };
+    let carried = if weapon.fire.kind == FireKind::Gun {
+        Vec3::ZERO
+    } else {
+        thrower
+    };
     direction * speed + carried
 }
 
@@ -301,7 +309,10 @@ impl Smoke<'_, '_> {
 
     /// How thick the smoke is at `point`, 0..1.
     pub fn density_at(&self, point: Vec3) -> f32 {
-        self.clouds.iter().map(|cloud| cloud.density_at(point)).fold(0.0, f32::max)
+        self.clouds
+            .iter()
+            .map(|cloud| cloud.density_at(point))
+            .fold(0.0, f32::max)
     }
 }
 
@@ -332,7 +343,10 @@ mod tests {
         assert!(in_trigger(&trigger, &mine, ahead, 3.0));
         assert!(!in_trigger(&trigger, &mine, ahead, 0.5), "sneaking past");
         assert!(!in_trigger(&trigger, &mine, Vec3::new(0.0, 0.9, -8.0), 3.0), "too far");
-        assert!(!in_trigger(&trigger, &mine, Vec3::new(4.0, 0.9, -2.0), 3.0), "off to the side");
+        assert!(
+            !in_trigger(&trigger, &mine, Vec3::new(4.0, 0.9, -2.0), 3.0),
+            "off to the side"
+        );
         assert!(!in_trigger(&trigger, &mine, Vec3::new(0.0, 0.9, 3.0), 3.0), "behind");
         // Turned to face +X.
         let mine = ProjectileMotion::new(Vec3::ZERO, Vec3::ZERO, -std::f32::consts::FRAC_PI_2);
@@ -351,8 +365,14 @@ mod tests {
         assert!(!cloud.blocks(from, to), "not spread yet");
         cloud.age = 5.0;
         assert!(cloud.blocks(from, to));
-        assert!(!cloud.blocks(from + Vec3::Z * 10.0, to + Vec3::Z * 10.0), "passes beside it");
-        assert!(!cloud.blocks(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)), "too close");
+        assert!(
+            !cloud.blocks(from + Vec3::Z * 10.0, to + Vec3::Z * 10.0),
+            "passes beside it"
+        );
+        assert!(
+            !cloud.blocks(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+            "too close"
+        );
         cloud.age = 11.5;
         assert!(!cloud.blocks(from, to), "thinned out");
     }

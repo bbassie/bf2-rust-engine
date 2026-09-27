@@ -563,11 +563,7 @@ fn flag_models(interp: &mut Interpreter, vfs: &Vfs, converter: &MeshConverter, o
         }
     }
     // The pole's effect bundle loops a flapping sound.
-    models.sound = interp
-        .world
-        .template("s_flagpole_sfxbundle_start")
-        .and_then(|t| t.get_str("soundfilename"))
-        .and_then(|file| converter.file(file));
+    models.sound = crate::sounds::SoundConverter::new(vfs, out).template(&interp.world, "s_flagpole_sfxbundle_start");
     models
 }
 

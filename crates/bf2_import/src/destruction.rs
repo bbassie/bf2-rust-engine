@@ -166,13 +166,9 @@ fn collect_effect(
         }
         "emitter" => effect.debris.extend(debris_piece(world, template, transform, converter)),
         "sound" => {
-            let files = template.get_str("soundfilename").unwrap_or_default().trim_matches('"');
-            for file in files.split(',').map(str::trim).filter(|f| !f.is_empty()) {
-                if let Some(path) = converter.file(file)
-                    && !effect.sounds.contains(&path)
-                {
-                    effect.sounds.push(path);
-                }
+            let sound = crate::sounds::SoundConverter::new(converter.vfs, &converter.out).template(world, name);
+            if let Some(sound) = sound.filter(|s| !effect.sounds.contains(s)) {
+                effect.sounds.push(sound);
             }
         }
         "spriteparticlesystem" | "particlesystememitter" => effect.dust = true,

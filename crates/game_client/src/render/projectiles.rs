@@ -105,7 +105,8 @@ fn puff_texture() -> Image {
     const SIZE: u32 = 128;
     let noise = |x: f32, y: f32| {
         let wave = |fx: f32, fy: f32, phase: f32| ((x * fx + y * fy) * std::f32::consts::TAU + phase).sin();
-        (wave(2.0, 1.0, 0.3) + wave(-1.0, 3.0, 1.7) * 0.7 + wave(4.0, -3.0, 4.1) * 0.4 + wave(-5.0, -6.0, 2.2) * 0.25) / 2.35
+        (wave(2.0, 1.0, 0.3) + wave(-1.0, 3.0, 1.7) * 0.7 + wave(4.0, -3.0, 4.1) * 0.4 + wave(-5.0, -6.0, 2.2) * 0.25)
+            / 2.35
     };
     let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for j in 0..SIZE {
@@ -142,7 +143,12 @@ fn spawn_visual(
     let transform = Transform::from_translation(visual.motion.position).with_rotation(visual.motion.rotation);
     let mesh = visual.weapon.projectile.mesh.clone();
     let trail = visual.weapon.projectile.trail_effect.clone();
-    let mut entity = commands.spawn((visual, transform, GlobalTransform::from(transform), Visibility::default()));
+    let mut entity = commands.spawn((
+        visual,
+        transform,
+        GlobalTransform::from(transform),
+        Visibility::default(),
+    ));
     match mesh {
         Some(mesh) => {
             entity.with_child(WorldAssetRoot(
@@ -166,7 +172,9 @@ fn spawn_visual(
 fn random_spin(desc: &game_data::ProjectileDesc) -> Vec3 {
     match desc.impact {
         Impact::Stop => Vec3::ZERO,
-        _ => Vec3::new(fastrand::f32() - 0.5, fastrand::f32() - 0.5, fastrand::f32() - 0.5).normalize_or(Vec3::X) * 12.0,
+        _ => {
+            Vec3::new(fastrand::f32() - 0.5, fastrand::f32() - 0.5, fastrand::f32() - 0.5).normalize_or(Vec3::X) * 12.0
+        }
     }
 }
 
@@ -283,14 +291,20 @@ fn move_visuals(
 
         // A prediction that hit something waits hidden for the server's detonation.
         let hidden = visual.stopped && visual.source.is_none();
-        visibility.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
+        visibility.set_if_neq(if hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        });
         transform.translation = visual.motion.position + visual.offset;
         let motion = &visual.motion;
         transform.rotation = if motion.resting {
             motion.rotation
         } else if desc.impact == Impact::Stop {
             // Shells and rockets point along their flight.
-            Transform::default().looking_to(motion.velocity.normalize_or(motion.rotation * Vec3::NEG_Z), Vec3::Y).rotation
+            Transform::default()
+                .looking_to(motion.velocity.normalize_or(motion.rotation * Vec3::NEG_Z), Vec3::Y)
+                .rotation
         } else {
             motion.rotation * Quat::from_scaled_axis(visual.spin * visual.age)
         };
@@ -372,7 +386,11 @@ fn spawn_smoke_puffs(
         for _ in 0..PUFFS {
             let angle = fastrand::f32() * std::f32::consts::TAU;
             let out = fastrand::f32().sqrt() * radius * 0.6;
-            let offset = Vec3::new(angle.cos() * out, (fastrand::f32() * 0.5 - 0.15) * radius, angle.sin() * out);
+            let offset = Vec3::new(
+                angle.cos() * out,
+                (fastrand::f32() * 0.5 - 0.15) * radius,
+                angle.sin() * out,
+            );
             commands.spawn((
                 SmokePuff {
                     cloud: entity,

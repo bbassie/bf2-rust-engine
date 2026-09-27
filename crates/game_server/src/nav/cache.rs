@@ -1,8 +1,8 @@
 //! `navgrid_<mode>_<size>.bin`: a built grid, so later loads of the level skip the build.
 //!
 //! Layout: magic, the geometry key (see [`super::build::geometry_key`]), then deflated:
-//! cell size, origin (3 x f32), width, depth, cell count (u32), the column offsets and the
-//! cells.
+//! cell size, origin (3 x f32), width, depth, cell count (u32), the column offsets, the
+//! cells, the ladder count (u32) and the ladders (see [`LADDER_WORDS`]).
 
 use std::{
     fs,
@@ -14,9 +14,36 @@ use anyhow::ensure;
 use bevy::prelude::*;
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
-use super::{NavCell, NavGrid, NavParams};
+use super::{CellRef, NavCell, NavGrid, NavLadder, NavParams};
 
 const MAGIC: &[u8; 8] = b"BF2NAVGR";
+
+/// 4-byte words per ladder: both cells (x, z, index) and foot, head and front (x, y, z).
+const LADDER_WORDS: usize = 15;
+
+fn ladder_words(ladder: &NavLadder) -> [u32; LADDER_WORDS] {
+    let cell = |c: CellRef| [c.x, c.z, c.index];
+    let vec = |v: Vec3| v.to_array().map(f32::to_bits);
+    let mut words = [0; LADDER_WORDS];
+    words[..3].copy_from_slice(&cell(ladder.bottom));
+    words[3..6].copy_from_slice(&cell(ladder.top));
+    words[6..9].copy_from_slice(&vec(ladder.foot));
+    words[9..12].copy_from_slice(&vec(ladder.head));
+    words[12..].copy_from_slice(&vec(ladder.front));
+    words
+}
+
+fn ladder_from_words(w: &[u32]) -> NavLadder {
+    let cell = |i: usize| CellRef { x: w[i], z: w[i + 1], index: w[i + 2] };
+    let vec = |i: usize| Vec3::new(f32::from_bits(w[i]), f32::from_bits(w[i + 1]), f32::from_bits(w[i + 2]));
+    NavLadder {
+        bottom: cell(0),
+        top: cell(3),
+        foot: vec(6),
+        head: vec(9),
+        front: vec(12),
+    }
+}
 
 pub fn save(path: &Path, key: u64, grid: &NavGrid) -> anyhow::Result<()> {
     // Written next to it and renamed, so a crash or a second process never leaves a torn file.
@@ -33,6 +60,10 @@ pub fn save(path: &Path, key: u64, grid: &NavGrid) -> anyhow::Result<()> {
     }
     z.write_all(bytemuck::cast_slice(&grid.columns))?;
     z.write_all(bytemuck::cast_slice(&grid.cells))?;
+    z.write_all(&(grid.ladders.len() as u32).to_le_bytes())?;
+    for ladder in &grid.ladders {
+        z.write_all(bytemuck::cast_slice(&ladder_words(ladder)))?;
+    }
     z.finish()?.flush()?;
     fs::rename(&tmp, path)?;
     Ok(())
@@ -61,9 +92,23 @@ fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
     let (width, depth, count) = (u32_at(12), u32_at(16), u32_at(20) as usize);
     let columns_len = (width as usize * depth as usize + 1) * 4;
     let cells_len = count * size_of::<NavCell>();
-    ensure!(data.len() == HEADER + columns_len + cells_len, "wrong size");
+    let ladders_at = HEADER + columns_len + cells_len;
+    ensure!(data.len() >= ladders_at + 4, "truncated");
+    let ladder_count = u32_at(ladders_at) as usize;
+    ensure!(data.len() == ladders_at + 4 + ladder_count * LADDER_WORDS * 4, "wrong size");
     let columns: Vec<u32> = bytemuck::pod_collect_to_vec(&data[HEADER..HEADER + columns_len]);
-    let cells: Vec<NavCell> = bytemuck::pod_collect_to_vec(&data[HEADER + columns_len..]);
+    let cells: Vec<NavCell> = bytemuck::pod_collect_to_vec(&data[HEADER + columns_len..ladders_at]);
+    let words: Vec<u32> = bytemuck::pod_collect_to_vec(&data[ladders_at + 4..]);
+    let ladders: Vec<NavLadder> = words.chunks_exact(LADDER_WORDS).map(ladder_from_words).collect();
+    ensure!(
+        ladders.iter().all(|l| (l.bottom.index as usize) < count && (l.top.index as usize) < count),
+        "bad ladder"
+    );
+    let mut ladder_ends: bevy::platform::collections::HashMap<u32, Vec<u16>> = default();
+    for (i, ladder) in ladders.iter().enumerate() {
+        ladder_ends.entry(ladder.bottom.index).or_default().push(i as u16);
+        ladder_ends.entry(ladder.top.index).or_default().push(i as u16);
+    }
     ensure!(
         columns.last() == Some(&(count as u32)),
         "inconsistent columns"
@@ -75,5 +120,7 @@ fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
         depth,
         columns,
         cells,
+        ladders,
+        ladder_ends,
     })
 }

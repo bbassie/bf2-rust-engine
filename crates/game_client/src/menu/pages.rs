@@ -531,6 +531,8 @@ fn settings_page(
         }
         SettingsTab::Audio => {
             row(p, "Master volume", |c| slider(c, Slider::Volume));
+            row(p, "Effects volume", |c| slider(c, Slider::EffectsVolume));
+            row(p, "Ambience volume", |c| slider(c, Slider::AmbienceVolume));
         }
         SettingsTab::Controls => {
             p.spawn(Node {

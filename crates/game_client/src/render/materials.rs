@@ -451,13 +451,14 @@ fn describe(
             layers.gloss = GLASS_GLOSS;
         }
         // The map list is color, normal, wreck; wreck maps end in `_w` or `_wreck_c`.
-        let stem = |i: usize| {
-            maps.get(i).copied().flatten().map(|p| {
+        let wreck = (1..maps.len()).find(|&i| {
+            maps[i].is_some_and(|p| {
                 let p = p.to_ascii_lowercase();
-                p.trim_end_matches(".dds").rsplit('/').next().unwrap_or_default().to_string()
+                let p = p.trim_end_matches(".dds");
+                p.ends_with("_w") || p.ends_with("_wreck_c")
             })
-        };
-        if let Some(wreck) = (1..maps.len()).find(|&i| stem(i).is_some_and(|s| s.ends_with("_w") || s.contains("wreck"))) {
+        });
+        if let Some(wreck) = wreck {
             layers.detail = color(wreck);
             layers.flags |= Bf2Layers::WRECK;
         }

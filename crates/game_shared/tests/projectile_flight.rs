@@ -6,7 +6,7 @@ use bevy::{ecs::system::RunSystemOnce, prelude::*, time::TimeUpdateStrategy};
 use game_data::{Impact, ProjectileDesc};
 use game_shared::{
     physics::GameLayer,
-    projectile::{ProjectileMotion, Step, collision_layers, step, steer},
+    projectile::{ProjectileMotion, Step, collision_layers, steer, step},
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -42,7 +42,12 @@ fn world(wall: Option<f32>) -> App {
 }
 
 /// Flies `motion` for up to `seconds` and returns every step's outcome with the state after it.
-fn fly(app: &mut App, desc: &ProjectileDesc, mut motion: ProjectileMotion, seconds: f32) -> Vec<(Step, ProjectileMotion)> {
+fn fly(
+    app: &mut App,
+    desc: &ProjectileDesc,
+    mut motion: ProjectileMotion,
+    seconds: f32,
+) -> Vec<(Step, ProjectileMotion)> {
     let desc = desc.clone();
     app.world_mut()
         .run_system_once(move |spatial: SpatialQuery| {
@@ -89,7 +94,11 @@ fn a_grenade_bounces_rolls_and_comes_to_rest() {
     let (_, at_rest) = trace[rest];
     assert!(bounces >= 2, "{bounces} bounces");
     assert!(at_rest.resting && at_rest.velocity == Vec3::ZERO);
-    assert!(at_rest.position.y > 0.0 && at_rest.position.y < 0.1, "lies on the ground: {}", at_rest.position);
+    assert!(
+        at_rest.position.y > 0.0 && at_rest.position.y < 0.1,
+        "lies on the ground: {}",
+        at_rest.position
+    );
     // Flies ~40 m, then bounces and rolls a bit further, but stops.
     let distance = -at_rest.position.z;
     assert!((30.0..70.0).contains(&distance), "rests {distance:.1} m away");
@@ -118,20 +127,39 @@ fn charges_stick_where_they_land_and_claymores_only_to_level_ground() {
         ..Default::default()
     };
     // Thrown at the wall: sticks to it, facing out of it.
-    let trace = fly(&mut app, &c4, ProjectileMotion::new(Vec3::new(0.0, 1.5, 0.0), Vec3::NEG_Z * 8.0, 0.0), 3.0);
-    let stuck = trace.iter().find_map(|(s, m)| s.stuck.map(|c| (c, *m))).expect("sticks");
+    let trace = fly(
+        &mut app,
+        &c4,
+        ProjectileMotion::new(Vec3::new(0.0, 1.5, 0.0), Vec3::NEG_Z * 8.0, 0.0),
+        3.0,
+    );
+    let stuck = trace
+        .iter()
+        .find_map(|(s, m)| s.stuck.map(|c| (c, *m)))
+        .expect("sticks");
     assert!(stuck.0.normal.z > 0.9, "to the wall: {:?}", stuck.0.normal);
     assert!((stuck.1.position.z + 3.0).abs() < 0.05);
-    assert!(stuck.1.resting && (stuck.1.rotation * Vec3::Y).z > 0.9, "tilted with the wall");
+    assert!(
+        stuck.1.resting && (stuck.1.rotation * Vec3::Y).z > 0.9,
+        "tilted with the wall"
+    );
 
     // A claymore thrown at the wall bounces off it and sticks to the ground.
     let claymore = ProjectileDesc {
         impact: Impact::Stick { max_angle: 45.0 },
         ..c4
     };
-    let trace = fly(&mut app, &claymore, ProjectileMotion::new(Vec3::new(0.0, 1.5, 0.0), Vec3::NEG_Z * 8.0, 0.0), 3.0);
+    let trace = fly(
+        &mut app,
+        &claymore,
+        ProjectileMotion::new(Vec3::new(0.0, 1.5, 0.0), Vec3::NEG_Z * 8.0, 0.0),
+        3.0,
+    );
     assert!(trace.iter().any(|(s, _)| s.bounced));
-    let (contact, motion) = trace.iter().find_map(|(s, m)| s.stuck.map(|c| (c, *m))).expect("sticks");
+    let (contact, motion) = trace
+        .iter()
+        .find_map(|(s, m)| s.stuck.map(|c| (c, *m)))
+        .expect("sticks");
     assert!(contact.normal.y > 0.9, "to the ground: {:?}", contact.normal);
     assert!(motion.position.y < 0.05);
 }
@@ -150,7 +178,10 @@ fn rifle_grenades_bounce_off_until_armed() {
     };
     let motion = ProjectileMotion::new(Vec3::new(0.0, 1.5, 0.0), Vec3::NEG_Z * 50.0, 0.0);
     let trace = fly(&mut app, &shell, motion, 5.0);
-    assert!(trace.iter().any(|(s, _)| s.bounced), "the wall 5 m away is hit before arming");
+    assert!(
+        trace.iter().any(|(s, _)| s.bounced),
+        "the wall 5 m away is hit before arming"
+    );
     let (hit, _) = trace.last().unwrap();
     let hit = hit.hit.expect("goes off on the next impact");
     assert!(hit.normal.y > 0.9, "on the ground: {:?}", hit.normal);

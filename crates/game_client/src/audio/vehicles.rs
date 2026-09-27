@@ -13,7 +13,7 @@ use game_shared::vehicle::{Seated, VehicleData, VehicleHealth};
 
 use super::{
     AudioSystems,
-    voices::{AudioMix, HeldVoice, PlaySound, SoundCache, spawn_held},
+    voices::{Channel, HeldVoice, PlaySound, SoundCache, spawn_held},
 };
 use crate::{net::LocalSoldier, vehicles::{VehicleView, VehicleViewSystems}};
 
@@ -62,7 +62,6 @@ impl Engine {
 fn engines(
     mut commands: Commands,
     time: Res<Time>,
-    mix: Res<AudioMix>,
     mut cache: ResMut<SoundCache>,
     assets: Res<AssetServer>,
     listener: Query<(Entity, &Transform), With<SpatialListener>>,
@@ -99,7 +98,7 @@ fn engines(
                     .engine
                     .iter()
                     .map(|e| {
-                        let held = HeldVoice { at: Some(hull), level: 0.0, speed: 1.0 };
+                        let held = HeldVoice { at: Some(hull), level: 0.0, speed: 1.0, channel: Channel::Effects };
                         spawn_held(&mut commands, &mut cache, &assets, listener, &e.sound, held)
                     })
                     .collect();
@@ -136,7 +135,7 @@ fn engines(
                 None => 1.0,
             };
             voice.at = Some(hull);
-            voice.level = sound.sound.volume * curve_at(&sound.volume, engine.revs, 1.0) * load * mix.effects;
+            voice.level = sound.sound.volume * curve_at(&sound.volume, engine.revs, 1.0) * load;
             let pitch = (sound.sound.pitch[0] + sound.sound.pitch[1]) * 0.5;
             voice.speed = pitch * curve_at(&sound.pitch, engine.revs, 1.0);
             if log {
@@ -159,8 +158,7 @@ fn engines(
         let inside = seated.iter().any(|(s, local)| local && s.vehicle == vehicle);
         match (&audio.interior, engine.interior, inside) {
             (Some(interior), None, true) => {
-                let level = interior.volume * mix.effects;
-                let held = HeldVoice { at: None, level, speed: interior.pitch[0] };
+                let held = HeldVoice { at: None, level: interior.volume, speed: interior.pitch[0], channel: Channel::Effects };
                 engine.interior = Some(spawn_held(&mut commands, &mut cache, &assets, listener, interior, held));
             }
             (_, Some(voice), false) => {

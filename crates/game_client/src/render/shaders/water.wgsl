@@ -146,8 +146,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let opaque_depth = max(water.flags.x, 0.1);
     // Even shallow water is murky (BF2 adds a base opacity); deep water hides the ground.
     let body_alpha = 1.0 - (1.0 - water.color.a) * exp(-3.0 * ray_depth / opaque_depth);
-    // Soft shoreline: the surface itself fades out in the last half meter.
-    let shore = smoothstep(0.0, 0.5, min(vertical_depth, ray_depth * flat_NdotV));
+    // Soft shoreline: the surface itself fades out in the last 30 cm.
+    let shore = smoothstep(0.0, 0.3, min(vertical_depth, ray_depth * flat_NdotV));
 
     // The water body, lit like any surface (dark at night, darker in shadow).
     var pbr_input = pbr_input_new();

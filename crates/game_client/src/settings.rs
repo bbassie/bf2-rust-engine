@@ -11,7 +11,7 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use bevy::{
-    audio::{AudioSinkPlayback, GlobalVolume, SpatialAudioSink, Volume},
+    audio::{GlobalVolume, Volume},
     ecs::system::SystemParam,
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Cli,
+    audio::AudioMix,
     camera::PlayerCamera,
     local_input::{BASE_SENSITIVITY, LookState},
     render::environment::Sun,
@@ -108,6 +109,10 @@ pub struct Settings {
     pub field_of_view: f32,
     /// 0..1.
     pub master_volume: f32,
+    /// On top of the master volume, 0..1: weapons, footsteps, voices, vehicles...
+    pub effects_volume: f32,
+    /// Level ambience.
+    pub ambience_volume: f32,
     pub window_mode: DisplayMode,
     /// Window size in windowed mode (logical pixels). Fullscreen uses the monitor's.
     pub window_size: (u32, u32),
@@ -127,6 +132,8 @@ impl Default for Settings {
             invert_mouse_y: false,
             field_of_view: 75.0,
             master_volume: 1.0,
+            effects_volume: 1.0,
+            ambience_volume: 1.0,
             window_mode: DisplayMode::Windowed,
             window_size: (1280, 720),
             vsync: false,
@@ -478,24 +485,12 @@ fn apply_look(settings: Res<Settings>, mut look: ResMut<LookState>) {
     look.invert_y = settings.invert_mouse_y;
 }
 
-/// Sets the global volume for new sounds and adjusts the ones already playing.
-fn apply_volume(
-    settings: Res<Settings>,
-    mut global: ResMut<GlobalVolume>,
-    mut sinks: Query<(&PlaybackSettings, &mut AudioSink)>,
-    mut spatial_sinks: Query<(&PlaybackSettings, &mut SpatialAudioSink)>,
-) {
-    let volume = Volume::Linear(settings.master_volume.clamp(0.0, 1.0));
-    if global.volume == volume {
-        return;
-    }
-    global.volume = volume;
-    for (playback, mut sink) in &mut sinks {
-        sink.set_volume(playback.volume * volume);
-    }
-    for (playback, mut sink) in &mut spatial_sinks {
-        sink.set_volume(playback.volume * volume);
-    }
+/// Master volume as Bevy's global volume, the others as the audio mix (`audio` applies both
+/// to what's playing).
+fn apply_volume(settings: Res<Settings>, mut global: ResMut<GlobalVolume>, mut mix: ResMut<AudioMix>) {
+    global.volume = Volume::Linear(settings.master_volume.clamp(0.0, 1.0));
+    mix.effects = settings.effects_volume.clamp(0.0, 1.0);
+    mix.ambience = settings.ambience_volume.clamp(0.0, 1.0);
 }
 
 /// Changes only what changed in the settings, so a window resized by hand stays that size.

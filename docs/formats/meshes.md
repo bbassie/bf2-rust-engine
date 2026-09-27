@@ -209,7 +209,7 @@ BaseDetailCrackNDetailNCrack (168+4)  BaseDetailDirtCrackNDetailNCrack (112+48) 
 BaseDetailNDetailparallaxdetail (53)  BaseNDetail (15)  BaseDetailDirt (2)  alpha_one / alpha / alpha_cgfx / '' (rare junk)
 ```
 
-* `parallaxdetail` suffix: parallax offset using the Detail map's alpha as height (`RaShaderSTM.fx`).
+* `parallaxdetail` suffix: parallax offset using the NDetail (detail normal) map's alpha as height, with a hard-coded scale of 0.0025 (`RaShaderSTM.fx`).
 * `BaseNDetail` exists (the engine treats it like `BaseNBase` per bf2-blender).
 
 UV channel per layer (per material). Evidence: shader permutation vertex requirements (`RaShaderSTM.mfx`), bf2-blender, and statistics:

@@ -2,7 +2,10 @@
 //! decode, so they are converted to 16-bit PCM `.wav` here. `.wav` files are copied as they
 //! are (BF2's are all 16-bit PCM).
 
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use bf2_formats::{Vfs, vfs::normalize};
@@ -26,8 +29,14 @@ pub fn sound(vfs: &Vfs, reference: &str, out: &Path) -> Option<String> {
         data
     };
     std::fs::create_dir_all(target.parent()?).ok()?;
-    std::fs::write(&target, data).ok()?;
-    Some(target_rel)
+    // Parallel imports may convert the same file: never leave a half-written one.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let temp = target.with_extension(format!("part{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&temp, data).ok()?;
+    if std::fs::rename(&temp, &target).is_err() {
+        std::fs::remove_file(&temp).ok();
+    }
+    target.exists().then_some(target_rel)
 }
 
 /// Decodes Ogg Vorbis into a 16-bit PCM WAV file.

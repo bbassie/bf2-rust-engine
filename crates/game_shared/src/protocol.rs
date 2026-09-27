@@ -55,7 +55,11 @@ impl Plugin for ProtocolPlugin {
             .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
             .add_mapped_server_message::<KillFeed>(Channel::Ordered)
             .add_mapped_server_message::<VehicleShot>(Channel::Unreliable)
-            .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered);
+            .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered)
+            .add_client_message::<crate::chat::ChatRequest>(Channel::Ordered)
+            .add_server_message::<crate::chat::ChatLine>(Channel::Ordered)
+            .add_server_message::<crate::chat::Kicked>(Channel::Ordered)
+            .add_server_message::<crate::summary::RoundSummary>(Channel::Ordered);
     }
 }
 

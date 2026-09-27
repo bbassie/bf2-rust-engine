@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Placement;
+use crate::{Placement, SoundDesc};
 
 /// What an object looks like and collides with, flattened into parts.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -80,9 +80,9 @@ pub struct ExplosionDesc {
 pub struct DestructionEffect {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debris: Vec<DebrisPiece>,
-    /// `.wav` paths relative to the imported root; one is picked at random.
+    /// Sounds of the effect, all played at once (each picks one of its files).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sounds: Vec<String>,
+    pub sounds: Vec<SoundDesc>,
     /// Dust, splinters or smoke (BF2 sprite particle systems) are part of the effect.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dust: bool,

@@ -11,7 +11,7 @@
         Teleport((-184.0, 157.0, -85.0), 20.0, -4.0),
         Wait(1.5),
         Measure("baseline", 3.0),
-        // 300 impacts and 60 explosions, each firing again every half particle life.
+        // 300 impacts and 60 explosions, each firing again after 40% of its particle life.
         Effect("e_bhit_s_concrete", (-189.0, 156.3, -99.0), 150, 10.0),
         Effect("e_bhit_s_dirt", (-189.0, 156.3, -99.0), 150, 10.0),
         Effect("e_exp_grenade", (-189.0, 156.3, -110.0), 60, 10.0),

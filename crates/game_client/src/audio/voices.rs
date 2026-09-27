@@ -10,7 +10,8 @@
 //!
 //! At most [`MAX_VOICES`] play at once: a new sound quieter than every playing one is
 //! dropped, otherwise the quietest one fades out for it. Rapid repeats from one emitter
-//! (automatic fire) keep [`PER_EMITTER`] instances and fade out the oldest.
+//! (automatic fire) keep [`PER_EMITTER`] instances and fade out the oldest. Announcements
+//! (the commander) are never dropped, and everything else ducks under them.
 
 use std::{
     collections::HashMap,
@@ -35,6 +36,7 @@ impl Plugin for VoicePlugin {
             .init_resource::<AudioMix>()
             .init_resource::<SoundCache>()
             .init_resource::<VoiceStats>()
+            .init_resource::<Ducking>()
             .add_systems(
                 PostUpdate,
                 (start_sounds, update_voices, log_stats).chain().in_set(AudioSystems::Play),
@@ -45,7 +47,7 @@ impl Plugin for VoicePlugin {
 pub const MAX_VOICES: usize = 40;
 pub const PER_EMITTER: usize = 3;
 /// Quieter sounds aren't started (-54 dB).
-const AUDIBLE: f32 = 0.002;
+pub(super) const AUDIBLE: f32 = 0.002;
 /// Seconds to fade out a voice that makes room for another.
 const FADE: f32 = 0.05;
 /// Distance of a positional voice from the listener: rodio's own attenuation (`1 / d²`,
@@ -53,6 +55,10 @@ const FADE: f32 = 0.05;
 const PAN_RADIUS: f32 = 0.5;
 /// Rodio pans between 0.5 and 1 per ear, 0.75 straight ahead; this brings that back to 1.
 const PAN_GAIN: f32 = 4.0 / 3.0;
+/// Everything but announcements drops to this while one plays, easing at `DUCK_RATE` per
+/// second.
+const DUCKED: f32 = 0.45;
+const DUCK_RATE: f32 = 6.0;
 /// For positional sounds that don't say how they fade.
 pub const DEFAULT_FALLOFF: Falloff = Falloff {
     min_distance: 5.0,
@@ -60,12 +66,43 @@ pub const DEFAULT_FALLOFF: Falloff = Falloff {
 };
 
 /// Volume multipliers on top of the master volume (`Settings::master_volume`, applied as
-/// Bevy's `GlobalVolume`), for audio settings.
+/// Bevy's `GlobalVolume`), from the audio settings. Applied to what's playing, too.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct AudioMix {
-    /// Weapons, footsteps, impacts, voices, explosions.
+    /// Weapons, footsteps, impacts, voices, explosions, vehicles.
     pub effects: f32,
+    /// Level ambience, flags flapping.
     pub ambience: f32,
+}
+
+impl AudioMix {
+    pub fn of(&self, channel: Channel) -> f32 {
+        match channel {
+            Channel::Effects => self.effects,
+            Channel::Ambience => self.ambience,
+            Channel::Announcement => 1.0,
+        }
+    }
+}
+
+/// Which volume setting a sound follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Channel {
+    #[default]
+    Effects,
+    Ambience,
+    /// Voice-overs: only the master volume; never dropped; the rest ducks under them.
+    Announcement,
+}
+
+/// How far everything but announcements is turned down right now (1 = not at all).
+#[derive(Resource)]
+pub struct Ducking(pub f32);
+
+impl Default for Ducking {
+    fn default() -> Self {
+        Self(1.0)
+    }
 }
 
 impl Default for AudioMix {
@@ -135,6 +172,7 @@ pub struct PlaySound {
     pub volume: f32,
     /// What makes it (a soldier): repeats of one sound from one emitter cut the oldest.
     pub emitter: Option<Entity>,
+    pub channel: Channel,
     /// For the debug log.
     pub reason: &'static str,
 }
@@ -147,6 +185,7 @@ impl PlaySound {
             at: Some(position),
             volume: 1.0,
             emitter: None,
+            channel: Channel::Effects,
             reason: "",
         }
     }
@@ -171,6 +210,17 @@ impl PlaySound {
 
     pub fn reason(mut self, reason: &'static str) -> Self {
         self.reason = reason;
+        self
+    }
+
+    /// A voice-over (see [`Channel::Announcement`]).
+    pub fn announcement(mut self) -> Self {
+        self.channel = Channel::Announcement;
+        self
+    }
+
+    pub fn channel(mut self, channel: Channel) -> Self {
+        self.channel = channel;
         self
     }
 }
@@ -200,11 +250,12 @@ struct Voice {
     file: String,
     /// Identifies the sound (not the file picked) for the per-emitter limit.
     sound: u64,
-    /// Volume before distance.
+    /// Volume before distance, mix and ducking.
     level: f32,
     /// Positional voices.
     at: Option<(Vec3, Falloff)>,
     emitter: Option<Entity>,
+    channel: Channel,
     started: f32,
     /// Level after distance, last frame.
     gain: f32,
@@ -212,17 +263,18 @@ struct Voice {
     fade: Option<f32>,
 }
 
-/// A looping voice another audio module steers (vehicle engines): it sets where the sound is,
-/// how loud and how fast every frame. Held voices aren't counted against [`MAX_VOICES`] and
-/// never make room for others.
+/// A looping voice another audio module steers (vehicle engines, sound emitters): it sets
+/// where the sound is, how loud and how fast every frame. Held voices aren't counted against
+/// [`MAX_VOICES`] and never make room for others.
 #[derive(Component)]
 pub struct HeldVoice {
     /// `None`: not positional.
     pub at: Option<Vec3>,
-    /// Volume before distance.
+    /// Volume before distance and mix.
     pub level: f32,
     /// Playback speed (pitch).
     pub speed: f32,
+    pub channel: Channel,
 }
 
 /// Starts a held voice playing `desc` (looping) from `listener`'s point of view.
@@ -250,6 +302,7 @@ pub fn spawn_held(
         level: held.level,
         at,
         emitter: None,
+        channel: held.channel,
         started: 0.0,
         gain: 0.0,
         fade: None,
@@ -300,13 +353,16 @@ fn start_sounds(
     mut cache: ResMut<SoundCache>,
     asset_server: Res<AssetServer>,
     mix: Res<AudioMix>,
+    ducking: Res<Ducking>,
     mut stats: ResMut<VoiceStats>,
     listener: Query<(Entity, &Transform), With<SpatialListener>>,
     mut voices: Query<(Entity, &mut Voice), Without<HeldVoice>>,
 ) {
     let listener: Option<Listener> = listener.iter().next();
     let now = time.elapsed_secs();
-    let mut playing: usize = voices.iter().filter(|(_, v)| v.fade.is_none()).count();
+    // Announcements neither count nor make room.
+    let stealable = |v: &Voice| v.fade.is_none() && v.channel != Channel::Announcement;
+    let mut playing: usize = voices.iter().filter(|(_, v)| stealable(v)).count();
     for request in requests.read() {
         let desc = match &request.sound {
             Sound::Desc(desc) => Some(desc.as_ref()),
@@ -326,12 +382,17 @@ fn start_sounds(
             (Some(_), None) => continue,
             (None, _) => None,
         };
-        let level = desc.volume * uniform(desc.volume_range) * request.volume * mix.effects;
+        let announcement = request.channel == Channel::Announcement;
+        let level = desc.volume * uniform(desc.volume_range) * request.volume;
         let distance = at.zip(listener).map(|((at, _), (_, l))| at.distance(l.translation));
-        let gain = level * at.zip(distance).map_or(1.0, |((_, falloff), d)| falloff.gain(d));
+        let duck = if announcement { 1.0 } else { ducking.0 };
+        let gain = level
+            * mix.of(request.channel)
+            * duck
+            * at.zip(distance).map_or(1.0, |((_, falloff), d)| falloff.gain(d));
         let file = &desc.files[fastrand::usize(..desc.files.len())];
         let distance_text = distance.map_or(String::new(), |d| format!(" at {d:.1} m"));
-        if gain < AUDIBLE {
+        if gain < AUDIBLE && !announcement {
             stats.culled += 1;
             debug!(target: "audio", "culled {file}{distance_text}: gain {gain:.4} ({})", request.reason);
             continue;
@@ -353,10 +414,10 @@ fn start_sounds(
                 }
             }
         }
-        if playing >= MAX_VOICES {
+        if playing >= MAX_VOICES && !announcement {
             let quietest = voices
                 .iter()
-                .filter(|(_, v)| v.fade.is_none())
+                .filter(|(_, v)| stealable(v))
                 .min_by(|a, b| a.1.gain.total_cmp(&b.1.gain))
                 .map(|(e, v)| (e, v.gain));
             match quietest {
@@ -392,6 +453,7 @@ fn start_sounds(
                 level,
                 at,
                 emitter: request.emitter,
+                channel: request.channel,
                 started: now,
                 gain,
                 fade: None,
@@ -401,17 +463,20 @@ fn start_sounds(
         if let (Some((at, _)), Some((listener, transform))) = (at, listener) {
             voice.insert((ChildOf(listener), Transform::from_translation(pan_offset(transform, at))));
         }
-        playing += 1;
+        playing += usize::from(!announcement);
         stats.started += 1;
         debug!(target: "audio", "play {file}{distance_text}: gain {gain:.3} ({})", request.reason);
     }
 }
 
-/// Distance, direction and fading of the playing voices.
+/// Distance, direction, mix, ducking and fading of the playing voices.
+#[allow(clippy::too_many_arguments)]
 fn update_voices(
     mut commands: Commands,
     time: Res<Time<Real>>,
     global: Res<GlobalVolume>,
+    mix: Res<AudioMix>,
+    mut ducking: ResMut<Ducking>,
     listener: Query<&Transform, (With<SpatialListener>, Without<Voice>)>,
     mut voices: Query<(
         Entity,
@@ -425,6 +490,9 @@ fn update_voices(
     let dt = time.delta_secs();
     let listener = listener.iter().next();
     let master = global.volume.to_linear();
+    let announcing = voices.iter().any(|(_, v, ..)| v.channel == Channel::Announcement && v.fade.is_none());
+    let target = if announcing { DUCKED } else { 1.0 };
+    ducking.0 += (target - ducking.0) * (1.0 - (-DUCK_RATE * dt).exp());
     for (entity, mut voice, held, transform, sink, spatial_sink) in &mut voices {
         let mut fade = 1.0;
         if let Some(left) = &mut voice.fade {
@@ -447,6 +515,10 @@ fn update_voices(
             if let Some(mut transform) = transform {
                 transform.translation = pan_offset(listener, at);
             }
+        }
+        gain *= mix.of(voice.channel);
+        if voice.channel != Channel::Announcement {
+            gain *= ducking.0;
         }
         voice.gain = gain;
         let volume = Volume::Linear(gain * fade * master);

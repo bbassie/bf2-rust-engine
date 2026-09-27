@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Placement, TeamDesc};
+use crate::{Placement, SoundDesc, TeamDesc};
 
 /// Everything needed to load a level on the client and the server.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -243,9 +243,9 @@ pub struct FlagModels {
     /// Flags of neutral, team 1 and team 2: skinned `.glb`s with a looping `idle` clip.
     #[serde(default)]
     pub flags: [Option<String>; 3],
-    /// Looping sound of the flag flapping (`.wav`).
+    /// Looping sound of the flag flapping.
     #[serde(default)]
-    pub sound: Option<String>,
+    pub sound: Option<SoundDesc>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
