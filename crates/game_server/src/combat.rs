@@ -52,6 +52,7 @@ impl Plugin for CombatPlugin {
             .add_message::<StaticHit>()
             .add_message::<SoldierHit>()
             .add_message::<VehicleHit>()
+            .add_message::<VehicleDestroyed>()
             .add_message::<Detonation>()
             .add_systems(
                 FixedUpdate,
@@ -148,6 +149,16 @@ struct VehicleHit {
     vehicle: Entity,
     damage: f32,
     attacker: Attacker,
+}
+
+/// Server-side: a hit took a vehicle's last hit points, by whom and with what (crashes and
+/// drowning don't send one).
+#[derive(Message, Clone, Debug)]
+pub struct VehicleDestroyed {
+    pub vehicle: Entity,
+    /// The attacker's player.
+    pub by: Option<Entity>,
+    pub weapon: Arc<str>,
 }
 
 /// Server-side: a grenade, rocket or charge goes off.
@@ -1033,6 +1044,7 @@ fn damage_vehicles(
     mut hits: MessageReader<VehicleHit>,
     mut targets: VehicleTargets,
     mut confirmations: MessageWriter<ToClients<HitConfirmed>>,
+    mut destroyed: MessageWriter<VehicleDestroyed>,
 ) {
     for hit in hits.read() {
         let attacker_team = hit.attacker.player.and_then(|p| teams.get(p).ok()).copied();
@@ -1055,6 +1067,13 @@ fn damage_vehicles(
             "{} took {:.1} damage from {}, {:.0} left",
             data.0.desc.name, hit.damage, hit.attacker.weapon, health.current
         );
+        if health.wrecked() {
+            destroyed.write(VehicleDestroyed {
+                vehicle: hit.vehicle,
+                by: hit.attacker.player,
+                weapon: hit.attacker.weapon.clone(),
+            });
+        }
         if let Some(client) = hit.attacker.player.and_then(|p| player_client(p, &clients, host.as_deref())) {
             confirmations.write(ToClients {
                 targets: SendTargets::Single(client),

@@ -643,9 +643,11 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
             }
         })
         .collect();
-    let rotor = (category == VehicleCategory::Helicopter)
-        .then(|| rotor_desc(world, root, &nodes, &engines))
-        .flatten();
+    let rotor = match category {
+        VehicleCategory::Helicopter => rotor_desc(world, root, &nodes, &engines),
+        VehicleCategory::Air => vtol_desc(&nodes, &engines),
+        _ => None,
+    };
     let float_lift: f32 = nodes
         .iter()
         .filter(|n| n.ty == "floatingbundle")
@@ -896,6 +898,29 @@ fn rotor_desc(world: &World, root: &Template, nodes: &[Node], engines: &[(usize,
         response: 4.0,
         leveling: 0.3,
         tail_position: tail.map_or([0.0, 0.0, 8.0], |(i, _, _)| nodes[*i].hull.translation.to_array()),
+    })
+}
+
+/// A jump jet's hover system (the F-35B's lift fan: a `c_ETHelicopter` engine that isn't
+/// only for turning), flown like a gentle helicopter while the jet hovers: BF2 holds it level
+/// with small pure-rotational engines and damps its drift (`dampHorizontalVel`).
+fn vtol_desc(nodes: &[Node], engines: &[(usize, &Template, String)]) -> Option<RotorDesc> {
+    let (index, engine, _) = engines
+        .iter()
+        .find(|(_, t, ty)| ty == "c_ethelicopter" && t.get_f32("purerotational").unwrap_or(0.0) == 0.0)?;
+    Some(RotorDesc {
+        position: nodes[*index].hull.translation.to_array(),
+        spin_up: 2.0,
+        climb_speed: [6.0, 6.0],
+        lift_margin: 0.5,
+        horizontal_magnifier: 1.0,
+        horizontal_damping: engine.get_f32("damphorizontalvel").unwrap_or(0.0) * 0.004,
+        regulation_angle: 20.0,
+        no_regulation_angle: 40.0,
+        turn_rates: [0.6, 0.8, 0.8],
+        response: 3.0,
+        leveling: 0.8,
+        tail_position: [0.0, 0.0, 6.0],
     })
 }
 

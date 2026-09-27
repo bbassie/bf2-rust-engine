@@ -564,7 +564,7 @@ type InstrumentTexts<'w, 's> = (
     Single<'w, 's, &'static mut Text, (With<HeadingText>, Without<SpeedText>, Without<AltitudeText>, Without<WarningText>)>,
     Single<'w, 's, &'static mut Text, (With<SpeedText>, Without<HeadingText>, Without<AltitudeText>, Without<WarningText>)>,
     Single<'w, 's, &'static mut Text, (With<AltitudeText>, Without<HeadingText>, Without<SpeedText>, Without<WarningText>)>,
-    Single<'w, 's, &'static mut Text, (With<WarningText>, Without<HeadingText>, Without<SpeedText>, Without<AltitudeText>)>,
+    Single<'w, 's, (&'static mut Text, &'static mut TextColor), (With<WarningText>, Without<HeadingText>, Without<SpeedText>, Without<AltitudeText>)>,
 );
 
 /// Pilots' flight instruments, from the aircraft as drawn.
@@ -581,7 +581,8 @@ fn update_instruments(
     mut rungs: Query<(&Rung, &mut Visibility), Without<Instruments>>,
     texts: InstrumentTexts,
 ) {
-    let (mut heading_text, mut speed_text, mut altitude_text, mut warning_text) = texts;
+    let (mut heading_text, mut speed_text, mut altitude_text, warning) = texts;
+    let (mut warning_text, mut warning_color) = warning.into_inner();
     let flying = seated
         .single()
         .ok()
@@ -630,16 +631,20 @@ fn update_instruments(
     throttle.height = percent(view.engine.clamp(0.0, 1.0) * 100.0);
     boost.height = percent(if desc.afterburner.is_some() { view.boost.clamp(0.0, 1.0) * 100.0 } else { 0.0 });
 
-    // Warnings: the ground coming up fast, or too slow to fly.
+    // Warnings: the ground coming up fast, or too slow to fly (jump jets that slow hover).
     let impact = if climb < -1.0 { altitude / -climb } else { f32::MAX };
-    let warning = if altitude < 200.0 && impact < 4.0 {
-        "PULL UP"
-    } else if desc.category == VehicleCategory::Air && altitude > 8.0 && speed < 30.0 {
-        "STALL"
+    let slow = desc.category == VehicleCategory::Air && altitude > 8.0 && speed < 30.0;
+    let (warning, color) = if altitude < 200.0 && impact < 4.0 {
+        ("PULL UP", WARNING)
+    } else if slow && desc.rotor.is_some() {
+        ("HOVER", INSTRUMENT)
+    } else if slow {
+        ("STALL", WARNING)
     } else {
-        ""
+        ("", WARNING)
     };
     if warning_text.0 != warning {
         warning_text.0 = warning.into();
     }
+    warning_color.0 = color;
 }

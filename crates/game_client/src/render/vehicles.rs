@@ -493,10 +493,16 @@ fn scroll_tracks(
         };
         let transform = match (&desc.motion, animated.center) {
             (game_data::UvMotion::Scroll { size, wrap }, None) => {
+                // Always forwards within one repeat of the texture: BF2's strips repeat past
+                // the faces' UV, not before it (the same motion as moving backwards).
                 let axis = |i: usize| {
-                    if size[i] > 0.0 && wrap[i] > 0.0 { (distance / size[i]).rem_euclid(wrap[i]) } else { 0.0 }
+                    if size[i] > 0.0 && wrap[i] > 0.0 {
+                        (animated.flow[i] * distance / size[i]).rem_euclid(wrap[i])
+                    } else {
+                        0.0
+                    }
                 };
-                Affine2::from_translation(Vec2::new(axis(0), axis(1)) * animated.flow)
+                Affine2::from_translation(Vec2::new(axis(0), axis(1)))
             }
             (game_data::UvMotion::Spin { radius, scale }, Some(center)) => {
                 let angle = -animated.spin * distance / radius.max(0.05);

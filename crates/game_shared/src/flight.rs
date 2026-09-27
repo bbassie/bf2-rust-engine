@@ -15,7 +15,10 @@
 //!   sprint meter.
 //! * **Rotors** hold the helicopter's altitude while the collective is centred and its tilt is
 //!   moderate (BF2's vertical regulation), climb and sink with it, and turn the helicopter at
-//!   the stick's and rudder's rates, levelling it out when the stick is centred.
+//!   the stick's and rudder's rates, levelling it out when the stick is centred. Jump jets
+//!   (the F-35B) have one for hovering: slow, with S held (or parked and holding S), the lift
+//!   fan takes over and the jet flies like a helicopter (W/S climb and sink, the stick tilts
+//!   it, the engine idles) until it goes fast again or the afterburner is lit.
 //! * **Floaters** lift in proportion to how deep they are in the water, and the submerged
 //!   hull drags (a keel sideways, little forwards).
 
@@ -47,6 +50,9 @@ const COLLECTIVE_RESPONSE: f32 = 1.5;
 /// Helicopters regulate their altitude and level out only above this height (m); lower down
 /// they settle onto the ground unless the pilot climbs.
 const HOVER_HEIGHT: f32 = 1.5;
+/// Jump jets start hovering below the first airspeed (m/s) and fly as jets again above the
+/// second.
+const VTOL_SPEEDS: [f32; 2] = [35.0, 50.0];
 
 /// A rigid body's motion in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,6 +146,8 @@ pub struct FlightState {
     pub boosting: bool,
     /// Landing gear retracted.
     pub gear_up: bool,
+    /// Jump jets: the lift fan carries it.
+    pub hovering: bool,
 }
 
 impl FlightState {
@@ -275,11 +283,18 @@ pub fn flight_forces(
 
     // Thrusters.
     let jet = desc.category == VehicleCategory::Air;
+    if jet && desc.rotor.is_some() {
+        if state.hovering {
+            state.hovering = controls.occupied && !controls.boost && airspeed < VTOL_SPEEDS[1];
+        } else {
+            state.hovering = controls.occupied && controls.throttle < 0.0 && airspeed < VTOL_SPEEDS[0];
+        }
+    }
     if jet {
         // On the ground the engines idle unless the pilot opens the throttle.
         let parked = around.altitude < 5.0 && speed < 20.0;
         let target = match controls.throttle {
-            _ if !controls.occupied => 0.0,
+            _ if !controls.occupied || state.hovering => 0.0,
             t if t > 0.0 => 1.0,
             t if t < 0.0 => 0.0,
             _ if parked => 0.0,
@@ -318,9 +333,10 @@ pub fn flight_forces(
         push.forces.push((direction * thruster.acceleration * setting * fade * mass, point));
     }
 
-    // Rotor.
+    // Rotor (a jump jet's lift fan only while it hovers).
     if let Some(rotor) = &desc.rotor {
-        let (target, rate) = if controls.occupied { (1.0, 1.0) } else { (0.0, 0.5) };
+        let running = controls.occupied && (!jet || state.hovering);
+        let (target, rate) = if running { (1.0, 1.0) } else { (0.0, 0.5) };
         let rate = rate / rotor.spin_up.max(0.1);
         state.spin += (target - state.spin).clamp(-rate * dt, rate * dt);
         let power = state.spin * state.spin;

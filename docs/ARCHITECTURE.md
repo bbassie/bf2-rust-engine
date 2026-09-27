@@ -129,6 +129,10 @@ helicopter, sea, stationary) comes from the engine type.
   - helicopters: the rotor spins up, the collective regulates the climb rate (holding
     altitude hands off), the cyclic tilts the lift within BF2's regulation angles and the
     body levels itself when let go; turn rates follow BF2's engine values.
+  - jump jets (the F-35B): below 35 m/s, S swings them into hover (also parked on a deck):
+    the lift fan (BF2's `c_ETHelicopter` engine on the jet) carries them like a gentle
+    helicopter, W/S climb and sink, the stick tilts them to drift; above 50 m/s or with the
+    afterburner they fly as jets again.
   - boats and amphibious vehicles: floaters lift as columns below the level's water height,
     water jets push up to their top speed, water drags.
 
@@ -162,10 +166,11 @@ helicopter, sea, stationary) comes from the engine type.
   hit points are under their thresholds, the explosion and wreck fires at 0; the wreck burns
   down to -100 % over its 10 s and blows apart.
 
-Controls in vehicles: W/S throttle (jets: hands off holds 50 %, S idles and air brakes;
-helicopters: collective), A/D steering, rudder or tail rotor, mouse or arrow keys as the stick
-(pitch and roll; the down arrow pulls up), Alt free look, Shift afterburner, Space wheel
-brakes, fire/aim buttons the seat's primary/secondary guns, weapon keys the gun on a trigger,
+Controls in vehicles: W/S throttle (jets: hands off holds 50 %, S idles and air brakes, and
+slows a jump jet into hover; helicopters and hovering jets: collective), A/D steering, rudder
+or tail rotor, mouse or arrow keys as the stick (pitch and roll; the down arrow pulls up), Alt
+free look, Shift afterburner, Space wheel brakes, fire/aim buttons the seat's
+primary/secondary guns, weapon keys the gun on a trigger, G countermeasures (flares, smoke),
 V chase camera, F1..F8 seats, E enter/exit.
 
 ### Bots
