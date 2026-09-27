@@ -129,8 +129,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - [x] Special Forces night vision, gas masks and tear gas, flashbangs, blast tinnitus
 - Zipline, grappling hook (in progress)
-- Co-op (in progress)
-- Modding workflow: authoring new content directly in glTF + RON (in progress)
+- [x] Co-op: bots fill both teams around the humans, who play one side
+- [x] Modding workflow: mods authored directly in glTF + RON (`mods/`, see docs/MODDING.md)
 - [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
   map changes; server config file; persistent player stats
-- Master server (in progress)
+- [x] Master server: servers register and heartbeat, the browser lists internet servers
