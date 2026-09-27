@@ -21,6 +21,7 @@ use crate::{
 const SKELETON: &str = "objects/soldiers/common/animations/3p_setup.ske";
 const SKELETON_1P: &str = "objects/soldiers/common/animations/1p_setup.ske";
 const ANIMATIONS: &str = "objects/soldiers/common/animations/3p/";
+const FLAGS: &str = "objects/common/flags/";
 
 /// Z-mirror of a (true, un-conjugated) BF2 rotation.
 fn rotation(r: [f32; 4]) -> Quat {
@@ -186,6 +187,11 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
         }
 
         let converter = MeshConverter::new(&vfs, out);
+        match export_flags(&vfs, &converter, out) {
+            Ok(0) => {}
+            Ok(count) => log::info!("{mod_name}: {count} flags"),
+            Err(err) => log::warn!("{mod_name} flags: {err:#}"),
+        }
         let mut meshes: Vec<String> = vfs
             .list("objects/soldiers/")
             .filter(|p| p.ends_with(".skinnedmesh"))
@@ -218,6 +224,27 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(done)
+}
+
+/// Control point flags (`objects/common/flags/flag_*/meshes/flag_*.glb`): skinned cloth with
+/// the waving `idle` clip.
+fn export_flags(vfs: &Vfs, converter: &MeshConverter, out: &Path) -> Result<usize> {
+    let Ok(data) = vfs.read(&format!("{FLAGS}flag_setup.ske")) else {
+        return Ok(0);
+    };
+    let skeleton = Skeleton::parse(&data).context("parsing flag_setup.ske")?;
+    let idle = Animation::parse(&vfs.read(&format!("{FLAGS}animations/flag_idle.baf"))?)?;
+    let clips = [("idle".to_string(), idle)];
+    let meshes: Vec<String> = vfs
+        .list(FLAGS)
+        .filter(|p| p.ends_with(".skinnedmesh"))
+        .map(str::to_string)
+        .collect();
+    for mesh_path in &meshes {
+        let out_rel = format!("{}.glb", mesh_path.trim_end_matches(".skinnedmesh"));
+        export_skinned(vfs, converter, mesh_path, 0, &skeleton, "flag", &clips, &out_rel, out)?;
+    }
+    Ok(meshes.len())
 }
 
 /// Third-person body (geom 1) with the `3p_setup` skeleton and movement clips.

@@ -69,6 +69,9 @@ pub struct Cli {
     /// Where scenario screenshots and the report go (default `target/scenarios/<name>`).
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Your team (1 or 2) when hosting or in singleplayer.
+    #[arg(long, default_value_t = 1)]
+    team: u8,
     /// Watch without a soldier (free camera).
     #[arg(long)]
     spectate: bool,
@@ -177,6 +180,7 @@ fn main() -> AppExit {
                 port: cli.port,
                 network: cli.host,
                 local_player: (!cli.spectate).then(|| cli.name.clone()),
+                local_team: cli.team,
                 ..default()
             },
         });

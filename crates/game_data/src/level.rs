@@ -33,6 +33,9 @@ pub struct LevelDesc {
     /// terrain, north up.
     #[serde(default)]
     pub minimap: Option<String>,
+    /// Models for control point flags.
+    #[serde(default)]
+    pub flag_models: FlagModels,
     /// Conquest: tickets per minute a team loses once it holds no control point and has
     /// nobody alive.
     #[serde(default = "default_ticket_loss_at_end")]
@@ -178,6 +181,20 @@ pub struct GameModeDesc {
     /// Additional objects that only exist in this layout.
     #[serde(default)]
     pub statics: Vec<StaticInstance>,
+}
+
+/// The flag pole every control point has, and the flags that go up and down on it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FlagModels {
+    /// Pole mesh (`.glb`), origin at its foot.
+    #[serde(default)]
+    pub pole: Option<String>,
+    /// Pole height in meters.
+    #[serde(default)]
+    pub pole_height: f32,
+    /// Flags of neutral, team 1 and team 2: skinned `.glb`s with a looping `idle` clip.
+    #[serde(default)]
+    pub flags: [Option<String>; 3],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

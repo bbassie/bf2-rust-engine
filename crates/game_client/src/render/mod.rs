@@ -3,6 +3,7 @@
 use bevy::prelude::*;
 
 pub mod environment;
+mod flags;
 pub mod materials;
 mod props;
 mod soldiers;
@@ -17,6 +18,7 @@ impl Plugin for RenderPlugin {
         app.add_plugins((
             materials::MaterialsPlugin,
             environment::EnvironmentPlugin,
+            flags::FlagRenderPlugin,
             terrain::TerrainRenderPlugin,
             props::PropRenderPlugin,
             soldiers::SoldierRenderPlugin,

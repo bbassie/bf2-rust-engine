@@ -47,6 +47,8 @@ pub struct ServerSettings {
     pub network: bool,
     /// Create a player for the local user (listen server / singleplayer).
     pub local_player: Option<String>,
+    /// Team of the local player (1 or 2).
+    pub local_team: u8,
     pub respawn_seconds: f32,
     /// Whether bullets hurt teammates.
     pub friendly_fire: bool,
@@ -63,6 +65,7 @@ impl Default for ServerSettings {
             port: game_shared::DEFAULT_PORT,
             network: true,
             local_player: None,
+            local_team: 1,
             respawn_seconds: 10.0,
             friendly_fire: false,
         }
@@ -214,7 +217,7 @@ fn start_match(mut commands: Commands, settings: Res<ServerSettings>) {
                     is_bot: false,
                 },
                 PlayerNetId::LOCAL_HOST,
-                Team::One,
+                if settings.local_team == 2 { Team::Two } else { Team::One },
                 InputBuffer::default(),
                 Replicated,
             ))

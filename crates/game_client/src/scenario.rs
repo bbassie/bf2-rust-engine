@@ -68,6 +68,8 @@ pub struct Scenario {
     pub bots: Option<u32>,
     pub spectate: Option<bool>,
     pub third_person: Option<bool>,
+    /// Our team, 1 or 2.
+    pub team: Option<u8>,
     pub steps: Vec<Step>,
 }
 
@@ -170,6 +172,9 @@ impl Scenario {
         }
         if let Some(third_person) = self.third_person {
             cli.third_person = third_person;
+        }
+        if let Some(team) = self.team {
+            cli.team = team;
         }
     }
 

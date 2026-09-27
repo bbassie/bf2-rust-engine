@@ -8,12 +8,13 @@ use std::{
 
 use anyhow::{Context, Result};
 use bf2_formats::{
-    Bf2Install, LevelInfo, Side,
+    Bf2Install, LevelInfo, Side, Vfs,
     localization::Localization,
+    mesh::{MeshKind, Usage, VisMesh},
     con::{Instance, Interpreter, Template, World, parse_vec3},
 };
 use game_data::{
-    ControlPointDesc, EnvironmentDesc, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
+    ControlPointDesc, EnvironmentDesc, FlagModels, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
     Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, VehicleSpawnerDesc,
 };
 use glam::{Affine3A, Vec3};
@@ -78,6 +79,7 @@ pub fn import_level(
         .collect();
     let (kit_count, weapon_count) =
         weapons::import(&mut interp, &converter, localization, &kit_names, out)?;
+    let flag_models = flag_models(&mut interp, &vfs, &converter, out);
 
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
@@ -148,6 +150,7 @@ pub fn import_level(
         game_modes,
         teams: level_teams,
         minimap,
+        flag_models,
         ticket_loss_at_end_per_minute,
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
@@ -459,6 +462,47 @@ fn sky(world: &World, converter: &MeshConverter) -> Option<SkyDesc> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0),
     })
+}
+
+/// The flag pole (converted here, with its height) and the flags of neutral, team 1 and
+/// team 2 from `gameLogic.setTeamFlag` (their models are exported with the soldiers).
+fn flag_models(interp: &mut Interpreter, vfs: &Vfs, converter: &MeshConverter, out: &Path) -> FlagModels {
+    let flags: Vec<(usize, String)> = interp
+        .world
+        .commands
+        .iter()
+        .filter(|c| c.name == "gamelogic.setteamflag")
+        .filter_map(|c| {
+            let team: usize = c.args.first()?.parse().ok()?;
+            Some((team, c.args.get(1)?.trim_matches('"').to_ascii_lowercase()))
+        })
+        .collect();
+    let mut mesh_path = |template: &str| -> Option<String> {
+        interp.ensure_template(template);
+        let world = &interp.world;
+        let geometry = world.template(template)?.geometry.clone()?;
+        world.geometry(&geometry)?.mesh_path()
+    };
+    let mut models = FlagModels::default();
+    if let Some(pole) = mesh_path("flagpole") {
+        models.pole_height = vfs
+            .read(&pole)
+            .ok()
+            .and_then(|data| VisMesh::parse(&data, MeshKind::Static).ok())
+            .and_then(|mesh| mesh.attribute::<3>(Usage::Position, 0))
+            .map_or(0.0, |positions| positions.iter().map(|p| p[1]).fold(0.0, f32::max));
+        models.pole = converter
+            .convert_mesh(&pole)
+            .map_err(|e| log::warn!("flag pole: {e:#}"))
+            .ok();
+    }
+    for (team, template) in flags {
+        let glb = mesh_path(&template).map(|p| format!("{}.glb", p.trim_end_matches(".skinnedmesh")));
+        if let Some(slot) = models.flags.get_mut(team) {
+            *slot = glb.filter(|p| out.join(p).exists());
+        }
+    }
+    models
 }
 
 /// Team names, kits and ticket rules from the level's `gameLogic.*` settings.
