@@ -1,0 +1,44 @@
+// Big explosions seen from 85 m on Strike at Karkand. A commander artillery strike: each
+// shell is a flash of a few tenths of a second (e_exp_xlarge) plus the dust of the surface it
+// lands on (e_mexp_xl_*, from the material manager) and a scorch mark. Then an M1A2 blowing
+// up (debris and fire fingers), and the xlarge and tank flashes kept going for a while so the
+// screenshots (which arrive a few frames late) catch them.
+// client --scenario scenarios/effects_explosions.ron --out target/scenarios/effects/explosions
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    team: 2,
+    steps: [
+        WaitReady,
+        Teleport((-150.0, 163.5, 215.0), 180.0, -4.0),
+        Wait(1.0),
+        Commander(Apply),
+        Wait(1.5),
+        // The first shells land 5 s later, then one every 2 s from each gun.
+        Commander(Use(asset: Artillery, target: (-150.0, 161.3, 300.0))),
+        Wait(5.2),
+        Screenshot("artillery_1"),
+        Wait(0.4),
+        Screenshot("artillery_2"),
+        Wait(1.0),
+        Screenshot("artillery_3"),
+        Wait(1.5),
+        Screenshot("artillery_4"),
+        Wait(12.0),
+        Effect("e_vexp_m1a2", (-150.0, 161.3, 300.0), 1, 0.0),
+        Wait(0.2),
+        Screenshot("m1a2_1"),
+        Wait(0.5),
+        Screenshot("m1a2_2"),
+        Wait(4.0),
+        Effect("e_exp_xlarge", (-150.0, 161.3, 300.0), 1, 2.0),
+        Wait(0.3),
+        Screenshot("xlarge_flash"),
+        Wait(3.0),
+        Effect("e_vexp_tank", (-150.0, 161.3, 300.0), 1, 2.0),
+        Wait(0.3),
+        Screenshot("tank_flash"),
+        Wait(2.0),
+        Quit,
+    ],
+)

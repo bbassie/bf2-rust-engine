@@ -121,7 +121,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Water, undergrowth/overgrowth, surrounding terrain, view distance setting (grows with
   altitude), BF2's distant tree stand-ins
 - Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
-- Effects: particles for muzzle flashes, impacts, explosions, smoke (in progress)
+- [x] Effects: BF2's particle effects for muzzle flashes, impacts per surface, explosions with
+  their material-manager dust columns, smoke, destruction, scorch decals
 - [x] Audio: BF2's sounds with its distance model, weapons (near/far, cracks), footsteps per
   surface, vehicles, ambience, voices, announcements ducking the rest
 - [x] Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
