@@ -203,8 +203,9 @@ pub fn flight_forces(
     {
         let share = 1.0 / desc.floaters.len() as f32;
         for floater in &desc.floaters {
+            // A floater is a column `depth` meters down from its point.
             let point = body.position + rotation * Vec3::from(floater.position);
-            let depth = water - point.y;
+            let depth = water - (point.y - floater.depth);
             if depth <= 0.0 {
                 continue;
             }
@@ -340,7 +341,8 @@ pub fn flight_forces(
             g * 0.9
         };
         let thrust = (free + (regulated - free) * regulation).clamp(0.0, g * (1.0 + rotor.lift_margin)) * power;
-        let horizontal = up - Vec3::Y * up.y;
+        // Tilting further than the regulation reaches doesn't push harder sideways.
+        let horizontal = (up - Vec3::Y * up.y).clamp_length_max(rotor.regulation_angle.to_radians().sin());
         let direction = Vec3::Y * up.y + horizontal * rotor.horizontal_magnifier;
         let flat_velocity = body.velocity - Vec3::Y * body.velocity.y;
         push.forces.push(((direction * thrust - flat_velocity * rotor.horizontal_damping * power) * mass, com));

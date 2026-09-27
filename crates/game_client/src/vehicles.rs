@@ -10,7 +10,14 @@ use std::collections::VecDeque;
 
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*, window::CursorOptions};
 use bevy_replicon::prelude::*;
-use game_shared::vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleMotion, VehicleShot, VehicleState};
+use std::fmt::Write as _;
+
+use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
+use game_data::VehicleCategory;
+use game_shared::{
+    physics::GameLayer,
+    vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleMotion, VehicleShot, VehicleState, VehicleWeapons},
+};
 
 use crate::{
     audio::PlaySound,
@@ -67,6 +74,8 @@ pub struct VehicleView {
     pub velocity: Vec3,
     /// Rotor speed or throttle, 0..1.
     pub engine: f32,
+    /// Afterburner meter, 0..1.
+    pub boost: f32,
 }
 
 /// Received states, by local receive time.
@@ -125,6 +134,7 @@ fn place_vehicles(
             view.speed = a.0.forward_speed() + (b.0.forward_speed() - a.0.forward_speed()) * t;
             view.velocity = a.0.velocity.lerp(b.0.velocity, t);
             view.engine = a.1.engine + (b.1.engine - a.1.engine) * t;
+            view.boost = b.1.boost;
         } else {
             // Hosting: avian already interpolates the body's transform between ticks.
             view.joints.clone_from(&current.joints);
@@ -132,6 +142,7 @@ fn place_vehicles(
             view.speed = motion.forward_speed();
             view.velocity = motion.velocity;
             view.engine = current.engine;
+            view.boost = current.boost;
         }
         view.transform = *transform;
     }
@@ -359,38 +370,94 @@ fn spawn_hud(mut commands: Commands) {
     ));
 }
 
+/// The vehicle lines of the HUD: vehicle, seat, speed and hit points (aircraft add altitude,
+/// throttle and afterburner), then the seat's guns with rounds, heat and lock.
 fn update_hud(
     seated: Query<&Seated, With<LocalSoldier>>,
-    vehicles: Query<(&VehicleView, &VehicleData, Option<&VehicleHealth>)>,
+    vehicles: Query<(&VehicleView, &VehicleData, Option<&VehicleHealth>, Option<&VehicleWeapons>)>,
+    spatial: SpatialQuery,
     mut text: Single<&mut Text, With<VehicleHudText>>,
 ) {
-    let line = seated
+    let lines = seated
         .single()
         .ok()
-        .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d, h)| (s, v, d, h)))
-        .map(|(seated, view, data, health)| {
+        .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d, h, w)| (s, v, d, h, w)))
+        .map(|(seated, view, data, health, weapons)| {
             let model = &data.0;
+            let desc = &model.desc;
             let seat = seated.seat as usize;
-            let role = if seat == 0 {
-                "Driver"
-            } else if model.seat_aims(seat) {
-                "Gunner"
-            } else {
-                "Passenger"
+            let role = match seat {
+                0 if desc.category.flies() => "Pilot",
+                0 if desc.category == VehicleCategory::Stationary => "Gunner",
+                0 => "Driver",
+                _ if model.seat_aims(seat) => "Gunner",
+                _ => "Passenger",
             };
-            let hit_points = health.map_or(model.desc.hit_points, |h| h.current);
-            format!(
-                "{}   |   {role} ({}/{})   |   {:.0} km/h   |   {:.0} HP",
-                model.desc.display_name,
+            let hit_points = health.map_or(desc.hit_points, |h| h.current);
+            let mut line = format!(
+                "{}   |   {role} ({}/{})   |   {:.0} km/h",
+                desc.display_name,
                 seat + 1,
-                model.desc.seats.len(),
-                view.speed.abs() * 3.6,
-                hit_points.ceil()
-            )
+                desc.seats.len(),
+                view.velocity.length() * 3.6,
+            );
+            if desc.category.flies() {
+                let filter = SpatialQueryFilter::from_mask(GameLayer::World);
+                let altitude = spatial
+                    .cast_ray(view.transform.translation, Dir3::NEG_Y, 2000.0, true, &filter)
+                    .map_or(2000.0, |hit| hit.distance);
+                let _ = write!(line, "   |   ALT {altitude:.0} m   |   ");
+                let _ = match desc.category {
+                    VehicleCategory::Air => write!(line, "THR {:.0}%", view.engine * 100.0),
+                    _ => write!(line, "ROTOR {:.0}%", view.engine * 100.0),
+                };
+                if desc.afterburner.is_some() {
+                    let _ = write!(line, "   AB {:.0}%", view.boost * 100.0);
+                }
+            }
+            let _ = write!(line, "   |   {:.0} HP", hit_points.ceil());
+            // The guns this seat fires.
+            let guns: Vec<String> = desc
+                .weapons
+                .iter()
+                .zip(&model.guns)
+                .enumerate()
+                .filter(|(_, (w, _))| w.seat as usize == seat)
+                .map(|(i, (w, gun))| {
+                    let status = weapons.and_then(|s| s.guns.get(i)).copied().unwrap_or_default();
+                    let name = if gun.display_name.is_empty() || gun.display_name == desc.display_name {
+                        gun.name.as_str()
+                    } else {
+                        gun.display_name.as_str()
+                    };
+                    let mut entry = format!("{}{}{name}", if status.selected { "> " } else { "  " }, if w.alt_fire { "[2] " } else { "" });
+                    let _ = match (status.reloading, status.rounds) {
+                        (true, _) => write!(entry, "  reloading"),
+                        (false, u16::MAX) => Ok(()),
+                        (false, rounds) => write!(entry, "  {rounds}"),
+                    };
+                    if gun.fire.overheat.is_some() {
+                        let _ = match status.heat {
+                            255 => write!(entry, "  OVERHEATED"),
+                            heat => write!(entry, "  heat {:.0}%", heat as f32 / 2.54),
+                        };
+                    }
+                    if gun.fire.lock.is_some() {
+                        let _ = match status.lock {
+                            255 => write!(entry, "  LOCKED"),
+                            0 => Ok(()),
+                            lock => write!(entry, "  locking {:.0}%", lock as f32 / 2.55),
+                        };
+                    }
+                    entry
+                })
+                .collect();
+            if guns.is_empty() { line } else { format!("{line}
+{}", guns.join("      ")) }
         })
         .unwrap_or_default();
-    if text.0 != line {
-        text.0 = line;
+    if text.0 != lines {
+        text.0 = lines;
     }
 }
 
@@ -408,7 +475,10 @@ fn receive_shots(
         let Some(weapon) = vehicles.get(shot.vehicle).ok().and_then(|d| d.0.guns.get(shot.gun as usize)) else {
             continue;
         };
-        spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle), library.as_deref());
+        // Shells and missiles are replicated projectiles; bullets are tracers.
+        if !weapon.projectile.is_object() {
+            spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle), library.as_deref());
+        }
         if let Some((muzzle, _)) = library.as_deref().and_then(|l| l.muzzle(&weapon.name)) {
             effects.write(SpawnEffect::new(muzzle, shot.origin).with_forward(shot.direction));
         }

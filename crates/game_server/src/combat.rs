@@ -162,6 +162,11 @@ const GUIDANCE_RANGE: f32 = 2000.0;
 /// Guided missiles only follow an aim point at most this far off their nose (radians; BF2's
 /// `seek.maxAngleLock 90` of every wire-guided missile).
 const SEEKER_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+/// Heat seekers turn this many times their `follow.maxYaw` in degrees per second, within
+/// these radians per second, and go off this close to their target (meters).
+const HEAT_TURN: f32 = 5.0;
+const HEAT_TURN_RANGE: [f32; 2] = [1.0, 3.0];
+const HEAT_PROXIMITY: f32 = 4.0;
 /// Vehicle mines go off under bodies at least this heavy (kg).
 const HEAVY: f32 = 1000.0;
 /// Smoke clouds billow up around this far above the grenade.
@@ -172,7 +177,8 @@ const SMOKE_HEIGHT: f32 = 1.5;
 #[derive(Component)]
 struct Live {
     weapon: Arc<WeaponDesc>,
-    /// Its weapon in the shooter's loadout (a guided missile is steered while it's in hand).
+    /// Its weapon in the shooter's loadout (a guided missile is steered while it's in hand);
+    /// `u8::MAX` for vehicle guns (steered while the shooter stays seated).
     weapon_index: u8,
     shooter: Entity,
     shooter_player: Entity,
@@ -183,6 +189,8 @@ struct Live {
     fuse: f32,
     /// Steered by the shooter's aim until he lets go of the launcher.
     guided: bool,
+    /// Heat seekers: the aircraft it was locked on to.
+    target: Option<Entity>,
 }
 
 impl Live {
@@ -390,6 +398,7 @@ fn fire_weapons(
                             age: 0.0,
                             fuse: desc.time_to_live - cooked,
                             guided: weapon.fire.guidance == Guidance::Wire,
+                            target: None,
                         },
                         ProjectileMotion::new(origin, launch_velocity(&weapon, direction, soft, motion.velocity), motion.yaw),
                     ));
@@ -441,10 +450,11 @@ fn simulate_projectiles(
     time: Res<Time>,
     spatial: SpatialQuery,
     mut projectiles: Query<(Entity, &mut Live, &mut ProjectileMotion)>,
-    shooters: Query<(&SoldierMotion, &Inventory)>,
+    shooters: Query<(&SoldierMotion, &Inventory, Has<Seated>)>,
     colliders: Query<&ColliderOf>,
     soldiers: Query<&SoldierMotion, With<Soldier>>,
     vehicles: Query<&VehicleData>,
+    aircraft: Query<(&Position, &LinearVelocity), With<VehicleData>>,
     destructibles: Query<(), With<Destructible>>,
     mut soldier_hits: MessageWriter<SoldierHit>,
     mut vehicle_hits: MessageWriter<VehicleHit>,
@@ -476,13 +486,13 @@ fn simulate_projectiles(
         let mut next = *motion;
         if live.guided {
             // Wire guided: towards whatever the shooter aims at, while the launcher is in his
-            // hands and not being reloaded.
-            let holding = shooters
-                .get(live.shooter)
-                .ok()
-                .filter(|(_, inventory)| inventory.active == live.weapon_index && !inventory.reloading);
+            // hands and not being reloaded (or he stays at the vehicle's sight).
+            let holding = shooters.get(live.shooter).ok().filter(|(_, inventory, seated)| match live.weapon_index {
+                u8::MAX => *seated,
+                index => inventory.active == index && !inventory.reloading,
+            });
             match holding {
-                Some((shooter, _)) => {
+                Some((shooter, ..)) => {
                     let eye = shooter.eye_position();
                     let aim = shooter.view_rotation() * Vec3::NEG_Z;
                     let mut filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle, GameLayer::Soldier]);
@@ -510,6 +520,36 @@ fn simulate_projectiles(
                     live.guided = false;
                     info!("{} lost its guidance at {:.1}", weapon.name, next.position);
                 }
+            }
+        }
+
+        if let Some(target) = live.target {
+            // Heat seeking: towards where the aircraft will be, until it slips out of view.
+            match aircraft.get(target) {
+                Ok((position, velocity)) => {
+                    let to = position.0 - next.position;
+                    if to.length() < HEAT_PROXIMITY {
+                        detonations.write(Detonation {
+                            entity: Some(entity),
+                            weapon: weapon.clone(),
+                            position: next.position,
+                            normal: Vec3::Y,
+                            facing: next.velocity.normalize_or(Vec3::NEG_Z),
+                            attacker: live.attacker(),
+                        });
+                        continue;
+                    }
+                    let closing = next.velocity.length().max(desc.max_speed).max(50.0);
+                    let lead = to + velocity.0 * (to.length() / closing).min(3.0);
+                    if lead.angle_between(next.velocity) > SEEKER_ANGLE {
+                        live.target = None;
+                    } else if live.age >= desc.motor_delay {
+                        let [min, max] = HEAT_TURN_RANGE;
+                        let turn = (desc.turn_rate.to_radians() * HEAT_TURN).clamp(min, max);
+                        next.velocity = steer(next.velocity, lead, turn * dt);
+                    }
+                }
+                Err(_) => live.target = None,
             }
         }
 
@@ -881,7 +921,8 @@ fn damage_soldiers(
 }
 
 /// A projectile fired by something other than a soldier's own weapon handling (vehicle guns).
-/// `ignore` is the collider it starts inside and must not hit (the firing vehicle).
+/// `ignore` is the collider it starts inside and must not hit (the firing vehicle). Shells
+/// and missiles are replicated like grenades (vehicle guns are in the armory too).
 pub fn spawn_projectile(
     commands: &mut Commands,
     weapon: Arc<WeaponDesc>,
@@ -890,10 +931,15 @@ pub fn spawn_projectile(
     ignore: Option<Entity>,
     origin: Vec3,
     direction: Vec3,
+    target: Option<Entity>,
 ) {
     let fuse = weapon.projectile.time_to_live;
     let velocity = direction * weapon.projectile.velocity;
-    commands.spawn((
+    let guided = weapon.fire.guidance == Guidance::Wire;
+    let object = weapon.projectile.is_object();
+    let name = weapon.name.clone();
+    let yaw = (-direction.x).atan2(-direction.z);
+    let mut projectile = commands.spawn((
         Live {
             weapon,
             weapon_index: u8::MAX,
@@ -903,10 +949,20 @@ pub fn spawn_projectile(
             travelled: 0.0,
             age: 0.0,
             fuse,
-            guided: false,
+            guided,
+            target,
         },
-        ProjectileMotion::new(origin, velocity, 0.0),
+        ProjectileMotion::new(origin, velocity, yaw),
     ));
+    if object {
+        projectile.insert((
+            Projectile {
+                player: shooter_player,
+                weapon: name,
+            },
+            Replicated,
+        ));
+    }
 }
 
 /// Soldiers whose health ran out some other way (scripts, and later falls and crashes).

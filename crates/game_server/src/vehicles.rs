@@ -21,7 +21,7 @@ use game_shared::{
     soldier::Health,
     vehicle::{
         SeatInputs, Seated, Vehicle, VehicleData, VehicleHealth, VehicleLibrary, VehicleModel, VehicleMotion,
-        VehicleShot, VehicleState, VehicleSystems, water_height,
+        GunStatus, VehicleShot, VehicleState, VehicleSystems, VehicleWeapons, water_height,
     },
     weapons::spread_direction,
 };
@@ -76,8 +76,8 @@ const DEFAULT_RESPAWN_SECONDS: f32 = 10.0;
 /// How long a destroyed vehicle stays (BF2's `armor.timeToStayAsWreck`).
 const WRECK_SECONDS: f32 = 10.0;
 
-/// Server-side: per gun, seconds until it may fire again, rounds left in the magazine and
-/// seconds of reloading left.
+/// Server-side: per gun, seconds until it may fire again, rounds left in the magazine,
+/// seconds of reloading left, heat, and what a heat seeker is locking on to (for how long).
 #[derive(Component)]
 struct VehicleGuns(Vec<GunState>);
 
@@ -86,6 +86,10 @@ struct GunState {
     cooldown: f32,
     rounds: u32,
     reload: f32,
+    heat: f32,
+    /// Seconds it can't fire for having overheated.
+    overheated: f32,
+    lock: Option<(Entity, f32)>,
 }
 
 /// Server-side: a destroyed vehicle, removed when the timer runs out.
@@ -223,7 +227,7 @@ fn run_spawners(
             .guns
             .iter()
             .map(|w| GunState {
-                rounds: w.magazine_size.max(1),
+                rounds: w.magazine_size,
                 ..default()
             })
             .collect();
@@ -231,6 +235,7 @@ fn run_spawners(
             .spawn((
                 Vehicle { template },
                 VehicleGuns(guns),
+                VehicleWeapons::default(),
                 Transform::from_translation(position).with_rotation(rotation),
                 VehicleMotion {
                     position,
@@ -535,7 +540,9 @@ fn carry_occupants(
 }
 
 /// Guns fire while their seat holds the trigger (the secondary button for secondary guns),
-/// at their rate of fire, reloading when the magazine is empty.
+/// at their rate of fire, reloading when the magazine is empty. Where a seat has several
+/// guns on one trigger, its weapon keys choose which. Machine guns overheat, heat seekers
+/// lock on to enemy aircraft in their sight and hand the target to their missiles.
 #[allow(clippy::type_complexity)]
 fn fire_vehicle_guns(
     mut commands: Commands,
@@ -549,8 +556,11 @@ fn fire_vehicle_guns(
         &SeatInputs,
         &VehicleHealth,
         &mut VehicleGuns,
+        &mut VehicleWeapons,
     )>,
+    targets: Query<(Entity, &VehicleData, &Position, &VehicleHealth)>,
     seated: Query<(Entity, &Seated, &ControlledBy)>,
+    teams: Query<&Team>,
     mut shots: MessageWriter<ToClients<VehicleShot>>,
 ) {
     let dt = time.delta_secs();
@@ -558,63 +568,141 @@ fn fire_vehicle_guns(
         .iter()
         .map(|(soldier, s, c)| ((s.vehicle, s.seat), (soldier, c.0)))
         .collect();
-    for (vehicle, data, state, position, rotation, inputs, health, mut guns) in &mut vehicles {
+    let team_of = |player: Entity| teams.get(player).copied().unwrap_or_default();
+    // Aircraft someone flies, and the pilot's team.
+    let aircraft: Vec<(Entity, Vec3, Team)> = targets
+        .iter()
+        .filter(|(_, data, _, health)| data.0.desc.category.flies() && !health.wrecked())
+        .filter_map(|(entity, _, position, _)| Some((entity, position.0, team_of(occupants.get(&(entity, 0))?.1))))
+        .collect();
+    for (vehicle, data, state, position, rotation, inputs, health, mut guns, mut status) in &mut vehicles {
         if health.wrecked() {
             continue;
         }
         let model = &data.0;
         let mut transforms = None;
+        let mut next = VehicleWeapons {
+            guns: Vec::with_capacity(model.desc.weapons.len()),
+        };
         for (index, weapon) in model.desc.weapons.iter().enumerate() {
             let (Some(gun), Some(desc)) = (guns.0.get_mut(index), model.guns.get(index)) else {
                 continue;
             };
+            let input = inputs.0.get(weapon.seat as usize).copied().flatten();
+            let occupant = occupants.get(&(vehicle, weapon.seat as u8)).copied();
+            // Among the seat's guns on the same trigger, the weapon keys pick one.
+            let group: Vec<usize> = model
+                .desc
+                .weapons
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.seat == weapon.seat && w.alt_fire == weapon.alt_fire)
+                .map(|(i, _)| i)
+                .collect();
+            let pick = input.map_or(0, |i| i.weapon as usize) % group.len().max(1);
+            let selected = group.get(pick) == Some(&index);
+
             gun.cooldown = (gun.cooldown - dt).max(0.0);
+            if let Some(overheat) = &desc.fire.overheat {
+                gun.overheated = (gun.overheated - dt).max(0.0);
+                gun.heat = (gun.heat - overheat.cooling * dt).max(0.0);
+            }
+            let world = Transform::from_translation(position.0).with_rotation(rotation.0);
+            let muzzle = |transforms: &mut Option<Vec<Transform>>| {
+                let transforms = transforms.get_or_insert_with(|| model.part_transforms(&state.joints));
+                world * model.muzzle(transforms, index)
+            };
+
+            // Heat seekers lock on to the enemy aircraft nearest their sight line.
+            if let (Some(lock), Some((_, player))) = (&desc.fire.lock, occupant.filter(|_| selected)) {
+                let sight = muzzle(&mut transforms);
+                let forward = sight.rotation * Vec3::NEG_Z;
+                let team = team_of(player);
+                let candidate = aircraft
+                    .iter()
+                    .filter(|(entity, _, owner)| *entity != vehicle && *owner != team)
+                    .filter_map(|(entity, target, _)| {
+                        let to = *target - sight.translation;
+                        let angle = to.angle_between(forward).to_degrees();
+                        (to.length() <= lock.range && angle <= lock.angle).then_some((*entity, angle))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(entity, _)| entity);
+                gun.lock = match (candidate, gun.lock) {
+                    (Some(target), Some((locked, time))) if target == locked => Some((target, time + dt)),
+                    (Some(target), _) => Some((target, 0.0)),
+                    (None, _) => None,
+                };
+            } else {
+                gun.lock = None;
+            }
+
             if gun.reload > 0.0 {
                 gun.reload -= dt;
                 if gun.reload <= 0.0 {
-                    gun.rounds = desc.magazine_size.max(1);
+                    gun.rounds = desc.magazine_size;
                 }
-                continue;
+            } else if let (Some(input), Some((soldier, player))) = (input, occupant) {
+                let trigger = input.pressed(if weapon.alt_fire { Buttons::AIM } else { Buttons::FIRE });
+                if trigger && selected && gun.cooldown <= 0.0 && gun.overheated <= 0.0 && desc.projectile.velocity > 0.0 {
+                    gun.cooldown = 60.0 / desc.rounds_per_minute.max(1.0);
+                    // A magazine size of 0 never runs dry.
+                    if desc.magazine_size > 0 {
+                        gun.rounds = gun.rounds.saturating_sub(1);
+                        if gun.rounds == 0 {
+                            gun.reload = desc.reload_time.max(0.5);
+                        }
+                    }
+                    if let Some(overheat) = &desc.fire.overheat {
+                        gun.heat += overheat.per_shot;
+                        if gun.heat >= 1.0 {
+                            gun.heat = 1.0;
+                            gun.overheated = overheat.penalty.max(0.5);
+                        }
+                    }
+                    let muzzle = muzzle(&mut transforms);
+                    let forward = muzzle.rotation * Vec3::NEG_Z;
+                    let direction = spread_direction(forward, desc.deviation.min, (fastrand::f32(), fastrand::f32()));
+                    let target = desc
+                        .fire
+                        .lock
+                        .and_then(|lock| gun.lock.filter(|(_, time)| *time >= lock.time))
+                        .map(|(target, _)| target);
+                    combat::spawn_projectile(
+                        &mut commands,
+                        desc.clone(),
+                        soldier,
+                        player,
+                        Some(vehicle),
+                        muzzle.translation,
+                        direction,
+                        target,
+                    );
+                    shots.write(ToClients {
+                        targets: SendTargets::All,
+                        message: VehicleShot {
+                            vehicle,
+                            gun: index as u8,
+                            origin: muzzle.translation,
+                            direction,
+                        },
+                    });
+                }
             }
-            let Some(input) = inputs.0.get(weapon.seat as usize).copied().flatten() else {
-                continue;
+
+            let lock = match (&desc.fire.lock, gun.lock) {
+                (Some(lock), Some((_, time))) => ((time / lock.time.max(0.01)).min(1.0) * 255.0) as u8,
+                _ => 0,
             };
-            let trigger = input.pressed(if weapon.alt_fire { Buttons::AIM } else { Buttons::FIRE });
-            if !trigger || gun.cooldown > 0.0 || desc.projectile.velocity <= 0.0 {
-                continue;
-            }
-            let Some(&(soldier, player)) = occupants.get(&(vehicle, weapon.seat as u8)) else {
-                continue;
-            };
-            gun.cooldown = 60.0 / desc.rounds_per_minute.max(1.0);
-            gun.rounds = gun.rounds.saturating_sub(1);
-            if gun.rounds == 0 {
-                gun.reload = desc.reload_time.max(0.5);
-            }
-            let transforms = transforms.get_or_insert_with(|| model.part_transforms(&state.joints));
-            let muzzle =
-                Transform::from_translation(position.0).with_rotation(rotation.0) * model.muzzle(transforms, index);
-            let forward = muzzle.rotation * Vec3::NEG_Z;
-            let direction = spread_direction(forward, desc.deviation.min, (fastrand::f32(), fastrand::f32()));
-            combat::spawn_projectile(
-                &mut commands,
-                desc.clone(),
-                soldier,
-                player,
-                Some(vehicle),
-                muzzle.translation,
-                direction,
-            );
-            shots.write(ToClients {
-                targets: SendTargets::All,
-                message: VehicleShot {
-                    vehicle,
-                    gun: index as u8,
-                    origin: muzzle.translation,
-                    direction,
-                },
+            next.guns.push(GunStatus {
+                rounds: if desc.magazine_size == 0 { u16::MAX } else { gun.rounds.min(u16::MAX as u32 - 1) as u16 },
+                reloading: gun.reload > 0.0,
+                heat: if gun.overheated > 0.0 { 255 } else { (gun.heat * 254.0) as u8 },
+                selected,
+                lock,
             });
         }
+        status.set_if_neq(next);
     }
 }
 

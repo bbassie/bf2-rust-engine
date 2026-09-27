@@ -276,7 +276,8 @@ pub struct FloaterDesc {
     /// Lift when fully submerged, as a share of the vehicle's weight (from
     /// `setFloatMaxLift`).
     pub lift: f32,
-    /// How deep it goes before it is fully submerged, meters (`setHullHeight`).
+    /// The hull below it floats: a column this many meters down from `position`
+    /// (`setHullHeight`), fully submerged when the water reaches `position`.
     pub depth: f32,
 }
 

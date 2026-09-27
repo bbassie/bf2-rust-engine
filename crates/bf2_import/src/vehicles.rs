@@ -53,6 +53,8 @@ const THRUST_PER_POWER: f32 = 0.004;
 const DRAG_PER_DRAG: f32 = 0.003;
 /// Landing flaps' lift (`setFlapLift 3`) would lift a jet off at a walking pace.
 const LANDING_FLAP_SHARE: f32 = 0.3;
+/// Rudders in the water need more bite than BF2's numbers give against our water drag.
+const WATER_RUDDER_SHARE: f32 = 6.0;
 /// Helicopter fins and stub wings only steady them: at full strength, flying nose down
 /// would press them down harder than the rotor can lift.
 const HELICOPTER_WING_SHARE: f32 = 0.1;
@@ -502,6 +504,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         ..Default::default()
     };
 
+    let floats = nodes.iter().any(|n| n.ty == "floatingbundle");
     let wings: Vec<WingDesc> = nodes
         .iter()
         .enumerate()
@@ -515,11 +518,12 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
                 _ if landing_flap => LANDING_FLAP_SHARE,
                 _ => 1.0,
             };
+            let flap_share = if floats { WATER_RUDDER_SHARE } else { share };
             Some(WingDesc {
                 part: i as u32,
                 position: (Vec3::from(n.hull.translation) + offset).to_array(),
                 lift: t.get_f32("setwinglift").unwrap_or(0.0) * LIFT_PER_WING_LIFT * share,
-                flap_lift: t.get_f32("setflaplift").unwrap_or(0.0) * LIFT_PER_FLAP_LIFT * share,
+                flap_lift: t.get_f32("setflaplift").unwrap_or(0.0) * LIFT_PER_FLAP_LIFT * flap_share,
                 landing_flap,
             })
         })
@@ -657,6 +661,8 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         VehicleCategory::Air => [0.0, 0.0, balance_wings(&mut desc)],
         // Helicopters are laid out around their origin under the rotor.
         VehicleCategory::Helicopter => [0.0; 3],
+        // Boats are heaviest at the keel.
+        VehicleCategory::Sea => [0.0, bounds[0][1] + height * 0.15, (bounds[0][2] + bounds[1][2]) * 0.5],
         // Low in the hull, like the heavy engine and chassis; BF2 doesn't say.
         _ => [0.0, bounds[0][1] + height * 0.3, (bounds[0][2] + bounds[1][2]) * 0.5],
     };
@@ -733,7 +739,7 @@ fn aero_desc(category: VehicleCategory, drag: f32) -> AeroDesc {
             max_load: 40.0,
             angular_damping: [0.5, 0.5, 0.5],
             speed_damping: [0.0; 3],
-            water_drag: [2.5, 2.0, 0.12],
+            water_drag: [1.5, 2.0, 0.08],
         },
     }
 }
@@ -788,7 +794,7 @@ fn rotor_desc(world: &World, root: &Template, nodes: &[Node], engines: &[(usize,
             tilt(2).to_radians() * 10.0,
         ],
         response: 4.0,
-        leveling: 0.6,
+        leveling: 0.3,
         tail_position: tail.map_or([0.0, 0.0, 8.0], |(i, _, _)| nodes[*i].hull.translation.to_array()),
     })
 }

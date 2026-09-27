@@ -267,6 +267,29 @@ pub struct FireDesc {
     pub max_in_world: u32,
     #[serde(default)]
     pub guidance: Guidance,
+    /// Heat seekers: locking on before firing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<LockDesc>,
+    /// Vehicle machine guns: heat per shot (1 overheats), cooling per second, and seconds it
+    /// can't fire once overheated (BF2 `heatAddWhenFire`, `coolDownPerSec`, `overheatPenalty`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overheat: Option<OverheatDesc>,
+}
+
+/// Locking a heat seeker on: the target must stay within `angle` degrees of the sight and
+/// `range` meters for `time` seconds (BF2 `target.lockDelay`, `lockAngle`, `maxDistance`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct LockDesc {
+    pub time: f32,
+    pub angle: f32,
+    pub range: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct OverheatDesc {
+    pub per_shot: f32,
+    pub cooling: f32,
+    pub penalty: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -286,9 +309,11 @@ pub enum FireKind {
 pub enum Guidance {
     #[default]
     None,
-    /// Wire guided (BF2 `TSWireGuided`): flies towards whatever the shooter aims at while
-    /// he keeps the launcher in his hands.
+    /// Wire guided (BF2 `TSWireGuided`, and TV and laser guided): flies towards whatever the
+    /// shooter aims at while he keeps the launcher in his hands or stays at the sight.
     Wire,
+    /// Heat seeking (BF2 `TSHeatSeeking`): flies towards the aircraft it was locked on to.
+    Heat,
 }
 
 fn is_zero(v: &f32) -> bool {

@@ -9,8 +9,9 @@ use bf2_formats::{
     localization::Localization,
 };
 use game_data::{
-    DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, ProjectileDesc,
-    RecoilDesc, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds, ZoomDesc,
+    DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, LockDesc, OverheatDesc,
+    ProjectileDesc, RecoilDesc, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds,
+    ZoomDesc,
 };
 
 use crate::{meshes::MeshConverter, sounds::SoundConverter};
@@ -267,7 +268,17 @@ fn fire_desc(t: &Template) -> FireDesc {
     } else {
         FireKind::Gun
     };
-    let wire = t.get_str("target.targetsystem").is_some_and(|s| s.eq_ignore_ascii_case("TSWireGuided"));
+    // TV and laser guided missiles follow the gunner's sight like wire guided ones.
+    let guidance = match t.get_str("target.targetsystem").map(str::to_ascii_lowercase).as_deref() {
+        Some("tswireguided" | "tstvguided" | "tslaserguided") => Guidance::Wire,
+        Some("tsheatseeking") => Guidance::Heat,
+        _ => Guidance::None,
+    };
+    let lock = (guidance == Guidance::Heat).then(|| LockDesc {
+        time: t.get_f32("target.lockdelay").unwrap_or(1.0),
+        angle: t.get_f32("target.lockangle").unwrap_or(15.0),
+        range: t.get_f32("target.maxdistance").unwrap_or(400.0),
+    });
     FireDesc {
         kind,
         pull_back: f("fire.pullbacktime"),
@@ -275,7 +286,13 @@ fn fire_desc(t: &Template) -> FireDesc {
         launch_delay_soft: f("fire.firelaunchdelaysoft"),
         start_offset: position(t, "fire.projectilestartposition").unwrap_or_default(),
         max_in_world: f("fire.maxprojectilesinworld") as u32,
-        guidance: if wire { Guidance::Wire } else { Guidance::None },
+        guidance,
+        lock,
+        overheat: (f("heataddwhenfire") > 0.0).then(|| OverheatDesc {
+            per_shot: f("heataddwhenfire"),
+            cooling: f("cooldownpersec"),
+            penalty: f("overheatpenalty"),
+        }),
     }
 }
 

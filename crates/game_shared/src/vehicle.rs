@@ -27,6 +27,7 @@ use crate::{
     input::InputFrame,
     level::LoadedLevel,
     physics::GameLayer,
+    weapons::Armory,
 };
 
 pub struct VehiclePlugin;
@@ -105,6 +106,28 @@ pub struct VehicleState {
     /// Rotor speed or throttle, 0..1 (for rotor blades, sounds and the HUD).
     #[serde(default)]
     pub engine: f32,
+    /// Afterburner meter, 0..1 (for the HUD).
+    #[serde(default)]
+    pub boost: f32,
+}
+
+/// The guns' state, for the HUD. Replicated.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct VehicleWeapons {
+    pub guns: Vec<GunStatus>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct GunStatus {
+    /// Rounds left in the magazine; `u16::MAX` for a bottomless one.
+    pub rounds: u16,
+    pub reloading: bool,
+    /// 0..=255; 255 while overheated.
+    pub heat: u8,
+    /// The gun its seat fires among those on the same trigger (the weapon keys choose).
+    pub selected: bool,
+    /// Heat seekers: how far the lock is, 0..=255 (255: locked on).
+    pub lock: u8,
 }
 
 /// Hit points. Replicated. At 0 the vehicle is a wreck.
@@ -447,6 +470,7 @@ fn add_vehicle_physics(
     mut commands: Commands,
     vehicles: Query<&Vehicle>,
     mut library: ResMut<VehicleLibrary>,
+    mut armory: ResMut<Armory>,
     paths: Res<GamePaths>,
     state: Res<State<ClientState>>,
 ) {
@@ -457,6 +481,10 @@ fn add_vehicle_physics(
         warn!("unknown vehicle `{}`", vehicle.template);
         return;
     };
+    // Their shells and missiles are replicated by weapon name like grenades.
+    for gun in &model.guns {
+        armory.weapons.entry(gun.name.clone()).or_insert_with(|| gun.clone());
+    }
     let desc = &model.desc;
     let mut entity = commands.entity(add.entity);
     entity.insert((
@@ -476,6 +504,7 @@ fn add_vehicle_physics(
             joints: vec![[0.0; 3]; model.joint_count],
             wheels: vec![0.0; desc.wheels.len()],
             engine: 0.0,
+            boost: 1.0,
         },
         VehicleSim::new(desc),
         SeatInputs(vec![None; desc.seats.len()]),
@@ -796,6 +825,8 @@ pub fn step_vehicle(
         joints,
         wheels: wheel_offsets,
         engine: sim.flight.engine(),
+        // Coarse steps, so the meter doesn't replicate every tick.
+        boost: (sim.flight.boost * 50.0).round() / 50.0,
     };
     push
 }
