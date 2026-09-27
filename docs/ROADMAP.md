@@ -42,10 +42,18 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   explosions
 - [x] Health, death, respawn, kill feed, scoreboard
 - [x] Deploy screen with kit and spawn point selection on the level's map
+- Movement like BF2: stairs and ledges, slopes, jumping (in progress)
+- Smooth animation blending, first and third person (in progress)
+- Scopes: zoomed scope view and reticles (in progress)
+- Destructible objects (barricades, barrels, signs) and BF2's material damage table
+  (in progress)
+- Ladders: climbing up and down, getting on and off at the top
+- Thrown and launched projectiles: hand grenades (cooking, bouncing, fuse), smoke grenades
+  with smoke that blocks sight, under-barrel grenade launchers, rocket launchers, C4 and
+  claymores, shotgun pellets
 - Lag compensation
-- Material damage matrix (143 materials), per-bone hit zones
+- Per-bone hit zones
 - Man-down/revive
-- Grenades, shotgun pellets, scopes
 - Medic, support and engineer abilities (heal/resupply/repair all use the damage matrix)
 
 ## M2: Conquest (in progress)
@@ -54,8 +62,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   using each point's capture times (BF2's `gpm_cq` rules)
 - [x] Ticket bleed by area value, a ticket per death, win conditions, round restart
 - [x] Scoreboard, kill feed, capture notifications, flag and ticket HUD
-- Flag models moving on their poles, capture sounds
-- Minimap and full map in the HUD
+- [x] Flag models moving on their poles
+- [x] Minimap (north up or turning with the view)
+- Capture sounds, a full-screen map
 - Squads and commander (basic)
 
 ## M3: Vehicles
@@ -67,7 +76,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 ## M4: BF2-style bots
 
-- Navmesh generated from our collision data (Recast), path costs per vehicle class
+- Navigation from our collision data (infantry: in progress), path costs per vehicle class
 - Strategic layer from `StrategicAreas.ai`, squad orders, individual utility behaviours
   seeded from `AIBehaviours.ai` and per-object AI templates
 - Bots driving vehicles and flying through the same input channels as players
@@ -76,7 +85,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - BF2-accurate materials (detail/dirt/crack/lightmap layers on statics, normal-mapped
   bundled meshes), terrain splatting, water, undergrowth/overgrowth, effects, audio
-- Menus, server browser, settings, HUD: a modern design of our own, not a copy of BF2's UI
+- Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
+  audio, controls, key bindings, mouse sensitivity, field of view) saved to disk, pause menu:
+  a modern design of our own, not a copy of BF2's UI
 
 ## Later
 
