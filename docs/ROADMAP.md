@@ -92,14 +92,21 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Seat cameras (first person) and chase camera (V); turrets follow the gunner's aim
 - [x] Vehicle guns (main guns, coaxial and pintle MGs, firing ports), hit points through an
   excerpt of the material damage table, wrecks
-- Vehicle prediction on clients (vehicles are interpolated 100 ms in the past for now)
-  (phase 2 in progress: aircraft, helicopters, boats, stationary weapons, prediction)
+- [x] Vehicle prediction for drivers (rewind/replay like soldiers): steering shows after
+  17-32 ms instead of 200-260 ms over a local dedicated server
+- [x] Jets (BF2 wings, control surfaces, engine, afterburner, landing gear, AoA limiter),
+  helicopters (rotor lift, collective/cyclic/tail rotor), boats and amphibious APCs
+  (floating bundles on the level's water), crash and water damage
+- [x] Stationary weapons (TOW/HJ-8, HMGs, AA) from spawners; wire/TV guided missiles follow
+  the sight, heat seekers lock on aircraft; gun overheat and weapon choice per trigger
+- [x] Vehicle meshes as glTF skins (one joint per part); seated soldier poses; first-person
+  interiors (geom 0); BF2 vehicle sights (reticles, periscope frames); vehicle HUD (guns,
+  ammo, heat, lock, speed, altitude, throttle)
 - Engine/gearbox/tyre model fitted to the original (`newCar2.*`, gear ratios); per-face armour
   materials (front/side/rear/tracks) for direct hits
-- Wings for jets, rotors for helicopters, floating for boats and amphibious APCs
-- Seated soldier poses, first-person cockpit models (geom 0), track texture scrolling,
-  guided missiles (TOW/HJ8), smoke launchers, vehicle HUD (weapon, ammo, heat)
-- Stationary weapons (TOW, bipods, artillery) and commander assets
+- Passenger/pilot HUD overlays (`hudPass`, aircraft instruments), countermeasures, bombs,
+  track texture scrolling, smoke launchers, artillery and commander assets
+- Flight tuning against BF2 (rudder authority, VTOL F-35B hover, helicopter landing)
 
 ## M4: BF2-style bots
 

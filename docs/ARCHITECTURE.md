@@ -89,28 +89,63 @@ from `SoldierRender` each frame, so smoothing never moves hitboxes.
 (`game_data::VehicleDesc`): a part tree (hull, turret, barrel, wheels, ...) with rest
 placements and meshes, joints (which input turns which axis within which limits), wheels
 (radius measured from the mesh, BF2 spring strength/damping), seats (where the occupant sits,
-looks from and gets out), entry points, guns and physics values in our own units (mass,
-top speed, drive and brake force, grip). Only land vehicles so far.
+looks from, gets out and which pose it holds), entry points, guns and physics values in our
+own units (mass, top speed, drive and brake force, grip). Aircraft, helicopters and boats add
+wings (BF2 `Wing` lift and flap lift at their lift points, which input moves them), thrusters
+(engine push and water jets), a rotor, floaters (`FloatingBundle`), landing gear, afterburner
+and aerodynamics (drag, stall angle, load limit, angular damping). The `category` (land, air,
+helicopter, sea, stationary) comes from the engine type.
 
 - **Server** (`game_server::vehicles`): spawners create vehicles for the team holding their
   control point and respawn them when they are gone or abandoned. The use button near an
   entry point takes the first free seat, F1..F8 change seats, use again gets out beside the
   vehicle. A seated soldier stays alive but `apply_inputs` skips it: its `InputFrame` goes to
-  the vehicle's `SeatInputs`, and it is carried along at its seat every tick.
-- **Simulation** (`game_shared::vehicle`, server only): each vehicle is an avian dynamic body
-  (compound of convex hulls of the hull and turret collision). Per wheel a raycast spring
-  holds it up; tyres cancel sideways sliding up to their grip and push with the engine force
-  (falling off towards top speed) or brake. Tracked vehicles instead hold both tracks to a
-  commanded speed and turn rate (skid steering). Turrets and barrels turn towards the
-  gunner's aim (the world direction of their view) at their BF2 speeds within their limits.
-- **Replication**: `Vehicle` (template name), `VehicleMotion` (pose and velocity),
-  `VehicleState` (joint angles, suspension) and `Seated` (on the soldier). Clients show
-  vehicles 100 ms in the past, interpolated; there is **no vehicle prediction yet**, so a
-  driver on a remote server sees the vehicle respond one round trip plus 100 ms after the
-  input (hosting: immediately, avian interpolates between ticks).
-- **Client**: parts are drawn with the static mesh pipeline and posed from the replicated
-  joints and wheels; the camera uses the seat's camera point (first person) or chases the
-  vehicle (V). In seats that don't aim, the view turns with the vehicle.
+  the vehicle's `SeatInputs`, and it is carried along at its seat every tick. Guns fire from
+  their seat's triggers (weapon keys pick among the guns of one trigger) with BF2 overheat;
+  wire/TV guided missiles follow the gunner's aim, heat seekers lock on piloted aircraft.
+  Crashes (speed along the contact) and deep water damage the vehicle.
+- **Simulation** (`game_shared::vehicle` and `game_shared::flight`): each vehicle is an avian
+  dynamic body (compound of convex hulls of the hull and turret collision; stationary weapons
+  are static). `step_vehicle` computes its push for one tick from the driver's inputs:
+  - land: per wheel a raycast spring holds it up; tyres cancel sideways sliding up to their
+    grip and push with the engine force (falling off towards top speed) or brake. Tracked
+    vehicles instead hold both tracks to a commanded speed and turn rate (skid steering).
+  - jets: throttle spools (hands off holds cruise, parked idles), thrust fades towards top
+    speed (the afterburner raises it), each wing lifts with its BF2 lift plus flap lift times
+    its control surface deflection and speed squared, clamped at the stall angle; plate and
+    induced drag, a load limit, an angle of attack limiter and per-axis angular damping keep
+    it flyable. Landing gear retracts above its BF2 height.
+  - helicopters: the rotor spins up, the collective regulates the climb rate (holding
+    altitude hands off), the cyclic tilts the lift within BF2's regulation angles and the
+    body levels itself when let go; turn rates follow BF2's engine values.
+  - boats and amphibious vehicles: floaters lift as columns below the level's water height,
+    water jets push up to their top speed, water drags.
+
+  Turrets and barrels turn towards the gunner's aim (the world direction of their view) at
+  their BF2 speeds within their limits; wings, rotors and gear animate from the same joints.
+- **Replication**: `Vehicle` (template name), `VehicleMotion` (pose, velocity and the last
+  applied driver input), `VehicleState` (joint angles, suspension, engine, afterburner),
+  `VehicleWeapons` (rounds, reload, heat, lock per gun) and `Seated` (on the soldier).
+- **Prediction** (`game_client::vehicle_prediction`): the driver runs the same `step_vehicle`
+  and `integrate` for his vehicle, keeps the state per input, rewinds to each `VehicleMotion`
+  and replays the unacknowledged inputs, like soldiers. Over a local dedicated server a
+  driver sees steering 17-32 ms and throttle 50-60 ms after the key (200-260 ms interpolated),
+  unchanged with 100 ms added latency (270-335 ms interpolated). Other vehicles are shown
+  100 ms in the past, interpolated. `--no-vehicle-prediction` turns it off.
+- **Client**: vehicle meshes are glTF skins with one joint per part (triangles spanning parts,
+  like track belts, bend with them); parts are posed from the replicated joints and wheels.
+  First person shows the interior mesh (BF2 geom 0), the seated soldier (its seat pose) and,
+  for gunners, the weapon's BF2 HUD sight (reticle, periscope frame) from
+  `menu/hud/hudsetup/vehicles`, laid out on BF2's 800x600 screen. The camera uses the seat's
+  camera point (gunners' views turn with their turret) or chases the vehicle (V); pilots get
+  a stiff chase camera. The HUD shows the guns, ammo, heat, lock, speed, altitude, throttle
+  and afterburner.
+
+Controls in vehicles: W/S throttle (jets: hands off holds 50 %, S idles and air brakes;
+helicopters: collective), A/D steering, rudder or tail rotor, mouse or arrow keys as the stick
+(pitch and roll; the down arrow pulls up), Alt free look, Shift afterburner, Space wheel
+brakes, fire/aim buttons the seat's primary/secondary guns, weapon keys the gun on a trigger,
+V chase camera, F1..F8 seats, E enter/exit.
 
 ### Bots
 
