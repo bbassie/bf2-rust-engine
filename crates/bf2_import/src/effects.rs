@@ -83,10 +83,32 @@ pub fn import(
         }
     }
 
+    let (count, failed) = convert_named(interp, converter, names, out);
+    if let Err(err) = game_data::write_ron(out.join("effects/impacts.ron"), &impacts) {
+        log::warn!("impacts.ron: {err}");
+    }
+    if let Err(err) = merge_weapon_effects(out, weapons) {
+        log::warn!("weapons.ron: {err:#}");
+    }
+    import_gadget_assets(converter, out);
+    let decals = decal_table(interp, converter, decal_cells);
+    if let Err(err) = game_data::write_ron(out.join("effects/decals.ron"), &decals) {
+        log::warn!("decals.ron: {err}");
+    }
+    log::info!(
+        "effects: {count} converted, {failed} empty or missing, {} impact cells, {} decals",
+        impacts.effects.len(),
+        decals.decals.len()
+    );
+}
+
+/// Converts the named effects this run hasn't written yet. Returns how many were converted
+/// and how many were empty or missing.
+pub fn convert_named(interp: &mut Interpreter, converter: &MeshConverter, mut names: Vec<String>, out: &Path) -> (u32, u32) {
     names.sort();
     names.dedup();
-    let atlas = Atlas::load(vfs);
-    let sounds = SoundConverter::new(vfs, &converter.out);
+    let atlas = Atlas::load(converter.vfs);
+    let sounds = SoundConverter::new(converter.vfs, &converter.out);
     let mut written = WRITTEN.lock().unwrap();
     let written = written.get_or_insert_with(HashSet::new);
     let (mut count, mut failed) = (0, 0);
@@ -107,26 +129,19 @@ pub fn import(
         }
         written.insert(name.clone());
     }
-    if let Err(err) = game_data::write_ron(out.join("effects/impacts.ron"), &impacts) {
-        log::warn!("impacts.ron: {err}");
-    }
-    if let Err(err) = merge_weapon_effects(out, weapons) {
-        log::warn!("weapons.ron: {err:#}");
-    }
-    import_gadget_assets(converter, out);
-    let decals = decal_table(interp, converter, decal_cells);
-    if let Err(err) = game_data::write_ron(out.join("effects/decals.ron"), &decals) {
-        log::warn!("decals.ron: {err}");
-    }
-    log::info!(
-        "effects: {count} converted, {failed} empty or missing, {} impact cells, {} decals",
-        impacts.effects.len(),
-        decals.decals.len()
-    );
+    (count, failed)
+}
+
+/// Whether an effect bundle lasts until its owner stops it (`timeToLive` -1: damage smoke,
+/// wreck fires) rather than playing out once. Its templates must be loaded.
+pub fn lasts(world: &World, name: &str) -> bool {
+    world
+        .template(name)
+        .is_some_and(|t| t.get_str("timetolive").is_none_or(|s| parse_spread(s).max <= 0.0))
 }
 
 /// Loads an effect bundle and every template it names.
-fn load_effect(interp: &mut Interpreter, name: &str) {
+pub fn load_effect(interp: &mut Interpreter, name: &str) {
     let mut pending = vec![name.to_string()];
     let mut seen = HashSet::new();
     while let Some(name) = pending.pop() {

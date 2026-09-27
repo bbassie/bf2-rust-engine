@@ -185,6 +185,8 @@ pub enum Step {
     CommanderClick((f32, f32, f32)),
     /// The nearest vehicle loses this many hit points (keeping at least 1).
     DamageVehicle(f32),
+    /// The vehicle nearest to a point loses this many hit points; at 0 it is destroyed.
+    DamageVehicleAt((f32, f32, f32), f32),
     /// Adds our health and ammo, the nearest teammate's health and the nearest vehicle's
     /// hit points to the report.
     Vitals(String),
@@ -1079,6 +1081,22 @@ fn run_scenario(
                         health.current = (health.current - amount).max(1.0);
                         info!("scenario: vehicle down to {:.0}/{:.0}", health.current, health.max);
                     }
+                    None => warn!("scenario: no vehicle to damage"),
+                }
+                Progress::Done
+            }
+            Step::DamageVehicleAt(point, amount) => {
+                let origin = Vec3::from(*point);
+                let nearest = vehicles.health.iter_mut().min_by(|a, b| {
+                    let d = |v: &VehicleView| v.transform.translation.distance(origin);
+                    d(a.0).total_cmp(&d(b.0))
+                });
+                match nearest {
+                    Some((_, mut health)) if health.current > 0.0 => {
+                        health.current = (health.current - amount).max(0.0);
+                        info!("scenario: vehicle down to {:.0}/{:.0}", health.current, health.max);
+                    }
+                    Some(_) => warn!("scenario: that vehicle is a wreck already"),
                     None => warn!("scenario: no vehicle to damage"),
                 }
                 Progress::Done

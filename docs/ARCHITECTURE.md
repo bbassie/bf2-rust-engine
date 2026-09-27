@@ -139,7 +139,9 @@ helicopter, sea, stationary) comes from the engine type.
   `menu/hud/hudsetup/vehicles`, laid out on BF2's 800x600 screen. The camera uses the seat's
   camera point (gunners' views turn with their turret) or chases the vehicle (V); pilots get
   a stiff chase camera. The HUD shows the guns, ammo, heat, lock, speed, altitude, throttle
-  and afterburner.
+  and afterburner. BF2's armor effects show the damage state: smoke (and sparks) while the
+  hit points are under their thresholds, the explosion and wreck fires at 0; the wreck burns
+  down to -100 % over its 10 s and blows apart.
 
 Controls in vehicles: W/S throttle (jets: hands off holds 50 %, S idles and air brakes;
 helicopters: collective), A/D steering, rudder or tail rotor, mouse or arrow keys as the stick

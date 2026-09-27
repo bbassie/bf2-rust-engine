@@ -73,8 +73,11 @@ const ABANDON_SECONDS: f32 = 60.0;
 const FLIPPED_SECONDS: f32 = 8.0;
 /// Respawn delay when the spawner doesn't set one.
 const DEFAULT_RESPAWN_SECONDS: f32 = 10.0;
-/// How long a destroyed vehicle stays (BF2's `armor.timeToStayAsWreck`).
+/// How long a destroyed vehicle stays (BF2's `armor.timeToStayAsWreck`). Its hit points
+/// burn down from 0 to minus the maximum meanwhile (the wreck's armor effects, down to its
+/// last explosion, follow them); it is removed a moment later.
 const WRECK_SECONDS: f32 = 10.0;
+const WRECK_LINGER_SECONDS: f32 = 0.5;
 
 /// Server-side: per gun, seconds until it may fire again, rounds left in the magazine,
 /// seconds of reloading left, heat, and what a heat seeker is locking on to (for how long).
@@ -768,10 +771,10 @@ fn crash_damage(
 fn wreck_vehicles(
     mut commands: Commands,
     time: Res<Time>,
-    mut vehicles: Query<(Entity, &Vehicle, &Position, &VehicleHealth, Option<&mut Wreck>, &mut SeatInputs)>,
+    mut vehicles: Query<(Entity, &Vehicle, &Position, &mut VehicleHealth, Option<&mut Wreck>, &mut SeatInputs)>,
     mut soldiers: Query<(&Seated, &mut Health), With<Soldier>>,
 ) {
-    for (vehicle, desc, position, health, wreck, mut inputs) in &mut vehicles {
+    for (vehicle, desc, position, mut health, wreck, mut inputs) in &mut vehicles {
         if !health.wrecked() {
             continue;
         }
@@ -787,7 +790,11 @@ fn wreck_vehicles(
             }
             Some(mut wreck) => {
                 wreck.0 -= time.delta_secs();
-                if wreck.0 <= 0.0 {
+                let burnt = -health.max * (1.0 - wreck.0 / WRECK_SECONDS).min(1.0);
+                if burnt < health.current {
+                    health.current = burnt;
+                }
+                if wreck.0 <= -WRECK_LINGER_SECONDS {
                     commands.entity(vehicle).despawn();
                 }
             }

@@ -63,6 +63,9 @@ pub struct VehicleDesc {
     pub wreck_mesh: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub wreck_pieces: u32,
+    /// Smoke, fire and explosions of its damage states (`armor.addArmorEffect`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub armor_effects: Vec<VehicleArmorEffect>,
     /// Parent parts come before their children; part 0 is the hull.
     pub parts: Vec<VehiclePart>,
     #[serde(default)]
@@ -534,6 +537,25 @@ pub struct HudPicture {
     pub rect: [f32; 4],
     /// Tint (rgba).
     pub color: [f32; 4],
+}
+
+/// An effect of a damage state, placed in the vehicle's frame.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VehicleArmorEffect {
+    /// Starts when the hit points fall to this percentage of the maximum. Below zero it is
+    /// the wreck's: it burns down from 0 to -100 while it stays, then blows apart.
+    pub hit_points: f32,
+    /// Effect name (`effects/<name>.ron`).
+    pub effect: String,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    /// Keeps going while the hit points stay below the threshold (smoke, fire) instead of
+    /// playing once (explosions).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lasting: bool,
+    /// BF2 plays it only when the vehicle dies spectacularly (`addArmorEffectSpectacular`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spectacular: bool,
 }
 
 fn default_hit_points() -> f32 {

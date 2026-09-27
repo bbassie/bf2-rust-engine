@@ -73,7 +73,7 @@ pub fn load_effects(interp: &mut Interpreter, templates: &HashSet<String>) {
         .iter()
         .filter_map(|name| interp.world.template(name))
         .filter(|t| is_destroyable(t))
-        .flat_map(|t| armor_effects(t).map(|e| e.template).collect::<Vec<_>>())
+        .flat_map(|t| armor_effects(t, "armor.addarmoreffect").map(|e| e.template).collect::<Vec<_>>())
         .collect();
     let mut seen = HashSet::new();
     while let Some(name) = pending.pop() {
@@ -103,7 +103,7 @@ pub fn armor(world: &World, template: &Template, converter: &MeshConverter) -> O
         _ => None,
     };
     let mut effect = DestructionEffect::default();
-    for armor_effect in armor_effects(template).filter(|e| e.hit_points <= 0.0) {
+    for armor_effect in armor_effects(template, "armor.addarmoreffect").filter(|e| e.hit_points <= 0.0) {
         let transform = Affine3A::from_rotation_translation(
             coords::rotation_ypr(armor_effect.rotation),
             Vec3::from_array(coords::position(armor_effect.position)),
@@ -123,17 +123,17 @@ pub fn armor(world: &World, template: &Template, converter: &MeshConverter) -> O
     })
 }
 
-struct ArmorEffect {
-    hit_points: f32,
-    template: String,
-    position: [f32; 3],
-    rotation: [f32; 3],
+pub struct ArmorEffect {
+    pub hit_points: f32,
+    pub template: String,
+    pub position: [f32; 3],
+    pub rotation: [f32; 3],
 }
 
-/// `armor.addArmorEffect <hit points> <effect> <position> <rotation>`: effects that start when
-/// the hit points drop to the threshold.
-fn armor_effects(template: &Template) -> impl Iterator<Item = ArmorEffect> + '_ {
-    template.get_all("armor.addarmoreffect").filter_map(|args| {
+/// `armor.addArmorEffect <hit points> <effect> <position> <rotation>` (or `property`'s
+/// variant): effects that start when the hit points drop to the threshold.
+pub fn armor_effects<'a>(template: &'a Template, property: &'a str) -> impl Iterator<Item = ArmorEffect> + 'a {
+    template.get_all(property).filter_map(|args| {
         let vec = |i: usize| args.get(i).and_then(|s| parse_vec3(s)).unwrap_or_default();
         Some(ArmorEffect {
             hit_points: args.first()?.parse().ok()?,

@@ -101,7 +101,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   the sight, heat seekers lock on aircraft; gun overheat and weapon choice per trigger
 - [x] Vehicle meshes as glTF skins (one joint per part); seated soldier poses; first-person
   interiors (geom 0); BF2 vehicle sights (reticles, periscope frames); vehicle HUD (guns,
-  ammo, heat, lock, speed, altitude, throttle)
+  ammo, heat, lock, speed, altitude, throttle); damage smoke, explosions and wreck fires
+  (BF2's armor effects)
 - Engine/gearbox/tyre model fitted to the original (`newCar2.*`, gear ratios); per-face armour
   materials (front/side/rear/tracks) for direct hits
 - Passenger/pilot HUD overlays (`hudPass`, aircraft instruments), countermeasures, bombs,

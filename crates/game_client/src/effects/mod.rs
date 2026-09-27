@@ -176,6 +176,12 @@ pub fn spawn_around(effects: &mut MessageWriter<SpawnEffect>, name: &str, center
 #[derive(Component, Clone, Debug)]
 pub struct EffectEmitter(pub String);
 
+/// With an [`EffectEmitter`]: runs the effect the way BF2 runs a bundle that lasts until its
+/// owner stops it (damage smoke, wreck fires) instead of sustaining it: emitters with an
+/// emission time fire once, those without one (`emitTime 0`) keep emitting at their rate.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Lasting;
+
 /// Numbers for the HUD and measurements.
 #[derive(Resource, Default, Debug)]
 pub struct EffectStats {
@@ -475,6 +481,8 @@ struct Instance {
     age: f32,
     /// Emitters keep going until this age.
     sustain: f32,
+    /// See [`Lasting`].
+    lasting: bool,
     emitters: Vec<EmitterState>,
     particles: Vec<Particle>,
 }
@@ -522,6 +530,7 @@ impl Instance {
             follow: None,
             age: 0.0,
             sustain,
+            lasting: false,
             emitters,
             particles: Vec::new(),
         }
@@ -663,7 +672,7 @@ fn placement((transform, global, has_parent): (&Transform, &GlobalTransform, boo
 
 /// Starts the effect of new [`EffectEmitter`]s.
 fn follow_emitters(
-    added: Query<(Entity, &EffectEmitter, EmitterPlacement), Added<EffectEmitter>>,
+    added: Query<(Entity, &EffectEmitter, EmitterPlacement, Has<Lasting>), Added<EffectEmitter>>,
     library: Option<ResMut<EffectLibrary>>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -673,13 +682,14 @@ fn follow_emitters(
     let Some(mut library) = library else {
         return;
     };
-    for (entity, emitter, placed) in &added {
+    for (entity, emitter, placed, lasting) in &added {
         let Some(effect) = library.prepare(&emitter.0, &asset_server, &mut meshes, &mut materials) else {
             continue;
         };
         let (position, rotation) = placement(placed);
         let mut instance = Instance::new(effect, position, rotation, false, f32::INFINITY);
         instance.follow = Some(entity);
+        instance.lasting = lasting;
         world.instances.push(instance);
     }
 }
@@ -770,8 +780,15 @@ fn emit(instance: &mut Instance, budget: &mut usize) {
                 break;
             }
             // The cycle is over: another one while sustained, else stop.
-            if instance.age < instance.sustain {
-                let period = if desc.looping { window } else { window.max(desc.life[1] * SUSTAIN_PERIOD) };
+            let again = !instance.lasting || desc.looping || window <= 0.0;
+            if instance.age < instance.sustain && again {
+                let period = if desc.looping {
+                    window
+                } else if instance.lasting {
+                    1.0 / desc.rate.max(0.1)
+                } else {
+                    window.max(desc.life[1] * SUSTAIN_PERIOD)
+                };
                 state.start += period.max(0.02);
                 state.emitted = 0;
             } else {

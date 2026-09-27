@@ -21,7 +21,8 @@ use bf2_formats::{
 use game_data::{
     AeroDesc, AfterburnerDesc, Attachment, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc, JointAxis,
     JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera, SeatDesc, ThrusterDesc,
-    VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc, WingDesc,
+    VehicleArmorEffect, VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc,
+    WingDesc,
 };
 use glam::{Affine3A, Quat, Vec3};
 
@@ -69,6 +70,7 @@ pub fn import(
     out: &Path,
 ) -> Result<Vec<String>> {
     let mut written = Vec::new();
+    let mut effects = Vec::new();
     let huds = crate::vehicle_hud::VehicleHuds::load(converter);
     for name in names {
         interp.ensure_template(name);
@@ -85,10 +87,37 @@ pub fn import(
         }
         desc.weapons = weapon_descs(interp, converter, localization, &huds, &desc, out);
         desc.sounds = crate::sounds::SoundConverter::new(converter.vfs, out).vehicle(&interp.world, name);
+        desc.armor_effects = armor_effects(interp, name);
+        effects.extend(desc.armor_effects.iter().map(|e| e.effect.clone()));
         game_data::write_ron(out.join("vehicles").join(format!("{name}.ron")), &desc)?;
         written.push(name.clone());
     }
+    let (count, _) = crate::effects::convert_named(interp, converter, effects, out);
+    log::info!("vehicles: {} imported, {count} more damage effects", written.len());
     Ok(written)
+}
+
+/// The smoke, fire and explosions of the vehicle's damage states
+/// (`armor.addArmorEffect[Spectacular] <hit points %> <effect> <position> <rotation>`).
+fn armor_effects(interp: &mut Interpreter, name: &str) -> Vec<VehicleArmorEffect> {
+    let Some(template) = interp.world.template(name).cloned() else {
+        return Vec::new();
+    };
+    let mut effects = Vec::new();
+    for (property, spectacular) in [("armor.addarmoreffect", false), ("armor.addarmoreffectspectacular", true)] {
+        for effect in crate::destruction::armor_effects(&template, property) {
+            crate::effects::load_effect(interp, &effect.template);
+            effects.push(VehicleArmorEffect {
+                hit_points: effect.hit_points,
+                lasting: crate::effects::lasts(&interp.world, &effect.template),
+                position: coords::position(effect.position),
+                rotation: coords::rotation_ypr(effect.rotation).to_array(),
+                effect: effect.template,
+                spectacular,
+            });
+        }
+    }
+    effects
 }
 
 /// Children can be defined in other files (shared weapons, antennas): load them the way the
@@ -689,6 +718,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         blast_material: root.get_f32("armor.defaultmaterial").unwrap_or(72.0) as u32,
         wreck_mesh,
         wreck_pieces,
+        armor_effects: Vec::new(),
         parts,
         wheels,
         seats: seat_descs,

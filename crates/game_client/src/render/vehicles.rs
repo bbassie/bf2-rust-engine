@@ -23,6 +23,7 @@ use super::materials::Bf2Materials;
 
 use crate::{
     camera::ThirdPerson,
+    effects::{EffectEmitter, Lasting, SpawnEffect},
     net::LocalSoldier,
     vehicles::{VehicleView, VehicleViewSystems},
 };
@@ -35,7 +36,7 @@ impl Plugin for VehicleRenderPlugin {
             .add_systems(Update, spawn_rigs)
             .add_systems(
                 PostUpdate,
-                (pose_parts, show_interior, show_wrecks)
+                (pose_parts, show_interior, show_wrecks, play_armor_effects, hide_burnt_wrecks)
                     .after(VehicleViewSystems)
                     .before(TransformSystems::Propagate),
             );
@@ -45,6 +46,10 @@ impl Plugin for VehicleRenderPlugin {
 /// A destroyed vehicle whose wreck model is showing.
 #[derive(Component)]
 struct ShowsWreck;
+
+/// A piece of a wreck model.
+#[derive(Component)]
+struct WreckPiece;
 
 /// Swaps a destroyed vehicle's parts for its wreck model: piece `n` where the part drawn with
 /// hull mesh index `n` is.
@@ -84,8 +89,82 @@ fn show_wrecks(
                     path: wreck.clone(),
                     index: piece,
                 },
+                WreckPiece,
                 ChildOf(entity),
             ));
+        }
+    }
+}
+
+/// A wreck burns down to -100 % hit points while it stays; its last explosion there leaves
+/// nothing behind.
+fn hide_burnt_wrecks(
+    vehicles: Query<(&VehicleHealth, &Children), With<ShowsWreck>>,
+    mut pieces: Query<&mut Visibility, With<WreckPiece>>,
+) {
+    for (health, children) in &vehicles {
+        if health.current > -health.max {
+            continue;
+        }
+        for child in children.iter() {
+            if let Ok(mut visibility) = pieces.get_mut(child) {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
+        }
+    }
+}
+
+/// Where a vehicle's damage states stand: its hit points (percent of the maximum) when last
+/// looked at and, per armor effect, the emitter of a lasting one while it runs.
+#[derive(Component)]
+struct ArmorEffects {
+    percent: f32,
+    running: Vec<Option<Entity>>,
+}
+
+/// BF2's damage states (the vehicle's armor effects): smoke and fire while the hit points are
+/// under their thresholds, explosions once as they cross them, down to the wreck's last
+/// explosion at -100 %.
+fn play_armor_effects(
+    mut commands: Commands,
+    mut vehicles: Query<(Entity, &VehicleData, &VehicleHealth, &Transform, Option<&mut ArmorEffects>)>,
+    mut effects: MessageWriter<SpawnEffect>,
+) {
+    for (entity, data, health, transform, state) in &mut vehicles {
+        let desc = &data.0.desc;
+        if desc.armor_effects.is_empty() {
+            continue;
+        }
+        let percent = health.current / health.max.max(1.0) * 100.0;
+        let Some(mut state) = state else {
+            // Explosions from before we saw the vehicle stay in the past.
+            commands.entity(entity).insert(ArmorEffects {
+                percent,
+                running: vec![None; desc.armor_effects.len()],
+            });
+            continue;
+        };
+        let before = std::mem::replace(&mut state.percent, percent);
+        for (effect, running) in desc.armor_effects.iter().zip(&mut state.running) {
+            let local = Transform::from_translation(Vec3::from_array(effect.position))
+                .with_rotation(Quat::from_array(effect.rotation));
+            let below = percent <= effect.hit_points;
+            if effect.lasting {
+                match (below, *running) {
+                    (true, None) => {
+                        let emitter = (local, EffectEmitter(effect.effect.clone()), Lasting, ChildOf(entity));
+                        *running = Some(commands.spawn(emitter).id());
+                    }
+                    (false, Some(emitter)) => {
+                        commands.entity(emitter).despawn();
+                        *running = None;
+                    }
+                    _ => {}
+                }
+            } else if below && before > effect.hit_points {
+                let at = *transform * local;
+                effects.write(SpawnEffect::new(effect.effect.clone(), at.translation).with_rotation(at.rotation));
+            }
         }
     }
 }
