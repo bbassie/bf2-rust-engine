@@ -586,6 +586,8 @@ struct Senses<'w, 's> {
     profiles: Res<'w, VehicleProfiles>,
     vehicle_nav: Option<Res<'w, VehicleNavigation>>,
     players: Query<'w, 's, &'static Player>,
+    /// Rockets, missiles and grenades in flight (crews fire countermeasures at them).
+    projectiles: Query<'w, 's, (&'static game_shared::projectile::Projectile, &'static game_shared::projectile::ProjectileMotion)>,
 }
 
 impl Senses<'_, '_> {

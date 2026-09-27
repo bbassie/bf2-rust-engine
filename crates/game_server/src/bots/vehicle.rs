@@ -170,6 +170,8 @@ pub(super) struct Ride {
 
     flight: Flight,
     orbit: f32,
+    /// Seconds until flares or smoke may go again.
+    countermeasure_cooldown: f32,
     last_velocity: Vec3,
     airborne: bool,
 }
@@ -217,6 +219,7 @@ impl Ride {
             pitch: 0.0,
             flight: Flight::Ground,
             orbit: fastrand::f32() * TAU,
+            countermeasure_cooldown: 0.0,
             last_velocity: Vec3::ZERO,
             airborne: false,
         }
@@ -762,6 +765,25 @@ impl BotBrain {
             }
         }
 
+        // Flares or smoke when an enemy rocket or missile is coming at the vehicle.
+        ride.countermeasure_cooldown -= dt;
+        if profile.countermeasures.contains(&seated.seat) && ride.countermeasure_cooldown <= 0.0 {
+            let at = seen.motion.position;
+            let incoming = w.projectiles.iter().any(|(projectile, motion)| {
+                let to = at - motion.position;
+                let speed = motion.velocity.length();
+                !motion.resting
+                    && speed > 25.0
+                    && to.length() < 500.0
+                    && motion.velocity.dot(to) > 0.97 * speed * to.length()
+                    && w.is_enemy(projectile.player, me.team)
+            });
+            if incoming {
+                frame.buttons |= Buttons::COUNTERMEASURE;
+                ride.countermeasure_cooldown = 4.0;
+                team_stats.countermeasures += 1;
+            }
+        }
         if ride.leaving {
             // Pressed and let go on alternate ticks until out.
             ride.use_down = !ride.use_down;
@@ -930,7 +952,7 @@ impl BotBrain {
         let locked = gun.kind != GunKind::AntiAir || status.is_some_and(|s| s.lock == 255);
         let trigger = if gun.alt_fire { Buttons::AIM } else { Buttons::FIRE };
         if every(ride.time, dt, 3.0) {
-            info!(
+            debug!(
                 "{} aims {} gun {} ({:?}) at a {} {distance:.0} m away: off by {:.1} (fires within {:.1}), ready {ready}, lock {}, reaction {:.1}",
                 w.name(me.player),
                 seen.template,
@@ -1359,6 +1381,11 @@ impl BotBrain {
             wanted = wanted.min((top * (1.0 - alpha.abs() / FRAC_PI_2)).max(3.0));
         }
         wanted = wanted.min((2.0 * BRAKING * remaining).sqrt() + 1.0);
+        // Leaning over on a side slope: slow down before it rolls.
+        let roll = (-(motion.rotation * Vec3::X).y).clamp(-1.0, 1.0).asin().abs();
+        if !boat && roll > 0.2 {
+            wanted = wanted.min((top * (1.0 - (roll - 0.2) * 3.0)).max(3.0));
+        }
         if boat {
             // Rudders only turn a boat moving through the water: keep going while turning,
             // slow down only at the end.
@@ -1519,7 +1546,7 @@ impl BotBrain {
         }
         frame.set_movement(Vec2::new(steer, throttle));
         if profile.role == Role::Boat && every(ride.time, dt, 10.0) {
-            info!(
+            debug!(
                 "{} sails {}: at {position:.0}, {speed:.1} m/s (wants {wanted:.1}), goal {goal:.0} {:.0} m away, {:.0} m of path left, \
                  bearing {:.0}, depth {:.1}, shore {:.0} m",
                 w.name(me.player),
@@ -1711,7 +1738,7 @@ impl BotBrain {
         frame.set_movement(Vec2::new(steer, collective));
         frame.set_stick(Vec2::new(stick_roll, stick_pitch));
         if every(ride.time, dt, 5.0) {
-            info!(
+            debug!(
                 "{} flies {} ({:?}): at {:.0}, {:.0} m up (wants {:.0}), {:.0} m/s (wants {:.0}), heading off by {:.0}, pitch {:.0}, roll {:.0}; stick {:.2} {:.2}, collective {:.2}, pedal {:.2}",
                 w.name(me.player),
                 seen.template,
@@ -1839,7 +1866,7 @@ impl BotBrain {
         frame.set_movement(Vec2::new(0.0, throttle));
         frame.set_stick(Vec2::new(stick_roll, stick_pitch));
         if every(ride.time, dt, 5.0) {
-            info!(
+            debug!(
                 "{} flies {} ({:?}): at {:.0}, {:.0} m up (wants {:.0}), {:.0} m/s, heading off by {:.0}, climb {:.0}, roll {:.0} (wants {:.0}); stick {:.2} {:.2}",
                 w.name(me.player),
                 seen.template,

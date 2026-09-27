@@ -88,7 +88,7 @@ impl DriveSpec {
     fn slopes(&self) -> (f32, f32) {
         match self.class {
             NavClass::Tracked => (0.8, 0.35),
-            _ => (0.62, 0.25),
+            _ => (0.55, 0.2),
         }
     }
 

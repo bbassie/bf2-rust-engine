@@ -133,9 +133,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   meshes, environment maps
 - [x] Water, undergrowth/overgrowth, surrounding terrain, view distance setting (grows with
   altitude), BF2's distant tree stand-ins
-- Lighting depth (in progress): per-map world lighting from BF2's values (night maps), directional
-  sky ambient, BF2's baked sky visibility as ambient occlusion (the sun stays dynamic), light
-  probes for soldiers and vehicles, tonemapping and bloom
+- [x] Lighting depth: per-map world lighting from BF2's shader math and values (night maps are
+  night), directional sky light, BF2's baked sky visibility as occlusion on statics and terrain
+  (the sun stays dynamic), ray-traced sky occlusion for soldiers and vehicles, tonemapping and
+  optional bloom
 - [x] Static mesh LODs with BF2's switch distances (`setSubGeometryLodDistance`) and draw distances
   (cull radius), dithered cross-fades, zoom-aware like BF2
 - Vehicle and soldier LODs

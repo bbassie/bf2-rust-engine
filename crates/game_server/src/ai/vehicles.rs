@@ -131,6 +131,8 @@ pub struct VehicleProfile {
     /// Tracked: turn rate at full steering, radians per second.
     pub turn_rate: f32,
     pub hit_points: f32,
+    /// Seats that fire decoy flares or smoke with the countermeasure key.
+    pub countermeasures: Vec<u8>,
 }
 
 impl VehicleProfile {
@@ -214,6 +216,12 @@ impl VehicleProfile {
             wheelbase,
             turn_rate: desc.engine.turn_rate.max(0.3),
             hit_points: desc.hit_points,
+            countermeasures: desc
+                .weapons
+                .iter()
+                .filter(|w| w.countermeasure.is_some())
+                .map(|w| w.seat as u8)
+                .collect(),
         }
     }
 
@@ -235,6 +243,10 @@ fn seat_aims(desc: &VehicleDesc, seat: usize) -> bool {
 fn guns(desc: &VehicleDesc, data: &AiData) -> Vec<GunInfo> {
     let mut out = Vec::with_capacity(desc.weapons.len());
     for (index, gun) in desc.weapons.iter().enumerate() {
+        // Flares and smoke have a key of their own (see `VehicleProfile::countermeasures`).
+        if gun.countermeasure.is_some() {
+            continue;
+        }
         let w: &WeaponDesc = &gun.weapon;
         let p = &w.projectile;
         let kind = if w.fire.lock.is_some() || w.fire.guidance == Guidance::Heat {
@@ -264,7 +276,7 @@ fn guns(desc: &VehicleDesc, data: &AiData) -> Vec<GunInfo> {
         let range = template.filter(|r| *r > 20.0).unwrap_or(default).min(reach);
         let pick = desc.weapons[..index]
             .iter()
-            .filter(|o| o.seat == gun.seat && o.alt_fire == gun.alt_fire)
+            .filter(|o| o.seat == gun.seat && o.alt_fire == gun.alt_fire && o.countermeasure.is_none())
             .count() as u8;
         out.push(GunInfo {
             index,
