@@ -75,6 +75,12 @@ pub struct VehicleDesc {
     pub parts: Vec<VehiclePart>,
     #[serde(default)]
     pub wheels: Vec<WheelDesc>,
+    /// How tracks scroll their textures and turn their wheel hubs (tracked vehicles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uv_animations: Vec<UvAnimationDesc>,
+    /// Drive sprockets and idlers: parts that turn with their track (`rotateAsAnimatedUV`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_wheels: Vec<TrackWheelDesc>,
     /// Seat 0 is the driver.
     #[serde(default)]
     pub seats: Vec<SeatDesc>,
@@ -503,6 +509,39 @@ pub struct WheelDesc {
     /// Suspension stiffness and damping as tuned in BF2 (`setStrength`, `setDamping`).
     pub strength: f32,
     pub damping: f32,
+    /// The model turns with the wheel; tank road wheels (BF2 `rotateUV`) stand still and
+    /// scroll their texture instead, as the track belt around them is skinned to them.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub turns: bool,
+}
+
+/// BF2's UV animation of one track side (`animatedUVTranslation*`, `animatedUVRotation*` on
+/// its wheels): the model's faces that name UV matrix `index` scroll or turn as the track
+/// moves (which way is in their material's `bf2.uv_animation` extras).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UvAnimationDesc {
+    pub index: u8,
+    /// The track side that drives it: its wheels' x in hull space.
+    pub side: f32,
+    pub motion: UvMotion,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum UvMotion {
+    /// The texture moves one UV unit per `size` meters of track along each axis, wrapping
+    /// at `wrap` (`animatedUVTranslationSize`, `animatedUVTranslationMax`; 0: still).
+    Scroll { size: [f32; 2], wrap: [f32; 2] },
+    /// The texture turns with a wheel of `radius`, in UV space scaled by `scale`
+    /// (`animatedUVRotationRadius`, `animatedUVRotationScale`).
+    Spin { radius: f32, scale: [f32; 2] },
+}
+
+/// A part that turns with its track like a wheel of `radius` (drive sprockets).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TrackWheelDesc {
+    pub part: u32,
+    pub side: f32,
+    pub radius: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -655,4 +694,12 @@ fn is_zero(v: &u32) -> bool {
 
 fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }

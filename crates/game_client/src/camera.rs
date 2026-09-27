@@ -19,6 +19,7 @@ pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ThirdPerson(false))
+            .init_resource::<ChaseZoom>()
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, toggle_third_person)
             .add_systems(
@@ -118,6 +119,16 @@ fn chase_position(spatial: &avian3d::prelude::SpatialQuery, pivot: Vec3, offset:
 #[derive(Resource, Default)]
 pub struct ThirdPerson(pub bool);
 
+/// Scales how far the vehicle chase camera stays out (scenarios take close-ups with it).
+#[derive(Resource)]
+pub struct ChaseZoom(pub f32);
+
+impl Default for ChaseZoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 fn toggle_third_person(actions: Actions, mut third_person: ResMut<ThirdPerson>) {
     if actions.just_pressed(Action::ThirdPerson) {
         third_person.0 = !third_person.0;
@@ -130,6 +141,7 @@ fn update_camera(
     cursor: Single<&CursorOptions>,
     look: Res<LookState>,
     third_person: Res<ThirdPerson>,
+    zoom: Res<ChaseZoom>,
     cli: Res<crate::Cli>,
     spatial: avian3d::prelude::SpatialQuery,
     soldier: Query<(&SoldierRender, Option<&Seated>), With<LocalSoldier>>,
@@ -155,7 +167,7 @@ fn update_camera(
             let smoothed = chase.map_or(wanted, |c| c.slerp(wanted, 1.0 - (-CHASE_STIFFNESS * time.delta_secs()).exp()));
             *chase = Some(smoothed);
             transform.translation = if third_person.0 {
-                let offset = smoothed * Vec3::new(0.0, view.chase_height, view.chase_distance * 0.8);
+                let offset = smoothed * Vec3::new(0.0, view.chase_height, view.chase_distance * 0.8 * zoom.0);
                 chase_position(&spatial, view.vehicle.translation, offset, 3.0)
             } else {
                 view.eye
@@ -167,7 +179,7 @@ fn update_camera(
         *chase = None;
         transform.translation = if third_person.0 {
             let pivot = view.vehicle.translation + Vec3::Y * 1.5;
-            let offset = rotation * Vec3::new(0.0, 0.0, view.chase_distance * 0.7) + Vec3::Y * view.chase_height;
+            let offset = rotation * Vec3::new(0.0, 0.0, view.chase_distance * 0.7 * zoom.0) + Vec3::Y * view.chase_height;
             let distance = Dir3::new(offset)
                 .ok()
                 .and_then(|dir| {

@@ -152,6 +152,8 @@ pub enum Step {
     /// Weapon index in the kit.
     Weapon(u8),
     ThirdPerson(bool),
+    /// Scales the vehicle chase camera's distance (1 = normal).
+    ChaseZoom(f32),
     Ssao(bool),
     Shadows(bool),
     /// Presses and releases a key, e.g. `Key(Enter)`.
@@ -398,6 +400,7 @@ struct PlayerControls<'w, 's> {
     input: ResMut<'w, ScenarioInput>,
     look: ResMut<'w, LookState>,
     third_person: ResMut<'w, ThirdPerson>,
+    chase_zoom: ResMut<'w, crate::camera::ChaseZoom>,
     selection: ResMut<'w, WeaponSelection>,
     keyboard: MessageWriter<'w, KeyboardInput>,
     window: Single<'w, 's, Entity, With<PrimaryWindow>>,
@@ -513,6 +516,7 @@ fn run_scenario(
         mut input,
         mut look,
         mut third_person,
+        mut chase_zoom,
         mut selection,
         mut keyboard,
         window,
@@ -924,8 +928,9 @@ fn run_scenario(
                                 Some(format!("{} {:.0}/{:.0}", p.name, a[0].to_degrees(), a[1].to_degrees()))
                             })
                             .collect();
+                        let wheels: Vec<String> = view.wheels.iter().map(|w| format!("{w:.2}")).collect();
                         format!(
-                            "{label}: {} seat {} at ({:.1}, {:.1}, {:.1}), {:.1} km/h, heading {:.0} deg, tilt {:.0} deg, aim [{}]",
+                            "{label}: {} seat {} at ({:.2}, {:.2}, {:.2}), {:.1} km/h, heading {:.0} deg, tilt {:.1} deg, aim [{}], wheels down [{}]",
                             model.desc.name,
                             seated.seat + 1,
                             t.translation.x,
@@ -934,7 +939,8 @@ fn run_scenario(
                             view.speed * 3.6,
                             crate::vehicles::heading(t.rotation).to_degrees(),
                             up,
-                            aims.join(", ")
+                            aims.join(", "),
+                            wheels.join(" ")
                         )
                     }
                     None => format!("{label}: not in a vehicle"),
@@ -962,6 +968,10 @@ fn run_scenario(
             }
             Step::ThirdPerson(on) => {
                 third_person.0 = *on;
+                Progress::Done
+            }
+            Step::ChaseZoom(zoom) => {
+                chase_zoom.0 = *zoom;
                 Progress::Done
             }
             Step::Ssao(on) => {

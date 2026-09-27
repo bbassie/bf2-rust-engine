@@ -106,8 +106,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Engine/gearbox/tyre model from BF2's `newCar2.*` numbers (gear ratios and shift points,
   gear changes, rev limiter, brake and engine brake torques, dynamic friction), fitted to BF2's
   AI top speeds; per-face armour materials (front/side/rear/top/tracks) for direct hits
-- Passenger/pilot HUD overlays (`hudPass`, aircraft instruments), countermeasures, bombs,
-  track texture scrolling, smoke launchers, artillery and commander assets
+- [x] Countermeasures (smoke launchers, decoy flares that break heat seeker locks), bombs,
+  track texture scrolling (BF2's UV matrices: belts, rim treads, hubs, sprockets)
+- Passenger/pilot HUD overlays (`hudPass`, aircraft instruments), artillery and commander
+  assets
 - Flight tuning against BF2 (rudder authority, VTOL F-35B hover, helicopter landing)
 
 ## M4: BF2-style bots

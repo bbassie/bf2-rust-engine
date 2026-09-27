@@ -140,6 +140,11 @@ helicopter, sea, stationary) comes from the engine type.
   100 ms in the past, interpolated. `--no-vehicle-prediction` turns it off.
 - **Client**: vehicle meshes are glTF skins with one joint per part (triangles spanning parts,
   like track belts, bend with them); parts are posed from the replicated joints and wheels.
+  Tracks animate like BF2's UV matrices: the importer splits the faces each matrix moves into
+  materials of their own (with the scroll direction and hub centres in their extras), and
+  each vehicle scrolls its belts and rim treads and turns its hub textures and sprockets by
+  the distance each track ran; tank road wheels (`rotateUV`) don't turn their geometry, as
+  the belt around them is skinned to them.
   First person shows the interior mesh (BF2 geom 0), the seated soldier (its seat pose) and,
   for gunners, the weapon's BF2 HUD sight (reticle, periscope frame) from
   `menu/hud/hudsetup/vehicles`, laid out on BF2's 800x600 screen. The camera uses the seat's

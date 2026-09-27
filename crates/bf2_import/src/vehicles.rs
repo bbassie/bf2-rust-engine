@@ -21,8 +21,8 @@ use bf2_formats::{
 use game_data::{
     AeroDesc, AfterburnerDesc, Attachment, CountermeasureDesc, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc,
     GearDesc, GearboxDesc, JointAxis, JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera,
-    SeatDesc, ThrusterDesc, VehicleArmorEffect, VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics,
-    VehicleWeaponDesc, WheelDesc, WingDesc,
+    SeatDesc, ThrusterDesc, TrackWheelDesc, UvAnimationDesc, UvMotion, VehicleArmorEffect, VehicleCategory,
+    VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc, WingDesc,
 };
 use glam::{Affine3A, Quat, Vec3};
 
@@ -534,6 +534,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
                 contact: t.get_f32("grip").unwrap_or(8.0) as u32 != 128 && strength > 0.0,
                 strength,
                 damping: t.get_f32("setdamping").unwrap_or(0.0),
+                turns: t.get_f32("rotateuv").unwrap_or(0.0) == 0.0,
             })
         })
         .collect();
@@ -745,6 +746,8 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         wreck_pieces,
         armor_effects: Vec::new(),
         parts,
+        uv_animations: uv_animations(world, &nodes),
+        track_wheels: track_wheels(world, &nodes, &wheels),
         wheels,
         seats: seat_descs,
         entry_points,
@@ -1256,6 +1259,68 @@ fn write_armor_mesh(world: &World, converter: &MeshConverter, name: &str, nodes:
         .map_err(|e| log::warn!("{rel}: {e:#}"))
         .ok()?;
     Some(rel)
+}
+
+/// Two numbers written `a/b`.
+fn pair(t: &Template, method: &str) -> [f32; 2] {
+    let mut values = t.get_str(method).unwrap_or("0/0").split('/').map(|v| v.trim().parse().unwrap_or(0.0));
+    [values.next().unwrap_or(0.0), values.next().unwrap_or(0.0)]
+}
+
+/// The tracks' UV animations, from the wheels that set them up (one per matrix index).
+fn uv_animations(world: &World, nodes: &[Node]) -> Vec<UvAnimationDesc> {
+    let mut animations: Vec<UvAnimationDesc> = Vec::new();
+    for node in nodes {
+        let Some(t) = world.template(&node.template) else { continue };
+        let side = node.hull.translation.x;
+        let mut add = |index: Option<f32>, motion: UvMotion| {
+            if let Some(index) = index.filter(|i| *i > 0.0).map(|i| i as u8)
+                && !animations.iter().any(|a| a.index == index)
+            {
+                animations.push(UvAnimationDesc { index, side, motion });
+            }
+        };
+        if t.get_f32("animateduvtranslation").unwrap_or(0.0) != 0.0 {
+            let motion = UvMotion::Scroll {
+                size: pair(t, "animateduvtranslationsize"),
+                wrap: pair(t, "animateduvtranslationmax"),
+            };
+            add(t.get_f32("animateduvtranslationindex"), motion);
+        }
+        if t.get_f32("animateduvrotation").unwrap_or(0.0) != 0.0 {
+            let motion = UvMotion::Spin {
+                radius: t.get_f32("animateduvrotationradius").unwrap_or(0.35),
+                scale: pair(t, "animateduvrotationscale").map(|v| if v == 0.0 { 1.0 } else { v }),
+            };
+            add(t.get_f32("animateduvrotationindex"), motion);
+        }
+    }
+    animations.sort_by_key(|a| a.index);
+    animations
+}
+
+/// Drive sprockets (`rotateAsAnimatedUV`) turn like the wheel they follow.
+fn track_wheels(world: &World, nodes: &[Node], wheels: &[WheelDesc]) -> Vec<TrackWheelDesc> {
+    nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| {
+            let t = world.template(&node.template)?;
+            (t.get_f32("rotateasanimateduv").unwrap_or(0.0) != 0.0).then_some(())?;
+            let followed = t
+                .get_str("rotateasanimateduvobject")
+                .and_then(|name| world.template(&name.to_ascii_lowercase()))
+                .and_then(|t| t.get_f32("animateduvrotationradius"));
+            let radius = followed
+                .or_else(|| wheels.iter().find(|w| w.part as usize == i).map(|w| w.radius))
+                .unwrap_or(0.35);
+            Some(TrackWheelDesc {
+                part: i as u32,
+                side: node.hull.translation.x,
+                radius,
+            })
+        })
+        .collect()
 }
 
 /// Measures meshes (wheels, wreck pieces).

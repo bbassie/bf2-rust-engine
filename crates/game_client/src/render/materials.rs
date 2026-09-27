@@ -297,6 +297,14 @@ pub struct Bf2Materials<'w> {
 }
 
 impl Bf2Materials<'_> {
+    /// A copy of a material for one object to change on its own (scrolling track textures).
+    pub fn duplicate(&mut self, material: &Handle<Bf2Material>) -> Handle<Bf2Material> {
+        match self.materials.get(material).cloned() {
+            Some(copy) => self.materials.add(copy),
+            None => material.clone(),
+        }
+    }
+
     /// The material of a glTF primitive; `None` while the glTF's materials are loading.
     pub fn for_primitive(&mut self, primitive: &GltfPrimitive) -> Option<Handle<Bf2Material>> {
         let Some(gltf_material) = &primitive.material else {
