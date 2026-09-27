@@ -1,0 +1,36 @@
+// A BTR-90 in the water off Gulf of Oman's shore: it floats, swims with its water jet and
+// rudder, and drives back out onto land. The report traces speed, height above the sea
+// floor and attitude.
+// client --scenario scenarios/vehicle2_amphibious.ron --out target/scenarios/vehicle2/amphibious
+(
+    level: "gulf_of_oman",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        NearVehicle("apc_btr90"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("entered"),
+        PlaceVehicle((-500.0, 26.0, 10.0), -90.0, 0.0),
+        ThirdPerson(true),
+        VehicleTrace("drop in", 3.0),
+        Screenshot("01_afloat"),
+        Move(0.0, 1.0),
+        VehicleTrace("swim", 6.0),
+        Screenshot("02_swimming"),
+        Move(1.0, 1.0),
+        VehicleTrace("turn", 3.0),
+        Move(-1.0, 1.0),
+        VehicleTrace("turn back", 3.0),
+        Move(0.0, 1.0),
+        VehicleTrace("to the shore", 14.0),
+        Screenshot("03_ashore"),
+        Quit,
+    ],
+)

@@ -172,6 +172,16 @@ impl Cli {
 
 fn main() -> AppExit {
     let mut cli = Cli::parse();
+    // Loading a level with many vehicles (Gulf of Oman) overflows the asset loaders' threads
+    // with their default 2 MiB stacks; Bevy's task pool plugin keeps a pool made before it.
+    bevy::tasks::IoTaskPool::get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        bevy::tasks::TaskPoolBuilder::new()
+            .num_threads((cores / 4).clamp(1, 4))
+            .thread_name("IO Task Pool".into())
+            .stack_size(8 << 20)
+            .build()
+    });
     let scenario = match (&cli.scenario, &cli.screenshot) {
         (Some(path), _) => match scenario::Scenario::load(path) {
             Ok(scenario) => {

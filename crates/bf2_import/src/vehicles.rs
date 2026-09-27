@@ -581,7 +581,8 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
                 position: hull.translation.to_array(),
                 direction: hull.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z).to_array(),
                 acceleration: thrust(power),
-                max_speed: t.get_f32("nopropellereffectatspeed").unwrap_or(150.0),
+                // Amphibious vehicles' water jets don't say: they paddle along slowly.
+                max_speed: t.get_f32("nopropellereffectatspeed").unwrap_or(if ty == "c_etship" { 7.0 } else { 150.0 }),
                 reverse: if max > 0.0 { (-min / max).clamp(0.0, 1.0) } else { 0.0 },
                 water: ty == "c_etship",
             }

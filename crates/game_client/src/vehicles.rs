@@ -448,11 +448,11 @@ fn update_hud(
                 .filter(|(_, (w, _))| w.seat as usize == seat)
                 .map(|(i, (w, gun))| {
                     let status = weapons.and_then(|s| s.guns.get(i)).copied().unwrap_or_default();
-                    let name = if gun.display_name.is_empty() || gun.display_name == desc.display_name {
-                        readable_name(&gun.name, &desc.name)
-                    } else {
-                        gun.display_name.clone()
-                    };
+                    // Unlocalized names are template names.
+                    let unnamed = gun.display_name.is_empty()
+                        || gun.display_name == desc.display_name
+                        || gun.display_name.contains('_');
+                    let name = if unnamed { readable_name(&gun.name, &desc.name) } else { gun.display_name.clone() };
                     let mut entry = format!("{}{}{name}", if status.selected { "> " } else { "  " }, if w.alt_fire { "[2] " } else { "" });
                     let _ = match (status.reloading, status.rounds) {
                         (true, _) => write!(entry, "  reloading"),
@@ -487,7 +487,7 @@ fn update_hud(
 /// A gun's template name for people: `air_j10_archerlauncher` on the J-10 is `Archerlauncher`.
 fn readable_name(name: &str, vehicle: &str) -> String {
     let short = name.strip_prefix(vehicle).map_or(name, |s| s.trim_start_matches('_'));
-    let mut words = short.replace('_', " ");
+    let mut words = short.replace('_', " ").trim().to_string();
     if let Some(first) = words.get_mut(..1) {
         first.make_ascii_uppercase();
     }

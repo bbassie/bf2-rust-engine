@@ -134,6 +134,9 @@ pub enum Step {
     VehicleTrace(String, f32),
     /// Flying: holds the stick at (roll right, pitch up), each -1..1; `Stick(0, 0)` centres it.
     Stick(f32, f32),
+    /// Moves the vehicle we sit in to a position with a heading (degrees) and a forward
+    /// speed (m/s). Singleplayer and listen server only.
+    PlaceVehicle((f32, f32, f32), f32, f32),
     /// In a vehicle: once it stands still, gives full throttle and reports how long until the
     /// vehicle is seen to move (faster than 0.3 m/s), then lets go. Gives up after 3 s.
     ResponseTime(String),
@@ -842,6 +845,22 @@ fn run_scenario(
                 } else {
                     Progress::Waiting
                 }
+            }
+            Step::PlaceVehicle(position, heading, speed) => {
+                match vehicles.seated.single() {
+                    Ok(seated) => {
+                        use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+                        let rotation = Quat::from_rotation_y(heading.to_radians());
+                        commands.entity(seated.vehicle).insert((
+                            Position(Vec3::from(*position)),
+                            Rotation(rotation),
+                            LinearVelocity(rotation * Vec3::NEG_Z * *speed),
+                            AngularVelocity(Vec3::ZERO),
+                        ));
+                    }
+                    Err(_) => warn!("scenario: not in a vehicle to place"),
+                }
+                Progress::Done
             }
             Step::Stick(roll, pitch) => {
                 let stick = Vec2::new(*roll, *pitch);
