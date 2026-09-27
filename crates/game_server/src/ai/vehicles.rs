@@ -343,9 +343,6 @@ pub struct VehicleClaims {
     /// Per vehicle: who, for which seat, until when (seconds of [`Self::clock`]).
     claims: HashMap<Entity, Vec<(Entity, SeatWish, f32)>>,
     clock: f32,
-    /// Vehicles bots fired at, by the firing team, and when: a vehicle wrecked soon after
-    /// counts as their kill.
-    pub engaged: HashMap<Entity, (game_shared::protocol::Team, f32)>,
 }
 
 /// How long a claim holds without being renewed, seconds.
@@ -359,7 +356,6 @@ impl VehicleClaims {
             list.retain(|(_, _, until)| *until > clock);
             !list.is_empty()
         });
-        self.engaged.retain(|_, (_, at)| clock - *at < 10.0);
     }
 
     pub fn now(&self) -> f32 {
@@ -394,11 +390,6 @@ impl VehicleClaims {
     /// Bots on their way into a vehicle.
     pub fn pending(&self, vehicle: Entity) -> usize {
         self.claims.get(&vehicle).map_or(0, |l| l.len())
-    }
-
-    /// A bot of `team` fired at a vehicle.
-    pub fn engage(&mut self, vehicle: Entity, team: game_shared::protocol::Team) {
-        self.engaged.insert(vehicle, (team, self.clock));
     }
 }
 

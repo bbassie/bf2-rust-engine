@@ -1,5 +1,6 @@
 //! Soldier bodies: skinned mesh + `3p_setup` skeleton + third-person animations, one `.glb`
-//! per soldier model.
+//! per soldier model, with BF2's lower levels of detail of the body as further meshes on the
+//! same skeleton (`body_lod1`, ...).
 
 use std::path::Path;
 
@@ -220,7 +221,7 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
                 continue;
             }
             match export(&vfs, &converter, &mesh_path, &skeleton, &clips, out) {
-                Ok(glb_path) => {
+                Ok((glb_path, lod_count)) => {
                     let mesh_1p = skeleton_1p.as_ref().and_then(|skeleton| {
                         export_arms(&vfs, &converter, &mesh_path, skeleton, out)
                             .map_err(|e| log::warn!("1p arms {mesh_path}: {e:#}"))
@@ -232,6 +233,9 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
                         animations: clips.iter().map(|(n, _)| n.clone()).collect(),
                         mesh_1p,
                         hit_zones: crate::hitzones::hit_zones(&mut interp, &vfs, &skeleton, &name),
+                        lods: body_lod_distances(&interp, &name, lod_count, converter.lod0_half_diagonal(&mesh_path, 1)),
+                        draw_distance: crate::lods::pco_draw_distance(Some(soldier_cull_radius(&interp, &name))),
+                        cull_radius: soldier_cull_radius(&interp, &name),
                     };
                     game_data::write_ron(out.join("soldiers").join(format!("{name}.ron")), &desc)?;
                     done.push(name);
@@ -259,12 +263,13 @@ fn export_flags(vfs: &Vfs, converter: &MeshConverter, out: &Path) -> Result<usiz
         .collect();
     for mesh_path in &meshes {
         let out_rel = format!("{}.glb", mesh_path.trim_end_matches(".skinnedmesh"));
-        export_skinned(vfs, converter, mesh_path, 0, &skeleton, "flag", &clips, &out_rel, out)?;
+        export_skinned(vfs, converter, mesh_path, 0, &skeleton, "flag", &clips, &out_rel, out, false)?;
     }
     Ok(meshes.len())
 }
 
-/// Third-person body (geom 1) with the `3p_setup` skeleton and movement clips.
+/// Third-person body (geom 1, all its LODs) with the `3p_setup` skeleton and movement clips.
+/// Returns the file and the number of LODs in it.
 fn export(
     vfs: &Vfs,
     converter: &MeshConverter,
@@ -272,10 +277,34 @@ fn export(
     skeleton: &Skeleton,
     clips: &[(String, Animation)],
     out: &Path,
-) -> Result<String> {
+) -> Result<(String, usize)> {
     let out_rel = format!("{}.glb", mesh_path.trim_end_matches(".skinnedmesh"));
-    export_skinned(vfs, converter, mesh_path, 1, skeleton, "soldier", clips, &out_rel, out)?;
-    Ok(out_rel)
+    let lods = export_skinned(vfs, converter, mesh_path, 1, skeleton, "soldier", clips, &out_rel, out, true)?;
+    Ok((out_rel, lods))
+}
+
+/// A soldier's cull radius: its built-in collision radius times its template's
+/// `cullRadiusScale` (2.5 for all of them); BF2 draws it by the rule of player control
+/// objects.
+fn soldier_cull_radius(interp: &bf2_formats::con::Interpreter, name: &str) -> f32 {
+    let scale = interp.world.template(name).and_then(|t| t.get_f32("cullradiusscale")).unwrap_or(1.0);
+    crate::lods::SOLDIER_RADIUS * scale
+}
+
+/// Where the body's LODs 1.. take over (m): the soldier geometry template's
+/// `setSubGeometryLodDistance` for geom 1 (or the engine's running default) times the
+/// skinned mesh scale, plus `r0`, half the diagonal of the body's full-detail box.
+fn body_lod_distances(interp: &bf2_formats::con::Interpreter, name: &str, lod_count: usize, r0: Option<f32>) -> Vec<f32> {
+    let world = &interp.world;
+    let geometry = world
+        .template(name)
+        .and_then(|t| t.geometry.as_deref())
+        .and_then(|g| world.geometry(g))
+        .or_else(|| world.geometry(name));
+    crate::lods::lod_starts(&crate::lods::lod_distances(geometry, 1, lod_count))
+        .into_iter()
+        .map(|d| d * crate::lods::SKINNED_LOD_SCALE + r0.unwrap_or(0.0))
+        .collect()
 }
 
 /// First-person arms (geom 0) with the `1p_setup` skeleton. A one-frame rest clip makes the
@@ -296,10 +325,13 @@ fn export_arms(
         }],
     };
     let out_rel = format!("{}_1p.glb", mesh_path.trim_end_matches(".skinnedmesh"));
-    export_skinned(vfs, converter, mesh_path, 0, skeleton, "firstperson", &[("rest".into(), rest)], &out_rel, out)?;
+    export_skinned(vfs, converter, mesh_path, 0, skeleton, "firstperson", &[("rest".into(), rest)], &out_rel, out, false)?;
     Ok(out_rel)
 }
 
+/// A skinned mesh (one geom) with its skeleton and clips as `out_rel`: mesh `body` is LOD 0;
+/// with `lods`, the geom's further LODs follow as `body_lod1`, ... on the same skin. Returns
+/// the number of LODs written.
 #[allow(clippy::too_many_arguments)]
 fn export_skinned(
     vfs: &Vfs,
@@ -311,13 +343,16 @@ fn export_skinned(
     clips: &[(String, Animation)],
     out_rel: &str,
     out: &Path,
-) -> Result<()> {
+    lods: bool,
+) -> Result<usize> {
     let mesh = VisMesh::parse(&vfs.read(mesh_path)?, MeshKind::Skinned)?;
-    let lod = mesh
+    let geom_lods = mesh
         .geoms
         .get(geom)
-        .and_then(|g| g.lods.first())
+        .map(|g| g.lods.as_slice())
+        .filter(|l| !l.is_empty())
         .with_context(|| format!("mesh has no geom {geom}"))?;
+    let geom_lods = if lods { geom_lods } else { &geom_lods[..1] };
     let out_rel = out_rel.to_string();
 
     let mut doc = glb::Document::default();
@@ -336,97 +371,107 @@ fn export_skinned(
     let uvs = mesh.attribute::<2>(Usage::TexCoord, 0).unwrap_or_default();
     let weights = mesh.attribute::<1>(Usage::BlendWeight, 0).unwrap_or_default();
     let blend = mesh.blend_indices().unwrap_or_default();
-    let mut primitives = Vec::new();
-    for (index, material) in lod.materials.iter().enumerate() {
-        let Some(rig) = lod.rigs.get(index).or_else(|| lod.rigs.last()) else {
-            continue;
-        };
-        let joint = |local: u8| -> u16 {
-            rig.get(local as usize)
-                .map(|b| b.ske_index as u16)
-                .filter(|&j| (j as usize) < bone_count)
-                .unwrap_or(0)
-        };
-        let maps = material.texture_maps();
-        let mut image = |texture: Option<String>| {
-            texture.map(|t| {
-                doc.images.push(glb::relative_uri(&out_rel, &t));
-                doc.images.len() - 1
-            })
-        };
-        let color = image(maps.first().and_then(|m| converter.texture(m)));
-        let normal = image(maps.get(1).and_then(|m| converter.texture(m)));
-        // Without `tangent` in the technique the normal map is in object (bind pose) space.
-        // The game rebuilds the object-to-world rotation per pixel from the vertex frame
-        // before skinning, packed as COLOR_0 = (tangent, normal.x), TEXCOORD_1 = normal.yz.
-        let object_space = normal.is_some() && !material.technique.to_ascii_lowercase().contains("tangent");
-        let tangents = normal.map(|_| crate::meshes::tangent_frames(&mesh, material, 0));
-        doc.materials.push(glb::Material {
-            name: material.technique.clone(),
-            base_color: color,
-            base_color_uv: 0,
-            normal,
-            alpha: if material.technique.to_ascii_lowercase().contains("alpha_test") {
-                glb::AlphaMode::Mask(0.5)
-            } else {
-                glb::AlphaMode::Opaque
-            },
-            double_sided: false,
-            extras: json!({ "bf2": { "kind": "skinned", "technique": material.technique, "maps": maps } }),
-        });
-
-        let mut primitive = glb::Primitive {
-            material: Some(doc.materials.len() - 1),
-            uvs: vec![Vec::new(); if object_space { 2 } else { 1 }],
-            ..Default::default()
-        };
-        let mut remap = std::collections::HashMap::new();
-        for tri in mesh.material_triangles(material) {
-            if tri.iter().any(|&v| v as usize >= positions.len()) {
+    let mut images: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut bodies = Vec::new();
+    for (lod_index, lod) in geom_lods.iter().enumerate() {
+        let mut primitives = Vec::new();
+        for (index, material) in lod.materials.iter().enumerate() {
+            let Some(rig) = lod.rigs.get(index).or_else(|| lod.rigs.last()) else {
                 continue;
-            }
-            for &v in [tri[0], tri[2], tri[1]].iter() {
-                let index = *remap.entry(v).or_insert_with(|| {
-                    let vi = v as usize;
-                    let normal = translation(normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0])).normalize_or(Vec3::Y);
-                    primitive.positions.push(translation(positions[vi]).to_array());
-                    primitive.normals.push(normal.to_array());
-                    primitive.uvs[0].push(uvs.get(vi).copied().unwrap_or_default());
-                    if let Some(tangents) = &tangents {
-                        let t = tangents.get(&v).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
-                        primitive.tangents.push(t);
-                        if object_space {
-                            primitive.colors.push([t[0], t[1], t[2], normal.x]);
-                            primitive.uvs[1].push([normal.y, normal.z]);
+            };
+            let joint = |local: u8| -> u16 {
+                rig.get(local as usize)
+                    .map(|b| b.ske_index as u16)
+                    .filter(|&j| (j as usize) < bone_count)
+                    .unwrap_or(0)
+            };
+            let maps = material.texture_maps();
+            let mut image = |texture: Option<String>| {
+                texture.map(|t| {
+                    *images.entry(t.clone()).or_insert_with(|| {
+                        doc.images.push(glb::relative_uri(&out_rel, &t));
+                        doc.images.len() - 1
+                    })
+                })
+            };
+            let color = image(maps.first().and_then(|m| converter.texture(m)));
+            let normal = image(maps.get(1).and_then(|m| converter.texture(m)));
+            // Without `tangent` in the technique the normal map is in object (bind pose) space.
+            // The game rebuilds the object-to-world rotation per pixel from the vertex frame
+            // before skinning, packed as COLOR_0 = (tangent, normal.x), TEXCOORD_1 = normal.yz.
+            let object_space = normal.is_some() && !material.technique.to_ascii_lowercase().contains("tangent");
+            let tangents = normal.map(|_| crate::meshes::tangent_frames(&mesh, material, 0));
+            doc.materials.push(glb::Material {
+                name: material.technique.clone(),
+                base_color: color,
+                base_color_uv: 0,
+                normal,
+                alpha: if material.technique.to_ascii_lowercase().contains("alpha_test") {
+                    glb::AlphaMode::Mask(0.5)
+                } else {
+                    glb::AlphaMode::Opaque
+                },
+                double_sided: false,
+                extras: json!({ "bf2": { "kind": "skinned", "technique": material.technique, "maps": maps } }),
+            });
+
+            let mut primitive = glb::Primitive {
+                material: Some(doc.materials.len() - 1),
+                uvs: vec![Vec::new(); if object_space { 2 } else { 1 }],
+                ..Default::default()
+            };
+            let mut remap = std::collections::HashMap::new();
+            for tri in mesh.material_triangles(material) {
+                if tri.iter().any(|&v| v as usize >= positions.len()) {
+                    continue;
+                }
+                for &v in [tri[0], tri[2], tri[1]].iter() {
+                    let index = *remap.entry(v).or_insert_with(|| {
+                        let vi = v as usize;
+                        let normal = translation(normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0])).normalize_or(Vec3::Y);
+                        primitive.positions.push(translation(positions[vi]).to_array());
+                        primitive.normals.push(normal.to_array());
+                        primitive.uvs[0].push(uvs.get(vi).copied().unwrap_or_default());
+                        if let Some(tangents) = &tangents {
+                            let t = tangents.get(&v).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
+                            primitive.tangents.push(t);
+                            if object_space {
+                                primitive.colors.push([t[0], t[1], t[2], normal.x]);
+                                primitive.uvs[1].push([normal.y, normal.z]);
+                            }
                         }
-                    }
-                    let b = blend.get(vi).copied().unwrap_or_default();
-                    let w = weights.get(vi).map_or(1.0, |w| w[0]).clamp(0.0, 1.0);
-                    primitive.joints.push([joint(b[0]), joint(b[1]), 0, 0]);
-                    primitive.weights.push([w, 1.0 - w, 0.0, 0.0]);
-                    (primitive.positions.len() - 1) as u32
-                });
-                primitive.indices.push(index);
+                        let b = blend.get(vi).copied().unwrap_or_default();
+                        let w = weights.get(vi).map_or(1.0, |w| w[0]).clamp(0.0, 1.0);
+                        primitive.joints.push([joint(b[0]), joint(b[1]), 0, 0]);
+                        primitive.weights.push([w, 1.0 - w, 0.0, 0.0]);
+                        (primitive.positions.len() - 1) as u32
+                    });
+                    primitive.indices.push(index);
+                }
+            }
+            if !primitive.indices.is_empty() {
+                primitives.push(primitive);
             }
         }
-        if !primitive.indices.is_empty() {
-            primitives.push(primitive);
-        }
+        let name = match lod_index {
+            0 => "body".to_string(),
+            n => format!("body_lod{n}"),
+        };
+        doc.meshes.push(glb::Mesh {
+            name: name.clone(),
+            primitives,
+        });
+        doc.nodes.push(glb::Node {
+            name,
+            mesh: Some(doc.meshes.len() - 1),
+            skin: Some(0),
+            ..Default::default()
+        });
+        bodies.push(doc.nodes.len() - 1);
     }
-    doc.meshes.push(glb::Mesh {
-        name: "body".into(),
-        primitives,
-    });
-    doc.nodes.push(glb::Node {
-        name: "body".into(),
-        mesh: Some(0),
-        skin: Some(0),
-        ..Default::default()
-    });
-    let body = doc.nodes.len() - 1;
-    add_named_root(&mut doc, skeleton, &[body], root_name);
+    add_named_root(&mut doc, skeleton, &bodies, root_name);
     add_clips(&mut doc, clips, bone_count);
 
     doc.write(&out.join(&out_rel))?;
-    Ok(())
+    Ok(bodies.len())
 }

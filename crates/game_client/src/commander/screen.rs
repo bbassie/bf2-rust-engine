@@ -2,7 +2,9 @@
 //! spotted enemies, orders, our assets and what they are doing, and a side panel with the
 //! squads, the orders and the assets. Pick a squad (in the list, or click one of its
 //! soldiers on the map), then an order, then a spot on the map; pick an asset, then its
-//! target (a satellite scan needs none). Right-click or Esc drops what was picked.
+//! target (a satellite scan needs none). Right-click or Esc drops what was picked; with
+//! nothing picked, right-click spots the enemy there for the team (what the satellite scan
+//! shows).
 
 use bevy::{
     platform::collections::HashMap,
@@ -306,10 +308,17 @@ fn click_map(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    if mouse.just_pressed(MouseButton::Right) {
-        screen.tool = None;
-    }
     let under_mouse = map.normalized.filter(|_| map.cursor_over).map(|n| n + Vec2::splat(0.5));
+    // Right-click drops what was picked; with nothing picked, it spots the enemy there for
+    // the team (what the satellite scan shows, like BF2's commander map).
+    if mouse.just_pressed(MouseButton::Right) {
+        match (screen.tool.take(), under_mouse) {
+            (None, Some(uv)) => {
+                requests.write(CommanderRequest::Spot { target: map_point(&level, uv) });
+            }
+            _ => {}
+        }
+    }
 
     // The target ring.
     match (screen.tool, under_mouse) {
@@ -427,6 +436,7 @@ fn rebuild_panel(
     orders: Query<&SquadOrder>,
     team_assets: Query<&TeamAssets>,
     assets: Res<CommanderAssets>,
+    destroyed: Query<&game_shared::statics::DestroyedStatics>,
     panel: Single<(Entity, Option<&Children>), With<ScreenPanel>>,
     mut hint: Single<&mut Text, With<ScreenHint>>,
     mut built: Local<String>,
@@ -470,14 +480,16 @@ fn rebuild_panel(
             }
         ),
         (Some(Tool::Asset(Asset::Artillery)), _) => {
+            let destroyed = destroyed.single().ok();
             let guns = assets
                 .of(team, game_data::AssetKind::Artillery)
+                .filter(|a| !destroyed.is_some_and(|d| d.0.contains(&a.instance)))
                 .count();
             format!("Click the target: {guns} gun(s) fire {} shells each. Right-click cancels.", assets.desc.artillery.shells)
         }
         (Some(Tool::Asset(Asset::Uav)), _) => "Click where the UAV should circle: it shows the enemies below it.".into(),
         (Some(Tool::Asset(Asset::Supply)), _) => "Click where the supply crate should land.".into(),
-        (_, None) => "Pick a squad (in the list or on the map), then an order and a spot on the map. Or call in an asset.".into(),
+        (_, None) => "Pick a squad (in the list or on the map), then an order and a spot on the map. Or call in an asset. Right-click an enemy to spot him for the team.".into(),
         (_, Some(squad)) => format!("{} picked: give it an order.", squad_name(squad)),
     };
     if hint.0 != text {

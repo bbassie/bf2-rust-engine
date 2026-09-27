@@ -74,6 +74,10 @@ pub struct UavDesc {
     /// Its model (`uavVehicleTemplate`), `.glb`.
     #[serde(default)]
     pub mesh: Option<String>,
+    /// The same as a vehicle (`vehicles/<name>.ron`): then it really flies its circle and
+    /// can be shot down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<String>,
     /// Flight height and speed around the circle (`uavVehicleFlightHeight`, `uavVehicleSpeed`).
     pub height: f32,
     pub speed: f32,
@@ -84,6 +88,7 @@ impl Default for UavDesc {
         Self {
             radius: 60.0,
             mesh: None,
+            vehicle: None,
             height: 120.0,
             speed: 30.0,
         }

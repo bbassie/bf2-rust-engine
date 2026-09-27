@@ -20,6 +20,10 @@ const FLAG: f32 = 26.0;
 const VEHICLE: f32 = 0.66;
 /// Font size of the names on a 300 px preview.
 const NAME: f32 = 11.0;
+/// Shown for levels without a map, at this corner (pixels), in this font size (300 px preview).
+const NO_MAP: &str = "No map preview";
+const NO_MAP_AT: Vec2 = Vec2::new(10.0, 8.0);
+const NO_MAP_FONT: f32 = 13.0;
 
 /// The team a layout's `initial_team` (0 neutral, 1, 2) means.
 fn side(team: u8) -> Team {
@@ -68,8 +72,18 @@ pub(super) fn layout_preview(
                     },
                 ));
             }
+            // In a corner, out of the way of the objectives (the test range has its flags down
+            // the middle); the names keep clear of it too (below).
             None => {
-                frame.spawn(text("No map preview", 14.0, DIM));
+                frame.spawn((
+                    text(NO_MAP, NO_MAP_FONT * scale, DIM),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(NO_MAP_AT.x),
+                        top: px(NO_MAP_AT.y),
+                        ..default()
+                    },
+                ));
             }
         }
         let (Some(preview), Some((corner, meters))) =
@@ -93,6 +107,14 @@ pub(super) fn layout_preview(
         let load = |path: &Option<String>| path.as_ref().map(|p| asset_server.load::<Image>(format!("imported://{p}")));
         // What the names keep clear of, in pixels.
         let mut obstacles = Vec::new();
+        if level.minimap.is_none() {
+            let font = NO_MAP_FONT * scale;
+            let extent = Vec2::new(NO_MAP.chars().count() as f32 * font * 0.58, font * 1.35);
+            obstacles.push(Obstacle {
+                rect: Rect::from_corners(NO_MAP_AT, NO_MAP_AT + extent),
+                hard: true,
+            });
+        }
 
         // Vehicles, under the flags: each spawner's vehicle for the side holding its point.
         for spawner in &preview.vehicles {

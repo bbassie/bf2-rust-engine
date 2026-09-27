@@ -76,11 +76,11 @@ impl LodConfig {
 }
 
 /// The factors on the imported switch and draw distances right now: the environment's, the
-/// view distance setting's and the camera zoom's.
+/// view distance setting's and the camera zoom's. Vehicles and soldiers use them too.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
-struct LodScales {
-    lod: f32,
-    draw: f32,
+pub(crate) struct LodScales {
+    pub(crate) lod: f32,
+    pub(crate) draw: f32,
 }
 
 impl Default for LodScales {
@@ -278,54 +278,68 @@ impl StaticLodSet {
     /// The visibility range of each level (`None`: drawn at any distance), with the switch
     /// distances times `lod_scale` and the draw distance times `draw_scale`.
     fn ranges(&self, lod_scale: f32, draw_scale: f32) -> Vec<Option<VisibilityRange>> {
-        let end = self.draw_distance.map_or(f32::INFINITY, |d| d * draw_scale);
-        if self.starts.len() <= 1 && end.is_infinite() {
-            return vec![None; self.starts.len()];
-        }
-        // Where each level starts (never decreasing); levels starting past the draw
-        // distance are never drawn.
-        let mut starts: Vec<f32> = self.starts.iter().map(|s| s * lod_scale).collect();
-        starts[0] = 0.0;
-        for i in 1..starts.len() {
-            starts[i] = starts[i].max(starts[i - 1]);
-        }
-        let shown = starts.iter().take_while(|s| **s < end).count().max(1);
-        // Level k is drawn from bounds[k] to bounds[k + 1].
-        let mut bounds = starts[..shown].to_vec();
-        bounds.push(end);
-        // Half the cross-fade band around each bound, never reaching past a neighbour's
-        // midpoint so the bands of successive levels don't overlap.
-        let widths: Vec<f32> = (0..bounds.len())
-            .map(|i| {
-                if i == 0 || bounds[i].is_infinite() {
-                    return 0.0;
-                }
-                let below = (bounds[i] - bounds[i - 1]) * 0.5;
-                let above = bounds.get(i + 1).map_or(f32::INFINITY, |next| (next - bounds[i]) * 0.5);
-                (bounds[i] * CROSSFADE).min(below).min(above).max(0.0)
-            })
-            .collect();
-        let band = |i: usize| {
-            if bounds[i].is_infinite() {
-                f32::INFINITY..f32::INFINITY
-            } else {
-                (bounds[i] - widths[i])..(bounds[i] + widths[i])
-            }
-        };
-        (0..self.starts.len())
-            .map(|k| {
-                Some(if k >= shown {
-                    VisibilityRange::abrupt(0.0, 0.0)
-                } else {
-                    VisibilityRange {
-                        start_margin: if k == 0 { 0.0..0.0 } else { band(k) },
-                        end_margin: band(k + 1),
-                        use_aabb: false,
-                    }
-                })
-            })
-            .collect()
+        lod_ranges(&self.starts, self.draw_distance, lod_scale, draw_scale)
     }
+}
+
+/// The visibility range of each level of detail that starts at `starts` (the first at 0)
+/// of something drawn up to `draw_distance` (`None`: drawn at any distance), cross-fading
+/// around each switch: with the switch distances times `lod_scale` and the draw distance
+/// times `draw_scale`.
+pub(crate) fn lod_ranges(
+    starts: &[f32],
+    draw_distance: Option<f32>,
+    lod_scale: f32,
+    draw_scale: f32,
+) -> Vec<Option<VisibilityRange>> {
+    let end = draw_distance.map_or(f32::INFINITY, |d| d * draw_scale);
+    if starts.len() <= 1 && end.is_infinite() {
+        return vec![None; starts.len()];
+    }
+    let count = starts.len();
+    // Where each level starts (never decreasing); levels starting past the draw
+    // distance are never drawn.
+    let mut starts: Vec<f32> = starts.iter().map(|s| s * lod_scale).collect();
+    starts[0] = 0.0;
+    for i in 1..starts.len() {
+        starts[i] = starts[i].max(starts[i - 1]);
+    }
+    let shown = starts.iter().take_while(|s| **s < end).count().max(1);
+    // Level k is drawn from bounds[k] to bounds[k + 1].
+    let mut bounds = starts[..shown].to_vec();
+    bounds.push(end);
+    // Half the cross-fade band around each bound, never reaching past a neighbour's
+    // midpoint so the bands of successive levels don't overlap.
+    let widths: Vec<f32> = (0..bounds.len())
+        .map(|i| {
+            if i == 0 || bounds[i].is_infinite() {
+                return 0.0;
+            }
+            let below = (bounds[i] - bounds[i - 1]) * 0.5;
+            let above = bounds.get(i + 1).map_or(f32::INFINITY, |next| (next - bounds[i]) * 0.5);
+            (bounds[i] * CROSSFADE).min(below).min(above).max(0.0)
+        })
+        .collect();
+    let band = |i: usize| {
+        if bounds[i].is_infinite() {
+            f32::INFINITY..f32::INFINITY
+        } else {
+            (bounds[i] - widths[i])..(bounds[i] + widths[i])
+        }
+    };
+    (0..count)
+        .map(|k| {
+            Some(if k >= shown {
+                VisibilityRange::abrupt(0.0, 0.0)
+            } else {
+                VisibilityRange {
+                    start_margin: if k == 0 { 0.0..0.0 } else { band(k) },
+                    end_margin: band(k + 1),
+                    use_aabb: false,
+                }
+            })
+        })
+        .collect()
 }
 
 /// Applies changed [`LodScales`] (view distance setting, zoom) to the spawned levels.

@@ -1,13 +1,14 @@
 //! Orders and assets where players see them: our squad's order on the HUD (with its
 //! distance) and on the maps, every squad's order on the commander's maps, our team's asset
 //! objects (standing or destroyed) and what the commander called in (artillery target, UAV,
-//! supply crate) on the maps. The commander hears when an asset is ready again or lost.
+//! supply crate) on the maps, and to the commander the enemies his satellite scan shows. The
+//! commander hears when an asset is ready again or lost.
 
 use bevy::prelude::*;
 use game_data::AssetKind;
 use game_shared::{
     chat::{ChatChannel, ChatLine},
-    commander::{Asset, AssetEffect, Commander, CommanderAssets, OrderKind, SquadOrder, TeamAssets},
+    commander::{Asset, AssetEffect, Commander, CommanderAssets, OrderKind, ScanContact, ScanReport, SquadOrder, TeamAssets},
     protocol::Team,
     squad::{SquadMember, squad_name},
     statics::DestroyedStatics,
@@ -25,8 +26,9 @@ pub struct MarkersPlugin;
 impl Plugin for MarkersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AssetKeys>()
+            .init_resource::<ScanContacts>()
             .add_systems(Startup, spawn_root)
-            .add_systems(Update, asset_news)
+            .add_systems(Update, (asset_news, receive_scans))
             .add_systems(PostUpdate, (map_markers, hud_marker).in_set(MarkerSystems));
     }
 }
@@ -55,6 +57,34 @@ const ABOVE: f32 = 3.0;
 /// Entities standing for the level's asset objects on the maps.
 #[derive(Resource, Default)]
 struct AssetKeys(Vec<Entity>);
+
+/// The enemies the commander's satellite scan last showed, until when (elapsed seconds), and
+/// entities standing for them on the maps.
+#[derive(Resource, Default)]
+pub struct ScanContacts {
+    pub contacts: Vec<ScanContact>,
+    until: f32,
+    keys: Vec<Entity>,
+}
+
+impl ScanContacts {
+    /// Whether the scan shows them now.
+    pub fn showing(&self, now: f32) -> bool {
+        now < self.until
+    }
+}
+
+/// Enemy contacts on the commander's maps.
+const SCAN_COLOR: Color = Color::srgb(1.0, 0.25, 0.2);
+/// A report shows until a little after the next one is due.
+const SCAN_REPORT_SECONDS: f32 = 1.6;
+
+fn receive_scans(time: Res<Time>, mut reports: MessageReader<ScanReport>, mut scan: ResMut<ScanContacts>) {
+    for report in reports.read() {
+        scan.contacts = report.contacts.clone();
+        scan.until = time.elapsed_secs() + SCAN_REPORT_SECONDS;
+    }
+}
 
 #[derive(Component)]
 struct OrderRoot;
@@ -89,6 +119,8 @@ fn map_markers(
     assets: Res<CommanderAssets>,
     destroyed: Query<&DestroyedStatics>,
     mut keys: ResMut<AssetKeys>,
+    mut scan: ResMut<ScanContacts>,
+    time: Res<Time>,
     mut markers: ResMut<MapMarkers>,
 ) {
     if keys.0.len() != assets.instances.len() {
@@ -102,6 +134,17 @@ fn map_markers(
     };
     if team == Team::Spectator {
         return;
+    }
+    // The satellite scan's contacts, on the commander's maps only.
+    if commander && scan.showing(time.elapsed_secs()) {
+        let ScanContacts { contacts, keys, .. } = &mut *scan;
+        while keys.len() < contacts.len() {
+            keys.push(commands.spawn_empty().id());
+        }
+        for (contact, key) in contacts.iter().zip(keys.iter()) {
+            let size = if contact.vehicle { 9.0 } else { 6.0 };
+            markers.0.push(MapMarker::dot(*key, contact.position, SCAN_COLOR, size).layer(2));
+        }
     }
     for (entity, order) in &orders {
         if order.team != team {

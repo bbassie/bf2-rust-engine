@@ -85,6 +85,39 @@ struct Soak {
     reports: u32,
     /// Where each alive bot's soldier was at the last report.
     bot_positions: HashMap<Entity, Vec3>,
+    /// Tick times since the last report and on the current level, ms.
+    report_ticks: Vec<f32>,
+    level_ticks: Vec<f32>,
+    /// The current level, for the tick percentiles logged when it changes.
+    level_name: Option<String>,
+}
+
+/// `p50/p90/p99` of `ms`, sorting it.
+fn percentiles(ms: &mut [f32]) -> String {
+    if ms.is_empty() {
+        return "-".into();
+    }
+    ms.sort_by(f32::total_cmp);
+    let at = |p: f32| ms[((ms.len() - 1) as f32 * p).round() as usize];
+    format!("{:.2}/{:.2}/{:.2}", at(0.5), at(0.9), at(0.99))
+}
+
+/// Logs the tick time percentiles of the level that just ended (or of the run so far).
+fn log_level_ticks(soak: &mut Soak) {
+    let Some(name) = soak.level_name.clone() else {
+        return;
+    };
+    let mut ticks = std::mem::take(&mut soak.level_ticks);
+    if ticks.is_empty() {
+        return;
+    }
+    let over = ticks.iter().filter(|&&ms| ms > OVERRUN_MS).count();
+    let max = ticks.iter().copied().fold(0.0, f32::max);
+    info!(
+        "soak: ticks on `{name}`: p50/p90/p99 {} ms, max {max:.1} ms, {over} of {} over {OVERRUN_MS:.1} ms",
+        percentiles(&mut ticks),
+        ticks.len()
+    );
 }
 
 fn frame_start(mut soak: ResMut<Soak>) {
@@ -108,6 +141,8 @@ fn tick_end(mut soak: ResMut<Soak>) {
     soak.frame_tick_ms += ms;
     soak.tick_ms_sum += ms;
     soak.tick_ms_max = soak.tick_ms_max.max(ms);
+    soak.report_ticks.push(ms);
+    soak.level_ticks.push(ms);
 }
 
 /// Moves on to the next map after `rotate_every` on this one.
@@ -115,6 +150,8 @@ fn rotate(mut soak: ResMut<Soak>, level: Res<LoadedLevel>, mut commands: Command
     let now = Instant::now();
     if level.is_changed() {
         soak.level_started = Some(now);
+        log_level_ticks(&mut soak);
+        soak.level_name = Some(level.desc.name.clone());
     }
     let (Some(every), Some(started)) = (soak.rotate_every, soak.level_started) else {
         return;
@@ -239,9 +276,11 @@ fn report(
     }
 
     let frames = soak.frames.max(1);
+    let mut report_ticks = std::mem::take(&mut soak.report_ticks);
+    let tick_percentiles = percentiles(&mut report_ticks);
     info!(
         "soak: {:.0} s, {map}, {round}, flags {}/{}/{} (1/2/neutral); entities {entity_count}, memory {:.0} MB; \
-         frame {:.2} ms avg, {:.1} ms max, {} of {} frames over {OVERRUN_MS:.1} ms, {:.1} ticks/s ({:.2} ms avg, {:.1} ms max); \
+         frame {:.2} ms avg, {:.1} ms max, {} of {} frames over {OVERRUN_MS:.1} ms, {:.1} ticks/s ({:.2} ms avg, p50/p90/p99 {tick_percentiles} ms, {:.1} ms max); \
          players {humans} + {bots} bots, soldiers {alive} ({downed} down, {seated} seated), idle bots {idle}{}, \
          vehicles {}, projectiles {}",
         now.duration_since(started).as_secs_f32(),
@@ -268,8 +307,16 @@ fn report(
     soak.tick_ms_sum = 0.0;
     soak.tick_ms_max = 0.0;
     soak.slow_frames = 0;
+    if crate::profile::enabled() {
+        info!(
+            "soak: where the time went over {} ticks (ms per tick; systems overlap, schedules include theirs):\n{}",
+            report_ticks.len(),
+            crate::profile::take_report(report_ticks.len() as u32, 40)
+        );
+    }
 
     if finished {
+        log_level_ticks(&mut soak);
         info!(
             "soak summary: {:.1} min, levels {}; peak entities {}, memory {:.0} MB at start, {:.0} MB at end, \
              {:.0} MB peak; worst frame {:.1} ms, {} of {} frames over {OVERRUN_MS:.1} ms; idle bots in {} of {} reports",

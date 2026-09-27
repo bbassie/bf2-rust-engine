@@ -52,6 +52,18 @@ pub fn load_assets(interp: &mut Interpreter) -> HashSet<String> {
         .collect()
 }
 
+/// The UAV's template (`UAVControlObject.uavVehicleTemplate`), to be imported as a vehicle.
+pub fn uav_vehicle(interp: &mut Interpreter) -> Option<String> {
+    interp.ensure_template("uavcontrolobject");
+    let vehicle = interp
+        .world
+        .template("uavcontrolobject")?
+        .get_str("uavvehicletemplate")?
+        .to_ascii_lowercase();
+    interp.ensure_template(&vehicle);
+    interp.world.template(&vehicle).is_some().then_some(vehicle)
+}
+
 /// A template's first descendant (or itself) that `matches`.
 fn find<'a>(world: &'a World, name: &str, matches: &dyn Fn(&Template) -> bool, depth: u32) -> Option<&'a Template> {
     let template = world.template(name)?;
@@ -94,6 +106,7 @@ pub fn import(
         if let Some(vehicle) = control.get_str("uavvehicletemplate").map(str::to_ascii_lowercase) {
             interp.ensure_template(&vehicle);
             uav.mesh = mesh(&interp.world, converter, &vehicle);
+            uav.vehicle = out.join("vehicles").join(format!("{vehicle}.ron")).exists().then_some(vehicle);
         }
     }
     // The supply crate.

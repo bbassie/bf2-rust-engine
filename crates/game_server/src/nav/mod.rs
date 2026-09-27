@@ -67,7 +67,11 @@ impl Plugin for NavPlugin {
 pub struct Navigation(pub Arc<NavGrid>);
 
 #[derive(Resource)]
-struct NavBuild(Task<NavGrid>);
+struct NavBuild {
+    task: Task<NavGrid>,
+    /// The layout's spawn points and control points, checked once the grid is there.
+    spawns: SpawnCheck,
+}
 
 #[derive(Resource)]
 struct VehicleNavBuild(Task<vehicle::VehicleNavGrid>);
@@ -368,39 +372,110 @@ fn start_build(
         })
     });
     let name = level.desc.name.clone();
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        let started = Instant::now();
-        let key = build::geometry_key(&geometry, &params);
-        if let Some(path) = &cache_path
-            && let Some(grid) = cache::load(path, key, params)
-        {
-            info!(
-                "nav: loaded {} ({} cells, {} ladders) in {:.2} s",
-                path.display(),
-                grid.cell_count(),
-                grid.ladders().len(),
-                started.elapsed().as_secs_f32()
-            );
-            return grid;
-        }
-        let grid = build::build(&geometry, params);
+    let spawns = SpawnCheck {
+        spawns: layout.map_or_else(Vec::new, |l| {
+            l.spawn_points
+                .iter()
+                .map(|sp| (sp.control_point.clone(), Vec3::from_array(sp.placement.position)))
+                .collect()
+        }),
+        control_points: layout.map_or_else(Vec::new, |l| {
+            l.control_points.iter().map(|cp| (cp.id.clone(), Vec3::from_array(cp.position))).collect()
+        }),
+    };
+    let task = AsyncComputeTaskPool::get()
+        .spawn(async move { load_or_build(&geometry, params, cache_path.as_deref(), &name) });
+    commands.insert_resource(NavBuild { task, spawns });
+}
+
+/// The grid from the cache if it is there and up to date, else built (and cached).
+fn load_or_build(
+    geometry: &build::LevelGeometry,
+    params: NavParams,
+    cache_path: Option<&std::path::Path>,
+    name: &str,
+) -> NavGrid {
+    let started = Instant::now();
+    let key = build::geometry_key(geometry, &params);
+    if let Some(path) = cache_path
+        && let Some(grid) = cache::load(path, key, params)
+    {
         info!(
-            "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {} ladders, {:.1} MB",
-            grid.width,
-            grid.depth,
-            started.elapsed().as_secs_f32(),
+            "nav: loaded {} ({} cells, {} ladders) in {:.2} s",
+            path.display(),
             grid.cell_count(),
             grid.ladders().len(),
-            grid.memory_bytes() as f32 / 1e6
+            started.elapsed().as_secs_f32()
         );
-        if let Some(path) = &cache_path
-            && let Err(err) = cache::save(path, key, &grid)
-        {
-            warn!("nav: can't write {}: {err:#}", path.display());
+        return grid;
+    }
+    let grid = build::build(geometry, params);
+    info!(
+        "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {} ladders, {:.1} MB",
+        grid.width,
+        grid.depth,
+        started.elapsed().as_secs_f32(),
+        grid.cell_count(),
+        grid.ladders().len(),
+        grid.memory_bytes() as f32 / 1e6
+    );
+    if let Some(path) = cache_path
+        && let Err(err) = cache::save(path, key, &grid)
+    {
+        warn!("nav: can't write {}: {err:#}", path.display());
+    }
+    grid
+}
+
+/// A layout's spawn points (by control point id) and control points.
+#[derive(Default)]
+struct SpawnCheck {
+    spawns: Vec<(String, Vec3)>,
+    control_points: Vec<(String, Vec3)>,
+}
+
+impl SpawnCheck {
+    /// Warns about spawn points soldiers can't walk from to their control point's flag (or,
+    /// when most can't reach the flag, to the spawn point most of the others can walk to):
+    /// pockets like the catwalks 1.4 m below a carrier's deck without its ladders (dropping in
+    /// is possible, so they share the deck's region). Runs in the background once the grid is
+    /// there.
+    fn report(&self, grid: &NavGrid) {
+        let mut cut_off = Vec::new();
+        for (id, flag) in &self.control_points {
+            let spawns: Vec<Vec3> = self.spawns.iter().filter(|(cp, _)| cp == id).map(|(_, at)| *at).collect();
+            // The flag, else one of the first spawn points (a carrier's flag is on top of its
+            // island, out of reach).
+            let mut best: Option<(usize, Vec<bool>)> = None;
+            for anchor in std::iter::once(*flag).chain(spawns.iter().copied().take(3)) {
+                let reaches: Vec<bool> = spawns
+                    .iter()
+                    .map(|at| at.distance(anchor) < 1.0 || grid.find_path(*at, anchor).is_some_and(|p| p.complete))
+                    .collect();
+                let reaching = reaches.iter().filter(|r| **r).count();
+                let enough = reaching == spawns.len() || (anchor == *flag && reaching * 2 >= spawns.len());
+                if enough || best.as_ref().is_none_or(|(b, _)| reaching > *b) {
+                    best = Some((reaching, reaches));
+                }
+                if enough {
+                    break;
+                }
+            }
+            if let Some((reaching, reaches)) = best
+                && reaching > 0
+            {
+                let missing = spawns.iter().zip(&reaches).filter(|(_, r)| !**r);
+                cut_off.extend(missing.map(|(at, _)| format!("{id} at {at:.1}")));
+            }
         }
-        grid
-    });
-    commands.insert_resource(NavBuild(task));
+        if !cut_off.is_empty() {
+            warn!(
+                "nav: {} spawn points can't walk to their control point: {}",
+                cut_off.len(),
+                cut_off.join(", ")
+            );
+        }
+    }
 }
 
 /// Builds (or loads) the vehicle grids on a background task: see [`vehicle`].
@@ -466,8 +541,12 @@ fn finish_vehicle_build(mut commands: Commands, mut build: ResMut<VehicleNavBuil
 }
 
 fn finish_build(mut commands: Commands, mut build: ResMut<NavBuild>) {
-    if let Some(grid) = check_ready(&mut build.0) {
-        commands.insert_resource(Navigation(Arc::new(grid)));
+    if let Some(grid) = check_ready(&mut build.task) {
+        let grid = Arc::new(grid);
+        let check = std::mem::take(&mut build.spawns);
+        let for_check = grid.clone();
+        AsyncComputeTaskPool::get().spawn(async move { check.report(&for_check) }).detach();
+        commands.insert_resource(Navigation(grid));
         commands.remove_resource::<NavBuild>();
     }
 }

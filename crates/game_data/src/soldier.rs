@@ -19,6 +19,22 @@ pub struct SoldierDesc {
     /// (`setSkeletonCollisionBone`), posed the way the soldier stands, crouches and lies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hit_zones: Vec<HitZone>,
+    /// BF2's lower levels of detail of the body: meshes `body_lod1`, `body_lod2`, ... in
+    /// `mesh` (same skeleton), each drawn from its distance (m) on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lods: Vec<f32>,
+    /// Distance from the camera (m) where BF2 has faded soldiers out (its cull rule for
+    /// player control objects); `None`: drawn as far as the view reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_distance: Option<f32>,
+    /// The soldier's cull radius (m, BF2's collision radius times `cullRadiusScale`): parts
+    /// with a model of their own under 0.8 of it (weapons) are culled on their own.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cull_radius: f32,
+}
+
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
 }
 
 /// A capsule around one bone. Ends are in the body's frame: feet at the origin, facing -Z.

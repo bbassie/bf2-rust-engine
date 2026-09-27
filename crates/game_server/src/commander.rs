@@ -2,36 +2,49 @@
 //! and the assets: artillery barrages, UAV sweeps, satellite scans and supply drops, their
 //! recharge, their level objects being destroyed, repaired by engineers or coming back.
 //!
+//! Like BF2, the artillery pieces are real objects (vehicles tagged [`AssetVehicle`]): a
+//! strike gives each living piece of the team a fire mission, the piece turns onto the
+//! target at its BF2 speeds and fires its burst, and its shells fly as projectiles in an arc
+//! to where they land (at the strike's timing: the first after [`ARTILLERY_DELAY`], then one
+//! per gun every `interval`, spread over the target area). The more pieces live, the more
+//! shells; with none left, there is no artillery until one is repaired or comes back. The UAV
+//! is a vehicle too, flown round its circle over the target, and shot down it falls.
+//! (Levels imported before the pieces were vehicles keep the abstract strike: shells land
+//! on schedule without flying.)
+//!
 //! Requests from clients and from an AI commander go through [`CommanderCommand`]: a bot
 //! strategy can apply for the post and give orders by writing those with its bot player.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
+use game_data::AssetKind;
 use game_shared::{
     commander::{
-        ARTILLERY_DELAY, ASSET_RESPAWN_SECONDS, Asset, AssetEffect, AssetStatus, Commander, CommanderAssets,
-        CommanderRequest, MUTINY_SHARE, OrderKind, SCAN_SECONDS, SquadOrder, TeamAssets, UAV_SECONDS,
+        ARTILLERY_DELAY, ARTILLERY_GUN_STAGGER, ASSET_RESPAWN_SECONDS, Asset, AssetEffect, AssetStatus, AssetVehicle,
+        Commander, CommanderAssets, CommanderRequest, MUTINY_SHARE, OrderKind, SCAN_SECONDS, ScanContact, ScanReport,
+        SquadOrder, TeamAssets, UAV_SECONDS,
     },
     effects::PlayEffect,
+    flight::{BodyState, Controls as FlightControls, FlightState, GRAVITY},
     input::Buttons,
     level::{LevelEntity, LoadedLevel},
     physics::GameLayer,
     protocol::{ControlledBy, Player, Team},
-    radio::{RadioCommand, RadioMessage},
+    radio::{RadioCommand, RadioMessage, SPOT_SECONDS},
     revive::Downed,
     soldier::{Health, Soldier, SoldierMotion},
     squad::SquadMember,
     statics::DestroyedStatics,
-    vehicle::{Seated, VehicleMotion},
+    vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleModel, VehicleMotion, VehicleShot, VehicleState, step_joints},
     weapons::{Armory, Inventory, Loadout},
 };
 
 use crate::{
-    AppliedInput, ClientPlayer, Controls, HostPlayer,
-    combat::{Attacker, Explosion},
+    AppliedInput, ClientPlayer, Controls, HostPlayer, PlayerClient,
+    combat::{self, Attacker, Explosion},
     destruction::{Materials, ObjectHealth},
     radio::Spot,
     sender_player,
@@ -53,16 +66,24 @@ impl Plugin for CommanderPlugin {
                 Update,
                 (
                     setup_teams.run_if(resource_exists_and_changed::<LoadedLevel>),
+                    tag_asset_vehicles,
                     handle_commands,
                     track_assets,
                     repair_assets,
                     run_strikes,
                     run_uavs,
+                    run_scans,
                     run_crates,
                     tidy_orders,
                     leave_squads,
                 )
                     .chain()
+                    .run_if(resource_exists::<LoadedLevel>)
+                    .run_if(in_state(ClientState::Disconnected)),
+            )
+            .add_systems(
+                FixedUpdate,
+                (fire_artillery, fly_uav_vehicles)
                     .run_if(resource_exists::<LoadedLevel>)
                     .run_if(in_state(ClientState::Disconnected)),
             );
@@ -86,6 +107,17 @@ const REPAIR_REACH: f32 = 6.0;
 /// Assets' armor material (`Destroyable_obj_large`), which the wrench's repair rate goes
 /// through the damage table against.
 const ASSET_MATERIAL: u32 = 98;
+/// Shells of a strike fly this long at least and at most (seconds): what is left of the
+/// strike's delay once the gun has turned onto the target [our choice: BF2's shells follow a
+/// predestined path of their own timing].
+const MIN_FLIGHT: f32 = 1.5;
+const MAX_FLIGHT: f32 = 4.5;
+/// A gun fires once its barrel points this close to the shell's launch direction (radians).
+const AIM_TOLERANCE: f32 = 0.035;
+/// A strike's markers stay this long after its last shell is due.
+const STRIKE_LINGER: f32 = 1.5;
+/// The commander spots the enemy within this many meters of where he clicks.
+const SPOT_REACH: f32 = 15.0;
 
 #[derive(Default)]
 struct TeamState {
@@ -113,17 +145,51 @@ impl CommanderState {
     }
 }
 
-/// Artillery shells still to land: seconds until each, and where.
+/// A strike under way (on its [`AssetEffect`]): artillery shells still to land on schedule
+/// (seconds until each, and where; only without artillery vehicles) and the seconds until
+/// the strike is over.
 #[derive(Component)]
 struct Strike {
     shells: Vec<(f32, Vec3)>,
     attacker: Attacker,
+    left: f32,
+}
+
+/// Server-side, on an artillery piece firing at a strike: when (seconds from the call) and
+/// where each shell it still has to fire lands, in order, and how long each flies.
+#[derive(Component)]
+struct FireMission {
+    player: Entity,
+    clock: f32,
+    shells: VecDeque<(f32, Vec3)>,
+    flight: f32,
 }
 
 #[derive(Component)]
 struct Uav {
     left: f32,
     next_sweep: f32,
+    /// The UAV flying the circle, if it is a vehicle.
+    vehicle: Option<Entity>,
+}
+
+/// Server-side, on a UAV vehicle: the circle it flies.
+#[derive(Component)]
+struct UavFlight {
+    center: Vec3,
+    angle: f32,
+    radius: f32,
+    speed: f32,
+}
+
+/// Server-side: a satellite scan under way: the commander who called it and the seconds
+/// left; it reports every second.
+#[derive(Component)]
+struct Scan {
+    team: Team,
+    commander: Entity,
+    left: f32,
+    next_report: f32,
 }
 
 #[derive(Component)]
@@ -181,6 +247,29 @@ fn setup_teams(
     }
 }
 
+/// Vehicles the layout's spawners put where an asset of the layout stands are that asset.
+fn tag_asset_vehicles(
+    mut commands: Commands,
+    assets: Res<CommanderAssets>,
+    vehicles: Query<(Entity, &Vehicle, &VehicleMotion), (Added<Vehicle>, Without<AssetVehicle>)>,
+) {
+    for (entity, vehicle, motion) in &vehicles {
+        let asset = assets.instances.iter().find(|a| {
+            a.vehicle
+                && a.template == vehicle.template
+                && Vec3::from_array(a.placement.position).xz().distance(motion.position.xz()) < 1.0
+        });
+        if let Some(asset) = asset {
+            debug!("{:?} {:?} {} is asset {}", asset.team, asset.kind, asset.template, asset.instance);
+            commands.entity(entity).insert(AssetVehicle {
+                kind: asset.kind,
+                team: asset.team,
+                instance: asset.instance,
+            });
+        }
+    }
+}
+
 /// The team's commander line to its players (or one squad).
 fn say(radio: &mut MessageWriter<ToClients<RadioMessage>>, player: Entity, position: Vec3, command: RadioCommand, squad: Option<u8>) {
     radio.write(ToClients {
@@ -203,6 +292,47 @@ fn ground(level: &LoadedLevel, point: Vec3) -> Vec3 {
     }
 }
 
+/// A random point within `spread` meters of `target`, on the ground.
+fn spread_point(level: &LoadedLevel, target: Vec3, spread: f32) -> Vec3 {
+    let angle = fastrand::f32() * std::f32::consts::TAU;
+    let offset = Vec2::from_angle(angle) * spread * fastrand::f32().sqrt();
+    ground(level, target + Vec3::new(offset.x, 0.0, offset.y))
+}
+
+/// The world transform of an artillery piece's muzzle with its joints at `joints`.
+fn muzzle(model: &VehicleModel, body: &BodyState, joints: &[[f32; 3]]) -> Transform {
+    let transforms = model.part_transforms(joints);
+    Transform::from_translation(body.position).with_rotation(body.rotation) * model.muzzle(&transforms, 0)
+}
+
+/// The velocity that takes a shell from `from` to `to` in `flight` seconds under `gravity`.
+fn launch_velocity(from: Vec3, to: Vec3, flight: f32, gravity: f32) -> Vec3 {
+    (to - from) / flight + Vec3::Y * (0.5 * gravity * flight)
+}
+
+/// Gravity on the gun's shells (m/s²).
+fn shell_gravity(model: &VehicleModel) -> f32 {
+    GRAVITY * model.guns.first().map_or(1.0, |g| g.projectile.gravity).max(0.1)
+}
+
+/// How long a piece takes to turn from `joints` onto a shell to `target` flying `flight`
+/// seconds, at its joints' speeds (seconds, at most 6).
+fn aim_time(model: &VehicleModel, body: &BodyState, joints: &[[f32; 3]], target: Vec3, flight: f32) -> f32 {
+    const DT: f32 = 0.05;
+    let gravity = shell_gravity(model);
+    let mut joints = joints.to_vec();
+    for step in 0..120 {
+        let muzzle = muzzle(model, body, &joints);
+        let direction = launch_velocity(muzzle.translation, target, flight, gravity).normalize_or(Vec3::Y);
+        if (muzzle.rotation * Vec3::NEG_Z).angle_between(direction) < AIM_TOLERANCE {
+            return step as f32 * DT;
+        }
+        let aim = [Some(muzzle.translation + direction * 1000.0)];
+        joints = step_joints(model, body, &aim, &joints, &FlightControls::default(), &FlightState::default(), DT).0;
+    }
+    6.0
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_commands(
     mut commands: Commands,
@@ -215,6 +345,8 @@ fn handle_commands(
     orders: Query<(Entity, &SquadOrder)>,
     team_assets: Query<&TeamAssets>,
     destroyed: Query<&DestroyedStatics>,
+    guns: Query<(Entity, &AssetVehicle, &VehicleData, &VehicleState, &VehicleHealth, &VehicleMotion)>,
+    vehicle_positions: Query<&VehicleMotion>,
     mut state: ResMut<CommanderState>,
     mut radio: MessageWriter<ToClients<RadioMessage>>,
     mut spots: MessageWriter<Spot>,
@@ -282,6 +414,31 @@ fn handle_commands(
                 info!("{team:?} commander: squad {squad} {kind:?} at {:.0}", order.position);
                 say(&mut radio, player, position, line, Some(squad));
             }
+            CommanderRequest::Spot { target } if is_commander => {
+                // The enemy (or the vehicle he sits in) nearest to the point.
+                let enemy = |c: &ControlledBy| players.get(c.0).is_ok_and(|p| *p.2 != team && *p.2 != Team::Spectator);
+                let nearest = enemies
+                    .iter()
+                    .filter(|(_, controlled_by, _)| enemy(controlled_by))
+                    .filter_map(|(soldier, _, seated)| {
+                        let body = seated.map_or(soldier, |s| s.vehicle);
+                        let at = match seated {
+                            Some(s) => vehicle_positions.get(s.vehicle).ok()?.position,
+                            None => motions.get(soldier).ok()?.position,
+                        };
+                        Some((body, at.xz().distance(target.xz())))
+                    })
+                    .filter(|(_, distance)| *distance <= SPOT_REACH)
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((body, _)) = nearest {
+                    spots.write(Spot {
+                        target: body,
+                        team,
+                        seconds: SPOT_SECONDS,
+                    });
+                    say(&mut radio, player, target, RadioCommand::EnemySpotted, None);
+                }
+            }
             CommanderRequest::CancelOrder { squad } if is_commander => {
                 for (entity, order) in &orders {
                     if order.team == team && order.squad == squad {
@@ -304,23 +461,64 @@ fn handle_commands(
                 };
                 let line = match asset {
                     Asset::Artillery => {
-                        let destroyed = destroyed.single().ok();
-                        let guns = assets
-                            .of(team, game_data::AssetKind::Artillery)
-                            .filter(|g| !destroyed.is_some_and(|d| d.0.contains(&g.instance)))
-                            .count()
-                            .max(1);
                         let desc = &assets.desc.artillery;
-                        let mut shells = Vec::new();
-                        for gun in 0..guns {
-                            for shell in 0..desc.shells {
-                                let angle = fastrand::f32() * std::f32::consts::TAU;
-                                let offset = Vec2::from_angle(angle) * desc.spread * fastrand::f32().sqrt();
-                                let at = ground(&level, target + Vec3::new(offset.x, 0.0, offset.y));
-                                let when = ARTILLERY_DELAY + shell as f32 * desc.interval + gun as f32 * 0.4;
-                                shells.push((when, at));
+                        let mut strike = Strike {
+                            shells: Vec::new(),
+                            attacker,
+                            left: 0.0,
+                        };
+                        let pieces: Vec<_> = guns
+                            .iter()
+                            .filter(|(_, a, _, _, health, _)| {
+                                a.team == team && a.kind == AssetKind::Artillery && !health.wrecked()
+                            })
+                            .collect();
+                        let last_shell = desc.shells.saturating_sub(1) as f32 * desc.interval;
+                        if assets.of(team, AssetKind::Artillery).any(|a| a.vehicle) {
+                            // The living pieces fire their bursts.
+                            for (index, (gun, _, data, joints, _, motion)) in pieces.iter().enumerate() {
+                                let model = &data.0;
+                                let first = ARTILLERY_DELAY + index as f32 * ARTILLERY_GUN_STAGGER;
+                                let shells: VecDeque<(f32, Vec3)> = (0..desc.shells)
+                                    .map(|shell| (first + shell as f32 * desc.interval, spread_point(&level, target, desc.spread)))
+                                    .collect();
+                                let body = BodyState {
+                                    position: motion.position,
+                                    rotation: motion.rotation,
+                                    ..default()
+                                };
+                                let turn = aim_time(model, &body, &joints.joints, shells[0].1, 3.0);
+                                let flight = (first - turn - 0.2).clamp(MIN_FLIGHT, MAX_FLIGHT);
+                                debug!("{team:?} artillery {gun}: turns in {turn:.1} s, shells fly {flight:.1} s");
+                                commands.entity(*gun).insert(FireMission {
+                                    player,
+                                    clock: 0.0,
+                                    shells,
+                                    flight,
+                                });
+                            }
+                            strike.left = ARTILLERY_DELAY
+                                + last_shell
+                                + pieces.len().saturating_sub(1) as f32 * ARTILLERY_GUN_STAGGER
+                                + STRIKE_LINGER;
+                        } else {
+                            // Older imports: the pieces are objects; the shells land on schedule.
+                            let destroyed = destroyed.single().ok();
+                            let count = assets
+                                .of(team, AssetKind::Artillery)
+                                .filter(|g| !destroyed.is_some_and(|d| d.0.contains(&g.instance)))
+                                .count()
+                                .max(1);
+                            for gun in 0..count {
+                                for shell in 0..desc.shells {
+                                    let when = ARTILLERY_DELAY
+                                        + shell as f32 * desc.interval
+                                        + gun as f32 * ARTILLERY_GUN_STAGGER;
+                                    strike.shells.push((when, spread_point(&level, target, desc.spread)));
+                                }
                             }
                         }
+                        info!("{team:?} artillery strike: {} pieces", pieces.len());
                         commands.spawn((
                             AssetEffect {
                                 team,
@@ -328,44 +526,69 @@ fn handle_commands(
                                 position: target,
                                 radius: desc.spread + desc.radius,
                             },
-                            Strike { shells, attacker },
+                            strike,
                             Replicated,
                             LevelEntity,
                         ));
                         RadioCommand::ArtilleryStrike
                     }
                     Asset::Uav => {
-                        commands.spawn((
-                            AssetEffect {
-                                team,
-                                asset,
-                                position: target,
-                                radius: assets.desc.uav.radius,
-                            },
-                            Uav {
-                                left: UAV_SECONDS,
-                                next_sweep: 0.0,
-                            },
-                            Replicated,
-                            LevelEntity,
-                        ));
+                        let uav = &assets.desc.uav;
+                        let effect = commands
+                            .spawn((
+                                AssetEffect {
+                                    team,
+                                    asset,
+                                    position: target,
+                                    radius: uav.radius,
+                                },
+                                Replicated,
+                                LevelEntity,
+                            ))
+                            .id();
+                        // The UAV itself, flying its circle.
+                        let vehicle = uav.vehicle.as_ref().map(|template| {
+                            let flight = UavFlight {
+                                center: target + Vec3::Y * uav.height,
+                                angle: fastrand::f32() * std::f32::consts::TAU,
+                                radius: uav.radius.max(10.0),
+                                speed: uav.speed.max(1.0),
+                            };
+                            let (position, rotation) = flight.pose();
+                            commands
+                                .spawn((
+                                    Vehicle {
+                                        template: template.clone(),
+                                    },
+                                    flight,
+                                    Transform::from_translation(position).with_rotation(rotation),
+                                    VehicleMotion {
+                                        position,
+                                        rotation,
+                                        ..default()
+                                    },
+                                    Replicated,
+                                    LevelEntity,
+                                ))
+                                .id()
+                        });
+                        commands.entity(effect).insert(Uav {
+                            left: UAV_SECONDS,
+                            next_sweep: 0.0,
+                            vehicle,
+                        });
                         RadioCommand::UavOnline
                     }
                     Asset::Scan => {
-                        let enemy = |c: &ControlledBy| players.get(c.0).is_ok_and(|p| *p.2 != team && *p.2 != Team::Spectator);
-                        let mut seen = 0;
-                        for (soldier, controlled_by, seated) in &enemies {
-                            if enemy(controlled_by) {
-                                seen += 1;
-                                let target = seated.map_or(soldier, |s| s.vehicle);
-                                spots.write(Spot {
-                                    target,
-                                    team,
-                                    seconds: SCAN_SECONDS,
-                                });
-                            }
-                        }
-                        info!("{team:?} scan: {seen} enemies marked");
+                        commands.spawn((
+                            Scan {
+                                team,
+                                commander: player,
+                                left: SCAN_SECONDS,
+                                next_report: 0.0,
+                            },
+                            LevelEntity,
+                        ));
                         RadioCommand::ScanInitiated
                     }
                     Asset::Supply => {
@@ -398,8 +621,8 @@ fn handle_commands(
 }
 
 /// Recharging, asset objects going down (and coming back after a while), and what the
-/// teams see of it.
-#[allow(clippy::too_many_arguments)]
+/// teams see of it. An artillery piece (a vehicle) counts as destroyed while it is a wreck.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn track_assets(
     time: Res<Time>,
     assets: Res<CommanderAssets>,
@@ -408,6 +631,7 @@ fn track_assets(
     mut health: ResMut<ObjectHealth>,
     mut state: ResMut<CommanderState>,
     mut team_assets: Query<&mut TeamAssets>,
+    mut vehicles: Query<(&AssetVehicle, &mut VehicleHealth)>,
     mut radio: MessageWriter<ToClients<RadioMessage>>,
 ) {
     let dt = time.delta_secs();
@@ -420,7 +644,18 @@ fn track_assets(
     let Ok(mut destroyed) = destroyed.single_mut() else {
         return;
     };
+    // Which asset vehicles are wrecks now.
+    let wrecks: HashMap<u32, bool> = vehicles.iter().map(|(a, h)| (a.instance, h.wrecked())).collect();
     for asset in &assets.instances {
+        if asset.vehicle {
+            let wreck = wrecks.get(&asset.instance).copied().unwrap_or(false);
+            // (Only touched when it changes: the set is replicated.)
+            if wreck && !destroyed.0.contains(&asset.instance) {
+                destroyed.0.insert(asset.instance);
+            } else if !wreck && destroyed.0.contains(&asset.instance) {
+                destroyed.0.remove(&asset.instance);
+            }
+        }
         let down = destroyed.0.contains(&asset.instance);
         match (down, state.destroyed_at.get(&asset.instance).copied()) {
             (true, None) => {
@@ -428,9 +663,9 @@ fn track_assets(
                 info!("{:?} {:?} ({}) destroyed", asset.team, asset.kind, asset.template);
                 if let Some((commander, _)) = commanders.iter().find(|(_, t)| **t == asset.team) {
                     let line = match asset.kind {
-                        game_data::AssetKind::Artillery => RadioCommand::ArtilleryDestroyed,
-                        game_data::AssetKind::Uav => RadioCommand::UavDestroyed,
-                        game_data::AssetKind::Radar => RadioCommand::RadarDestroyed,
+                        AssetKind::Artillery => RadioCommand::ArtilleryDestroyed,
+                        AssetKind::Uav => RadioCommand::UavDestroyed,
+                        AssetKind::Radar => RadioCommand::RadarDestroyed,
                     };
                     say(&mut radio, commander, Vec3::ZERO, line, None);
                 }
@@ -438,6 +673,9 @@ fn track_assets(
             (true, Some(at)) if now - at >= ASSET_RESPAWN_SECONDS => {
                 destroyed.0.remove(&asset.instance);
                 health.0.remove(&asset.instance);
+                if asset.vehicle {
+                    revive(&mut vehicles, asset.instance);
+                }
                 info!("{:?} {:?} ({}) is back", asset.team, asset.kind, asset.template);
             }
             (false, Some(_)) => {
@@ -448,12 +686,15 @@ fn track_assets(
         }
     }
     for mut team_assets in &mut team_assets {
-        let Some(index) = team_index(team_assets.team) else { continue };
+        let team = team_assets.team;
+        let Some(index) = team_index(team) else { continue };
         let status = Asset::ALL.map(|asset| AssetStatus {
             intact: asset.object().is_none_or(|kind| {
-                assets
-                    .of(team_assets.team, kind)
-                    .any(|a| !destroyed.0.contains(&a.instance))
+                assets.of(team, kind).any(|a| match a.vehicle {
+                    // A piece counts once it stands, and while it isn't a wreck.
+                    true => wrecks.get(&a.instance) == Some(&false),
+                    false => !destroyed.0.contains(&a.instance),
+                })
             }),
             recharge: state.teams[index].recharge[asset.index()].ceil() as u16,
         });
@@ -463,8 +704,18 @@ fn track_assets(
     }
 }
 
+/// Brings an asset vehicle's wreck back to full hit points (the vehicle code then takes it
+/// for a vehicle again).
+fn revive(vehicles: &mut Query<(&AssetVehicle, &mut VehicleHealth)>, instance: u32) {
+    for (asset, mut health) in vehicles.iter_mut() {
+        if asset.instance == instance {
+            health.current = health.max;
+        }
+    }
+}
+
 /// Engineers bring destroyed assets back with the wrench, like repairing a wreck.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn repair_assets(
     time: Res<Time>,
     armory: Res<Armory>,
@@ -473,6 +724,7 @@ fn repair_assets(
     engineers: Query<(&SoldierMotion, &Loadout, &Inventory, &AppliedInput, &ControlledBy), Without<Downed>>,
     teams: Query<&Team>,
     mut destroyed: Query<&mut DestroyedStatics>,
+    mut vehicles: Query<(&AssetVehicle, &mut VehicleHealth)>,
     mut health: ResMut<ObjectHealth>,
     mut state: ResMut<CommanderState>,
 ) {
@@ -507,13 +759,82 @@ fn repair_assets(
             if *progress >= 1.0 {
                 destroyed.0.remove(&asset.instance);
                 health.0.remove(&asset.instance);
+                if asset.vehicle {
+                    revive(&mut vehicles, asset.instance);
+                }
                 info!("{:?} {:?} ({}) repaired", asset.team, asset.kind, asset.template);
             }
         }
     }
 }
 
-/// Artillery shells landing: each a blast like the guns' own shells, and its effect.
+/// Artillery pieces on a fire mission turn onto the next shell's launch direction (at their
+/// joints' speeds) and fire it when its time comes and the barrel points there: a projectile
+/// on the arc that lands where and when the strike planned.
+#[allow(clippy::type_complexity)]
+fn fire_artillery(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut guns: Query<(Entity, &VehicleData, &mut VehicleState, &Position, &Rotation, &VehicleHealth, &mut FireMission)>,
+    mut shots: MessageWriter<ToClients<VehicleShot>>,
+) {
+    let dt = time.delta_secs();
+    for (gun, data, mut state, position, rotation, health, mut mission) in &mut guns {
+        let model = &data.0;
+        let (Some(weapon), Some(&(land, point)), false) = (model.guns.first(), mission.shells.front(), health.wrecked())
+        else {
+            // Done, or knocked out: the rest of its shells are never fired.
+            commands.entity(gun).remove::<FireMission>();
+            continue;
+        };
+        mission.clock += dt;
+        let body = BodyState {
+            position: position.0,
+            rotation: rotation.0,
+            ..default()
+        };
+        let muzzle = muzzle(model, &body, &state.joints);
+        let fire_at = land - mission.flight;
+        let due = mission.clock >= fire_at;
+        let flight = if due { (land - mission.clock).max(MIN_FLIGHT) } else { mission.flight };
+        let velocity = launch_velocity(muzzle.translation, point, flight, shell_gravity(model));
+        let direction = velocity.normalize_or(Vec3::Y);
+        let aim = [Some(muzzle.translation + direction * 1000.0)];
+        let joints = step_joints(model, &body, &aim, &state.joints, &FlightControls::default(), &FlightState::default(), dt).0;
+        if state.joints != joints {
+            state.joints = joints;
+        }
+        if !due || (muzzle.rotation * Vec3::NEG_Z).angle_between(direction) > AIM_TOLERANCE {
+            continue;
+        }
+        // A projectile of the gun's own shell, launched at the arc's velocity.
+        combat::spawn_projectile(
+            &mut commands,
+            weapon.clone(),
+            gun,
+            mission.player,
+            Some(gun),
+            muzzle.translation,
+            direction,
+            velocity - direction * weapon.projectile.velocity,
+            None,
+        );
+        shots.write(ToClients {
+            targets: SendTargets::All,
+            message: VehicleShot {
+                vehicle: gun,
+                gun: 0,
+                origin: muzzle.translation,
+                direction,
+            },
+        });
+        debug!("artillery {gun} fired, lands at {point:.0} in {flight:.1} s");
+        mission.shells.pop_front();
+    }
+}
+
+/// Strikes end once their shells are down; older imports' shells land on schedule, each a
+/// blast like the guns' own shells, with its effect.
 fn run_strikes(
     mut commands: Commands,
     time: Res<Time>,
@@ -525,6 +846,7 @@ fn run_strikes(
     let dt = time.delta_secs();
     let desc = &assets.desc.artillery;
     for (entity, mut strike) in &mut strikes {
+        strike.left -= dt;
         let attacker = strike.attacker.clone();
         strike.shells.retain_mut(|(left, at)| {
             *left -= dt;
@@ -550,27 +872,79 @@ fn run_strikes(
             }
             false
         });
-        if strike.shells.is_empty() {
+        if strike.shells.is_empty() && strike.left <= 0.0 {
             commands.entity(entity).despawn();
         }
     }
 }
 
-/// UAVs keep marking the enemies below them.
+impl UavFlight {
+    /// Where it is on its circle and which way it faces: flying counter-clockwise seen from
+    /// above, banked into the turn.
+    fn pose(&self) -> (Vec3, Quat) {
+        let (sin, cos) = self.angle.sin_cos();
+        let position = self.center + Vec3::new(cos, 0.0, sin) * self.radius;
+        let tangent = Vec3::new(-sin, 0.0, cos);
+        let bank = (self.speed * self.speed / (self.radius * GRAVITY)).atan();
+        let rotation = Transform::IDENTITY.looking_to(tangent, Vec3::Y).rotation * Quat::from_rotation_z(bank);
+        (position, rotation)
+    }
+}
+
+/// UAVs fly their circle (kinematic bodies moved by their velocity); shot down, they fall.
+#[allow(clippy::type_complexity)]
+fn fly_uav_vehicles(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut uavs: Query<(Entity, &mut UavFlight, &Position, &mut Rotation, &mut LinearVelocity, &mut AngularVelocity, &VehicleHealth)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (entity, mut flight, position, mut rotation, mut velocity, mut spin, health) in &mut uavs {
+        if health.wrecked() {
+            info!("UAV shot down at {:.0}", position.0);
+            spin.0 = Vec3::new(fastrand::f32() - 0.5, fastrand::f32() - 0.5, 1.5);
+            commands
+                .entity(entity)
+                .remove::<UavFlight>()
+                .insert((RigidBody::Dynamic, GravityScale(1.0), LinearDamping(0.1), AngularDamping(0.5)));
+            continue;
+        }
+        flight.angle = (flight.angle + flight.speed / flight.radius * dt) % std::f32::consts::TAU;
+        let (next, facing) = flight.pose();
+        velocity.0 = (next - position.0) / dt;
+        spin.0 = Vec3::ZERO;
+        rotation.0 = facing;
+    }
+}
+
+/// UAVs keep marking the enemies below them, until their time is up (they leave) or they
+/// are shot down.
 #[allow(clippy::type_complexity)]
 fn run_uavs(
     mut commands: Commands,
     time: Res<Time>,
     mut uavs: Query<(Entity, &AssetEffect, &mut Uav)>,
     soldiers: Query<(Entity, &SoldierMotion, &ControlledBy, Option<&Seated>), With<Soldier>>,
-    vehicles: Query<&VehicleMotion>,
+    vehicles: Query<(&VehicleMotion, Option<&VehicleHealth>)>,
     teams: Query<&Team>,
     mut spots: MessageWriter<Spot>,
 ) {
     let dt = time.delta_secs();
     for (entity, effect, mut uav) in &mut uavs {
         uav.left -= dt;
+        let shot_down = uav.vehicle.is_some_and(|v| vehicles.get(v).map_or(true, |(_, h)| h.is_some_and(|h| h.wrecked())));
+        if shot_down {
+            info!("{:?} UAV lost", effect.team);
+            commands.entity(entity).despawn();
+            continue;
+        }
         if uav.left <= 0.0 {
+            if let Some(vehicle) = uav.vehicle {
+                commands.entity(vehicle).despawn();
+            }
             commands.entity(entity).despawn();
             continue;
         }
@@ -582,7 +956,7 @@ fn run_uavs(
         let mut seen = 0;
         for (soldier, motion, controlled_by, seated) in &soldiers {
             let enemy = teams.get(controlled_by.0).is_ok_and(|t| *t != effect.team && *t != Team::Spectator);
-            let (target, position) = match seated.and_then(|s| vehicles.get(s.vehicle).ok().map(|v| (s.vehicle, v.position))) {
+            let (target, position) = match seated.and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, _)| (s.vehicle, v.position))) {
                 Some(vehicle) => vehicle,
                 None => (soldier, motion.position),
             };
@@ -599,8 +973,77 @@ fn run_uavs(
     }
 }
 
-/// Supply crates float down, then heal and resupply the team around them until their stock
-/// or their time runs out.
+/// The client a player plays on (the host's own player plays on the server).
+fn player_client(player: Entity, clients: &Query<&PlayerClient>, host: Option<&HostPlayer>) -> Option<ClientId> {
+    if host.is_some_and(|h| h.0 == player) {
+        return Some(ClientId::Server);
+    }
+    clients.get(player).ok().map(|c| ClientId::Client(c.0))
+}
+
+/// Satellite scans show the commander every enemy on his map, once a second while they last
+/// (BF2: "your map will show the position of every enemy"); he spots them for his team. An
+/// AI commander has no map to look at: what its scan shows is spotted for its team, as a
+/// commander would.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn run_scans(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut scans: Query<(Entity, &mut Scan)>,
+    soldiers: Query<(Entity, &SoldierMotion, &ControlledBy, Option<&Seated>), (With<Soldier>, Without<Downed>)>,
+    vehicles: Query<&VehicleMotion>,
+    players: Query<(&Player, &Team)>,
+    clients: Query<&PlayerClient>,
+    host: Option<Res<HostPlayer>>,
+    mut reports: MessageWriter<ToClients<ScanReport>>,
+    mut spots: MessageWriter<Spot>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut scan) in &mut scans {
+        scan.left -= dt;
+        scan.next_report -= dt;
+        if scan.left <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if scan.next_report > 0.0 {
+            continue;
+        }
+        scan.next_report = 1.0;
+        let bot = players.get(scan.commander).is_ok_and(|(p, _)| p.is_bot);
+        let mut contacts = Vec::new();
+        for (soldier, motion, controlled_by, seated) in &soldiers {
+            if !players.get(controlled_by.0).is_ok_and(|(_, t)| *t != scan.team && *t != Team::Spectator) {
+                continue;
+            }
+            let (body, position) = match seated.and_then(|s| vehicles.get(s.vehicle).ok().map(|v| (s.vehicle, v.position))) {
+                Some(vehicle) => vehicle,
+                None => (soldier, motion.position),
+            };
+            if bot {
+                spots.write(Spot {
+                    target: body,
+                    team: scan.team,
+                    seconds: 1.5,
+                });
+            }
+            contacts.push(ScanContact {
+                position,
+                vehicle: seated.is_some(),
+            });
+        }
+        debug!("{:?} scan: {} enemies", scan.team, contacts.len());
+        if let Some(client) = player_client(scan.commander, &clients, host.as_deref()) {
+            reports.write(ToClients {
+                targets: SendTargets::Single(client),
+                message: ScanReport { contacts },
+            });
+        }
+    }
+}
+
+/// Supply crates float down, then heal, resupply and repair the team around them (soldiers
+/// and vehicles, BF2's `workOnVehicles`) until their stock or their time runs out.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn run_crates(
     mut commands: Commands,
@@ -610,6 +1053,8 @@ fn run_crates(
     spatial: SpatialQuery,
     mut crates: Query<(Entity, &mut AssetEffect, &mut SupplyCrate)>,
     mut soldiers: Query<(&SoldierMotion, &ControlledBy, &mut Health, &Loadout, &mut Inventory), (With<Soldier>, Without<Downed>)>,
+    mut vehicles: Query<(Entity, &VehicleMotion, &mut VehicleHealth, Option<&AssetVehicle>)>,
+    crews: Query<(&Seated, &ControlledBy)>,
     teams: Query<&Team>,
 ) {
     let dt = time.delta_secs();
@@ -665,6 +1110,24 @@ fn run_crates(
                 supply.stock -= given;
             }
         }
+        // The team's vehicles around (crewed by it, empty, or its assets) are repaired like
+        // soldiers are healed.
+        for (vehicle, motion, mut health, asset) in &mut vehicles {
+            if health.wrecked() || health.current >= health.max || motion.position.distance(effect.position) > desc.radius + 2.0 {
+                continue;
+            }
+            let crew_team = crews
+                .iter()
+                .find(|(seated, _)| seated.vehicle == vehicle)
+                .and_then(|(_, crew)| teams.get(crew.0).ok().copied());
+            let team = asset.map(|a| a.team).or(crew_team);
+            if team.is_some_and(|t| t != effect.team) {
+                continue;
+            }
+            let before = health.current;
+            health.current = (health.current + desc.heal / 100.0 * health.max).min(health.max);
+            supply.stock -= (health.current - before) / health.max * 100.0;
+        }
     }
 }
 
@@ -693,5 +1156,44 @@ fn tidy_orders(
         if !members.iter().any(|(team, member)| *team == order.team && member.squad == order.squad) {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shells_land_where_and_when_planned() {
+        // The launch velocity's arc through the projectile's own integration (velocity
+        // averaged over each tick) reaches the target at the planned time.
+        let (from, to, flight, gravity) = (Vec3::new(0.0, 2.0, 0.0), Vec3::new(300.0, -10.0, -400.0), 3.2, GRAVITY * 5.0);
+        let mut velocity = launch_velocity(from, to, flight, gravity);
+        let mut position = from;
+        let dt = 1.0 / 60.0;
+        let steps = (flight / dt).round() as usize;
+        for _ in 0..steps {
+            let start = velocity;
+            velocity += Vec3::NEG_Y * gravity * dt;
+            position += (start + velocity) * 0.5 * dt;
+        }
+        assert!(position.distance(to) < 0.5, "{position:?}");
+    }
+
+    #[test]
+    fn uav_flies_round_its_center() {
+        let flight = UavFlight {
+            center: Vec3::new(10.0, 200.0, -20.0),
+            angle: 1.0,
+            radius: 60.0,
+            speed: 30.0,
+        };
+        let (position, rotation) = flight.pose();
+        assert!((position.distance(flight.center) - 60.0).abs() < 1e-3);
+        // Facing along the circle, banked towards its middle.
+        let forward = rotation * Vec3::NEG_Z;
+        assert!(forward.dot(position - flight.center).abs() < 1e-3);
+        let right = rotation * Vec3::X;
+        assert!(right.y < 0.0 || right.dot(flight.center - position) < 0.0);
     }
 }

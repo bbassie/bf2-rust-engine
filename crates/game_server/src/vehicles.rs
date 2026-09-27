@@ -837,15 +837,30 @@ fn crash_damage(
     }
 }
 
-/// A vehicle out of hit points kills everyone inside and stays as a wreck for a while.
+/// A vehicle out of hit points kills everyone inside and stays as a wreck for a while. The
+/// commander's assets stay wrecks until repaired (see `commander`); a wreck brought back
+/// above 0 hit points is a vehicle again.
+#[allow(clippy::type_complexity)]
 fn wreck_vehicles(
     mut commands: Commands,
     time: Res<Time>,
-    mut vehicles: Query<(Entity, &Vehicle, &Position, &mut VehicleHealth, Option<&mut Wreck>, &mut SeatInputs)>,
+    mut vehicles: Query<(
+        Entity,
+        &Vehicle,
+        &VehicleData,
+        &Position,
+        &mut VehicleHealth,
+        Option<&mut Wreck>,
+        &mut SeatInputs,
+    )>,
     mut soldiers: Query<(&Seated, &mut Health), With<Soldier>>,
 ) {
-    for (vehicle, desc, position, mut health, wreck, mut inputs) in &mut vehicles {
+    for (vehicle, desc, data, position, mut health, wreck, mut inputs) in &mut vehicles {
         if !health.wrecked() {
+            if wreck.is_some() {
+                info!("{} repaired at {:.1}", desc.template, position.0);
+                commands.entity(vehicle).remove::<Wreck>();
+            }
             continue;
         }
         match wreck {
@@ -858,6 +873,8 @@ fn wreck_vehicles(
                     }
                 }
             }
+            // It stays as it is until repaired.
+            Some(_) if data.0.desc.repairable_wreck => {}
             Some(mut wreck) => {
                 wreck.0 -= time.delta_secs();
                 let burnt = -health.max * (1.0 - wreck.0 / WRECK_SECONDS).min(1.0);

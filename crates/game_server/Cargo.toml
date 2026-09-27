@@ -13,6 +13,11 @@ path = "src/lib.rs"
 name = "server"
 path = "src/main.rs"
 
+[features]
+# Per-system timings for `server --profile-ticks` (Bevy's tracing spans; see `profile.rs`).
+# Kept out of the default build: it rebuilds Bevy with the `trace` feature.
+profile = ["bevy/trace", "bevy/debug"]
+
 [dependencies]
 bevy = { workspace = true, features = [
   "default_app",

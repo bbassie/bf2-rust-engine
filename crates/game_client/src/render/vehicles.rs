@@ -7,8 +7,13 @@
 //! draw one mesh per part through the static object pipeline. Tracks animate like BF2's:
 //! the belt and wheel textures scroll, hub textures and drive sprockets turn with the
 //! distance each track has run (road wheels themselves stand still).
+//!
+//! The outside models' lower levels of detail are rigged the same way (on the same part
+//! entities) and drawn by distance, cross-fading, and the vehicle fades out past its draw
+//! distance (see `unit_lods`). A wreck that is repaired (the commander's artillery) gets its
+//! models back.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use bevy::{
     camera::visibility::NoFrustumCulling,
@@ -18,11 +23,14 @@ use bevy::{
     prelude::*,
 };
 use game_shared::{
-    statics::StaticMesh,
+    statics::{StaticMesh, StaticMeshLods},
     vehicle::{Seated, VehicleData, VehicleHealth, joint_rotation},
 };
 
-use super::materials::{Bf2Material, Bf2Materials};
+use super::{
+    materials::{Bf2Material, Bf2Materials},
+    unit_lods::{UnitLod, UnitLodConfig},
+};
 
 use crate::{
     camera::ThirdPerson,
@@ -42,7 +50,7 @@ impl Plugin for VehicleRenderPlugin {
                 (
                     (run_tracks, (pose_parts, scroll_tracks)).chain(),
                     show_interior,
-                    show_wrecks,
+                    (show_wrecks, revive_wrecks).chain(),
                     play_armor_effects,
                     hide_burnt_wrecks,
                 )
@@ -98,10 +106,40 @@ fn show_wrecks(
                     path: wreck.clone(),
                     index: piece,
                 },
+                // With their lower LODs, fading out where the vehicle would.
+                StaticMeshLods {
+                    lods: desc.wreck_lods.clone(),
+                    draw_distance: desc.draw_distance,
+                },
                 WreckPiece,
                 ChildOf(entity),
             ));
         }
+    }
+}
+
+/// A wreck repaired above 0 hit points (the commander's artillery) is a vehicle again: its
+/// wreck model goes, its models come back.
+fn revive_wrecks(
+    mut commands: Commands,
+    vehicles: Query<(Entity, &VehicleData, &VehicleHealth, &VehicleParts, &Children), With<ShowsWreck>>,
+    pieces: Query<(), With<WreckPiece>>,
+    asset_server: Res<AssetServer>,
+    config: Res<UnitLodConfig>,
+) {
+    for (entity, data, health, parts, children) in &vehicles {
+        if health.wrecked() {
+            continue;
+        }
+        for child in children.iter().filter(|c| pieces.contains(*c)) {
+            commands.entity(child).despawn();
+        }
+        // The part tree hangs off the hull part; the models off the vehicle.
+        for &old in parts.parts.first().into_iter().chain(&parts.models) {
+            commands.entity(old).despawn();
+        }
+        let fresh = build_parts(&mut commands, entity, &data.0, &asset_server, config.enabled);
+        commands.entity(entity).remove::<ShowsWreck>().insert(fresh);
     }
 }
 
@@ -206,13 +244,15 @@ fn show_interior(
 }
 
 /// The part entities of a vehicle, in part order, their outside and interior meshes, and how
-/// far each wheel has turned.
+/// far each wheel has turned. `models` keeps every model entity (also once a wreck has
+/// taken the others' place).
 #[derive(Component, Clone)]
 struct VehicleParts {
     parts: Vec<Entity>,
     outside: Vec<Entity>,
     interior: Vec<Entity>,
     spin: Vec<f32>,
+    models: Vec<Entity>,
 }
 
 /// How far each track has run, meters: per UV animation and per track wheel of the vehicle,
@@ -258,11 +298,13 @@ impl UvAnimated {
 }
 
 /// A rigged model of a vehicle: one skinned mesh whose joint `n` is `joints[n]` (the part
-/// drawing mesh index `n`). Joints no part draws collapse out of sight.
+/// drawing mesh index `n`). Joints no part draws collapse out of sight. `lod`: which level of
+/// detail of the model it is, drawn by distance.
 #[derive(Component)]
 struct VehicleRig {
     gltf: Handle<Gltf>,
     joints: HashMap<u32, Entity>,
+    lod: Option<UnitLod>,
 }
 
 fn spawn_parts(
@@ -270,16 +312,29 @@ fn spawn_parts(
     mut commands: Commands,
     vehicles: Query<&VehicleData>,
     asset_server: Res<AssetServer>,
+    config: Res<UnitLodConfig>,
 ) {
     let Ok(data) = vehicles.get(add.entity) else {
         return;
     };
-    let model = &data.0;
+    let parts = build_parts(&mut commands, add.entity, &data.0, &asset_server, config.enabled);
+    commands.entity(add.entity).insert((Visibility::default(), parts));
+}
+
+/// Spawns a vehicle's part entities and its models (outside views with their lower LODs if
+/// `lods`, interiors).
+fn build_parts(
+    commands: &mut Commands,
+    vehicle: Entity,
+    model: &game_shared::vehicle::VehicleModel,
+    asset_server: &AssetServer,
+    lods: bool,
+) -> VehicleParts {
     let desc = &model.desc;
     let mut parts: Vec<Entity> = Vec::with_capacity(desc.parts.len());
     let (mut outside, mut interior) = (Vec::new(), Vec::new());
     for (i, part) in desc.parts.iter().enumerate() {
-        let parent = part.parent.map_or(add.entity, |p| parts[p as usize]);
+        let parent = part.parent.map_or(vehicle, |p| parts[p as usize]);
         let entity = commands.spawn((model.rest[i], Visibility::default(), ChildOf(parent))).id();
         parts.push(entity);
         if desc.rigged {
@@ -321,23 +376,38 @@ fn spawn_parts(
                 }
             }
             for (path, joints) in rigs {
-                let rig = VehicleRig {
-                    gltf: asset_server.load(format!("imported://{path}")),
-                    joints,
+                // Outside views: the model and its lower LODs, each drawn in its distance
+                // band, all fading out at the draw distance.
+                let levels: Vec<(String, f32)> = match interior_view || !lods {
+                    true => vec![(path.clone(), 0.0)],
+                    false => std::iter::once((path.clone(), 0.0))
+                        .chain(desc.model_lods(&path).iter().map(|l| (l.mesh.clone(), l.distance)))
+                        .collect(),
                 };
-                list.push(commands.spawn((Transform::IDENTITY, visibility, rig, ChildOf(add.entity))).id());
+                let starts: Arc<[f32]> = levels.iter().map(|(_, start)| *start).collect();
+                for (level, (file, _)) in levels.iter().enumerate() {
+                    let rig = VehicleRig {
+                        gltf: asset_server.load(format!("imported://{file}")),
+                        joints: joints.clone(),
+                        lod: (!interior_view && lods).then(|| UnitLod {
+                            starts: starts.clone(),
+                            draw_distance: desc.model_draw_distance(&path),
+                            level,
+                        }),
+                    };
+                    list.push(commands.spawn((Transform::IDENTITY, visibility, rig, ChildOf(vehicle))).id());
+                }
             }
         }
     }
-    commands.entity(add.entity).insert((
-        Visibility::default(),
-        VehicleParts {
-            parts,
-            outside,
-            interior,
-            spin: vec![0.0; model.desc.wheels.len()],
-        },
-    ));
+    let models = outside.iter().chain(&interior).copied().collect();
+    VehicleParts {
+        parts,
+        outside,
+        interior,
+        spin: vec![0.0; model.desc.wheels.len()],
+        models,
+    }
 }
 
 /// Once a rig's model has loaded, draws its primitives skinned to the parts (a model that
@@ -415,7 +485,7 @@ fn spawn_rigs(
                 }
                 None => (material, None),
             };
-            match (&skinned, rigged) {
+            let spawned = match (&skinned, rigged) {
                 (Some(skinned), true) => {
                     let mut mesh = commands.spawn((
                         Mesh3d(primitive.mesh.clone()),
@@ -428,11 +498,15 @@ fn spawn_rigs(
                     if let Some(animated) = animated {
                         mesh.insert(animated);
                     }
+                    mesh.id()
                 }
                 _ => {
                     let part = rig.joints.get(&0).copied().unwrap_or(entity);
-                    commands.spawn((Mesh3d(primitive.mesh.clone()), MeshMaterial3d(material), ChildOf(part)));
+                    commands.spawn((Mesh3d(primitive.mesh.clone()), MeshMaterial3d(material), ChildOf(part))).id()
                 }
+            };
+            if let Some(lod) = &rig.lod {
+                commands.entity(spawned).insert(lod.clone());
             }
         }
     }

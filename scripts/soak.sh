@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Soak test: a dedicated server with bots for a while, with a client connecting part of the
 # time, then a summary of the logs: panics, warnings and errors, the server's health per map
-# (`server --soak`: entities, memory, frame times, idle bots), rounds and map changes, stuck
+# (`server --soak`: entities, memory, frame and tick times, idle bots), rounds and map changes, stuck
 # bots and the clients' prediction corrections and frame times.
 #
 #   scripts/soak.sh [--minutes 10] [--port 27777] [--client-runs 2] [--client-gap 30]
@@ -20,6 +20,9 @@
 #       --config scripts/soak_rotation.ron --soak-rotate 10
 #   # Server only.
 #   scripts/soak.sh --minutes 30 --client-runs 0 -- --level dalian_plant --size 64 --bots 32
+#   # Where the server's time goes, per system (a server built with `--features profile`,
+#   # see crates/game_server/src/profile.rs).
+#   scripts/soak.sh --minutes 5 --client-runs 0 -- --level strike_at_karkand --bots 32 --profile-ticks
 #
 # The server reports every 30 s (`--soak-every`), quits after --minutes and `--soak-rotate N`
 # moves to the next map of the rotation after N minutes on one. The client (one at a time)
@@ -154,6 +157,13 @@ strip "$out/server.log" | grep -E "soak: [0-9.]+ s," | sed -E 's/^.*soak: //' | 
     }
     END { flush() }'
 strip "$out/server.log" | grep "soak summary:" | sed -E 's/^.*soak summary/summary/; s/^/  /'
+echo "simulation tick percentiles per map (p50/p90/p99; ticks over one 16.7 ms step fall behind):"
+strip "$out/server.log" | grep "soak: ticks on" | sed -E 's/^.*soak: ticks on /  /'
+if strip "$out/server.log" | grep -q "where the time went"; then
+    echo "where the time went in the last report (--profile-ticks):"
+    strip "$out/server.log" | awk '/where the time went/ {block = ""; on = 1; next}
+        on && /^  / {block = block $0 "\n"; next} {on = 0} END {printf "%s", block}' | head -25
+fi
 echo "stuck bots per minute (stuck events, goals out of reach):"
 strip "$out/server.log" | grep -E "game_server::bots: bots:" \
     | sed -E 's/^[^T]+T([0-9:]+)\.[0-9]+Z.*bots: ([0-9]+) stuck events.* ([0-9]+) goals out of reach.*/\1 \2\/\3/' \

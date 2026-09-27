@@ -205,10 +205,11 @@ use button, the seat keys and ordinary `InputFrame`s like players:
   and drop, main guns and missiles at vehicles and groups, machine guns at soldiers, and fire
   once the turret, which turns at its own speed, is on target; heat seekers wait for a lock.
 - *Pilots*: helicopters climb out, cruise above the air map's obstacles, transports land
-  their squad by the objective, attack helicopters circle it and fire; jets with a runway take
-  off, climb and circle, diving on targets.
-- *Getting out*: at the objective, when the vehicle is badly damaged (aircrews only on the
-  ground: there are no parachutes), on its roof, stuck for good, or when the driver left.
+  their squad by the objective and fly back to where they took off for more passengers
+  (parking there when nobody comes), attack helicopters circle the objective and fire; jets
+  with a runway take off, climb and circle, diving on targets.
+- *Getting out*: at the objective, when the vehicle is badly damaged (aircrews on the ground,
+  or high enough up for their parachute), on its roof, stuck for good, or when the driver left.
 
 The **vehicle grid** is built like the infantry grid from our collision, with vehicle limits
 (1 m cells, 3 m head room, 0.5 m steps, 40° slopes); BF2's own `AIPathFinding/Vehicle.qtr` is

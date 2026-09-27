@@ -120,6 +120,14 @@ impl<'a> MeshConverter<'a> {
         Some(path)
     }
 
+    /// Half the diagonal of a geom's full-detail bounding box: `r0` of BF2's LOD selection.
+    pub fn lod0_half_diagonal(&self, mesh_path: &str, geom: usize) -> Option<f32> {
+        let key = normalize(mesh_path);
+        let mesh = VisMesh::parse(&self.vfs.read(&key).ok()?, MeshKind::from_path(&key)?).ok()?;
+        let lod = mesh.geoms.get(geom)?.lods.first()?;
+        Some(crate::lods::half_diagonal(lod.bounds_min, lod.bounds_max))
+    }
+
     /// Largest distance of any vertex of the first geom/LOD from the origin.
     pub fn mesh_radius(&self, mesh_path: &str) -> Option<f32> {
         let key = normalize(mesh_path);
@@ -157,10 +165,25 @@ impl<'a> MeshConverter<'a> {
     /// spanning parts (track belts between hull and wheels) stretch between them instead of
     /// tearing. The joints' inverse bind matrices are identities: vertices are part-local.
     pub fn convert_mesh_rigged(&self, mesh_path: &str, geom: usize, suffix: &str) -> Result<String> {
+        self.convert_mesh_rigged_lod(mesh_path, geom, 0, suffix)
+    }
+
+    /// [`Self::convert_mesh_rigged`] for one LOD of the geom (vehicles' lower LODs: the same
+    /// part numbering, so the same joints).
+    pub fn convert_mesh_rigged_lod(&self, mesh_path: &str, geom: usize, lod: usize, suffix: &str) -> Result<String> {
         let key = normalize(mesh_path);
-        let job = format!("{key}#{geom}.rig{suffix}");
+        let job = format!("{key}#{geom}.{lod}.rig{suffix}");
         let suffix = suffix.to_string();
-        self.once(&job, || self.convert_mesh_inner(key, geom, 0, &suffix, true))
+        self.once(&job, || self.convert_mesh_inner(key, geom, lod, &suffix, true))
+    }
+
+    /// Number of LODs of a geom of a visible mesh (0 if it can't be read).
+    pub fn lod_count(&self, mesh_path: &str, geom: usize) -> usize {
+        let key = normalize(mesh_path);
+        MeshKind::from_path(&key)
+            .and_then(|kind| VisMesh::parse(&self.vfs.read(&key).ok()?, kind).ok())
+            .and_then(|mesh| mesh.geoms.get(geom).map(|g| g.lods.len()))
+            .unwrap_or(0)
     }
 
     fn convert_mesh_inner(&self, key: String, geom: usize, lod: usize, suffix: &str, rigged: bool) -> Result<String> {

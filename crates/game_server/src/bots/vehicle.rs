@@ -24,10 +24,15 @@
 //! **Pilots** fly helicopters with the collective, cyclic and tail rotor: over the terrain and
 //! statics (the air map) at a safe height, transports to a landing spot by the objective,
 //! attack helicopters in circles around it, firing rockets when their nose is on a target.
-//! Jets take off, climb and patrol over the objectives, making gun and rocket runs.
+//! Transport pilots stay in once their passengers are out and fly back to where they took
+//! off, wait there for more and ferry them too (or park the helicopter there when nobody
+//! comes). Jets take off, climb and patrol over the objectives, making gun and rocket runs.
+//! Roles come from the vehicle's category: the F-35B has a rotor (its hover) but is a jet,
+//! and bots leave carrier jets alone (no runway ahead).
 //!
-//! **Getting out**: at the objective (riders of transports, everyone once a transport has
-//! landed), when the vehicle is badly damaged, on its roof, stuck for good, or its driver left.
+//! **Getting out**: at the objective (riders of transports, a pilot who flew there alone),
+//! when the vehicle is badly damaged (aircrews on the ground or high enough for their
+//! parachute), on its roof, stuck for good, or its driver left.
 
 use std::f32::consts::FRAC_PI_2;
 
@@ -47,6 +52,8 @@ const BOARD_DISTANCE: f32 = 90.0;
 const MOUNT_DISTANCE: f32 = 160.0;
 /// Seconds a driver waits for his squad to get in.
 const BOARD_WAIT: f32 = 14.0;
+/// Seconds a transport pilot back at base waits for passengers before he parks there.
+const BASE_WAIT: f32 = 60.0;
 /// Seconds a bot keeps away from vehicles after leaving one (and from that one for longer).
 const VEHICLE_COOLDOWN: f32 = 8.0;
 const ABANDON_COOLDOWN: f32 = 60.0;
@@ -174,6 +181,14 @@ pub(super) struct Ride {
     countermeasure_cooldown: f32,
     last_velocity: Vec3,
     airborne: bool,
+    /// Transport helicopters: where the pilot took off, whether he carries passengers this
+    /// trip, whether he flies back there after landing them, the trips he flew, and seconds
+    /// waiting at base for more.
+    home: Vec3,
+    carried: bool,
+    returning: bool,
+    trips: u32,
+    base_wait: f32,
 }
 
 impl Ride {
@@ -222,6 +237,11 @@ impl Ride {
             countermeasure_cooldown: 0.0,
             last_velocity: Vec3::ZERO,
             airborne: false,
+            home: position,
+            carried: false,
+            returning: false,
+            trips: 0,
+            base_wait: 0.0,
         }
     }
 
@@ -453,8 +473,10 @@ impl BotBrain {
             let Some(profile) = w.profile(&vehicle.template) else {
                 continue;
             };
-            // Upside down, or sunk, or out of walking reach.
-            if (motion.rotation * Vec3::Y).y < 0.5 || (distance > 12.0 && !walkable(data, motion)) {
+            // Upside down, or sunk, or out of walking reach (close by but far below, like a
+            // boat under a carrier's stern, counts too).
+            let far_off = distance > 12.0 || (motion.position.y - position.y).abs() > 4.0;
+            if (motion.rotation * Vec3::Y).y < 0.5 || (far_off && !walkable(data, motion)) {
                 continue;
             }
             let crew = vcx.crews.get(&entity).map_or(&[][..], |c| &c[..]);
@@ -604,7 +626,10 @@ impl BotBrain {
         } else {
             let distance = flat(entry - me.motion.position).length();
             intent.goal = Some(Goal {
-                position: Vec3::new(entry.x, me.motion.position.y.min(entry.y), entry.z),
+                // Feet below the entry point (it is where the chest gets to), not at our own
+                // height: from a carrier's catwalk that put the goal of a helicopter on the deck
+                // 1.4 m under the deck, so bots climbed up and down the ladder in between.
+                position: Vec3::new(entry.x, entry.y - 1.0, entry.z),
                 tolerance: 1.0,
                 sprint: distance > 8.0,
             });
@@ -709,8 +734,10 @@ impl BotBrain {
 
         // Reasons to get out.
         let health = seen.health_fraction();
-        // Without parachutes, aircrews only get out on the ground.
-        let grounded = !profile.role.flies() || w.height_above_ground(seen.motion.position, 10.0) < 3.0;
+        // Aircrews get out on the ground, or high enough up for their parachute to open
+        // (`vehicles::BAIL_OUT_HEIGHT`, 8 m) with a margin, not in between.
+        let height = if profile.role.flies() { w.height_above_ground(seen.motion.position, 30.0) } else { 0.0 };
+        let grounded = height < 3.0 || height > 15.0;
         if health < BAIL_OUT && profile.role != Role::Stationary && grounded {
             ride.leave("damaged");
         }
@@ -990,9 +1017,6 @@ impl BotBrain {
                         }
                     }
                 }
-            }
-            if aim.vehicle && frame.buttons.intersects(Buttons::FIRE | Buttons::AIM) {
-                vcx.claims.engage(aim.entity, me.team);
             }
         }
         true
@@ -1615,6 +1639,8 @@ impl BotBrain {
                 let angle = ride.orbit;
                 Some(area.position + Vec3::new(angle.cos(), 0.0, angle.sin()) * ORBIT_RADIUS)
             }
+            // Passengers dropped: back to where it took off, for the next ones.
+            (false, _) if ride.returning => Some(ride.home),
             (false, Some(area)) => {
                 // A landing spot beside the flag, found once.
                 if ride.goal.is_none_or(|g| g.distance(area.position) > area.radius + 150.0) {
@@ -1630,13 +1656,26 @@ impl BotBrain {
         };
         let pending = vcx.claims.pending(seen.entity);
         let spun_up = seen.state.engine > 0.95;
+        let riders = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());
+        if riders > 1 && ride.flight != Flight::Ground {
+            ride.carried = true;
+        }
         match ride.flight {
             Flight::Ground => {
                 let waiting = !attack && pending > 0 && ride.waited < BOARD_WAIT;
                 if waiting {
                     ride.waited += dt;
                 }
-                if spun_up && !waiting && destination.is_some() {
+                // Back at base after a trip: nobody aboard yet, so wait for passengers (squad
+                // members respawning on their leader, bots cut off on a carrier), and park it
+                // there if none come. It only takes off again with someone aboard.
+                let empty = !attack && ride.trips > 0 && riders <= 1;
+                if empty {
+                    ride.base_wait += dt;
+                    if ride.base_wait > BASE_WAIT {
+                        ride.leave("no passengers");
+                    }
+                } else if spun_up && !waiting && destination.is_some() {
                     ride.flight = Flight::Climb;
                 }
             }
@@ -1656,11 +1695,36 @@ impl BotBrain {
             _ => {}
         }
         if ride.flight == Flight::Land && height < 3.5 && motion.velocity.length() < 2.0 {
-            // Down: everyone out, the pilot too once they are.
             ride.arrived += dt;
-            let riders = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());
-            if riders <= 1 || ride.arrived > 6.0 {
+            if ride.returning {
+                // Home: wait there for the next passengers.
+                if ride.arrived > 1.0 {
+                    info!("{} is back at base with {}", w.name(me.player), seen.template);
+                    ride.returning = false;
+                    ride.flight = Flight::Ground;
+                    ride.waited = 0.0;
+                    ride.base_wait = 0.0;
+                    ride.arrived = 0.0;
+                }
+            } else if !attack && !ride.carried {
+                // Flew there alone (off a carrier): the objective was his own.
                 ride.leave("landed");
+            } else if !attack && (riders <= 1 || ride.arrived > 6.0) {
+                // Down by the objective: once everyone is out, the pilot stays in and flies back
+                // for more, like BF2's bot pilots, rather than leaving the helicopter there.
+                ride.trips += 1;
+                ride.carried = false;
+                info!(
+                    "{} dropped off {} with {}, flies back to base (trip {})",
+                    w.name(me.player),
+                    if riders <= 1 { "everyone" } else { "his passengers" },
+                    seen.template,
+                    ride.trips
+                );
+                ride.returning = true;
+                ride.flight = Flight::Climb;
+                ride.arrived = 0.0;
+                ride.waited = 0.0;
             }
         }
 

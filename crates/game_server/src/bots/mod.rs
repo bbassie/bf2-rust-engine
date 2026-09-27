@@ -368,6 +368,8 @@ pub struct BotBrain {
     unstuck_dir: f32,
     /// Recent stuck events; decays over time. Too many and the bot gives up on its goal.
     stuck_strikes: f32,
+    /// Recent times it got onto a ladder it didn't mean to take; decays over time.
+    unwanted_ladders: f32,
     path: Option<NavPath>,
     /// Index of the waypoint being walked to.
     waypoint: usize,
@@ -468,6 +470,7 @@ impl Default for BotBrain {
             unstuck_timer: 0.0,
             unstuck_dir: 1.0,
             stuck_strikes: 0.0,
+            unwanted_ladders: 0.0,
             path: None,
             waypoint: 0,
             path_goal: None,
@@ -822,14 +825,6 @@ impl BotBrain {
             }
         }
 
-        // Rockets and C4 at a vehicle: a wreck soon after counts as the team's.
-        match self.activity {
-            Activity::Launch { target: LaunchTarget::Vehicle(vehicle), fired, .. } if fired >= 0.0 => {
-                vcx.claims.engage(vehicle, me.team)
-            }
-            Activity::Demolish { vehicle, placed, .. } if placed > 0 => vcx.claims.engage(vehicle, me.team),
-            _ => {}
-        }
         team_stats.alive += dt;
         if self.activity == Activity::Engage {
             team_stats.fighting += dt;
@@ -1803,8 +1798,18 @@ impl BotBrain {
             direction = (direction + push.clamp_length_max(0.6)).normalize_or(direction);
         }
         let wants_move = direction.length_squared() > 0.01;
+        self.unwanted_ladders = (self.unwanted_ladders - dt / 8.0).max(0.0);
         if me.motion.climbing && !self.climbing {
             stats.climbs += 1;
+            // Onto a ladder it didn't mean to take (walking at a wall it hangs on): it jumps off
+            // (see `act`), and walking into it again and again is being stuck there.
+            if ladder.is_none() && intent.goal.is_some() {
+                self.unwanted_ladders += 1.0;
+                if self.unwanted_ladders >= 2.0 {
+                    self.unwanted_ladders = 0.0;
+                    self.stuck_event(position, stats);
+                }
+            }
         }
         self.climbing = me.motion.climbing;
 
@@ -1824,31 +1829,7 @@ impl BotBrain {
                 self.stuck_time = 0.0;
             }
             if self.stuck_time > 0.75 {
-                stats.stuck_events += 1;
-                let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
-                *stats.stuck_spots.entry(square).or_default() += 1;
-                stats.stuck_by_activity[match self.activity {
-                    Activity::Engage => 1,
-                    Activity::Cover { .. } | Activity::Flank { .. } => 2,
-                    _ => 0,
-                }] += 1;
-                self.stuck_time = 0.0;
-                self.unstuck_timer = 0.6 + fastrand::f32() * 0.8;
-                // First try jumping ahead (a ledge the grid thinks is lower), then sideways.
-                self.unstuck_dir = match self.stuck_strikes < 0.5 {
-                    true => 0.0,
-                    false if fastrand::bool() => 1.0,
-                    false => -1.0,
-                };
-                self.repath = true;
-                self.direct = false;
-                self.stuck_strikes += 1.0;
-                if self.stuck_strikes > 3.0 {
-                    // Keeps failing here: go somewhere else.
-                    self.stuck_strikes = 0.0;
-                    self.spot = None;
-                    self.via = None;
-                }
+                self.stuck_event(position, stats);
             }
         } else {
             self.stuck_time = 0.0;
@@ -1948,6 +1929,36 @@ impl BotBrain {
         frame
     }
 
+    /// Stuck where it is: wiggle free, then find a new path from there; after a few times
+    /// here, go somewhere else.
+    fn stuck_event(&mut self, position: Vec3, stats: &mut BotStats) {
+        stats.stuck_events += 1;
+        let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
+        *stats.stuck_spots.entry(square).or_default() += 1;
+        stats.stuck_by_activity[match self.activity {
+            Activity::Engage => 1,
+            Activity::Cover { .. } | Activity::Flank { .. } => 2,
+            _ => 0,
+        }] += 1;
+        self.stuck_time = 0.0;
+        self.unstuck_timer = 0.6 + fastrand::f32() * 0.8;
+        // First try jumping ahead (a ledge the grid thinks is lower), then sideways.
+        self.unstuck_dir = match self.stuck_strikes < 0.5 {
+            true => 0.0,
+            false if fastrand::bool() => 1.0,
+            false => -1.0,
+        };
+        self.repath = true;
+        self.direct = false;
+        self.stuck_strikes += 1.0;
+        if self.stuck_strikes > 3.0 {
+            // Keeps failing here: go somewhere else.
+            self.stuck_strikes = 0.0;
+            self.spot = None;
+            self.via = None;
+        }
+    }
+
     /// Requests paths as needed and walks them waypoint by waypoint. Without a path yet,
     /// heads straight for the goal. The path is kept while the goal moves less than
     /// `tolerance` meters.
@@ -2040,6 +2051,22 @@ impl BotBrain {
         if motion.climbing {
             // Height changes and no progress along the ground are what climbing is.
             self.waypoint_timer = 0.0;
+            // On the ladder a little before the point it is climbed from (walking into it at
+            // an angle gets on it within reach of the rungs): that is the ladder it means to
+            // take, not one to jump off again.
+            if waypoint.ladder.is_none()
+                && let Some(next) = path.waypoints.get(self.waypoint + 1)
+                && next.ladder.is_some()
+                && flat(waypoint.position - position).length() < 1.5
+            {
+                self.waypoint += 1;
+                self.waypoint_best = f32::MAX;
+                return Steer::Toward {
+                    target: next.position,
+                    jump: false,
+                    ladder: next.ladder,
+                };
+            }
             return Steer::Toward {
                 target: waypoint.position,
                 jump: false,

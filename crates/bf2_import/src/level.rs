@@ -213,6 +213,8 @@ pub fn import_level(
         .flat_map(|g| &g.vehicle_spawners)
         .flat_map(|s| s.templates.iter().flatten().cloned())
         .collect();
+    // The commander's UAV flies as a vehicle too.
+    vehicle_names.extend(crate::commander::uav_vehicle(&mut interp));
     vehicle_names.sort();
     vehicle_names.dedup();
     let missing_templates = interp.missing_templates.keys().cloned().collect();

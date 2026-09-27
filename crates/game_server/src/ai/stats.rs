@@ -5,18 +5,19 @@
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_shared::{
     conquest::{ControlPoint, FlagState, team_index},
-    protocol::Team,
+    protocol::{Player, Team},
     squad::squad_name,
+    weapons::Armory,
 };
-
-use game_shared::{vehicle::VehicleHealth, weapons::Armory};
 
 use super::{
     squad::SquadSnapshot,
     strategy::{OrderKind, StrategicMap, Strategy},
-    vehicles::VehicleClaims,
 };
-use crate::{bots::BotBrain, combat::Died};
+use crate::{
+    bots::BotBrain,
+    combat::{Died, VehicleDestroyed},
+};
 
 #[derive(Resource, Default)]
 pub struct AiStats {
@@ -130,28 +131,23 @@ impl AiStats {
 }
 
 /// Counts flags changing hands, deaths and vehicles bots destroyed.
-#[allow(clippy::too_many_arguments)]
 pub fn track_events(
     mut stats: ResMut<AiStats>,
     mut deaths: MessageReader<Died>,
+    mut destroyed: MessageReader<VehicleDestroyed>,
+    players: Query<(&Player, &Team)>,
     flags: Query<(Entity, &FlagState), (With<ControlPoint>, Changed<FlagState>)>,
     control_points: Query<(), With<ControlPoint>>,
     mut owners: Local<HashMap<Entity, Team>>,
-    vehicles: Query<(Entity, &VehicleHealth), Changed<VehicleHealth>>,
-    mut wrecks: Local<bevy::platform::collections::HashSet<Entity>>,
-    claims: Res<VehicleClaims>,
 ) {
-    for (vehicle, health) in &vehicles {
-        if health.wrecked()
-            && wrecks.insert(vehicle)
-            && let Some((team, at)) = claims.engaged.get(&vehicle)
-            && claims.now() - at < 6.0
+    for kill in destroyed.read() {
+        if let Some((player, team)) = kill.by.and_then(|by| players.get(by).ok())
+            && player.is_bot
             && let Some(t) = team_index(*team)
         {
             stats.teams[t].vehicle_kills += 1;
         }
     }
-    wrecks.retain(|v| vehicles.contains(*v) || claims.engaged.contains_key(v));
     for death in deaths.read() {
         if let Some(t) = team_index(death.team) {
             stats.teams[t].deaths += 1;

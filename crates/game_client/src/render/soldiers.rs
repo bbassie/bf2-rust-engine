@@ -9,9 +9,14 @@
 //! weapon's one-shots on the upper body; a switch lowers the old weapon, swaps the model
 //! out of view and raises the new one. Soldiers in vehicles sit at their seat, drawn where
 //! the vehicle is drawn, in their seat's pose (BF2's seat animations).
+//!
+//! The body's lower levels of detail (meshes `body_lod1`, ... in the model, on the same
+//! skeleton) are drawn by distance, cross-fading, and soldiers with their weapons fade out
+//! past BF2's cull distance for them (see `unit_lods`).
 
 use bevy::{
     app::AnimationSystems,
+    camera::primitives::MeshAabb,
     gltf::{Gltf, GltfMesh},
     platform::collections::HashMap,
     prelude::*,
@@ -33,6 +38,7 @@ use game_shared::{
 use super::{
     blend::{BlendLayer, Clip, Play},
     materials::Bf2Materials,
+    unit_lods::{UnitLod, UnitLodConfig, small_part_draw_distance},
 };
 use crate::{
     combat::CombatFeedback,
@@ -237,10 +243,41 @@ const DEFAULT_WEAPON_ANIMATIONS: &str = "objects/weapons/handheld/rurif_ak47/ani
 struct SoldierModels {
     /// The model each team wears (its first kit's body for now).
     teams: [Option<Handle<Gltf>>; 2],
+    /// Where each team model's body LODs start and how far it is drawn.
+    lods: [Option<BodyLods>; 2],
     /// Weapon upper-body animation sets by path.
     weapon_sets: HashMap<String, Handle<Gltf>>,
     /// One graph per team model.
     graphs: [Option<ModelAnimations>; 2],
+}
+
+/// Where a body's levels of detail start (the first at 0; `body`, `body_lod1`, ...) and how
+/// far the soldier is drawn, before scaling.
+#[derive(Clone, Debug)]
+struct BodyLods {
+    starts: Arc<[f32]>,
+    draw_distance: Option<f32>,
+    /// The soldier's cull radius, which small parts (weapons) are measured against.
+    cull_radius: f32,
+}
+
+impl BodyLods {
+    /// The level of detail a mesh of the model draws, by its (or its node's) name.
+    fn level(name: &str) -> Option<usize> {
+        let node = name.split('.').next()?;
+        match node {
+            "body" => Some(0),
+            _ => node.strip_prefix("body_lod")?.parse().ok(),
+        }
+    }
+
+    fn lod(&self, level: usize) -> UnitLod {
+        UnitLod {
+            starts: self.starts.clone(),
+            draw_distance: self.draw_distance,
+            level,
+        }
+    }
 }
 
 /// A team model's animation graph: its movement clips plus the upper-body clips of every
@@ -414,11 +451,12 @@ fn load_team_models(
     level: Res<LoadedLevel>,
     paths: Res<GamePaths>,
     asset_server: Res<AssetServer>,
+    config: Res<UnitLodConfig>,
     mut models: ResMut<SoldierModels>,
 ) {
     models.graphs = default();
-    for (index, slot) in models.teams.iter_mut().enumerate() {
-        *slot = level
+    for index in 0..2 {
+        let desc = level
             .desc
             .teams
             .get(index)
@@ -428,8 +466,13 @@ fn load_team_models(
                     .read_ron::<SoldierDesc>(format!("soldiers/{}.ron", kit.soldier))
                     .map_err(|err| warn!("soldier model: {err:#}"))
                     .ok()
-            })
-            .map(|desc| asset_server.load(format!("imported://{}", desc.mesh)));
+            });
+        models.teams[index] = desc.as_ref().map(|desc| asset_server.load(format!("imported://{}", desc.mesh)));
+        models.lods[index] = desc.filter(|_| config.enabled).map(|desc| BodyLods {
+            starts: std::iter::once(0.0).chain(desc.lods.iter().copied()).collect(),
+            draw_distance: desc.draw_distance,
+            cull_radius: desc.cull_radius,
+        });
     }
 }
 
@@ -569,18 +612,30 @@ fn attach_models(
             attach_capsule(&mut commands, entity, team, &placeholder);
             continue;
         };
+        let lods = wanted.and_then(|i| models.lods[i].clone());
         commands.spawn((WorldAssetRoot(scene), ChildOf(entity))).observe(
-            |ready: On<WorldInstanceReady>,
-             mut commands: Commands,
-             children: Query<&Children>,
-             players: Query<(), With<AnimationPlayer>>,
-             names: Query<&Name>,
-             parents: Query<&ChildOf>| {
+            move |ready: On<WorldInstanceReady>,
+                  mut commands: Commands,
+                  children: Query<&Children>,
+                  players: Query<(), With<AnimationPlayer>>,
+                  meshes: Query<(), With<Mesh3d>>,
+                  names: Query<&Name>,
+                  parents: Query<&ChildOf>| {
                 let mut player = None;
                 let mut weapon_bones = [None; 8];
                 for descendant in children.iter_descendants(ready.entity) {
                     if players.contains(descendant) {
                         player = Some(descendant);
+                    }
+                    // Body meshes are drawn in their LOD's distance band.
+                    if let Some(lods) = &lods
+                        && meshes.contains(descendant)
+                    {
+                        let name = |e: Entity| names.get(e).ok().and_then(|n| BodyLods::level(n.as_str()));
+                        let level = name(descendant).or_else(|| parents.get(descendant).ok().and_then(|p| name(p.parent())));
+                        if let Some(level) = level {
+                            commands.entity(descendant).insert(lods.lod(level));
+                        }
                     }
                     if let Ok(name) = names.get(descendant)
                         && let Some(n) = name.as_str().strip_prefix("mesh").and_then(|n| n.parse::<usize>().ok())
@@ -648,10 +703,19 @@ fn attach_weapons(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     mut materials: Bf2Materials,
+    models: Res<SoldierModels>,
+    meshes_assets: Res<Assets<Mesh>>,
     soldiers: Query<(Option<&Loadout>, Option<&Inventory>)>,
-    mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&SoldierAnimator>, Option<&mut HeldWeapon>)>,
+    mut visuals: Query<(
+        Entity,
+        &SoldierVisual,
+        &ModelRig,
+        Option<&SoldierAnimator>,
+        Option<&mut HeldWeapon>,
+        Option<&AttachedBody>,
+    )>,
 ) {
-    for (entity, visual, rig, animator, held) in &mut visuals {
+    for (entity, visual, rig, animator, held, body) in &mut visuals {
         let Ok((loadout, inventory)) = soldiers.get(visual.soldier) else {
             continue;
         };
@@ -710,13 +774,29 @@ fn attach_weapons(
         };
         let mut part_materials = part_materials.into_iter();
         let mut parts = Vec::new();
+        // The weapon fades out with the soldier, or sooner as a small part of him (BF2 culls
+        // carried weapons on their own).
+        let bounds = meshes
+            .iter()
+            .flat_map(|(_, mesh)| &mesh.primitives)
+            .filter_map(|primitive| meshes_assets.get(&primitive.mesh)?.compute_aabb())
+            .fold(None, |acc: Option<(Vec3, Vec3)>, aabb| {
+                let (min, max) = (Vec3::from(aabb.min()), Vec3::from(aabb.max()));
+                Some(acc.map_or((min, max), |(a, b)| (a.min(min), b.max(max))))
+            });
+        let radius = bounds.map_or(0.0, |(min, max)| (max - min).length() * 0.5);
+        let lod = body.and_then(|b| b.0).and_then(|i| models.lods[i].as_ref()).map(|l| UnitLod {
+            starts: Arc::from([0.0]),
+            draw_distance: small_part_draw_distance(radius, l.cull_radius).or(l.draw_distance),
+            level: 0,
+        });
         for (bone, mesh) in meshes {
             for (primitive, material) in mesh.primitives.iter().zip(part_materials.by_ref()) {
-                parts.push(
-                    commands
-                        .spawn((Mesh3d(primitive.mesh.clone()), MeshMaterial3d(material), ChildOf(bone)))
-                        .id(),
-                );
+                let mut part = commands.spawn((Mesh3d(primitive.mesh.clone()), MeshMaterial3d(material), ChildOf(bone)));
+                if let Some(lod) = &lod {
+                    part.insert(lod.clone());
+                }
+                parts.push(part.id());
             }
         }
         held.parts = parts;

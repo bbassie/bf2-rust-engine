@@ -614,6 +614,8 @@ pub struct Interpreter<'a> {
     loaded: HashSet<String>,
     parsed: HashMap<String, Arc<Vec<Node>>>,
     template_index: Option<HashMap<String, String>>,
+    /// Templates whose children [`Self::ensure_template`] has loaded.
+    children_loaded: HashSet<String>,
     depth: u32,
     pub missing_files: BTreeMap<String, u32>,
     pub missing_templates: BTreeMap<String, u32>,
@@ -633,6 +635,7 @@ impl<'a> Interpreter<'a> {
             loaded: HashSet::new(),
             parsed: HashMap::new(),
             template_index: None,
+            children_loaded: HashSet::new(),
             depth: 0,
             missing_files: BTreeMap::new(),
             missing_templates: BTreeMap::new(),
@@ -647,12 +650,38 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Makes sure a template is defined, loading `<name>.con` (or `<name>_compiled.con`
-    /// for compiled roads) from anywhere under `objects/` if needed.
+    /// for compiled roads) from anywhere under `objects/` if needed, and so are the child
+    /// templates it adds (`ObjectTemplate.addTemplate`): the game loads those on demand too,
+    /// e.g. the carrier's ladders, which live in files of their own that only the editor's
+    /// part of `StaticObjects.con` runs.
     pub fn ensure_template(&mut self, name: &str) {
         let key = name.to_ascii_lowercase();
-        if !self.lazy_templates || self.world.templates.contains_key(&key) {
+        if !self.lazy_templates {
             return;
         }
+        self.load_template(&key);
+        self.ensure_children(&key, 0);
+    }
+
+    fn ensure_children(&mut self, key: &str, depth: u32) {
+        let Some(template) = self.world.templates.get(key) else {
+            return;
+        };
+        if depth > 16 || template.children.is_empty() || !self.children_loaded.insert(key.to_string()) {
+            return;
+        }
+        let children: Vec<String> = template.children.iter().map(|c| c.template.to_ascii_lowercase()).collect();
+        for child in children {
+            self.load_template(&child);
+            self.ensure_children(&child, depth + 1);
+        }
+    }
+
+    fn load_template(&mut self, key: &str) {
+        if self.world.templates.contains_key(key) {
+            return;
+        }
+        let key = key.to_string();
         let vfs = self.vfs;
         let index = self.template_index.get_or_insert_with(|| build_template_index(vfs));
         let paths: Vec<String> = [key.clone(), format!("{key}_compiled")]

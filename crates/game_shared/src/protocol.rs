@@ -55,6 +55,7 @@ impl Plugin for ProtocolPlugin {
             .replicate::<crate::commander::SquadOrder>()
             .replicate::<crate::commander::TeamAssets>()
             .replicate::<crate::commander::AssetEffect>()
+            .replicate::<crate::commander::AssetVehicle>()
             .replicate::<crate::gear::SoldierGear>()
             .replicate::<crate::gear::TearGas>()
             .add_client_message::<crate::gear::GearRequest>(Channel::Ordered)
@@ -79,6 +80,7 @@ impl Plugin for ProtocolPlugin {
             .add_client_message::<crate::revive::GiveUp>(Channel::Ordered)
             .add_client_message::<crate::radio::RadioRequest>(Channel::Ordered)
             .add_client_message::<crate::commander::CommanderRequest>(Channel::Ordered)
+            .add_server_message::<crate::commander::ScanReport>(Channel::Unordered)
             .add_mapped_server_message::<crate::radio::RadioMessage>(Channel::Ordered)
             .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered);
     }

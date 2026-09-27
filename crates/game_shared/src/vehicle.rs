@@ -604,6 +604,13 @@ impl VehicleSim {
 #[derive(Component)]
 pub struct Stationary;
 
+/// Server-side: a vehicle nobody drives (BF2's remote controlled objects, see
+/// [`game_data::RemoteKind`]): the commander's systems move it (the UAV is a kinematic body
+/// flown along its circle) and turn its joints (artillery), the driving simulation leaves
+/// it alone.
+#[derive(Component)]
+pub struct Remote;
+
 /// Gives every vehicle its collider, and on the server a dynamic rigid body.
 fn add_vehicle_physics(
     add: On<Add, Vehicle>,
@@ -654,8 +661,16 @@ fn add_vehicle_physics(
             max: desc.hit_points,
         },
     ));
+    if desc.remote.is_some() {
+        entity.insert(Remote);
+    }
     if desc.category == VehicleCategory::Stationary {
         entity.insert((RigidBody::Static, Stationary));
+        return;
+    }
+    if desc.remote.is_some() {
+        // Flown along a path; it only falls once shot down (see `game_server::commander`).
+        entity.insert((RigidBody::Kinematic, Mass(desc.physics.mass), TransformInterpolation));
         return;
     }
     let (linear, angular) = body_damping(desc);
@@ -712,7 +727,7 @@ fn simulate_vehicles(
             Forces,
             Has<Sleeping>,
         ),
-        Without<Stationary>,
+        (Without<Stationary>, Without<Remote>),
     >,
 ) {
     let dt = time.delta_secs();

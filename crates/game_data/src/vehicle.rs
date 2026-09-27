@@ -68,6 +68,9 @@ pub struct VehicleDesc {
     pub wreck_mesh: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub wreck_pieces: u32,
+    /// Lower levels of detail of `wreck_mesh` (laid out like it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wreck_lods: Vec<crate::MeshLod>,
     /// Smoke, fire and explosions of its damage states (`armor.addArmorEffect`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub armor_effects: Vec<VehicleArmorEffect>,
@@ -90,6 +93,57 @@ pub struct VehicleDesc {
     pub weapons: Vec<VehicleWeaponDesc>,
     #[serde(default)]
     pub sounds: VehicleSounds,
+    /// Nobody sits in it: BF2's remote controlled objects. The commander's artillery turns
+    /// and fires where he calls a strike; the UAV flies its circle over the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteKind>,
+    /// The wreck stays until engineers repair it, instead of burning down (BF2
+    /// `armor.canBeDestroyed 0` with `canBeRepairedWhenWreck 1`: the commander's assets).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repairable_wreck: bool,
+    /// Lower levels of detail of the outside models (BF2's LODs of geom 1): per model file
+    /// (a part's `mesh`), rigged files laid out like it, each drawn from its distance on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lods: Vec<ModelLods>,
+    /// Distance from the camera (m) where BF2 has faded it out (its cull rule for player
+    /// control objects); `None`: drawn as far as the view reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_distance: Option<f32>,
+}
+
+/// What drives a remote controlled vehicle.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteKind {
+    /// Commander artillery (`RemoteControlledObject` with `rcType RCArtillery`).
+    Artillery,
+    /// The commander's UAV (`UAVVehicle`).
+    Uav,
+}
+
+/// The lower LODs of one model file, and how far it is drawn.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ModelLods {
+    /// The full-detail model, as a part's `mesh` names it.
+    pub mesh: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lods: Vec<crate::MeshLod>,
+    /// A small part with a model of its own (a tail rotor) fades out here, sooner than the
+    /// vehicle (BF2 culls it on its own); `None`: with the vehicle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_distance: Option<f32>,
+}
+
+impl VehicleDesc {
+    /// The lower LODs of a model file (none for interiors and old imports).
+    pub fn model_lods(&self, mesh: &str) -> &[crate::MeshLod] {
+        self.lods.iter().find(|l| l.mesh == mesh).map_or(&[], |l| l.lods.as_slice())
+    }
+
+    /// How far a model file is drawn: its own draw distance (small parts), else the
+    /// vehicle's.
+    pub fn model_draw_distance(&self, mesh: &str) -> Option<f32> {
+        self.lods.iter().find(|l| l.mesh == mesh).and_then(|l| l.draw_distance).or(self.draw_distance)
+    }
 }
 
 impl VehicleDesc {

@@ -48,7 +48,8 @@ impl Localization {
             };
             let key = key.trim();
             let value = rest.trim_start_matches('\x1b');
-            let value = value.split("\x1b\x1b").next().unwrap_or(value);
+            // Some texts end in stray (non-breaking) spaces, e.g. Warlord's "Palace, Third Floor".
+            let value = value.split("\x1b\x1b").next().unwrap_or(value).trim();
             if !key.is_empty() {
                 self.strings.insert(key.to_ascii_lowercase(), value.to_string());
             }
@@ -61,7 +62,7 @@ impl Localization {
 
     /// The text for `key`, or `key` itself if there is none.
     pub fn resolve(&self, key: &str) -> String {
-        self.get(key).unwrap_or(key).to_string()
+        self.get(key).unwrap_or(key.trim()).to_string()
     }
 
     pub fn len(&self) -> usize {
@@ -100,9 +101,11 @@ mod tests {
         loc.parse(
             "ID_LANGUAGE        \x1b\x1bEnglish\x1b\x1b\r\n\
              CPNAME_SK_16_hotel \x1b\x1bHotel\x1b\x1b\r\n\
-             EMPTY_TEXT         \x1b\x1b\x1b\x1b\n",
+             EMPTY_TEXT         \x1b\x1b\x1b\x1b\n\
+             CPNAME_WL_THIRD    \x1b\x1bPalace, Third Floor\u{a0}\u{a0}\u{a0} \x1b\x1b\n",
         );
         assert_eq!(loc.get("cpname_sk_16_HOTEL"), Some("Hotel"));
+        assert_eq!(loc.get("CPNAME_WL_THIRD"), Some("Palace, Third Floor"));
         assert_eq!(loc.get("EMPTY_TEXT"), Some(""));
         assert_eq!(loc.resolve("missing"), "missing");
     }

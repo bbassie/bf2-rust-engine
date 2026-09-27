@@ -13,6 +13,7 @@ use std::{path::PathBuf, time::Duration};
 
 use bevy::{
     app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin},
+    ecs::schedule::{Schedules, SingleThreadedExecutor},
     log::LogPlugin,
     prelude::*,
     state::app::StatesPlugin,
@@ -105,6 +106,13 @@ struct Cli {
     /// a rotation: restart the map).
     #[arg(long)]
     soak_rotate: Option<f32>,
+    /// Log where the server's time goes (per system, schedule and command flush) with each
+    /// soak report. Needs a build with `--features profile` for the per-system part.
+    #[arg(long)]
+    profile_ticks: bool,
+    /// Run each schedule's systems on several threads (Bevy's default) rather than in turn.
+    #[arg(long)]
+    parallel_schedules: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -236,7 +244,10 @@ fn main() -> AppExit {
         MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / (TICK_HZ * 2.0),
         ))),
-        LogPlugin::default(),
+        LogPlugin {
+            custom_layer: if cli.profile_ticks { game_server::profile::layer } else { |_| None },
+            ..default()
+        },
         TerminalCtrlCHandlerPlugin,
         StatesPlugin,
         TransformPlugin,
@@ -252,12 +263,24 @@ fn main() -> AppExit {
             settings: Some(settings),
         },
     ));
-    if let Some(minutes) = cli.soak {
+    // Profiling reports with the soak's reports; without `--soak` they go on forever.
+    let soak = cli.soak.or(cli.profile_ticks.then_some(0.0));
+    if let Some(minutes) = soak {
         app.add_plugins(game_server::soak::SoakPlugin {
             duration: (minutes > 0.0).then(|| Duration::from_secs_f32(minutes * 60.0)),
             every: cli.soak_every,
             rotate_every: cli.soak_rotate.filter(|m| *m > 0.0).map(|m| Duration::from_secs_f32(m * 60.0)),
         });
+    }
+    // Single-threaded schedules: nearly every server system is tiny, and handing each one to
+    // a thread cost more than running them in turn (Karkand, 32 bots: ticks 2.65 -> 1.65 ms,
+    // frames 2.7 -> 1.3 ms). Systems with real work split it themselves (`par_iter`), and
+    // avian runs its own schedules single-threaded for the same reason.
+    if !cli.parallel_schedules {
+        let mut schedules = app.world_mut().resource_mut::<Schedules>();
+        for (_, schedule) in schedules.iter_mut() {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        }
     }
     app.run()
 }

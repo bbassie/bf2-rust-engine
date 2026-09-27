@@ -1,0 +1,37 @@
+// Vehicle LODs up close and far away: the parked M1A2 at Karkand's Gas Station seen from
+// 10 m to 400 m, a little from above (BF2 switches its 3P model at 19.5, 34.5 and 99.5 m and
+// fades it out at 375 m). Compare with BF2_UNIT_LODS=off (full detail, no culling): the
+// switches should not show.
+// client --scenario scenarios/lod_vehicles.ron --out target/scenarios/lod_vehicles/on
+// BF2_UNIT_LODS=off client --scenario scenarios/lod_vehicles.ron --out target/scenarios/lod_vehicles/off
+(
+    level: "strike_at_karkand",
+    size: 64,
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-172.8, 165.2, 318.6), 0.0, -17.0),
+        Wait(1.5),
+        Screenshot("tank_010m"),
+        Camera((-172.8, 169.7, 332.9), 0.0, -17.0),
+        Wait(1.0),
+        Screenshot("tank_025m"),
+        Camera((-172.8, 177.2, 356.6), 0.0, -17.0),
+        Wait(1.0),
+        Screenshot("tank_050m"),
+        Camera((-172.8, 192.2, 404.1), 0.0, -17.0),
+        Wait(1.0),
+        Screenshot("tank_100m"),
+        Camera((-172.8, 222.2, 499.1), 0.0, -17.0),
+        Wait(1.0),
+        Screenshot("tank_200m"),
+        Camera((-172.8, 252.2, 24.1), 180.0, -17.0),
+        Wait(1.0),
+        Screenshot("tank_300m"),
+        Camera((-172.8, 282.2, -70.9), 180.0, -17.0),
+        Wait(1.0),
+        Screenshot("tank_400m"),
+        Quit,
+    ],
+)

@@ -1,0 +1,86 @@
+// The commander's assets as vehicles on Strike at Karkand (64 players, US), played as an
+// engineer who takes the commander post. The US artillery (two M198s, `usart_lw155`, at the
+// Gas Station) is idle, then a strike on the Train Accident turns both onto the target and
+// they fire their bursts (5 shells each, one every 2 s): the shells arc over the city and
+// land on the strike's timing. The UAV circles over the Hotel and is shot down (it falls and
+// burns). One gun is destroyed: it stays a wreck, the commander screen counts one gun, and
+// the engineer repairs it with the wrench.
+// RUST_LOG=info,game_server::commander=debug target/debug/deps/client.exe --scenario scenarios/commander_assets.ron --out target/scenarios/commander_assets
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Commander(Apply),
+        Kill,
+        Wait(1.0),
+        Click("kit:4"),
+        Wait(11.0),
+        // The guns at rest, from beside the first one (the second is behind us).
+        Teleport((-165.0, 163.0, 118.0), -100.0, 8.0),
+        Wait(1.5),
+        Screenshot("guns_idle"),
+        Commander(Use(asset: Artillery, target: (-122.0, 150.0, -257.0))),
+        Wait(0.75),
+        Screenshot("guns_aimed"),
+        Wait(0.15),
+        Screenshot("guns_firing"),
+        // The first shells climbing away.
+        Look(-60.0, 25.0),
+        Wait(0.25),
+        Screenshot("shells_climbing_1"),
+        Wait(0.3),
+        Screenshot("shells_climbing_2"),
+        // Coming down on the target.
+        Teleport((-122.0, 150.3, -200.0), 0.0, 3.0),
+        Wait(2.0),
+        Screenshot("impact_1"),
+        Wait(0.5),
+        Screenshot("impact_2"),
+        Wait(1.5),
+        Screenshot("impact_3"),
+        Wait(3.0),
+        // The UAV over the Hotel.
+        Commander(Use(asset: Uav, target: (-194.0, 158.0, -11.0))),
+        Teleport((-150.0, 161.5, 60.0), 32.0, 58.0),
+        Wait(3.0),
+        Screenshot("uav"),
+        LogVehicles("uav_pred"),
+        DamageVehicleAt((-194.0, 278.0, -11.0), 500.0),
+        Wait(1.0),
+        Screenshot("uav_hit"),
+        Look(32.0, 30.0),
+        Wait(2.0),
+        Screenshot("uav_falling"),
+        Wait(2.0),
+        Screenshot("uav_crashed"),
+        // One gun destroyed: a wreck; the screen counts one gun.
+        Teleport((-165.0, 163.0, 118.0), -100.0, 0.0),
+        DamageVehicleAt((-141.581, 162.502, 122.09), 2000.0),
+        Wait(2.0),
+        Screenshot("gun_wreck"),
+        Key(CapsLock),
+        Wait(0.3),
+        Click("cmd:asset:artillery"),
+        Wait(0.5),
+        Screenshot("screen_one_gun"),
+        Key(CapsLock),
+        Wait(0.3),
+        // The engineer repairs it.
+        Teleport((-146.5, 163.0, 121.0), -102.0, -25.0),
+        Weapon(2),
+        Wait(1.5),
+        Hold([Fire]),
+        Wait(20.0),
+        Screenshot("repairing"),
+        Wait(22.0),
+        Release([Fire]),
+        Teleport((-165.0, 163.0, 118.0), -100.0, 0.0),
+        Wait(1.5),
+        Screenshot("repaired"),
+        LogVehicles("all at the end"),
+        Quit,
+    ],
+)

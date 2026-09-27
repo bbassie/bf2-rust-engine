@@ -14,15 +14,16 @@ use std::{collections::HashMap, path::Path};
 use anyhow::Result;
 use bf2_formats::{
     collision::{ColType, CollisionMesh},
-    con::{Interpreter, Template, World, parse_vec3},
+    con::{Geometry, Interpreter, Template, World, parse_vec3},
     localization::Localization,
     mesh::{MeshKind, Usage, VisMesh},
 };
 use game_data::{
     AeroDesc, AfterburnerDesc, Attachment, CountermeasureDesc, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc,
-    GearDesc, GearboxDesc, JointAxis, JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera,
-    SeatDesc, ThrusterDesc, TrackWheelDesc, UvAnimationDesc, UvMotion, VehicleArmorEffect, VehicleCategory,
-    VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc, WingDesc,
+    GearDesc, GearboxDesc, JointAxis, JointDesc, JointInput, LandingGearDesc, MeshLod, ModelLods, Placement,
+    RemoteKind, RotorDesc, SeatCamera, SeatDesc, ThrusterDesc, TrackWheelDesc, UvAnimationDesc, UvMotion,
+    VehicleArmorEffect, VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc,
+    WingDesc,
 };
 use glam::{Affine3A, Quat, Vec3};
 
@@ -43,6 +44,8 @@ const PART_TYPES: &[&str] = &[
     "landinggear",
     "rotor",
     "floatingbundle",
+    // The commander's UAV (its root).
+    "uavvehicle",
 ];
 
 /// BF2's lift, thrust and drag numbers in our units (fitted by flying, see
@@ -181,6 +184,9 @@ struct Builder<'a> {
     seats: Vec<u32>,
     cameras: Vec<(u32, String, Placement)>,
     entry_points: Vec<EntryPointDesc>,
+    /// Lower LODs of the outside models met so far, with the part that owns each model and
+    /// the model's radius (half the diagonal of its full-detail box).
+    lods: Vec<(ModelLods, usize, f32)>,
 }
 
 /// A part's model: the BF2 mesh file, its converted outside view and interior.
@@ -239,29 +245,34 @@ impl Builder<'_> {
         // Meshes: vehicles and guns keep the third-person model in geom 1 and the interior
         // (cockpits, gunner sights) in geom 0. Skinned parts (swaying antennas) need their
         // skeleton, which isn't imported for vehicles yet.
-        let own_mesh = template
+        let geometry = template
             .geometry
             .as_deref()
             .and_then(|g| self.world.geometry(g))
-            .filter(|g| !g.ty.eq_ignore_ascii_case("SkinnedMesh"))
-            .and_then(|g| g.mesh_path())
-            .and_then(|path| {
-                let (outside, interior) = match self.converter.convert_mesh_rigged(&path, 1, "_rig3p") {
-                    Ok(outside) => (outside, self.converter.convert_mesh_rigged(&path, 0, "_rig1p").ok()),
-                    Err(_) => (
-                        self.converter
-                            .convert_mesh_rigged(&path, 0, "_rig")
-                            .map_err(|e| log::debug!("vehicle mesh {path}: {e:#}"))
-                            .ok()?,
-                        None,
-                    ),
-                };
-                Some(PartMesh {
-                    source: path,
-                    outside,
-                    interior,
-                })
-            });
+            .filter(|g| !g.ty.eq_ignore_ascii_case("SkinnedMesh"));
+        let own_mesh = geometry.and_then(|g| g.mesh_path()).and_then(|path| {
+            let (outside, interior, geom, suffix) = match self.converter.convert_mesh_rigged(&path, 1, "_rig3p") {
+                Ok(outside) => (outside, self.converter.convert_mesh_rigged(&path, 0, "_rig1p").ok(), 1, "_rig3p"),
+                Err(_) => (
+                    self.converter
+                        .convert_mesh_rigged(&path, 0, "_rig")
+                        .map_err(|e| log::debug!("vehicle mesh {path}: {e:#}"))
+                        .ok()?,
+                    None,
+                    0,
+                    "_rig",
+                ),
+            };
+            if !self.lods.iter().any(|(l, ..)| l.mesh == outside) {
+                let (lods, radius) = model_lods(self.converter, geometry, &path, geom, suffix, &outside);
+                self.lods.push((lods, self.parts.len(), radius));
+            }
+            Some(PartMesh {
+                source: path,
+                outside,
+                interior,
+            })
+        });
         let own_source_collision = template
             .collision_mesh
             .as_deref()
@@ -435,10 +446,121 @@ fn spin_joint(t: &Template) -> Option<JointDesc> {
     Some(JointDesc { axes, seat: 0 })
 }
 
+/// Lower LODs of a rigged model: LOD 1.. of geom `geom` as `x{suffix}_lod{N}.glb`, each
+/// taking over where BF2 switches (its `setSubGeometryLodDistance` or the engine's running
+/// default, plus `r0`, half the diagonal of the geom's LOD 0 box). Also returns `r0`.
+fn model_lods(
+    converter: &MeshConverter,
+    geometry: Option<&Geometry>,
+    path: &str,
+    geom: usize,
+    suffix: &str,
+    outside: &str,
+) -> (ModelLods, f32) {
+    let count = converter.lod_count(path, geom);
+    let r0 = converter.lod0_half_diagonal(path, geom).unwrap_or(0.0);
+    let starts = crate::lods::lod_starts(&crate::lods::lod_distances(geometry, geom, count));
+    let mut lods = Vec::new();
+    for (index, distance) in starts.into_iter().enumerate() {
+        let lod = index + 1;
+        match converter.convert_mesh_rigged_lod(path, geom, lod, &format!("{suffix}_lod{lod}")) {
+            Ok(mesh) => lods.push(MeshLod {
+                mesh,
+                distance: distance * crate::lods::BUNDLED_LOD_SCALE + r0,
+            }),
+            Err(err) => {
+                log::warn!("{path} geom {geom} LOD {lod}: {err:#}");
+                break;
+            }
+        }
+    }
+    let lods = ModelLods {
+        mesh: outside.to_string(),
+        lods,
+        draw_distance: None,
+    };
+    (lods, r0)
+}
+
+/// BF2's radius of an object (`Object::getRadius`) for each part of the tree: the part's
+/// collision radius (the farthest corner of its collision part's box, from its first geom
+/// and column that has faces), grown over its children by their distance plus their own
+/// radius.
+fn part_radii(world: &World, converter: &MeshConverter, nodes: &[Node], parts: &[VehiclePart]) -> Vec<f32> {
+    let mut meshes: HashMap<String, Option<CollisionMesh>> = HashMap::new();
+    let mut radii: Vec<f32> = nodes
+        .iter()
+        .map(|node| {
+            let Some((path, _)) = &node.source_collision else {
+                return 0.0;
+            };
+            let mesh = meshes
+                .entry(path.clone())
+                .or_insert_with(|| converter.vfs.read(path).ok().and_then(|data| CollisionMesh::parse(&data).ok()));
+            let collision_part = world
+                .template(&node.template)
+                .and_then(|t| t.get_f32("collisionpart"))
+                .unwrap_or(0.0) as usize;
+            mesh.as_ref()
+                .and_then(|m| m.parts.get(collision_part))
+                .and_then(|part| part.geoms.iter().flat_map(|g| &g.cols).find(|c| !c.faces.is_empty()))
+                .map_or(0.0, |col| crate::lods::corner_radius(col.bounds_min, col.bounds_max))
+        })
+        .collect();
+    // Children come after their parents: fold from the leaves up.
+    for i in (1..parts.len()).rev() {
+        if let Some(parent) = parts[i].parent {
+            let reach = Vec3::from_array(parts[i].placement.position).length() + radii[i];
+            radii[parent as usize] = radii[parent as usize].max(reach);
+        }
+    }
+    radii
+}
+
+/// Lower LODs of a vehicle's wreck (geom 2) as `x_wreck_lod{N}.glb`, laid out like its
+/// wreck model, with BF2's switch distances.
+fn wreck_lods(converter: &MeshConverter, geometry: Option<&Geometry>, path: &str) -> Vec<MeshLod> {
+    let count = converter.lod_count(path, 2);
+    let r0 = converter.lod0_half_diagonal(path, 2).unwrap_or(0.0);
+    let starts = crate::lods::lod_starts(&crate::lods::lod_distances(geometry, 2, count));
+    let mut lods = Vec::new();
+    for (index, distance) in starts.into_iter().enumerate() {
+        let lod = index + 1;
+        match converter.convert_mesh_lod(path, 2, lod, &format!("_wreck_lod{lod}")) {
+            Ok(mesh) => lods.push(MeshLod {
+                mesh,
+                distance: distance * crate::lods::BUNDLED_LOD_SCALE + r0,
+            }),
+            Err(err) => {
+                log::warn!("{path} wreck LOD {lod}: {err:#}");
+                break;
+            }
+        }
+    }
+    lods
+}
+
+/// Which remote controlled object a template is: the commander's artillery (a
+/// `RemoteControlledObject` child with `rcType RCArtillery`) or the UAV (`UAVVehicle`).
+fn remote_kind(world: &World, root: &Template) -> Option<RemoteKind> {
+    if root.ty.eq_ignore_ascii_case("UAVVehicle") {
+        return Some(RemoteKind::Uav);
+    }
+    root.children
+        .iter()
+        .filter_map(|c| world.template(&c.template))
+        .any(|t| {
+            t.ty.eq_ignore_ascii_case("RemoteControlledObject")
+                && t.get_str("rctype").is_some_and(|r| r.eq_ignore_ascii_case("RCArtillery"))
+        })
+        .then_some(RemoteKind::Artillery)
+}
+
 fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<(VehicleDesc, Option<Drivetrain>)> {
     let world = &interp.world;
     let root = world.template(name)?;
-    if !root.ty.eq_ignore_ascii_case("PlayerControlObject") {
+    let remote = remote_kind(world, root);
+    if !root.ty.eq_ignore_ascii_case("PlayerControlObject") && remote != Some(RemoteKind::Uav) {
         return None;
     }
     let mut builder = Builder {
@@ -449,6 +571,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         seats: Vec::new(),
         cameras: Vec::new(),
         entry_points: Vec::new(),
+        lods: Vec::new(),
     };
     builder.walk(name, None, Affine3A::IDENTITY, Affine3A::IDENTITY, Inherited::default(), None, 0);
     let Builder {
@@ -457,8 +580,35 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         seats,
         cameras,
         entry_points,
+        lods: model_lods,
         ..
     } = builder;
+    // How far BF2 draws the vehicle (its cull radius), and each model: with the vehicle, or on
+    // its own if it is a small part (rotors).
+    let radii = part_radii(world, converter, &nodes, &parts);
+    let cull_scale = |node: usize| {
+        world
+            .template(&nodes[node].template)
+            .and_then(|t| t.get_f32("cullradiusscale"))
+            .unwrap_or(1.0)
+            .max(0.0)
+    };
+    let vehicle_cull = radii.first().copied().unwrap_or(0.0) * cull_scale(0);
+    let draw_distance = crate::lods::pco_draw_distance(Some(vehicle_cull));
+    let lods: Vec<ModelLods> = model_lods
+        .into_iter()
+        .map(|(mut lods, node, model_radius)| {
+            // A part with a model of its own: its radius is the model's, grown over its
+            // children.
+            let radius = if node == 0 { vehicle_cull } else { radii[node].max(model_radius) * cull_scale(node) };
+            if node != 0 && radius < crate::lods::SMALL_PART_SHARE * vehicle_cull {
+                lods.draw_distance = crate::lods::small_part_draw_distance(radius);
+            }
+            lods
+        })
+        .collect();
+    // Nobody sits in remote controlled objects: the commander works them.
+    let seats = if remote.is_some() { Vec::new() } else { seats };
 
     // What moves it: the engines in the tree, by BF2 engine type.
     let engines: Vec<(usize, &Template, String)> = nodes
@@ -483,19 +633,22 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         _ if land_engine.is_some() => VehicleCategory::Land,
         _ if has_engine("c_ethelicopter") => VehicleCategory::Helicopter,
         _ if has_engine("c_etship") => VehicleCategory::Sea,
+        _ if remote == Some(RemoteKind::Uav) => VehicleCategory::Air,
         _ => {
             log::debug!("{name}: nothing moves it");
             return None;
         }
     };
-    // Commander assets and artillery have no way in.
-    if category == VehicleCategory::Stationary && entry_points.is_empty() {
+    // Stationary objects without a way in (radars, trailers) aren't vehicles; the
+    // commander's artillery is, worked from afar.
+    if category == VehicleCategory::Stationary && entry_points.is_empty() && remote.is_none() {
         log::debug!("{name}: stationary without an entry point");
         return None;
     }
     let drive = match (land_engine, category) {
         (Some((_, _, ty)), _) if ty == "c_ettank" => DriveKind::Tracked,
         (Some(_), _) => DriveKind::Wheeled,
+        _ if remote.is_some() => DriveKind::None,
         (None, VehicleCategory::Air | VehicleCategory::Helicopter) => DriveKind::Rolling,
         _ => DriveKind::None,
     };
@@ -719,6 +872,11 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         .filter(|_| wreck_mesh.is_some())
         .and_then(|path| meshes.part_count(converter, path, 2))
         .unwrap_or(0);
+    let hull_geometry = root.geometry.as_deref().and_then(|g| world.geometry(g));
+    let wreck_lods = match (&wreck_mesh, &hull_mesh) {
+        (Some(_), Some(path)) => wreck_lods(converter, hull_geometry, path),
+        _ => Vec::new(),
+    };
 
     let modifier = |method: &str| root.get_vec3(method).map_or([1.0; 3], |v| v.map(f32::abs));
     let mut desc = VehicleDesc {
@@ -752,6 +910,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         armor_mesh: write_armor_mesh(world, converter, name, &nodes),
         wreck_mesh,
         wreck_pieces,
+        wreck_lods,
         armor_effects: Vec::new(),
         parts,
         uv_animations: uv_animations(world, &nodes),
@@ -761,6 +920,11 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         entry_points,
         weapons: Vec::new(),
         sounds: Default::default(),
+        remote,
+        repairable_wreck: root.get_f32("armor.canbedestroyed") == Some(0.0)
+            && root.get_f32("armor.canberepairedwhenwreck").unwrap_or(0.0) != 0.0,
+        lods,
+        draw_distance,
     };
     let bounds = hull_bounds(world, converter, &nodes, &desc);
     let height = bounds[1][1] - bounds[0][1];

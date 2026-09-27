@@ -47,6 +47,7 @@ pub mod gear;
 pub mod radio;
 pub mod rotation;
 pub mod server_config;
+pub mod profile;
 pub mod soak;
 pub mod stats;
 pub mod squads;
@@ -492,7 +493,8 @@ fn apply_inputs(
     mut buffers: Query<&mut InputBuffer>,
 ) {
     let dt = time.delta_secs();
-    for (controlled_by, mut motion, mut ack, mut transform, mut applied, downed) in &mut soldiers {
+    // This tick's input of every soldier, from its player's buffer.
+    for (controlled_by, _, _, _, mut applied, downed) in &mut soldiers {
         let Ok(mut buffer) = buffers.get_mut(controlled_by.0) else {
             continue;
         };
@@ -502,15 +504,26 @@ fn apply_inputs(
             input = game_shared::revive::downed_input(input, downed);
         }
         applied.0 = input;
-        let mut next = *motion;
-        step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover);
-        motion.set_if_neq(next);
-        ack.set_if_neq(InputAck(input.seq));
-        let body = next.body_transform();
-        if transform.translation != body.translation || transform.rotation != body.rotation {
-            *transform = body;
-        }
     }
+    // Movement, in parallel: soldiers only move against the world and vehicles, never each
+    // other (`GameLayer::soldier_movement_mask`), so the order makes no difference.
+    let buffers = &buffers;
+    soldiers
+        .par_iter_mut()
+        .for_each(|(controlled_by, mut motion, mut ack, mut transform, applied, _)| {
+            if !buffers.contains(controlled_by.0) {
+                return;
+            }
+            let input = applied.0;
+            let mut next = *motion;
+            step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover);
+            motion.set_if_neq(next);
+            ack.set_if_neq(InputAck(input.seq));
+            let body = next.body_transform();
+            if transform.translation != body.translation || transform.rotation != body.rotation {
+                *transform = body;
+            }
+        });
 }
 
 #[allow(clippy::type_complexity)]

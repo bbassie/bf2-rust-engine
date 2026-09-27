@@ -7,7 +7,10 @@
 //! going on ([`AssetEffect`]: strikes, UAVs, supply crates), all replicated. The assets
 //! themselves are objects of the level's layout ([`layout_assets`]), spawned on the server
 //! and every client as destroyable objects numbered from [`ASSET_INSTANCE_BASE`]: while
-//! destroyed they can't be used, and they come back after [`ASSET_RESPAWN_SECONDS`].
+//! destroyed they can't be used, and they come back after [`ASSET_RESPAWN_SECONDS`]. The
+//! artillery pieces are vehicles instead (tagged [`AssetVehicle`]): a strike is fired by the
+//! team's living pieces, and a destroyed piece stays a wreck until it is repaired or comes
+//! back.
 
 use std::path::Path;
 
@@ -39,12 +42,15 @@ pub const ARTILLERY_RECHARGE: f32 = 180.0;
 pub const UAV_RECHARGE: f32 = 150.0;
 pub const SCAN_RECHARGE: f32 = 60.0;
 pub const SUPPLY_RECHARGE: f32 = 120.0;
-/// How long a UAV circles and how long a scan shows the enemy (seconds) [inferred].
+/// How long a UAV circles and how long a scan shows the enemy on the commander's map
+/// (seconds) [inferred].
 pub const UAV_SECONDS: f32 = 60.0;
 pub const SCAN_SECONDS: f32 = 6.0;
 /// Seconds from calling in artillery until the first shells land [inferred: the flight of
 /// shells fired at 450 m/s from the team's guns].
 pub const ARTILLERY_DELAY: f32 = 5.0;
+/// Seconds between the first shells of successive guns of a strike.
+pub const ARTILLERY_GUN_STAGGER: f32 = 0.4;
 /// A destroyed asset comes back after this long, like the layouts' spawners
 /// (`ObjectSpawner.minSpawnDelay 360`).
 pub const ASSET_RESPAWN_SECONDS: f32 = 360.0;
@@ -150,6 +156,23 @@ pub enum CommanderRequest {
     CancelOrder { squad: u8 },
     /// Commander: call in an asset (scans ignore the target).
     Use { asset: Asset, target: Vec3 },
+    /// Commander: spot the enemy nearest to this point on the map for the team (what his
+    /// satellite scan shows him, like BF2's commander map).
+    Spot { target: Vec3 },
+}
+
+/// Server -> the commander, every second of his satellite scan: where every enemy is. Like
+/// BF2, the scan shows them on the commander's map only; he spots them for his team.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ScanReport {
+    pub contacts: Vec<ScanContact>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct ScanContact {
+    pub position: Vec3,
+    /// In a vehicle (the vehicle's position).
+    pub vehicle: bool,
 }
 
 /// A squad's order. Replicated, one entity per ordered squad.
@@ -206,7 +229,21 @@ pub struct AssetInstance {
     pub team: Team,
     pub template: String,
     pub placement: Placement,
-    /// Its [`crate::statics::DestroyedStatics`] number.
+    /// Its [`crate::statics::DestroyedStatics`] number (in the set while it is destroyed,
+    /// also when it is a vehicle).
+    pub instance: u32,
+    /// It is a vehicle (`vehicles/<template>.ron`, the commander's artillery): the layout's
+    /// vehicle spawner puts it there (tagged with [`AssetVehicle`]) instead of it being a
+    /// destroyable object.
+    pub vehicle: bool,
+}
+
+/// A vehicle that is one of the commander's assets (the artillery): which one of
+/// [`CommanderAssets::instances`]. On the vehicle. Replicated.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct AssetVehicle {
+    pub kind: AssetKind,
+    pub team: Team,
     pub instance: u32,
 }
 
@@ -241,6 +278,7 @@ pub fn layout_assets(level: &LoadedLevel, info: &MatchInfo, desc: &CommanderDesc
                 template: template.clone(),
                 placement: spawner.placement,
                 instance: ASSET_INSTANCE_BASE + assets.len() as u32,
+                vehicle: false,
             });
         }
     }
@@ -272,16 +310,30 @@ fn spawn_assets(
     };
     assets.desc = load_desc(dir);
     assets.instances = layout_assets(&level, info, &assets.desc);
-    let objects: Vec<StaticInstance> = assets
-        .instances
-        .iter()
-        .map(|a| StaticInstance {
-            template: a.template.clone(),
-            placement: a.placement,
-        })
-        .collect();
-    if !objects.is_empty() {
-        info!("{} commander assets", objects.len());
-        spawn_objects(&mut commands, &objects, ASSET_INSTANCE_BASE, &paths);
+    for asset in &mut assets.instances {
+        asset.vehicle = paths.find(format!("vehicles/{}.ron", asset.template)).exists();
+    }
+    if assets.instances.is_empty() {
+        return;
+    }
+    info!(
+        "{} commander assets ({} vehicles)",
+        assets.instances.len(),
+        assets.instances.iter().filter(|a| a.vehicle).count()
+    );
+    // Objects are numbered by their place in the list: spawn each run of objects between
+    // the vehicles with its first number.
+    for run in assets.instances.chunk_by(|a, b| a.vehicle == b.vehicle) {
+        if run[0].vehicle {
+            continue;
+        }
+        let objects: Vec<StaticInstance> = run
+            .iter()
+            .map(|a| StaticInstance {
+                template: a.template.clone(),
+                placement: a.placement,
+            })
+            .collect();
+        spawn_objects(&mut commands, &objects, run[0].instance, &paths);
     }
 }

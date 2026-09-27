@@ -1,4 +1,5 @@
-//! Levels of detail of static objects, and how far away BF2 draws them at all.
+//! Levels of detail of static objects, vehicles and soldiers, and how far away BF2 draws
+//! them at all.
 //!
 //! Neither is stored in the mesh files; both come from the scripts and from constants in
 //! the engine (found in `RendDX9.dll` and `BF2.exe` 1.5):
@@ -15,6 +16,21 @@
 //!   `r = 0.8 · bounding radius · ObjectTemplate.cullRadiusScale`. At the highest geometry
 //!   quality the renderer sets `distanceCullConst` 8 (10 for soldiers and vehicles) and
 //!   `minCullDistance` 80 m.
+//!
+//! Vehicles (bundled meshes) and soldiers (skinned meshes) follow the rules found later in
+//! the same binaries (see docs/formats/meshes.md §2.12):
+//!
+//! * **LOD switch distances**: like the statics' (`setSubGeometryLodDistance`, the running
+//!   default, scale 1 at every quality), but compared with the camera distance divided by the
+//!   zoom *minus* `r0`, half the diagonal of the geom's LOD 0 bounding box: LOD `k` takes over
+//!   at its switch distance plus `r0`.
+//! * **Culling** (`distanceCullConstPCO` for `PlayerControlObject`s and soldiers): the object
+//!   is hidden once `distance² − r² > C²` with `C = max(√(10π) · 10 · r, 80)` on high and
+//!   `r = Object::getRadius · cullRadiusScale` (no 0.8 factor): the collision radius of each
+//!   part grown over its children, 0.98 for a soldier (its built-in collision box, cull radius
+//!   scale 2.5). Parts with a model of their own (rotors, carried weapons) smaller than 0.8 of
+//!   the whole are culled on their own with the "small part" constants: `C = max(√(5π) · 8 ·
+//!   r, 40)`.
 
 use std::collections::HashMap;
 
@@ -35,6 +51,21 @@ const DISTANCE_CULL_CONST: f32 = 8.0;
 const MIN_CULL_DISTANCE: f32 = 80.0;
 /// The object manager's cull radius is this much of the object's bounding radius.
 const CULL_RADIUS_FACTOR: f32 = 0.8;
+/// `renderer.globalBundleMeshLodDistanceScale` at the highest geometry quality: the factor on
+/// bundled meshes' (vehicles') switch distances.
+pub const BUNDLED_LOD_SCALE: f32 = 1.0;
+/// `renderer.globalSkinnedMeshLodDistanceScale` at the highest geometry quality: the factor on
+/// skinned meshes' (soldiers') switch distances.
+pub const SKINNED_LOD_SCALE: f32 = 1.0;
+/// `renderer.distanceCullConstPCO` at the highest geometry quality (5 by default, 10 on
+/// high): the cull constant of player control objects (vehicles, soldiers).
+const DISTANCE_CULL_CONST_PCO: f32 = 10.0;
+/// A soldier's radius for culling: its collision box, which the engine builds itself (x and z
+/// within ±0.4 m, y from −0.6 to 0.8 m).
+pub const SOLDIER_RADIUS: f32 = 0.98;
+/// Parts of an object smaller than this share of it (radius times cull radius scale) are
+/// culled on their own, with the small part constants.
+pub const SMALL_PART_SHARE: f32 = 0.8;
 
 /// Lower LODs of one visible mesh as used by a static object (the geom drawn in the world
 /// and its wreck), plus the mesh's bounding radius.
@@ -171,6 +202,33 @@ pub fn draw_distance(template: Option<&Template>, radius: f32) -> Option<f32> {
     (distance < 4000.0).then_some(distance)
 }
 
+/// How far from its origin BF2 draws a player control object (vehicle, soldier) of this cull
+/// radius (`getRadius` times `cullRadiusScale`): the object manager's rule with
+/// `distanceCullConstPCO` at the highest quality. `None` for those that reach the view
+/// distance anyway.
+pub fn pco_draw_distance(cull_radius: Option<f32>) -> Option<f32> {
+    let r = cull_radius.filter(|r| *r > 0.0 && r.is_finite())?;
+    let cull = ((10.0 * std::f32::consts::PI).sqrt() * DISTANCE_CULL_CONST_PCO * r).max(MIN_CULL_DISTANCE);
+    // Measured to the cull sphere: distance² − r² = cull².
+    let distance = (cull * cull + r * r).sqrt();
+    (distance < 4000.0).then_some(distance)
+}
+
+/// How far BF2 draws a small part of an object (a rotor, a carried weapon) of this cull radius
+/// on its own: `C² = max(π r² · 0.5 · distanceCullConst² · 10, (minCullDistance / 2)²)`.
+pub fn small_part_draw_distance(cull_radius: f32) -> Option<f32> {
+    let r = Some(cull_radius).filter(|r| *r > 0.0 && r.is_finite())?;
+    let cull = ((5.0 * std::f32::consts::PI).sqrt() * DISTANCE_CULL_CONST * r).max(MIN_CULL_DISTANCE * 0.5);
+    let distance = (cull * cull + r * r).sqrt();
+    (distance < 4000.0).then_some(distance)
+}
+
+/// Half the diagonal of a bounding box: `r0` of the LOD selection (BF2 compares the camera
+/// distance minus it with the switch distances).
+pub fn half_diagonal(min: [f32; 3], max: [f32; 3]) -> f32 {
+    (0..3).map(|i| (max[i] - min[i]).powi(2)).sum::<f32>().sqrt() * 0.5
+}
+
 /// Distance from the origin to the farthest corner of a bounding box.
 pub fn corner_radius(min: [f32; 3], max: [f32; 3]) -> f32 {
     (0..3).map(|i| min[i].abs().max(max[i].abs()).powi(2)).sum::<f32>().sqrt()
@@ -225,6 +283,23 @@ mod tests {
         assert_eq!(lod_starts(&[10.0, 23.0, 90.0]), vec![10.0, 23.0, 90.0]);
         // LOD 1 would start at 60 but LOD 2 already at 40: LOD 1 is never shown.
         assert_eq!(lod_starts(&[60.0, 40.0]), vec![40.0, 40.0]);
+    }
+
+    #[test]
+    fn player_control_objects_use_their_own_cull_constant() {
+        // A soldier: 0.98 m times cull radius scale 2.5 is drawn to about 137 m.
+        let d = pco_draw_distance(Some(SOLDIER_RADIUS * 2.5)).unwrap();
+        assert!((d - 137.3).abs() < 0.5, "{d}");
+        // A tank of radius 5 m: 56 m per meter of radius.
+        let d = pco_draw_distance(Some(5.0)).unwrap();
+        assert!((d - 280.3).abs() < 0.5, "{d}");
+        // Small ones: the 80 m minimum.
+        let d = pco_draw_distance(Some(1.0)).unwrap();
+        assert!((d - 80.006).abs() < 0.01, "{d}");
+        // A carried weapon (half diagonal 0.51 m): the small part minimum, 40 m.
+        let d = small_part_draw_distance(0.51).unwrap();
+        assert!((d - 40.003).abs() < 0.01, "{d}");
+        assert!((half_diagonal([-1.0, 0.0, -2.0], [1.0, 2.0, 2.0]) - 2.449).abs() < 0.01);
     }
 
     #[test]

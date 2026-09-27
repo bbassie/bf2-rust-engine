@@ -19,6 +19,7 @@ mod static_lightmaps;
 mod soldiers;
 mod statics;
 mod terrain;
+mod unit_lods;
 mod vegetation;
 mod vehicles;
 pub mod viewmodel;
@@ -46,6 +47,7 @@ impl Plugin for RenderPlugin {
             far_trees::FarTreesPlugin,
             sky_occlusion::SkyOcclusionPlugin,
             static_lightmaps::StaticLightmapsPlugin,
+            unit_lods::UnitLodPlugin,
         ));
     }
 }

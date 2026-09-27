@@ -27,6 +27,7 @@ use bevy_replicon::prelude::*;
 use game_data::{ReplenishDesc, ReplenishKind, WeaponDesc};
 use game_shared::{
     conquest::RoundState,
+    level::Terrain,
     physics::GameLayer,
     projectile::{Projectile, ProjectileMotion},
     protocol::{ControlledBy, KillFeed, Player, Score, Team},
@@ -702,6 +703,9 @@ struct Repairables<'w, 's> {
     parts: Query<'w, 's, &'static Destructible, Without<Inactive>>,
     destroyed: Query<'w, 's, &'static DestroyedStatics>,
     object_health: ResMut<'w, ObjectHealth>,
+    /// Left out of the query: nothing to repair, and a sphere test against a height field
+    /// is a projection onto every one of its triangles (parry), 10-180 ms on Karkand.
+    terrain: Query<'w, 's, Entity, With<Terrain>>,
 }
 
 /// Gadgets in hand: the medic bag heals and the ammo bag resupplies teammates around, the
@@ -786,7 +790,8 @@ fn replenish_in_hand(
 
         // Vehicles and destroyable objects around (repairs).
         if desc.kind == ReplenishKind::Health {
-            let filter = SpatialQueryFilter::from_mask([GameLayer::Vehicle, GameLayer::World]);
+            let filter = SpatialQueryFilter::from_mask([GameLayer::Vehicle, GameLayer::World])
+                .with_excluded_entities(repairables.terrain.iter());
             let mut vehicles_seen = Vec::new();
             let mut objects_seen = Vec::new();
             let Repairables {
@@ -797,6 +802,7 @@ fn replenish_in_hand(
                 parts,
                 destroyed,
                 object_health,
+                terrain: _,
             } = &mut repairables;
             for collider in spatial.shape_intersections(&Collider::sphere(desc.radius), center, Quat::IDENTITY, &filter) {
                 let body = colliders.get(collider).map_or(collider, |c| c.body);
