@@ -1,6 +1,6 @@
 //! First-person camera on our soldier, or a free-flying spectator camera.
 
-use bevy::{prelude::*, window::CursorOptions};
+use bevy::{pbr::ScreenSpaceAmbientOcclusion, prelude::*, window::CursorOptions};
 
 use game_shared::level::LoadedLevel;
 
@@ -40,14 +40,17 @@ pub struct CameraSystems;
 
 /// Position of the spectator camera when we have no soldier.
 #[derive(Component)]
-struct Spectator {
-    position: Vec3,
+pub struct Spectator {
+    pub position: Vec3,
 }
 
-fn spawn_camera(mut commands: Commands) {
-    commands.spawn((
+fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>) {
+    // SSAO needs MSAA off; the view model camera smooths the final image with SMAA then.
+    let msaa = if cli.no_ssao { Msaa::default() } else { Msaa::Off };
+    let mut camera = commands.spawn((
         PlayerCamera,
         Camera3d::default(),
+        msaa,
         Projection::from(PerspectiveProjection {
             fov: 75f32.to_radians(),
             near: 0.05,
@@ -61,6 +64,10 @@ fn spawn_camera(mut commands: Commands) {
         Transform::from_xyz(0.0, 40.0, 60.0),
         SpatialListener::new(0.25),
     ));
+    if !cli.no_ssao {
+        // Contact shadows in corners and under objects, which BF2 baked into lightmaps.
+        camera.insert(ScreenSpaceAmbientOcclusion::default());
+    }
 }
 
 /// Puts the spectator camera above the level, looking over it.

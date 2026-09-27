@@ -2,12 +2,13 @@
 
 use bevy::prelude::*;
 
-mod environment;
+pub mod environment;
 pub mod materials;
 mod props;
 mod soldiers;
 mod statics;
 mod terrain;
+pub mod viewmodel;
 
 pub struct RenderPlugin;
 
@@ -20,6 +21,7 @@ impl Plugin for RenderPlugin {
             props::PropRenderPlugin,
             soldiers::SoldierRenderPlugin,
             statics::StaticRenderPlugin,
+            viewmodel::ViewModelPlugin,
         ));
     }
 }

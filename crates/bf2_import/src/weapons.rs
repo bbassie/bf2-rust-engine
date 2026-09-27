@@ -163,8 +163,28 @@ fn weapon_desc(
     // Third-person animations were exported per weapon folder by the soldier import.
     let dir = t.source.split(':').next().unwrap_or_default();
     let dir = dir.rsplit_once('/').map_or("", |(d, _)| d);
-    let animations = format!("{dir}/animations/3p.glb");
-    let animations_3p = out.join(&animations).exists().then_some(animations);
+    // Many weapons borrow another weapon's animations: follow the `.baf` paths referenced
+    // by their animation system (`animationSystem1P ...AnimationSystem1p.inc`).
+    let animation_set = |view: &str| -> Option<String> {
+        let method = format!("animationsystem{view}");
+        let marker = format!("/animations/{view}/");
+        let from_system = t
+            .get_str(&method)
+            .and_then(|inc| converter.vfs.read_text(inc).ok())
+            .and_then(|text| {
+                text.split_whitespace()
+                    .map(|token| bf2_formats::vfs::normalize(token.trim_matches('"')))
+                    .find(|token| token.ends_with(".baf") && token.contains(&marker))
+            })
+            .and_then(|baf| baf.split_once("/animations/").map(|(d, _)| d.to_string()));
+        [from_system, Some(dir.to_string())]
+            .into_iter()
+            .flatten()
+            .map(|d| format!("{d}/animations/{view}.glb"))
+            .find(|path| out.join(path).exists())
+    };
+    let animations_3p = animation_set("3p");
+    let animations_1p = animation_set("1p");
 
     // Sounds are child templates like `S_usrif_m16a2_Fire3P`.
     let sound = |suffix: &str| -> Option<String> {
@@ -191,6 +211,7 @@ fn weapon_desc(
         mesh_1p,
         mesh_3p,
         animations_3p,
+        animations_1p,
         // Unset in several rifles; the engine default is presumably a typical 600.
         rounds_per_minute: f("fire.roundsperminute", 600.0),
         fire_modes,

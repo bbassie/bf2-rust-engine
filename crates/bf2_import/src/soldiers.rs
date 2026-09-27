@@ -19,6 +19,7 @@ use crate::{
 };
 
 const SKELETON: &str = "objects/soldiers/common/animations/3p_setup.ske";
+const SKELETON_1P: &str = "objects/soldiers/common/animations/1p_setup.ske";
 const ANIMATIONS: &str = "objects/soldiers/common/animations/3p/";
 
 /// Z-mirror of a (true, un-conjugated) BF2 rotation.
@@ -55,10 +56,10 @@ fn add_skeleton(doc: &mut glb::Document, skeleton: &Skeleton) -> Vec<Mat4> {
     world
 }
 
-/// One root named `soldier` over the skeleton roots (and `extra` nodes), so a soldier is a
-/// single animation hierarchy. Animation sets use the same root, so their clips target the
-/// same bones by name path.
-fn add_root(doc: &mut glb::Document, skeleton: &Skeleton, extra: &[usize]) {
+/// One root over the skeleton roots (and `extra` nodes), so a soldier is a single animation
+/// hierarchy. Animation sets use the same root name (`soldier` for third person,
+/// `firstperson` for first person), so their clips target the same bones by name path.
+fn add_named_root(doc: &mut glb::Document, skeleton: &Skeleton, extra: &[usize], name: &str) {
     let mut children: Vec<usize> = skeleton
         .bones
         .iter()
@@ -68,7 +69,7 @@ fn add_root(doc: &mut glb::Document, skeleton: &Skeleton, extra: &[usize]) {
         .collect();
     children.extend_from_slice(extra);
     doc.nodes.push(glb::Node {
-        name: "soldier".into(),
+        name: name.into(),
         children,
         ..Default::default()
     });
@@ -118,10 +119,11 @@ fn load_clips(vfs: &Vfs, dir: &str) -> Vec<(String, Animation)> {
 /// Third-person upper-body animations of every handheld weapon, as animation sets
 /// (`objects/weapons/handheld/<weapon>/animations/3p.glb`). Clips are named by state:
 /// `3p_ak47_crouchstill` becomes `crouchstill`. Returns how many sets were written.
-fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, out: &Path) -> Result<usize> {
+fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, view: &str, out: &Path) -> Result<usize> {
+    let marker = format!("/animations/{view}/");
     let mut dirs: Vec<String> = vfs
         .list("objects/weapons/handheld/")
-        .filter(|p| p.ends_with(".baf") && p.contains("/animations/3p/"))
+        .filter(|p| p.ends_with(".baf") && p.contains(&marker))
         .filter_map(|p| p.rsplit_once('/').map(|(dir, _)| format!("{dir}/")))
         .collect();
     dirs.sort();
@@ -132,8 +134,9 @@ fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, out: &Path) -> Result<usiz
         if clips.is_empty() {
             continue;
         }
-        // Strip `3p_` and the weapon token shared by all file names.
-        let stems: Vec<&str> = clips.iter().map(|(n, _)| n.trim_start_matches("3p_")).collect();
+        // Strip `3p_`/`1p_` and the weapon token shared by all file names.
+        let view_prefix = format!("{view}_");
+        let stems: Vec<&str> = clips.iter().map(|(n, _)| n.trim_start_matches(view_prefix.as_str())).collect();
         let prefix_len = stems
             .first()
             .map(|first| {
@@ -144,12 +147,12 @@ fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, out: &Path) -> Result<usiz
             })
             .unwrap_or(0);
         for (name, _) in &mut clips {
-            let stem = name.trim_start_matches("3p_").to_string();
+            let stem = name.trim_start_matches(view_prefix.as_str()).to_string();
             *name = stem.get(prefix_len..).unwrap_or(&stem).to_string();
         }
         let mut doc = glb::Document::default();
         add_skeleton(&mut doc, skeleton);
-        add_root(&mut doc, skeleton, &[]);
+        add_named_root(&mut doc, skeleton, &[], if view == "1p" { "firstperson" } else { "soldier" });
         add_clips(&mut doc, &clips, skeleton.bones.len());
         let out_rel = format!("{}.glb", dir.trim_end_matches('/'));
         doc.write(&out.join(&out_rel))?;
@@ -170,9 +173,16 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
         let skeleton = Skeleton::parse(&skeleton_data).context("parsing 3p_setup.ske")?;
 
         let clips = load_clips(&vfs, ANIMATIONS);
-        match export_weapon_sets(&vfs, &skeleton, out) {
-            Ok(count) => log::info!("{mod_name}: {count} weapon animation sets"),
-            Err(err) => log::warn!("{mod_name} weapon animations: {err:#}"),
+        let skeleton_1p = vfs
+            .read(SKELETON_1P)
+            .ok()
+            .and_then(|d| Skeleton::parse(&d).map_err(|e| log::warn!("1p_setup.ske: {e}")).ok());
+        for (view, skeleton) in [("3p", Some(&skeleton)), ("1p", skeleton_1p.as_ref())] {
+            let Some(skeleton) = skeleton else { continue };
+            match export_weapon_sets(&vfs, skeleton, view, out) {
+                Ok(count) => log::info!("{mod_name}: {count} {view} weapon animation sets"),
+                Err(err) => log::warn!("{mod_name} {view} weapon animations: {err:#}"),
+            }
         }
 
         let converter = MeshConverter::new(&vfs, out);
@@ -189,10 +199,16 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
             }
             match export(&vfs, &converter, &mesh_path, &skeleton, &clips, out) {
                 Ok(glb_path) => {
+                    let mesh_1p = skeleton_1p.as_ref().and_then(|skeleton| {
+                        export_arms(&vfs, &converter, &mesh_path, skeleton, out)
+                            .map_err(|e| log::warn!("1p arms {mesh_path}: {e:#}"))
+                            .ok()
+                    });
                     let desc = SoldierDesc {
                         name: name.clone(),
                         mesh: glb_path,
                         animations: clips.iter().map(|(n, _)| n.clone()).collect(),
+                        mesh_1p,
                     };
                     game_data::write_ron(out.join("soldiers").join(format!("{name}.ron")), &desc)?;
                     done.push(name);
@@ -204,6 +220,7 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
     Ok(done)
 }
 
+/// Third-person body (geom 1) with the `3p_setup` skeleton and movement clips.
 fn export(
     vfs: &Vfs,
     converter: &MeshConverter,
@@ -212,15 +229,52 @@ fn export(
     clips: &[(String, Animation)],
     out: &Path,
 ) -> Result<String> {
+    let out_rel = format!("{}.glb", mesh_path.trim_end_matches(".skinnedmesh"));
+    export_skinned(vfs, converter, mesh_path, 1, skeleton, "soldier", clips, &out_rel, out)?;
+    Ok(out_rel)
+}
+
+/// First-person arms (geom 0) with the `1p_setup` skeleton. A one-frame rest clip makes the
+/// root an animation root, so weapon animation sets can drive every bone.
+fn export_arms(
+    vfs: &Vfs,
+    converter: &MeshConverter,
+    mesh_path: &str,
+    skeleton: &Skeleton,
+    out: &Path,
+) -> Result<String> {
+    let rest = Animation {
+        frame_count: 2,
+        tracks: vec![bf2_formats::anim::BoneTrack {
+            bone: 0,
+            rotations: vec![skeleton.bones[0].rotation; 2],
+            translations: vec![skeleton.bones[0].translation; 2],
+        }],
+    };
+    let out_rel = format!("{}_1p.glb", mesh_path.trim_end_matches(".skinnedmesh"));
+    export_skinned(vfs, converter, mesh_path, 0, skeleton, "firstperson", &[("rest".into(), rest)], &out_rel, out)?;
+    Ok(out_rel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_skinned(
+    vfs: &Vfs,
+    converter: &MeshConverter,
+    mesh_path: &str,
+    geom: usize,
+    skeleton: &Skeleton,
+    root_name: &str,
+    clips: &[(String, Animation)],
+    out_rel: &str,
+    out: &Path,
+) -> Result<()> {
     let mesh = VisMesh::parse(&vfs.read(mesh_path)?, MeshKind::Skinned)?;
-    // Geom 1 is the third-person body (geom 0 is the first-person arms).
     let lod = mesh
         .geoms
-        .get(1)
-        .or_else(|| mesh.geoms.first())
+        .get(geom)
         .and_then(|g| g.lods.first())
-        .context("mesh has no geometry")?;
-    let out_rel = format!("{}.glb", mesh_path.trim_end_matches(".skinnedmesh"));
+        .with_context(|| format!("mesh has no geom {geom}"))?;
+    let out_rel = out_rel.to_string();
 
     let mut doc = glb::Document::default();
 
@@ -309,9 +363,9 @@ fn export(
         ..Default::default()
     });
     let body = doc.nodes.len() - 1;
-    add_root(&mut doc, skeleton, &[body]);
+    add_named_root(&mut doc, skeleton, &[body], root_name);
     add_clips(&mut doc, clips, bone_count);
 
     doc.write(&out.join(&out_rel))?;
-    Ok(out_rel)
+    Ok(())
 }

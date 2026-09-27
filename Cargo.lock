@@ -3194,6 +3194,8 @@ dependencies = [
  "game_data",
  "game_server",
  "game_shared",
+ "ron 0.10.1",
+ "serde",
  "serde_json",
 ]
 

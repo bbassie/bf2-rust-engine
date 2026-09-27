@@ -4,7 +4,6 @@
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
-    render::view::screenshot::{Screenshot, save_to_disk},
     window::PrimaryWindow,
 };
 use bevy_replicon::prelude::*;
@@ -17,7 +16,6 @@ use game_shared::{
 };
 
 use crate::{
-    Cli,
     combat::{CombatFeedback, weapon_display_name},
     net::{LocalPlayer, LocalSoldier},
     prediction::PredictionStats,
@@ -36,7 +34,6 @@ impl Plugin for HudPlugin {
                 update_kill_feed,
                 update_death_notice,
                 update_scoreboard,
-                auto_screenshot,
             ),
         );
     }
@@ -79,6 +76,14 @@ fn font(size: f32) -> TextFont {
     }
 }
 
+/// A tight drop shadow; the default 4 px offset reads as a second copy of small text.
+fn shadow() -> TextShadow {
+    TextShadow {
+        offset: Vec2::splat(1.0),
+        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
+    }
+}
+
 fn spawn_hud(mut commands: Commands) {
     // Status line.
     commands.spawn((
@@ -86,7 +91,7 @@ fn spawn_hud(mut commands: Commands) {
         Text::new(""),
         font(13.0),
         TextColor(DIM),
-        TextShadow::default(),
+        shadow(),
         Node {
             position_type: PositionType::Absolute,
             top: px(8),
@@ -204,7 +209,7 @@ fn spawn_hud(mut commands: Commands) {
         Text::new(""),
         font(15.0),
         TextColor(TEXT),
-        TextShadow::default(),
+        shadow(),
         TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
@@ -228,7 +233,7 @@ fn spawn_hud(mut commands: Commands) {
             Text::new(""),
             font(24.0),
             TextColor(TEXT),
-            TextShadow::default(),
+            shadow(),
             TextLayout::justify(Justify::Center),
         ));
 
@@ -307,7 +312,8 @@ fn update_status(
         String::new()
     };
     let help = if cursor.grab_mode == bevy::window::CursorGrabMode::None {
-        "\nclick to play  |  WASD move  shift sprint  space jump  ctrl crouch  Z prone  |  LMB fire  RMB zoom  R reload  B fire mode  1-6 weapons  |  V third person  Tab scores"
+        // Explicit lines: auto-wrapped text and its shadow get laid out differently.
+        "\nclick to play  |  WASD move  shift sprint  space jump  ctrl crouch  Z prone\nLMB fire  RMB zoom  R reload  B fire mode  1-6 weapons  |  V third person  Tab scores"
     } else {
         ""
     };
@@ -321,7 +327,8 @@ fn update_crosshair(
     mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility)>,
     mut marker: Query<&mut BackgroundColor, With<HitMarker>>,
 ) {
-    let alive = !soldier.is_empty();
+    // Zoomed in, the iron sights (or scope) do the aiming.
+    let alive = !soldier.is_empty() && feedback.zoom > 0.95;
     let fov_degrees = 75.0 * feedback.zoom;
     let px_per_degree = window.height() / fov_degrees;
     let gap = (feedback.spread * 0.5 * px_per_degree).clamp(3.0, 90.0);
@@ -448,29 +455,5 @@ fn update_scoreboard(
             );
         }
         text.0 = out;
-    }
-}
-
-/// `--screenshot <path>`: save a screenshot after a few seconds, then quit. Handy for
-/// checking rendering without a human at the keyboard.
-fn auto_screenshot(
-    mut commands: Commands,
-    time: Res<Time<Real>>,
-    cli: Res<Cli>,
-    mut state: Local<u8>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    let Some(path) = &cli.screenshot else {
-        return;
-    };
-    let t = time.elapsed_secs();
-    if *state == 0 && t > cli.screenshot_delay {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(path.clone()));
-        *state = 1;
-    } else if *state == 1 && t > cli.screenshot_delay + 1.5 {
-        exit.write(AppExit::Success);
-        *state = 2;
     }
 }

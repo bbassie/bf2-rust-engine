@@ -31,8 +31,9 @@ impl Plugin for EnvironmentPlugin {
     }
 }
 
+/// The level's sun (lights the world layer only).
 #[derive(Component)]
-struct Sun;
+pub struct Sun;
 
 /// The sky dome; it moves with the camera so it always surrounds it.
 #[derive(Component)]

@@ -67,6 +67,10 @@ pub struct CombatFeedback {
     pub spread: f32,
     /// Current field of view multiplier from zooming (1 = not zoomed).
     pub zoom: f32,
+    /// Shots our weapon fired (predicted), for the first-person animations.
+    pub shots_fired: u32,
+    /// Our weapon is reloading (predicted).
+    pub reloading: bool,
 }
 
 impl Default for CombatFeedback {
@@ -78,6 +82,8 @@ impl Default for CombatFeedback {
             killed_by: None,
             spread: 0.0,
             zoom: 1.0,
+            shots_fired: 0,
+            reloading: false,
         }
     }
 }
@@ -234,6 +240,7 @@ fn predict_local_shots(
 
     let trigger = input.pressed(Buttons::FIRE);
     let [in_mag, spare] = inventory.ammo.get(active as usize).copied().unwrap_or([0, 0]);
+    feedback.reloading = state.reload > 0.0;
     if state.reload > 0.0 {
         state.reload -= dt;
         state.trigger_was_down = trigger;
@@ -267,6 +274,7 @@ fn predict_local_shots(
     }
     let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
     state.on_shot(&weapon);
+    feedback.shots_fired = feedback.shots_fired.wrapping_add(1);
     let aim = Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0) * Vec3::NEG_Z;
     shots.write(LocalShot {
         direction: spread_direction(aim, cone, (fastrand::f32(), fastrand::f32())),
@@ -449,7 +457,7 @@ fn update_impacts(mut commands: Commands, time: Res<Time>, mut impacts: Query<(E
 /// Right mouse zooms by the weapon's zoom factor (BF2 stores it as a field-of-view scale).
 fn apply_zoom(
     time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    history: Res<InputHistory>,
     armory: Res<Armory>,
     soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, With<SoldierRender>)>,
     mut look: ResMut<LookState>,
@@ -459,7 +467,7 @@ fn apply_zoom(
     let target = soldier
         .single()
         .ok()
-        .filter(|_| mouse.pressed(MouseButton::Right))
+        .filter(|_| history.latest().is_some_and(|input| input.pressed(Buttons::AIM)))
         .and_then(|(loadout, inventory)| loadout.weapons.get(inventory.active as usize))
         .and_then(|w| armory.weapon(w))
         .and_then(|w| w.zoom_factors.iter().copied().find(|&f| f > 0.0))

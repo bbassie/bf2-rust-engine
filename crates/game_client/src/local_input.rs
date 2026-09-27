@@ -116,6 +116,7 @@ pub fn build_input(
     mut packets: MessageWriter<InputPacket>,
     cli: Res<crate::Cli>,
     selection: Res<crate::combat::WeaponSelection>,
+    scenario: Option<Res<crate::scenario::ScenarioInput>>,
 ) {
     if cli.debug_walk {
         look.yaw += 0.01;
@@ -150,8 +151,11 @@ pub fn build_input(
         set(Buttons::RELOAD, keys.pressed(KeyCode::KeyR));
         set(Buttons::FIRE_MODE, keys.pressed(KeyCode::KeyB));
     }
-    if cli.debug_fire {
-        frame.buttons.set(Buttons::FIRE, true);
+    if let Some(scenario) = scenario {
+        frame.buttons |= scenario.buttons;
+        if let Some(movement) = scenario.movement {
+            frame.set_movement(movement);
+        }
     }
     look.jump_latched = false;
 

@@ -25,6 +25,7 @@ mod local_input;
 mod net;
 mod prediction;
 mod render;
+mod scenario;
 
 #[derive(Parser, Debug, Clone, Resource)]
 #[command(version, about = "Game client")]
@@ -53,11 +54,19 @@ pub struct Cli {
     /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
-    /// Save a screenshot to this path after `--screenshot-delay` seconds, then exit.
+    /// Save a screenshot to this path once everything is loaded (plus
+    /// `--screenshot-delay` seconds), then exit.
     #[arg(long)]
     screenshot: Option<PathBuf>,
-    #[arg(long, default_value_t = 6.0)]
+    #[arg(long, default_value_t = 0.0)]
     screenshot_delay: f32,
+    /// Run a scripted scenario (see `scenarios/`): camera moves, input, screenshots,
+    /// frame time measurements. Overrides level/bots/spectate from the file.
+    #[arg(long)]
+    scenario: Option<PathBuf>,
+    /// Where scenario screenshots and the report go (default `target/scenarios/<name>`).
+    #[arg(long)]
+    out: Option<PathBuf>,
     /// Watch without a soldier (free camera).
     #[arg(long)]
     spectate: bool,
@@ -76,16 +85,37 @@ pub struct Cli {
     /// Disable sun shadows (for performance comparisons).
     #[arg(long)]
     no_shadows: bool,
-    /// Debug: hold the trigger (to test weapons without a human).
-    #[arg(long, hide = true)]
-    debug_fire: bool,
+    /// Disable screen-space ambient occlusion (for performance comparisons).
+    #[arg(long)]
+    no_ssao: bool,
     /// Debug: walk in circles and jump without any input, to exercise prediction.
     #[arg(long, hide = true)]
     debug_walk: bool,
 }
 
 fn main() -> AppExit {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let scenario = match (&cli.scenario, &cli.screenshot) {
+        (Some(path), _) => match scenario::Scenario::load(path) {
+            Ok(scenario) => {
+                let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                let out = cli.out.clone().unwrap_or_else(|| PathBuf::from("target/scenarios").join(name));
+                Some((scenario, out))
+            }
+            Err(err) => {
+                eprintln!("scenario {}: {err:#}", path.display());
+                return AppExit::error();
+            }
+        },
+        (None, Some(path)) => Some((
+            scenario::Scenario::screenshot(path, cli.screenshot_delay),
+            cli.out.clone().unwrap_or_default(),
+        )),
+        _ => None,
+    };
+    if let Some((scenario, _)) = &scenario {
+        scenario.apply(&mut cli);
+    }
     let paths = GamePaths::resolve(cli.imported.clone());
 
     let mut app = App::new();
@@ -146,6 +176,9 @@ fn main() -> AppExit {
                 ..default()
             },
         });
+    }
+    if let Some((scenario, out)) = scenario {
+        app.add_plugins(scenario::ScenarioPlugin { scenario, out });
     }
     app.insert_resource(camera::ThirdPerson(cli.third_person));
     app.insert_resource(cli);

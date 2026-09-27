@@ -12,6 +12,9 @@ pub struct SoldierDesc {
     /// Names of the animation clips in the `.glb`.
     #[serde(default)]
     pub animations: Vec<String>,
+    /// First-person arms (`.glb` with the `1p_setup` skeleton), relative to the imported root.
+    #[serde(default)]
+    pub mesh_1p: Option<String>,
 }
 
 /// One side of a match.

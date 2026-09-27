@@ -23,6 +23,7 @@ Milestones are ordered so that each one ends with something playable.
 - [x] Road decals from compiled road meshes
 - [x] Sky dome with the level's sky texture
 - [x] Bindless static materials (4x frame rate: ~270 fps on Karkand in release)
+- [x] Screen-space ambient occlusion (with SMAA instead of MSAA; `--no-ssao` to compare)
 
 Still to do for BF2 fidelity: baked lightmaps (statics and terrain), dirt/crack layers,
 surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
@@ -32,12 +33,18 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Soldier meshes and animations (skinned mesh + `.ske`/`.baf` import), per-team models
 - [x] Third-person movement animations: legs from the soldier set, upper body from weapon sets
 - [x] Third-person camera (V)
-- Weapon models in hands and first-person arms/weapon view
-- Kits (7 classes per faction) and handheld weapons from the original templates:
-  rate of fire, magazines, recoil, deviation, zoom
-- Projectiles with gravity, server-side hit detection with lag compensation
+- [x] Weapon models in hands (third person)
+- [x] First-person view: BF2's arms and weapon models with their 1P animations (deploy, fire,
+  zoom, reload, run, sprint), drawn by a second camera so they never clip into walls
+- [x] Kits (7 classes per faction) and handheld weapons from the original templates:
+  rate of fire, fire modes, magazines, recoil, deviation, zoom
+- [x] Projectiles with gravity, server-side hit detection, damage falloff, headshots,
+  explosions
+- [x] Health, death, respawn, kill feed, scoreboard
+- Lag compensation
 - Material damage matrix (143 materials), per-bone hit zones
-- Health, death, man-down/revive, respawn screen with spawn point selection
+- Man-down/revive, respawn screen with kit and spawn point selection
+- Grenades, shotgun pellets, scopes
 - Medic, support and engineer abilities (heal/resupply/repair all use the damage matrix)
 
 ## M2: Conquest

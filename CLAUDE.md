@@ -22,7 +22,13 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
 
 - `cargo test -p bf2_formats -p bf2_import` for the format code.
 - `bf2-import --bf2 "<install>" check` parses every mesh/collision mesh.
-- The client can verify itself without a human:
-  `client --screenshot out.png --screenshot-delay 10` (add `--spectate` for an overview,
-  `--debug-walk` to exercise prediction; the HUD shows RTT and prediction corrections).
+- The client can verify itself without a human. Scenarios (`scenarios/*.ron`, format in
+  `crates/game_client/src/scenario.rs`) load a level once, wait until it is fully loaded
+  and every shader compiled (usually 2-3 s), then script camera placement, input,
+  render toggles, screenshots and frame time measurements:
+  `client --scenario scenarios/viewmodel.ron` writes `target/scenarios/viewmodel/*.png`
+  (and `report.txt` for `Measure` steps). Prefer one scenario with several screenshots
+  over several launches. `client --screenshot out.png` is the one-shot shorthand.
+- `--debug-walk` exercises prediction; the HUD shows RTT and prediction corrections.
+- Test with dev builds (`target/debug/client.exe`); release builds take much longer.
 - Networking: start `server --bots 8` then `client --connect 127.0.0.1`.

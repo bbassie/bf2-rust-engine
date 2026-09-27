@@ -39,6 +39,10 @@ pub struct WeaponDesc {
     /// Upper-body animation set (`.glb`) for third person.
     #[serde(default)]
     pub animations_3p: Option<String>,
+    /// Arms-and-weapon animation set (`.glb`) for first person. First-person part `n`
+    /// attaches to bone `mesh{n+1}` of the `1p_setup` skeleton.
+    #[serde(default)]
+    pub animations_1p: Option<String>,
     pub rounds_per_minute: f32,
     /// Selectable modes, first is the default.
     pub fire_modes: Vec<FireMode>,

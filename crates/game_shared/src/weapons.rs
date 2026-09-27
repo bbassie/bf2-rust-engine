@@ -106,6 +106,7 @@ fn test_rifle() -> WeaponDesc {
         mesh_1p: None,
         mesh_3p: None,
         animations_3p: None,
+        animations_1p: None,
         rounds_per_minute: 700.0,
         fire_modes: vec![FireMode::Auto, FireMode::Single],
         magazine_size: 30,
