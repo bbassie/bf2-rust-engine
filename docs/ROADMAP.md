@@ -70,7 +70,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Commander announcements (captures, losses, ticket bleed) in the team's language
 - [x] Full-screen map (hold M)
 - [x] Squads: create/join/leave, squad leader spawning, bots in squads
-- Commander: orders to squads, commander assets
+- [x] Commo rose (Q) with BF2's radio voice-overs, spotting (HUD, minimap, map), automatic soldier
+  call-outs (reloading, grenade out, man down)
+- Commander: orders to squads, artillery, UAV, supply drops, scans (in progress)
 
 ## M3: Vehicles (in progress)
 

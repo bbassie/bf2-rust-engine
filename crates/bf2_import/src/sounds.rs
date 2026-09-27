@@ -37,8 +37,8 @@ use bf2_formats::{
     vfs::normalize,
 };
 use game_data::{
-    AmbientSound, EngineSound, Falloff, FootstepSounds, ImpactSounds, LevelSounds, SoundDesc,
-    SoundLibrary, VehicleSounds,
+    AmbientSound, EngineSound, Falloff, FootstepSounds, ImpactSounds, LevelSounds, RadioVoice,
+    SoundDesc, SoundLibrary, VehicleSounds,
 };
 
 use crate::{audio, coords};
@@ -463,6 +463,116 @@ pub fn import_level(vfs: &Vfs, world: &World, level_dir: &Path, out: &Path) -> R
     }
     game_data::write_ron(level_dir.join("sounds.ron"), &level).context("writing sounds.ron")?;
     Ok(level.ambience.len())
+}
+
+/// BF2's radio messages the game uses (`common/sound/voicemessages*.con`): the commo rose,
+/// spotting and soldiers' automatic call-outs.
+pub const RADIO_MESSAGES: &[&str] = &[
+    "roger_that",
+    "negative",
+    "PLAYER_CONFIRM_thankyou",
+    "PLAYER_CONFIRM_sorry",
+    "medic",
+    "need_ammo",
+    "need_repair",
+    "req_pickup",
+    "PLAYER_TACTICS_gogogo",
+    "PLAYER_TACTICS_followme",
+    "spotted",
+    "infantry_spotted",
+    "sniper_spotted",
+    "vehicle_spotted",
+    "apc_spotted",
+    "tank_spotted",
+    "aa_spotted",
+    "heli_spotted",
+    "AUTO_MOODGP_reloading",
+    "AUTO_MOODGP_throwingfraggrenade",
+    "AUTO_MOODGP_throwingsmokegrenade",
+    "AUTO_MOODGP_incominggrenade",
+    "AUTO_MOODGP_friendlyfire",
+    "out_of_ammo",
+    "revive",
+];
+
+/// Languages whose radio voice this run wrote.
+static RADIO_WRITTEN: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// The radio voices of `languages` (a level's teams, e.g. `English`, `Mec`) to
+/// `radio/<language>.ron`, once per run each.
+///
+/// `gamelogic.messages.addMessage <id>` starts a message; each `addRadioVoice <voice>
+/// <radio sample> <text id> [<local sample> [<flags>]]` adds a recording for a voice
+/// (`grunt`, `squadleader`, `commander`), paths relative to `common/sound/<language>/`. The
+/// radio sample is the filtered version heard over the radio, the local one is heard in
+/// person near the speaker; flags 2 and 3 mean never over the radio (and 0 and 2 only by the
+/// same team, which the game files don't use).
+pub fn import_radio(vfs: &Vfs, localization: &bf2_formats::localization::Localization, languages: &[String], out: &Path) {
+    let mut interp = Interpreter::new(vfs);
+    interp.run("common/sound/voicemessages.con", &[]);
+    for language in languages {
+        let language = language.to_ascii_lowercase();
+        if language.is_empty() || !RADIO_WRITTEN.lock().unwrap().insert(language.clone()) {
+            continue;
+        }
+        let voice = radio_voice(vfs, &interp.world, localization, &language, out);
+        let count = voice.messages.len();
+        match game_data::write_ron(out.join("radio").join(format!("{language}.ron")), &voice) {
+            Ok(()) => log::info!("radio voice {language}: {count} messages"),
+            Err(err) => log::warn!("radio voice {language}: {err}"),
+        }
+    }
+}
+
+fn radio_voice(
+    vfs: &Vfs,
+    world: &World,
+    localization: &bf2_formats::localization::Localization,
+    language: &str,
+    out: &Path,
+) -> RadioVoice {
+    let mut voice = RadioVoice::default();
+    let mut current: Option<String> = None;
+    for command in &world.commands {
+        let arg = |i: usize| command.args.get(i).map(|a| a.trim_matches('"')).unwrap_or_default();
+        match command.name.as_str() {
+            "gamelogic.messages.addmessage" => {
+                current = RADIO_MESSAGES
+                    .iter()
+                    .find(|m| m.eq_ignore_ascii_case(arg(0)))
+                    .map(|m| m.to_string());
+            }
+            "gamelogic.messages.addradiovoice" => {
+                let Some(id) = &current else { continue };
+                let rank = match arg(0).to_ascii_lowercase().as_str() {
+                    "grunt" => 0,
+                    "squadleader" => 1,
+                    "commander" => 2,
+                    _ => continue,
+                };
+                let convert = |files: &str| -> Vec<String> {
+                    files
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|f| !f.is_empty())
+                        .filter_map(|f| audio::sound(vfs, &format!("common/sound/{language}/{f}"), out))
+                        .collect()
+                };
+                let never_radio = matches!(arg(4), "2" | "3");
+                let line = voice.messages.entry(id.clone()).or_default();
+                if !never_radio {
+                    line.radio[rank].extend(convert(arg(1)));
+                }
+                line.local[rank].extend(convert(arg(3)));
+                if line.text.is_empty() && !arg(2).is_empty() {
+                    line.text = localization.resolve(arg(2));
+                }
+            }
+            _ => {}
+        }
+    }
+    voice.messages.retain(|_, line| line.radio.iter().chain(&line.local).any(|files| !files.is_empty()));
+    voice
 }
 
 /// A weapon's fire sound as heard from afar, generated from `near`: `<file>_distant.wav`

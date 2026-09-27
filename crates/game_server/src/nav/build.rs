@@ -27,7 +27,7 @@ use game_shared::{ladder::Ladder, level::Heightmap};
 use super::{NavCell, NavGrid, NavLadder, NavParams, SLOPE_SCALE};
 
 /// Bump when the build changes, to invalidate cached grids.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 /// Columns per side of the tiles rasterized in parallel.
 const TILE: u32 = 64;
@@ -356,9 +356,12 @@ fn place_ladders(grid: &mut NavGrid, ladders: &[Ladder]) {
             continue;
         };
         let (low, high) = (grid.position(bottom), grid.position(top));
-        if high.y - low.y < 1.5 || high.y > head.y + 0.5 {
+        // Soldiers get on from the ground only near the ladder's foot, and from the roof
+        // only near its top (see `game_shared::soldier::mount`).
+        if high.y - low.y < 1.5 || low.y < foot.y - 0.4 || high.y > head.y + 0.5 {
             continue;
         }
+        let down = high.y > head.y - 0.6;
         let index = grid.ladders.len() as u16;
         grid.ladders.push(NavLadder {
             bottom,
@@ -366,6 +369,7 @@ fn place_ladders(grid: &mut NavGrid, ladders: &[Ladder]) {
             foot: Vec3::new(foot.x, low.y, foot.z),
             head: Vec3::new(head.x, high.y, head.z),
             front: ladder.front,
+            down,
         });
         grid.ladder_ends.entry(bottom.index).or_default().push(index);
         grid.ladder_ends.entry(top.index).or_default().push(index);

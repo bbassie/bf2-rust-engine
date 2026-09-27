@@ -77,6 +77,8 @@ pub fn import_level(
     for team in &mut level_teams {
         team.voice = team_voice(&vfs, &team.language, out);
     }
+    let languages: Vec<String> = level_teams.iter().map(|t| t.language.clone()).collect();
+    crate::sounds::import_radio(&vfs, localization, &languages, out);
     let kit_names: Vec<String> = level_teams
         .iter()
         .flat_map(|t| t.kits.iter().map(|k| k.kit.clone()))
@@ -97,6 +99,7 @@ pub fn import_level(
     if let Err(err) = destruction::import_materials(&vfs, out) {
         log::warn!("damage table: {err:#}");
     }
+    let assets = crate::commander::load_assets(&mut interp);
     let world = &interp.world;
 
     // Static objects and the meshes they need.
@@ -104,10 +107,12 @@ pub fn import_level(
         .iter()
         .filter(|i| world.template(&i.template).is_some_and(is_visible_static))
         .collect();
-    let template_names: HashSet<String> = static_instances
+    let mut template_names: HashSet<String> = static_instances
         .iter()
         .map(|i| i.template.to_ascii_lowercase())
         .collect();
+    // The commander's assets (spawned by the layouts) are objects too.
+    template_names.extend(assets.iter().cloned());
 
     let failed = Mutex::new(Vec::new());
     let mesh_count = Mutex::new(0usize);
@@ -194,6 +199,9 @@ pub fn import_level(
     let missing_templates = interp.missing_templates.keys().cloned().collect();
     let vehicles = vehicles::import(&mut interp, &converter, localization, &vehicle_names, out)?;
     crate::effects::import_vehicle_weapons(&interp.world, out);
+    if let Err(err) = crate::commander::import(&mut interp, &converter, &assets, &level_dir, out) {
+        log::warn!("commander assets: {err:#}");
+    }
 
     Ok(LevelReport {
         statics: desc.statics.len(),

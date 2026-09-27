@@ -1,0 +1,46 @@
+// Engineer on Strike at Karkand (US): the HMMWV at the gas station loses 600 hit points;
+// holding the wrench's trigger next to it repairs 3 % of its 1000 per second times the
+// damage table's 2 for soft vehicles (material 84 against 71). Then the boards across a fence
+// gap (statics #803, 50 HP, material 97: factor 10) are knifed once and repaired.
+// client --scenario scenarios/abilities_engineer.ron --out target/scenarios/abilities/engineer
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Kill,
+        Wait(1.0),
+        Click("kit:4"),
+        Wait(11.0),
+        NearVehicle("usjep_hmmwv"),
+        Wait(1.0),
+        DamageVehicle(600.0),
+        Weapon(2),
+        Wait(1.5),
+        Vitals("damaged"),
+        Screenshot("wrench"),
+        Hold([Fire]),
+        Wait(4.0),
+        Vitals("repaired_4s"),
+        Screenshot("repairing"),
+        Wait(4.0),
+        Release([Fire]),
+        Vitals("repaired_8s"),
+        Teleport((-170.08, 156.3, 66.2), 0.0, -8.0),
+        Weapon(3),
+        Wait(1.5),
+        Hold([Fire]),
+        Wait(0.1),
+        Release([Fire]),
+        Wait(1.0),
+        Weapon(2),
+        Wait(1.5),
+        Hold([Fire]),
+        Wait(3.0),
+        Release([Fire]),
+        Screenshot("boards"),
+        Quit,
+    ],
+)

@@ -163,6 +163,8 @@ pub struct NavLadder {
     pub head: Vec3,
     /// Horizontal, out of the wall: the side it is climbed from.
     pub front: Vec3,
+    /// It can be climbed down too (its top is level with the floor behind it).
+    pub down: bool,
 }
 
 impl NavGrid {
@@ -504,13 +506,16 @@ mod tests {
 
     #[test]
     fn climbs_ladders() {
-        // A 4 m platform from z = 0 to 10 with a ladder on its south face (at z = 0).
+        // A 4 m platform from z = 0 to 10 with a ladder up its south face (at z = 0), and
+        // one that ends high above it (up only) and one starting in the air (useless).
         let platform = cuboid(Vec3::new(0.0, 2.0, 5.0), Vec3::new(8.0, 4.0, 10.0));
-        let ladder = game_shared::ladder::Ladder::from_box(
-            Vec3::new(0.0, 2.5, -0.1),
-            Quat::from_rotation_y(std::f32::consts::PI),
-            Vec3::new(0.3, 2.5, 0.1),
-        );
+        let ladder = |x: f32, bottom: f32, top: f32| {
+            game_shared::ladder::Ladder::from_box(
+                Vec3::new(x, (bottom + top) / 2.0, -0.1),
+                Quat::from_rotation_y(std::f32::consts::PI),
+                Vec3::new(0.3, (top - bottom) / 2.0, 0.1),
+            )
+        };
         let terrain = Heightmap {
             resolution: 33,
             spacing: 2.0,
@@ -520,11 +525,12 @@ mod tests {
         let geometry = LevelGeometry {
             terrain: Some(Arc::new(terrain)),
             meshes: vec![platform],
-            ladders: vec![ladder],
+            ladders: vec![ladder(0.0, 0.0, 4.3), ladder(-3.0, 0.0, 6.0), ladder(3.0, 1.5, 4.3)],
             bounds: None,
         };
         let grid = build::build(&geometry, NavParams::from_tuning(&SoldierTuning::default()));
-        assert_eq!(grid.ladders().len(), 1, "ladder not placed");
+        let downs: Vec<bool> = grid.ladders().iter().map(|l| l.down).collect();
+        assert_eq!(downs, [true, false], "{:?}", grid.ladders());
         let (ground, top) = (Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 4.0, 6.0));
         let up = grid.find_path(ground, top).unwrap();
         assert!(up.complete, "{up:?}");

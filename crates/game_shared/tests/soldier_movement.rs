@@ -712,7 +712,7 @@ fn climbs_ladders() {
     let m = settled(&mut app, Vec3::new(0.1, 0.0, 0.0));
 
     // Walk into the ladder and keep pushing forward: up and over onto the roof.
-    let trace = walk(&mut app, m, 200, Buttons::empty());
+    let trace = walk(&mut app, m, 300, Buttons::empty());
     let mounted = trace
         .iter()
         .position(|t| t.climbing)
@@ -898,20 +898,36 @@ fn sprint_uses_stamina() {
     // A light soldier sprints for its 10 s, then runs, and sprints again once a little has
     // recovered: 0.05 of a 17 s recovery.
     let trace = walk(&mut app, m, ticks(14.0), Buttons::SPRINT);
-    let stopped = trace.iter().position(|t| !t.sprinting && t.stamina < 0.5).expect("never ran out");
+    let stopped = trace
+        .iter()
+        .position(|t| !t.sprinting && t.stamina < 0.5)
+        .expect("never ran out");
     let seconds = stopped as f32 * DT;
     println!("light: out of stamina after {seconds:.2} s");
-    assert!((seconds - tuning.light.sprint_time).abs() < 0.1, "{seconds}");
+    assert!(
+        (seconds - tuning.light.sprint_time).abs() < 0.1,
+        "{seconds}"
+    );
     assert!((horizontal_speed(&trace[stopped + 30]) - tuning.run_speed).abs() < 0.3);
-    let again = stopped + trace[stopped..].iter().position(|t| t.sprinting).expect("never sprinted again");
+    let again = stopped
+        + trace[stopped..]
+            .iter()
+            .position(|t| t.sprinting)
+            .expect("never sprinted again");
     let wait = (again - stopped) as f32 * DT;
     println!("sprinting again after {wait:.2} s");
-    assert!((wait - tuning.sprint_min_stamina * tuning.light.recover_time).abs() < 0.1, "{wait}");
+    assert!(
+        (wait - tuning.sprint_min_stamina * tuning.light.recover_time).abs() < 0.1,
+        "{wait}"
+    );
 
     // Heavy kits run out sooner.
     let heavy = SoldierMotion { heavy: true, ..m };
     let trace = walk(&mut app, heavy, ticks(10.0), Buttons::SPRINT);
-    let stopped = trace.iter().position(|t| !t.sprinting && t.stamina < 0.5).expect("never ran out");
+    let stopped = trace
+        .iter()
+        .position(|t| !t.sprinting && t.stamina < 0.5)
+        .expect("never ran out");
     assert!((stopped as f32 * DT - tuning.heavy.sprint_time).abs() < 0.1);
 
     // Standing still recovers, but not right after a jump; jumping costs stamina.
@@ -921,9 +937,15 @@ fn sprint_uses_stamina() {
     let trace = simulate(&mut app, tired, frames);
     let cost = 0.5 - trace[0].stamina;
     // Less the stamina recovered in that tick before the jump.
-    assert!((cost - tuning.light.jump_cost).abs() < 2e-3, "jump cost {cost}");
+    assert!(
+        (cost - tuning.light.jump_cost).abs() < 2e-3,
+        "jump cost {cost}"
+    );
     let paused = ticks(tuning.stamina_delay_after_jump) - 2;
-    assert_eq!(trace[paused].stamina, trace[0].stamina, "recovered during the jump delay");
+    assert_eq!(
+        trace[paused].stamina, trace[0].stamina,
+        "recovered during the jump delay"
+    );
     assert!(trace.last().unwrap().stamina > trace[0].stamina);
 }
 
@@ -939,19 +961,33 @@ fn stance_and_fire_delays() {
     let mut frames = vec![input(0.0, 0.0, Buttons::PRONE)];
     frames.extend(vec![input(0.0, 0.0, Buttons::empty()); ticks(2.0)]);
     let trace = simulate(&mut app, m, frames);
-    let up = trace.iter().position(|t| t.stance != Stance::Prone).unwrap();
+    let up = trace
+        .iter()
+        .position(|t| t.stance != Stance::Prone)
+        .unwrap();
     println!("got up after {:.2} s", up as f32 * DT);
     assert!((up as f32 * DT - tuning.prone_switch_delay).abs() < 0.05);
     assert!(!trace[up].can_fire() && trace.last().unwrap().can_fire());
 
     // Right after getting up, prone is blocked for the switch delay too.
     let got_up = trace[up];
-    let trace = simulate(&mut app, got_up, vec![input(0.0, 0.0, Buttons::PRONE); ticks(1.5)]);
-    let down = trace.iter().position(|t| t.stance == Stance::Prone).unwrap();
+    let trace = simulate(
+        &mut app,
+        got_up,
+        vec![input(0.0, 0.0, Buttons::PRONE); ticks(1.5)],
+    );
+    let down = trace
+        .iter()
+        .position(|t| t.stance == Stance::Prone)
+        .unwrap();
     assert!((down as f32 * DT - tuning.prone_switch_delay).abs() < 0.05);
 
     // Jumping: no firing for 0.7 s.
-    let trace = simulate(&mut app, m, vec![input(0.0, 0.0, Buttons::JUMP); ticks(1.0)]);
+    let trace = simulate(
+        &mut app,
+        m,
+        vec![input(0.0, 0.0, Buttons::JUMP); ticks(1.0)],
+    );
     let ready = trace.iter().position(|t| t.can_fire()).unwrap();
     assert!((ready as f32 * DT - tuning.fire_delay_after_jump).abs() < 0.05);
 }

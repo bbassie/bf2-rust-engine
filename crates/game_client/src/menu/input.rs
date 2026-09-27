@@ -101,6 +101,7 @@ pub(super) fn press_buttons(
     scripted: Option<Res<ScenarioInput>>,
     mut browser: ResMut<ServerBrowser>,
     time: Res<Time<Real>>,
+    mut fields: Query<(&TextField, &mut EditableText)>,
 ) {
     let (window, mut cursor) = window.into_inner();
     if std::mem::take(&mut menu.swallow_click) {
@@ -186,16 +187,24 @@ pub(super) fn press_buttons(
                 settings.bindings = Settings::default().bindings;
             }
             MenuButton::Refresh => browser.refresh(&settings, time.elapsed_secs(), scripted.is_none()),
-            MenuButton::Server(index) => {
-                if let Some(entry) = browser.entries.get(*index) {
-                    let last = &mut settings.last_match;
-                    last.address = entry.address.clone();
-                    last.port = entry.port;
-                    // The address fields show the pick.
-                    menu.rebuild += 1;
+            MenuButton::Server(address, port) => {
+                let last = &mut settings.last_match;
+                last.address = address.clone();
+                last.port = *port;
+                // The address fields show the pick.
+                for (field, mut editable) in &mut fields {
+                    let value = match field {
+                        TextField::Address => address.clone(),
+                        TextField::Port => port.to_string(),
+                        TextField::PlayerName => continue,
+                    };
+                    editable.editor_mut().set_text(&value);
+                    editable.queue_edit(bevy::text::TextEdit::TextEnd(false));
                 }
             }
-            MenuButton::Favourite(index) => toggle_favourite(&mut settings, &mut browser, *index),
+            MenuButton::Favourite(address, port) => {
+                toggle_favourite(&mut settings, &mut browser, address, *port)
+            }
             MenuButton::AddFavourite => {
                 let last = settings.last_match.clone();
                 let address = last.address.trim();

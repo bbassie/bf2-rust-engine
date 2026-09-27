@@ -18,8 +18,9 @@ use super::{CellRef, NavCell, NavGrid, NavLadder, NavParams};
 
 const MAGIC: &[u8; 8] = b"BF2NAVGR";
 
-/// 4-byte words per ladder: both cells (x, z, index) and foot, head and front (x, y, z).
-const LADDER_WORDS: usize = 15;
+/// 4-byte words per ladder: both cells (x, z, index), foot, head and front (x, y, z), and
+/// whether it goes down too.
+const LADDER_WORDS: usize = 16;
 
 fn ladder_words(ladder: &NavLadder) -> [u32; LADDER_WORDS] {
     let cell = |c: CellRef| [c.x, c.z, c.index];
@@ -29,7 +30,8 @@ fn ladder_words(ladder: &NavLadder) -> [u32; LADDER_WORDS] {
     words[3..6].copy_from_slice(&cell(ladder.top));
     words[6..9].copy_from_slice(&vec(ladder.foot));
     words[9..12].copy_from_slice(&vec(ladder.head));
-    words[12..].copy_from_slice(&vec(ladder.front));
+    words[12..15].copy_from_slice(&vec(ladder.front));
+    words[15] = ladder.down as u32;
     words
 }
 
@@ -42,6 +44,7 @@ fn ladder_from_words(w: &[u32]) -> NavLadder {
         foot: vec(6),
         head: vec(9),
         front: vec(12),
+        down: w[15] != 0,
     }
 }
 

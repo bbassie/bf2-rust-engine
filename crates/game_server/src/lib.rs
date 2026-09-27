@@ -20,6 +20,7 @@ use bevy_replicon_renet::{
 };
 use game_shared::{
     PROTOCOL_ID,
+    config::GamePaths,
     conquest::{ControlPoint, Deployment, FlagState, RoundState},
     squad::SquadMember,
     input::{InputFrame, InputPacket},
@@ -39,6 +40,7 @@ pub mod chat;
 pub mod combat;
 pub mod conquest;
 pub mod discovery;
+pub mod radio;
 pub mod rotation;
 pub mod server_config;
 pub mod stats;
@@ -124,6 +126,7 @@ impl Plugin for GameServerPlugin {
             .add_plugins((
                 admin::AdminPlugin,
                 chat::ChatPlugin,
+                radio::RadioPlugin,
                 discovery::DiscoveryPlugin,
                 rotation::RotationPlugin,
                 stats::StatsPlugin,
@@ -277,7 +280,8 @@ fn start_match(mut commands: Commands, settings: Res<ServerSettings>) {
 /// Starts serving a match: listens for connections if `settings.network`, then spawns the
 /// match (which loads the level) and the local player. [`stop_server`] ends it.
 pub fn start_server(world: &mut World, mut settings: ServerSettings) -> Result<()> {
-    world.insert_resource(rotation::MapRotation::new(&mut settings));
+    let rotation = rotation::MapRotation::new(&mut settings, world.resource::<GamePaths>());
+    world.insert_resource(rotation);
     world.insert_resource(settings);
     world.run_system_cached::<(), _, _>(start_networking)?;
     discovery::start(world);

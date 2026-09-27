@@ -6,22 +6,26 @@ use std::{collections::VecDeque, sync::Arc};
 
 use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
+use bevy_replicon::{
+    client::{ServerUpdateTick, server_mutate_ticks::ServerMutateTicks},
+    prelude::*,
+};
 use game_data::{FireKind, FireMode, WeaponDesc};
 use game_shared::{
-    input::Buttons,
+    input::{Buttons, InputPacket},
     physics::GameLayer,
     protocol::{HitConfirmed, KillFeed, Player, ShotFired},
     soldier::{Hitbox, SoldierMotion},
     projectile::{launch_origin, launch_velocity},
-    weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, spread_direction},
+    weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, cooks, spread_direction},
 };
 
 use crate::{
     camera::{PlayerCamera, ThirdPerson},
-    effects::{EffectLibrary, SpawnEffect, SurfaceQuery},
+    effects::{EffectLibrary, SpawnDecal, SpawnEffect, SurfaceQuery, decals::Decals},
     local_input::{InputHistory, LocalInputSystems, LookState},
     net::{LocalPlayer, LocalSoldier},
-    prediction::SoldierRender,
+    prediction::{INTERPOLATION_DELAY, SoldierRender},
     render::scope::{WeaponPart, Zoom},
 };
 
@@ -31,6 +35,10 @@ impl Plugin for ClientCombatPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WeaponSelection>()
             .init_resource::<CombatFeedback>()
+            .init_resource::<ViewTick>()
+            .add_systems(Startup, simulated_input_delay)
+            .add_systems(PreUpdate, track_view_tick.after(ClientSystems::Receive))
+            .add_systems(PostUpdate, delay_inputs.before(ClientSystems::Send))
             .add_message::<LocalShot>()
             .add_message::<LocalLaunch>()
             .add_systems(Startup, load_effect_assets)
@@ -45,6 +53,75 @@ impl Plugin for ClientCombatPlugin {
                 )
                     .chain(),
             );
+    }
+}
+
+/// The server tick of the world we see (other soldiers are shown
+/// [`INTERPOLATION_DELAY`] behind the latest state received), sent with every input so the
+/// server judges our hits against it. 0 when not connected to a remote server.
+#[derive(Resource, Default)]
+pub struct ViewTick {
+    pub tick: u32,
+    latest: u32,
+    received: f64,
+}
+
+fn track_view_tick(
+    real: Res<Time<Real>>,
+    state: Res<State<ClientState>>,
+    updates: Option<Res<ServerUpdateTick>>,
+    mutations: Option<Res<ServerMutateTicks>>,
+    mut view: ResMut<ViewTick>,
+) {
+    if *state.get() != ClientState::Connected {
+        *view = ViewTick::default();
+        return;
+    }
+    let latest = updates
+        .map_or(0, |t| t.get())
+        .max(mutations.map_or(0, |t| t.last_tick().get()));
+    let now = real.elapsed_secs_f64();
+    if latest != view.latest {
+        view.latest = latest;
+        view.received = now;
+    }
+    // States keep arriving about once a tick; the one on screen came in a moment ago.
+    let behind = ((INTERPOLATION_DELAY - (now - view.received)).max(0.0) * game_shared::TICK_HZ).round() as u32;
+    view.tick = latest.saturating_sub(behind).max(1);
+}
+
+/// `BF2_SIM_INPUT_DELAY_MS`: our inputs are held back this long before they go to the
+/// server, to test lag compensation against a real server as if the network were slow.
+#[derive(Resource)]
+struct InputDelay {
+    seconds: f64,
+    queue: VecDeque<(f64, InputPacket)>,
+}
+
+fn simulated_input_delay(mut commands: Commands) {
+    let delay = std::env::var("BF2_SIM_INPUT_DELAY_MS").ok().and_then(|ms| ms.parse::<f64>().ok());
+    if let Some(ms) = delay.filter(|ms| *ms > 0.0) {
+        warn!("holding inputs back {ms} ms (BF2_SIM_INPUT_DELAY_MS)");
+        commands.insert_resource(InputDelay {
+            seconds: ms / 1000.0,
+            queue: VecDeque::new(),
+        });
+    }
+}
+
+fn delay_inputs(real: Res<Time<Real>>, delay: Option<ResMut<InputDelay>>, mut packets: ResMut<Messages<InputPacket>>) {
+    let Some(mut delay) = delay else {
+        return;
+    };
+    let now = real.elapsed_secs_f64();
+    let due = now + delay.seconds;
+    for packet in packets.drain() {
+        delay.queue.push_back((due, packet));
+    }
+    while delay.queue.front().is_some_and(|(at, _)| *at <= now) {
+        if let Some((_, packet)) = delay.queue.pop_front() {
+            packets.write(packet);
+        }
     }
 }
 
@@ -74,6 +151,8 @@ pub struct CombatFeedback {
     pub reloading: bool,
     /// We are winding up a throw (and cooking a grenade) (predicted).
     pub cooking: bool,
+    /// Seconds left on the fuse of the grenade in our hand, while winding up (predicted).
+    pub fuse: Option<f32>,
     /// The C4 detonator is in our hand instead of the charges (predicted).
     pub detonator: bool,
 }
@@ -90,6 +169,7 @@ impl Default for CombatFeedback {
             shots_fired: 0,
             reloading: false,
             cooking: false,
+            fuse: None,
             detonator: false,
         }
     }
@@ -146,10 +226,11 @@ struct Tracer {
     life: f32,
     /// The shooter's hitbox, which the tracer may start inside of.
     ignore: Option<Entity>,
-    /// Projectile material, for the impact effect.
+    /// Projectile material, for the impact effect and the mark it leaves.
     material: u32,
-    /// Effect where the projectile detonates (grenades, rockets), instead of an impact.
-    detonation: Option<String>,
+    /// Shells that go off where they hit: the server plays the detonation (`PlayEffect`),
+    /// the tracer shows no impact.
+    detonates: bool,
 }
 
 #[derive(Component)]
@@ -298,7 +379,11 @@ fn predict_local_shots(
     }
     feedback.reloading = state.reload > 0.0;
     feedback.cooking = state.wind_up.is_some();
-    feedback.detonator = state.detonator;
+    feedback.fuse = state
+        .wind_up
+        .filter(|_| cooks(&weapon.projectile))
+        .map(|held| (weapon.projectile.time_to_live - (held - weapon.fire.pull_back).max(0.0)).max(0.0));
+    feedback.detonator = state.detonator && weapon.fire.kind == FireKind::Explosives;
     // Out of grenades or mines: back to the primary weapon once the throw is over (BF2
     // `ammo.toggleWhenNoAmmo`).
     let used_up = weapon.fire.kind == FireKind::Thrown && ammo == [0, 0] && state.launch.is_none();
@@ -314,7 +399,8 @@ fn predict_local_shots(
     let released = launching && !local.launching;
     let launched = matches!(fired, Some(Fired::Launch { .. })) && !local.launching;
     local.launching = launching;
-    if released || launched {
+    // The detonator's press animates like a shot.
+    if released || launched || fired == Some(Fired::Detonate) {
         feedback.shots_fired = feedback.shots_fired.wrapping_add(1);
     }
     let Some(Fired::Launch { soft, .. }) = fired else {
@@ -358,7 +444,6 @@ pub(crate) fn spawn_tracer(
     direction: Vec3,
     weapon: &WeaponDesc,
     ignore: Option<Entity>,
-    library: Option<&EffectLibrary>,
 ) {
     if weapon.projectile.velocity <= 0.0 {
         return;
@@ -370,11 +455,7 @@ pub(crate) fn spawn_tracer(
             life: weapon.projectile.time_to_live.min(3.0),
             ignore,
             material: weapon.projectile.material,
-            detonation: weapon
-                .projectile
-                .detonation_effect
-                .clone()
-                .or_else(|| library.and_then(|l| l.detonation(&weapon.name)).map(str::to_string)),
+            detonates: weapon.projectile.goes_off(),
         },
         Mesh3d(assets.tracer.clone()),
         MeshMaterial3d(assets.tracer_material.clone()),
@@ -404,7 +485,7 @@ fn spawn_local_shots(
         let hitbox = soldier.map(|(_, hitbox)| hitbox.entity);
         // Grenades, rockets and charges are drawn as themselves (`render::projectiles`).
         if !shot.weapon.projectile.is_object() {
-            spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon, hitbox, library);
+            spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon, hitbox);
         }
         // Shotguns fire several pellets but flash once.
         if shot.pellet > 0 {
@@ -452,7 +533,7 @@ fn receive_shots(
         // Tracer from the gun rather than the eye.
         let gun = shot.origin - Vec3::Y * 0.15;
         if !weapon.projectile.is_object() {
-            spawn_tracer(&mut commands, &assets, gun, shot.direction, weapon, hitbox.map(|h| h.entity), library);
+            spawn_tracer(&mut commands, &assets, gun, shot.direction, weapon, hitbox.map(|h| h.entity));
         }
         // Shotguns fire several pellets but flash once.
         if flashed.contains(&shot.soldier) {
@@ -515,8 +596,10 @@ fn update_tracers(
     spatial: SpatialQuery,
     assets: Res<EffectAssets>,
     library: Option<Res<EffectLibrary>>,
+    decals: Option<Res<Decals>>,
     surfaces: SurfaceQuery,
     mut effects: MessageWriter<SpawnEffect>,
+    mut marks: MessageWriter<SpawnDecal>,
     mut tracers: Query<(Entity, &mut Tracer, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
@@ -535,20 +618,31 @@ fn update_tracers(
             .ok()
             .and_then(|dir| spatial.cast_ray(transform.translation, dir, step.length(), true, &filter));
         if let Some(hit) = hit {
+            commands.entity(entity).despawn();
+            if tracer.detonates {
+                continue;
+            }
             let point = transform.translation + step.normalize() * hit.distance;
-            let effect = match &tracer.detonation {
-                Some(detonation) => Some(SpawnEffect::new(detonation.clone(), point)),
-                None => library
-                    .as_ref()
-                    .and_then(|l| l.impact(tracer.material, surfaces.material(hit.entity, point)))
-                    .map(|name| SpawnEffect::new(name, point).with_up(hit.normal)),
-            };
-            match effect {
-                Some(effect) => {
-                    effects.write(effect);
+            let surface = surfaces.material(hit.entity, point);
+            if let (Some(parent), Some(name)) = (
+                surfaces.decal_surface(hit.entity),
+                decals.as_ref().and_then(|d| d.decal(tracer.material, surface)),
+            ) {
+                marks.write(SpawnDecal {
+                    name: name.to_string(),
+                    position: point,
+                    normal: hit.normal,
+                    parent,
+                });
+            }
+            match library.as_ref().map(|l| (l.impact(tracer.material, surface), l.impacts.effects.is_empty())) {
+                Some((Some(name), _)) => {
+                    effects.write(SpawnEffect::new(name, point).with_up(hit.normal));
                 }
+                // BF2 has no effect for this projectile on this surface.
+                Some((None, false)) => {}
                 // Without imported effects: a puff.
-                None => {
+                _ => {
                     commands.spawn((
                         Impact { age: 0.0 },
                         Mesh3d(assets.impact.clone()),
@@ -558,7 +652,6 @@ fn update_tracers(
                     ));
                 }
             }
-            commands.entity(entity).despawn();
             continue;
         }
         if tracer.life <= 0.0 {

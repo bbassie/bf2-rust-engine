@@ -421,6 +421,7 @@ fn update_stamina(
 #[allow(clippy::type_complexity)]
 fn update_vitals(
     armory: Res<Armory>,
+    feedback: Res<CombatFeedback>,
     soldier: Query<(&Health, &Loadout, &Inventory), With<LocalSoldier>>,
     mut panels: Query<&mut Visibility, With<VitalsPanel>>,
     mut health_text: Single<&mut Text, (With<HealthText>, Without<WeaponText>, Without<AmmoText>)>,
@@ -447,12 +448,19 @@ fn update_vitals(
     let weapon = loadout.weapons.get(active).and_then(|w| armory.weapon(w));
     let name = weapon.map_or(String::new(), |w| weapon_display_name(&w.display_name));
     let mode = weapon
+        .filter(|w| w.fire.kind == game_data::FireKind::Gun)
         .and_then(|w| w.fire_modes.get(inventory.fire_mode as usize))
-        .map_or("", |m| match m {
-            FireMode::Single => "  SINGLE",
-            FireMode::Burst => "  BURST",
-            FireMode::Auto => "  AUTO",
+        .map_or(String::new(), |m| match m {
+            FireMode::Single => "  SINGLE".into(),
+            FireMode::Burst => "  BURST".into(),
+            FireMode::Auto => "  AUTO".into(),
         });
+    // Grenades being cooked count down their fuse; C4 shows when the detonator is out.
+    let mode = match (feedback.fuse, feedback.detonator) {
+        (Some(fuse), _) => format!("  COOKING {fuse:.1}"),
+        (None, true) => "  DETONATOR".into(),
+        _ => mode,
+    };
     weapon_text.0 = format!("{name}{mode}");
     let [in_mag, spare] = inventory.ammo.get(active).copied().unwrap_or([0, 0]);
     ammo_text.0 = if inventory.reloading {

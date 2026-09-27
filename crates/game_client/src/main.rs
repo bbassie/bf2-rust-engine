@@ -41,11 +41,13 @@ mod minimap;
 mod nav_debug;
 mod net;
 mod prediction;
+mod radio;
 mod render;
 mod scenario;
 mod settings;
 mod summary;
 mod vehicles;
+mod wounded;
 
 #[derive(Parser, Debug, Clone, Resource)]
 #[command(version, about = "Game client")]
@@ -226,6 +228,8 @@ fn main() -> AppExit {
         audio::AudioPlugin,
         chat::ChatPlugin,
         summary::SummaryPlugin,
+        wounded::WoundedPlugin,
+        radio::RadioPlugin,
     ))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).

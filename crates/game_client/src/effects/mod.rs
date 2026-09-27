@@ -10,7 +10,8 @@
 //!   can't work the effect out from other messages.
 //!
 //! [`EffectLibrary`] also answers which effect a weapon's muzzle, a detonation or a bullet
-//! hitting some surface makes (see [`impacts`]).
+//! hitting some surface makes (see [`impacts`]); [`SpawnDecal`] leaves bullet holes and
+//! scorch marks (see [`decals`]).
 //!
 //! Particles are simulated on the CPU in one resource; the GPU expands them into quads from
 //! a storage buffer, one draw per texture (BF2 packs nearly all sprites into one atlas),
@@ -33,13 +34,17 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
-use game_data::{Blend, EffectDesc, EmitShape, EmitterDesc, Facing, ImpactTable, WeaponEffectTable};
+use game_data::{
+    Blend, DebrisPiece, DecalTable, EffectDesc, EffectSound, EmitShape, EmitterDesc, Facing, ImpactTable,
+    SoundDesc, WeaponEffectTable,
+};
 use game_shared::{
     config::GamePaths,
     effects::PlayEffect,
     level::{LevelEntity, LoadedLevel},
     physics::GameLayer,
     statics::StaticMesh,
+    weapons::Armory,
 };
 
 use crate::{
@@ -48,9 +53,11 @@ use crate::{
     render::viewmodel::VIEW_MODEL_LAYER,
 };
 
+pub mod decals;
 pub mod impacts;
 mod render;
 
+pub use decals::SpawnDecal;
 pub use impacts::SurfaceQuery;
 
 pub struct EffectsPlugin;
@@ -59,6 +66,7 @@ impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(render::ParticleRenderPlugin)
             .add_message::<SpawnEffect>()
+            .add_message::<SpawnDecal>()
             .init_resource::<EffectWorld>()
             .init_resource::<impacts::Surfaces>()
             .init_resource::<EffectStats>()
@@ -66,10 +74,17 @@ impl Plugin for EffectsPlugin {
             .add_systems(
                 Update,
                 (
-                    (clear_effects, impacts::load_surfaces, preload_level_effects, set_particle_light)
+                    (
+                        clear_effects,
+                        decals::clear_decals,
+                        decals::prepare_decals,
+                        impacts::load_surfaces,
+                        preload_level_effects,
+                        set_particle_light,
+                    )
                         .run_if(resource_exists_and_changed::<LoadedLevel>),
-                    clear_effects.run_if(resource_removed::<LoadedLevel>),
-                    receive_server_effects,
+                    (clear_effects, decals::clear_decals).run_if(resource_removed::<LoadedLevel>),
+                    (receive_server_effects, decals::spawn_decals).chain(),
                     (update_flashes, update_debris),
                 ),
             )
@@ -112,7 +127,6 @@ impl SpawnEffect {
     }
 
     /// Turned like the object it belongs to (destroyed objects).
-    #[allow(dead_code)]
     pub fn with_rotation(mut self, rotation: Quat) -> Self {
         self.rotation = rotation;
         self
@@ -275,15 +289,19 @@ impl EffectLibrary {
         prepared
     }
 
+    /// Whether the effect exists (was imported).
+    pub fn has(&self, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        match self.effects.get(&name) {
+            Some(prepared) => prepared.is_some(),
+            None => self.dir.join(format!("{name}.ron")).exists(),
+        }
+    }
+
     /// A weapon's muzzle flash, and where the muzzle is on the weapon model.
     pub fn muzzle(&self, weapon: &str) -> Option<(&str, Vec3)> {
         let effects = self.weapons.weapons.get(weapon)?;
         Some((effects.muzzle.as_deref()?, Vec3::from_array(effects.muzzle_offset)))
-    }
-
-    /// Where a weapon's projectile detonates (grenades, rockets).
-    pub fn detonation(&self, weapon: &str) -> Option<&str> {
-        self.weapons.weapons.get(weapon)?.detonation.as_deref()
     }
 
     /// The effect of a projectile of material `projectile` hitting `surface`.
@@ -300,10 +318,12 @@ impl EffectLibrary {
     }
 }
 
-fn load_library(mut commands: Commands, paths: Res<GamePaths>) {
+fn load_library(mut commands: Commands, paths: Res<GamePaths>, mut meshes: ResMut<Assets<Mesh>>) {
     let dir = paths.imported.join("effects");
     let impacts: ImpactTable = game_data::read_ron(dir.join("impacts.ron")).unwrap_or_default();
     let weapons: WeaponEffectTable = game_data::read_ron(dir.join("weapons.ron")).unwrap_or_default();
+    let decal_table: DecalTable = game_data::read_ron(dir.join("decals.ron")).unwrap_or_default();
+    commands.insert_resource(decals::Decals::new(decal_table, &mut meshes));
     if impacts.effects.is_empty() {
         info!("no imported effects in {}", dir.display());
     }
@@ -368,13 +388,54 @@ fn clear_effects(mut world: ResMut<EffectWorld>) {
     world.particles = 0;
 }
 
-fn receive_server_effects(mut received: MessageReader<PlayEffect>, mut effects: MessageWriter<SpawnEffect>) {
+/// Effects the server sends, and the scorch marks of detonations among them.
+fn receive_server_effects(
+    mut received: MessageReader<PlayEffect>,
+    mut effects: MessageWriter<SpawnEffect>,
+    mut marks: MessageWriter<SpawnDecal>,
+    decals: Res<decals::Decals>,
+    armory: Res<Armory>,
+    spatial: SpatialQuery,
+    surfaces: SurfaceQuery,
+) {
     for effect in received.read() {
         let mut spawn = SpawnEffect::new(effect.name.clone(), effect.position).with_up(effect.up);
         if effect.duration > 0.0 {
             spawn = spawn.lasting(effect.duration);
         }
         effects.write(spawn);
+
+        // The explosion material, from the message or the weapon whose detonation this is.
+        let material = match effect.material {
+            0 => armory
+                .weapons
+                .values()
+                .map(|w| &w.projectile)
+                .find(|p| p.detonation_effect.as_deref() == Some(effect.name.as_str()))
+                .map_or(0, |p| p.explosion_material),
+            material => material,
+        };
+        let up = effect.up.normalize_or(Vec3::Y);
+        let Ok(down) = Dir3::new(-up) else {
+            continue;
+        };
+        let filter = SpatialQueryFilter::from_mask(GameLayer::World);
+        let Some(hit) = spatial.cast_ray(effect.position + up * 0.5, down, 1.5, true, &filter) else {
+            continue;
+        };
+        let point = effect.position + up * 0.5 - up * hit.distance;
+        let (Some(parent), Some(name)) = (
+            surfaces.decal_surface(hit.entity),
+            decals.decal(material, surfaces.material(hit.entity, point)),
+        ) else {
+            continue;
+        };
+        marks.write(SpawnDecal {
+            name: name.to_string(),
+            position: point,
+            normal: hit.normal,
+            parent,
+        });
     }
 }
 
@@ -554,29 +615,12 @@ fn spawn_effects(
                 }
             }
         }
+        let frame = Transform::from_translation(request.position).with_rotation(request.rotation);
         for piece in &desc.debris {
-            let sample = |spread: &[game_data::Spread; 3]| {
-                request.rotation
-                    * Vec3::from_array(std::array::from_fn(|i| spread[i].sample(fastrand::f32(), fastrand::bool())))
-            };
-            commands.spawn((
-                LevelEntity,
-                Transform::from_translation(request.position + request.rotation * Vec3::from_array(piece.position))
-                    .with_rotation(request.rotation),
-                StaticMesh {
-                    path: piece.mesh.clone(),
-                    index: piece.mesh_index,
-                },
-                Debris {
-                    velocity: sample(&piece.velocity),
-                    spin: sample(&piece.spin),
-                    life: piece.life.sample(fastrand::f32(), false).max(0.2),
-                    age: 0.0,
-                },
-            ));
+            throw_debris(&mut commands, piece, &frame);
         }
         for sound in desc.sounds.iter().filter(|s| s.views.shows(request.first_person) && !s.files.is_empty()) {
-            sounds.write(PlaySound::at(sound, request.position).reason("effect"));
+            sounds.write(PlaySound::at(sound_desc(sound), request.position).reason("effect"));
         }
         if let Some(radius) = effect.explosion_radius {
             sounds.write(PlaySound::at(Sound::Explosion { radius }, request.position).reason("explosion effect"));
@@ -938,6 +982,20 @@ fn update_flashes(mut commands: Commands, time: Res<Time>, mut flashes: Query<(E
     }
 }
 
+/// How an effect sound plays; without a falloff of its own, audio's default for effects.
+fn sound_desc(sound: &EffectSound) -> Sound {
+    match sound.falloff {
+        Some(falloff) => Sound::Desc(Arc::new(SoundDesc {
+            files: sound.files.clone(),
+            volume: sound.volume,
+            pitch: sound.pitch,
+            falloff: Some(falloff),
+            ..SoundDesc::file("")
+        })),
+        None => Sound::from(sound),
+    }
+}
+
 /// A thrown mesh. It bounces off the world, comes to rest and shrinks away at the end.
 #[derive(Component)]
 struct Debris {
@@ -946,6 +1004,32 @@ struct Debris {
     spin: Vec3,
     life: f32,
     age: f32,
+    scale: Vec3,
+}
+
+/// Throws a piece of debris from an object (or effect) placed at `frame`.
+pub fn throw_debris(commands: &mut Commands, piece: &DebrisPiece, frame: &Transform) {
+    let sample = |spread: &[game_data::Spread; 3]| {
+        frame.rotation * Vec3::from_array(std::array::from_fn(|i| spread[i].sample(fastrand::f32(), fastrand::bool())))
+    };
+    commands.spawn((
+        LevelEntity,
+        Transform {
+            translation: frame.transform_point(Vec3::from_array(piece.position)),
+            ..*frame
+        },
+        StaticMesh {
+            path: piece.mesh.clone(),
+            index: piece.mesh_index,
+        },
+        Debris {
+            velocity: sample(&piece.velocity),
+            spin: sample(&piece.spin),
+            life: piece.life.sample(fastrand::f32(), false).max(0.2),
+            age: 0.0,
+            scale: frame.scale,
+        },
+    ));
 }
 
 fn update_debris(
@@ -978,6 +1062,6 @@ fn update_debris(
         }
         transform.rotation = (Quat::from_scaled_axis(piece.spin * dt) * transform.rotation).normalize();
         let shrink = ((piece.life - piece.age) / SHRINK).clamp(0.0, 1.0);
-        transform.scale = Vec3::splat(shrink);
+        transform.scale = piece.scale * shrink;
     }
 }

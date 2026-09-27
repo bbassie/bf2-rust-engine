@@ -413,9 +413,11 @@ fn water_color(world: &World) -> [f32; 4] {
     [color[0], color[1], color[2], 0.85]
 }
 
-/// Colors are 0..1, except a few written as 0..255.
+/// Colors are 0..1, except a few written as 0..255 (fog colours, and some terrain water
+/// colours by mistake). Light colours may be overbright (up to 2.34 in retail levels), while
+/// every 0..255 colour has a component of at least 11.
 pub fn normalize_color(c: [f32; 3]) -> [f32; 3] {
-    if c.iter().any(|&v| v > 1.0) {
+    if c.iter().any(|&v| v > 3.0) {
         c.map(|v| v / 255.0)
     } else {
         c

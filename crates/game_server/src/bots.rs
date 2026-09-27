@@ -107,12 +107,17 @@ const DECIDE_INTERVAL: f32 = 0.25;
 const APPROACH_DISTANCE: f32 = 60.0;
 /// How far a grenade may land from friends, meters.
 const GRENADE_SAFETY: f32 = 9.0;
+/// Bots keep this far from teammates while moving, meters.
+const CROWD_DISTANCE: f32 = 1.2;
 
 /// Per-minute movement statistics, logged to see how well bots get around.
 #[derive(Resource, Default)]
 pub struct BotStats {
     elapsed: f32,
     stuck_events: u32,
+    /// Stuck events while carrying out orders, advancing under fire, and taking cover or
+    /// flanking.
+    stuck_by_activity: [u32; 3],
     /// Stuck events by 10 m square, to find the places bots get stuck at.
     stuck_spots: bevy::platform::collections::HashMap<(i32, i32), u32>,
     stuck_seconds: f32,
@@ -782,17 +787,14 @@ impl BotBrain {
         if cover > best.0
             && !matches!(self.activity, Activity::Cover { .. })
             && *covers > 0
-            && {
-                *covers -= 1;
-                true
-            }
             && let (Some(nav), Some(threat)) = (w.nav(), target.map(|t| t.eye_position()).or(self.threat_point()))
-            && let Some(spot) = tactics::find_cover(nav, &w.spatial, position, threat)
         {
-            // TODO: with medics and resupply, go to one when badly hurt or out of ammo.
-            // Getting there counts against the time too.
-            let time = 2.5 + 3.0 * (1.0 - courage) + spot.distance(position) / 4.0;
-            consider(&mut best, cover, Activity::Cover { spot, time });
+            *covers -= 1;
+            if let Some(spot) = tactics::find_cover(nav, &w.spatial, position, threat) {
+                // Getting there counts against the time too.
+                let time = 2.5 + 3.0 * (1.0 - courage) + spot.distance(position) / 4.0;
+                consider(&mut best, cover, Activity::Cover { spot, time });
+            }
         }
 
         // TODO: kit abilities, once they exist: medics revive downed teammates nearby (BF2's
@@ -824,7 +826,14 @@ impl BotBrain {
                     true => 0.0,
                     false => 5.0 * (0.5 + aggression),
                 };
-                if (12.0..=40.0).contains(&d) && friends_clear && utility > 0.0 {
+                // Nothing right in front to bounce it back: the start of the arc is clear.
+                let eye = me.motion.eye_position();
+                let early = eye + flat(at - eye).normalize_or_zero() * 5.0 + Vec3::Y * 1.5;
+                if (12.0..=40.0).contains(&d)
+                    && friends_clear
+                    && utility > best.0
+                    && tactics::line_of_sight(&w.spatial, eye, early)
+                {
                     consider(&mut best, utility, Activity::Throw { at, time: 0.0, weapon: grenade });
                 }
             }
@@ -1300,6 +1309,24 @@ impl BotBrain {
         } else {
             direction = intent.step;
         }
+        // Keep a little apart from teammates: crowds jam doorways, stairs and ladders. Being
+        // held up by one isn't being stuck on the level.
+        let mut queued = false;
+        if direction.length_squared() > 0.01
+            && ladder.is_none()
+            && let Some(t) = me.team_index()
+        {
+            let mut push = Vec3::ZERO;
+            for other in w.snapshot.soldiers[t].iter().filter(|s| s.player != me.player) {
+                let away = flat(position - other.position);
+                let d = away.length();
+                if d > 0.01 && d < CROWD_DISTANCE && (other.position.y - position.y).abs() < 1.5 {
+                    push += away / d * (CROWD_DISTANCE - d);
+                    queued |= d < 1.0 && direction.dot(-away / d) > 0.5;
+                }
+            }
+            direction = (direction + push.clamp_length_max(0.6)).normalize_or(direction);
+        }
         let wants_move = direction.length_squared() > 0.01;
         if me.motion.climbing && !self.climbing {
             stats.climbs += 1;
@@ -1315,7 +1342,7 @@ impl BotBrain {
         if intent.goal.is_some() && wants_move && !me.motion.climbing {
             stats.moving_seconds += dt;
             stats.moved += moved;
-            if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && me.motion.grounded {
+            if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && me.motion.grounded && !queued {
                 self.stuck_time += dt;
                 stats.stuck_seconds += dt;
             } else {
@@ -1325,6 +1352,11 @@ impl BotBrain {
                 stats.stuck_events += 1;
                 let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
                 *stats.stuck_spots.entry(square).or_default() += 1;
+                stats.stuck_by_activity[match self.activity {
+                    Activity::Engage => 1,
+                    Activity::Cover { .. } | Activity::Flank { .. } => 2,
+                    _ => 0,
+                }] += 1;
                 self.stuck_time = 0.0;
                 self.unstuck_timer = 0.6 + fastrand::f32() * 0.8;
                 // First try jumping ahead (a ledge the grid thinks is lower), then sideways.
@@ -1494,7 +1526,14 @@ impl BotBrain {
         };
         while let Some(waypoint) = path.waypoints.get(self.waypoint) {
             let last = self.waypoint + 1 == path.waypoints.len();
-            let close = flat(waypoint.position - position).length() < if last { 0.6 } else { 0.8 };
+            // Ladders are narrow: get to where they are climbed from exactly.
+            let before_ladder = path.waypoints.get(self.waypoint + 1).is_some_and(|w| w.ladder.is_some());
+            let reach = match (before_ladder, last) {
+                (true, _) => 0.35,
+                (_, true) => 0.6,
+                _ => 0.8,
+            };
+            let close = flat(waypoint.position - position).length() < reach;
             if close && (waypoint.position.y - position.y).abs() < 1.5 {
                 self.waypoint += 1;
                 self.waypoint_best = f32::MAX;
@@ -1538,8 +1577,13 @@ impl BotBrain {
                 self.waypoint_timer = 0.0;
             }
         }
+        // Onto a ladder: straight along its middle, into it going up, over its top going down.
+        let target = match waypoint.ladder {
+            Some(step) => previous + if step.up { -step.front } else { step.front },
+            None => waypoint.position,
+        };
         Steer::Toward {
-            target: waypoint.position,
+            target,
             jump: waypoint.jump && motion.grounded && flat(waypoint.position - position).length() < 1.2,
             ladder: waypoint.ladder,
         }
@@ -1699,11 +1743,15 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
     }
     if !bots.is_empty() {
         info!(
-            "bots: {} stuck events in the last minute ({:.0} s stuck of {:.0} bot-seconds moving, \
+            "bots: {} stuck events in the last minute ({} on orders, {} advancing, {} to cover or \
+             flanking; {:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
              {:.1} ms avg, {:.1} ms max; {} ladders climbed; thinking {:.2} ms per tick, {:.1} ms max; \
              stuck most at {}",
             stats.stuck_events,
+            stats.stuck_by_activity[0],
+            stats.stuck_by_activity[1],
+            stats.stuck_by_activity[2],
             stats.stuck_seconds,
             stats.moving_seconds,
             stats.moved / stats.moving_seconds.max(1.0),

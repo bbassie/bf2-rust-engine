@@ -233,8 +233,9 @@ pub struct SoldierTuning {
     pub step_height: f32,
     /// How far the soldier snaps down to stay on the ground walking down slopes and steps.
     pub snap_distance: f32,
-    /// Ladder speeds, m/s. Going down, BF2 soldiers slide (its `3p_climb_skid` animation
-    /// is made for 3 m/s).
+    /// Ladder speeds, m/s: up at the pace of BF2's climbing animation (`3p_climbup` moves
+    /// the feet about 1.25 m/s). Going down, BF2 soldiers slide (its `3p_climb_skid`
+    /// animation is made for 3 m/s).
     pub climb_speed: f32,
     pub climb_down_speed: f32,
     /// Speed away from the ladder when jumping off it.
@@ -303,7 +304,7 @@ impl Default for SoldierTuning {
             max_slope: 55f32.to_radians(),
             step_height: 0.45,
             snap_distance: 0.45,
-            climb_speed: 2.0,
+            climb_speed: 1.25,
             climb_down_speed: 3.0,
             ladder_jump_speed: 3.0,
             light: StaminaTuning {

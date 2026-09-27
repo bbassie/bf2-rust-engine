@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// How far in the past remote soldiers are shown, to always have two states to blend.
-const INTERPOLATION_DELAY: f64 = 0.1;
+pub(crate) const INTERPOLATION_DELAY: f64 = 0.1;
 /// How quickly prediction corrections are blended out (per second).
 const ERROR_DECAY: f32 = 12.0;
 

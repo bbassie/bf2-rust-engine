@@ -2,7 +2,8 @@
 // (static meshes), RaShaderBM.fx (bundled) and RaShaderSM.fx (skinned):
 //
 // - Static: color = base (UV0) x detail (UV1) x dirt, the crack blended over by its alpha,
-//   all doubled (BF2 lights static meshes 2x; folded into the albedo, clamped at 1). Detail
+//   all doubled in gamma space (BF2 lights static meshes 2x; folded into the albedo as
+//   2^2.2 in linear space, clamped at 1). Detail
 //   normal map on UV1 with the crack normal map blended over by the crack alpha; parallax
 //   shifts the detail UVs by the normal map's alpha as height. Gloss is the detail alpha,
 //   unless base x detail alpha is the alpha test.
@@ -234,7 +235,9 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
     }
     if (flags & GLOSS_FROM_BASE) != 0u {
         gloss = color.a;
-        color.a = select(1.0, dot(color.rgb, vec3(1.0)), (flags & ALPHA_FROM_COLOR) != 0u);
+        // BF2's brightness alpha test sums gamma-space values.
+        let brightness = dot(pow(max(color.rgb, vec3(0.0)), vec3(1.0 / 2.2)), vec3(1.0));
+        color.a = select(1.0, brightness, (flags & ALPHA_FROM_COLOR) != 0u);
     }
     var crack_mask = 0.0;
     if (flags & DIRT) != 0u {
@@ -246,7 +249,9 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
         crack_mask = crack.a;
         color = vec4(mix(color.rgb, crack.rgb, crack.a), color.a);
     }
-    color = vec4(min(color.rgb * layers.albedo_scale, vec3(1.0)), color.a);
+    // BF2 doubles in gamma space, where detail textures average 0.5 grey; the products of
+    // textures are the same in linear space, but the factor becomes 2^2.2.
+    color = vec4(min(color.rgb * pow(layers.albedo_scale, 2.2), vec3(1.0)), color.a);
 
     var world_normal = normalize(N);
     let map_normal = !in.has_prepass_normal;

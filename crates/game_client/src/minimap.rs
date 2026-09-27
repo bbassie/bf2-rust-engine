@@ -19,7 +19,7 @@ use game_shared::{
 
 use crate::{
     camera::PlayerCamera,
-    conquest_hud::{FRIENDLY, SQUAD, team_color},
+    conquest_hud::{ENEMY, FRIENDLY, SQUAD, team_color},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -227,12 +227,16 @@ fn update_minimap(
     players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
     teams: Query<(&Team, Option<&SquadMember>)>,
     control_points: Query<(Entity, &ControlPoint, &FlagState)>,
-    soldiers: Query<(Entity, &SoldierRender, &ControlledBy), (With<Soldier>, Without<LocalSoldier>)>,
+    soldiers: Query<
+        (Entity, &SoldierRender, &ControlledBy, Has<game_shared::revive::Downed>),
+        (With<Soldier>, Without<LocalSoldier>),
+    >,
     map: Single<Option<&MaterialNode<MinimapMaterial>>, With<MinimapMap>>,
     mut materials: ResMut<Assets<MinimapMaterial>>,
     icons_root: Single<Entity, With<MinimapIcons>>,
     mut icons: Query<(Entity, &Icon, &mut Node, &mut BackgroundColor, &mut Visibility)>,
     mut heading: Single<&mut UiTransform, With<PlayerHeading>>,
+    spotted: Res<crate::radio::SpottedTargets>,
 ) {
     let Some(level) = level else {
         return;
@@ -256,12 +260,23 @@ fn update_minimap(
     for (entity, cp, state) in &control_points {
         wanted.insert(entity, (cp.position, team_color(state.owner, local), 12.0));
     }
-    for (entity, render, controlled_by) in &soldiers {
+    for (entity, render, controlled_by, downed) in &soldiers {
         let (team, squad) = teams.get(controlled_by.0).map(|(t, s)| (*t, s.copied())).unwrap_or_default();
         if team == local && local != Team::Spectator {
             let squad_mate = local_squad.zip(squad).is_some_and(|(a, b)| a.squad == b.squad);
-            wanted.insert(entity, (render.position, if squad_mate { SQUAD } else { FRIENDLY }, 6.0));
+            // Critically wounded teammates stand out, for medics.
+            let (color, size) = match (downed, squad_mate) {
+                (true, _) => (crate::wounded::WOUNDED, 9.0),
+                (false, true) => (SQUAD, 6.0),
+                (false, false) => (FRIENDLY, 6.0),
+            };
+            wanted.insert(entity, (render.position, color, size));
         }
+    }
+
+    // Enemies our team spotted.
+    for &(entity, position) in &spotted.0 {
+        wanted.insert(entity, (position, ENEMY, 7.0));
     }
 
     // Map offsets to minimap pixels, turned the opposite way to the map.

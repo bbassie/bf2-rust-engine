@@ -124,12 +124,12 @@ pub(super) fn build_pages(
     asset_server: Res<AssetServer>,
     monitors: Query<&Monitor, With<PrimaryMonitor>>,
     roots: Query<(Entity, Option<&Children>), With<PageRoot>>,
-    mut built: Local<Option<(Entity, Page, SettingsTab, u32, Option<String>, u32)>>,
+    mut built: Local<Option<(Entity, Page, SettingsTab, u32, Option<String>)>>,
 ) {
     let Ok((root, children)) = roots.single() else {
         return;
     };
-    let key = (root, menu.page, menu.tab, catalog.version, notice.0.clone(), menu.rebuild);
+    let key = (root, menu.page, menu.tab, catalog.version, notice.0.clone());
     if built.as_ref() == Some(&key) {
         return;
     }

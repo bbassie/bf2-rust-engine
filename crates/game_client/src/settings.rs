@@ -336,10 +336,14 @@ pub enum Action {
     ChatAll,
     ChatTeam,
     ChatSquad,
+    /// Critically wounded: stop waiting for a medic and go to the deploy screen.
+    GiveUp,
+    /// BF2's commo rose while held: radio messages, spotting.
+    CommoRose,
 }
 
 impl Action {
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 32] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -361,6 +365,8 @@ impl Action {
         Action::ChatAll,
         Action::ChatTeam,
         Action::ChatSquad,
+        Action::GiveUp,
+        Action::CommoRose,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
         Action::WeaponSlot(3),
@@ -396,6 +402,8 @@ impl Action {
             Action::ChatAll => "Chat to everyone".into(),
             Action::ChatTeam => "Chat to team".into(),
             Action::ChatSquad => "Chat to squad".into(),
+            Action::GiveUp => "Give up when wounded".into(),
+            Action::CommoRose => "Commo rose (radio)".into(),
         }
     }
 
@@ -442,6 +450,8 @@ impl Action {
             Action::ChatAll => Key(KeyCode::KeyT),
             Action::ChatTeam => Key(KeyCode::KeyY),
             Action::ChatSquad => Key(KeyCode::KeyU),
+            Action::GiveUp => Key(KeyCode::KeyX),
+            Action::CommoRose => Key(KeyCode::KeyQ),
         }
     }
 }

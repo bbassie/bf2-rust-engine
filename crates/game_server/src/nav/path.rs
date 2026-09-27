@@ -27,9 +27,10 @@ const MAX_LOOKAHEAD: usize = 120;
 const CLEARANCE: u8 = 2;
 /// How close to a cell's middle a straight line must pass to cross an edge cell, in cells.
 const CENTER_TOLERANCE: f32 = 0.2;
-/// Cost of getting on and off a ladder, in meters of walking; climbing a meter costs
-/// [`LADDER_UP_COST`] going up and [`LADDER_DOWN_COST`] going down.
-const LADDER_COST: f32 = 3.0;
+/// Cost of getting on and off a ladder (and waiting for whoever is on it), in meters of
+/// walking; climbing a meter costs [`LADDER_UP_COST`] going up and [`LADDER_DOWN_COST`]
+/// going down. Ladders only take one soldier at a time: stairs are better when close.
+const LADDER_COST: f32 = 8.0;
 const LADDER_UP_COST: f32 = 2.0;
 const LADDER_DOWN_COST: f32 = 1.5;
 
@@ -203,11 +204,11 @@ impl NavGrid {
                     }
                 }
             }
-            let ladders = self.ladders_at(index).map(|ladder| {
+            let ladders = self.ladders_at(index).filter_map(|ladder| {
                 let height = self.cell(ladder.top).y - self.cell(ladder.bottom).y;
                 match ladder.bottom.index == index {
-                    true => (ladder.top, LADDER_COST + height * LADDER_UP_COST),
-                    false => (ladder.bottom, LADDER_COST + height * LADDER_DOWN_COST),
+                    true => Some((ladder.top, LADDER_COST + height * LADDER_UP_COST)),
+                    false => ladder.down.then_some((ladder.bottom, LADDER_COST + height * LADDER_DOWN_COST)),
                 }
             });
             let walks = moves.into_iter().filter_map(|(to, length)| {

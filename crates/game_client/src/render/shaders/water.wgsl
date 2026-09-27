@@ -11,7 +11,7 @@
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     mesh_view_bindings::{globals, lights, view},
     mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
-    pbr_functions::{apply_pbr_lighting, calculate_view},
+    pbr_functions::{apply_pbr_lighting, calculate_view, main_pass_post_lighting_processing},
     pbr_types::pbr_input_new,
     shadows::fetch_directional_shadow,
     view_transformations::{position_world_to_clip, position_world_to_view, depth_ndc_to_view_z},
@@ -181,15 +181,19 @@ fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     }
     // Premultiplied: surface = body where the water is deep, reflection by Fresnel on top.
     let transmitted = (1.0 - body_alpha) * (1.0 - reflection);
-    var color = body * body_alpha * (1.0 - reflection) + reflected * reflection + glint;
-    var alpha = 1.0 - transmitted;
+    let color = body * body_alpha * (1.0 - reflection) + reflected * reflection + glint;
+    let alpha = 1.0 - transmitted;
 
+    // Fog (what shows through is already fogged at about this distance) and tone mapping
+    // apply to the surface's own colour, before it is premultiplied again.
+    var surface = color / max(alpha, 0.001);
 #ifdef DISTANCE_FOG
-    // Fog the surface part (what shows through is already fogged at about this distance).
-    if alpha > 0.001 {
-        let fogged = apply_fog(fog, vec4(color / alpha, 1.0), world, view.world_position.xyz, in.position.xy);
-        color = fogged.rgb * alpha;
-    }
+    surface = apply_fog(fog, vec4(surface, 1.0), world, view.world_position.xyz, in.position.xy).rgb;
 #endif
-    return vec4(color, alpha) * shore;
+    var post = pbr_input_new();
+    post.material.flags = 0u;
+    post.frag_coord = in.position;
+    post.world_position = vec4(world, 1.0);
+    surface = main_pass_post_lighting_processing(post, vec4(surface, 1.0)).rgb;
+    return vec4(surface * alpha, alpha) * shore;
 }

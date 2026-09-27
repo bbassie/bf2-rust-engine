@@ -330,6 +330,8 @@ fn static_layers(technique: &str) -> (Vec<&'static str>, bool) {
 const STATIC_GLOSS: f32 = 0.15;
 /// Gloss of glass (`AlphaEnvMap`): the reflectance of real glass.
 const GLASS_GLOSS: f32 = 0.5;
+/// Share of the light on a leaf that passes through to its other side.
+const LEAF_TRANSMISSION: f32 = 0.4;
 
 fn technique_reflects(bf2: &serde_json::Value) -> bool {
     bf2["kind"] != "static" && bf2["technique"].as_str().is_some_and(|t| t.to_ascii_lowercase().contains("envmap"))
@@ -418,13 +420,16 @@ fn describe(
             base.alpha_mode = AlphaMode::Opaque;
         }
         if path.contains("vegitation") {
-            // Trees use BF2's leaf and trunk shaders: no specular, leaves without the 2x.
+            // Trees use BF2's leaf and trunk shaders: no specular. The leaf shader wraps the
+            // sunlight around (`(N.L + 0.6) / 1.4`) so leaves facing away still get some:
+            // light shining through them.
             layers.flags &= !Bf2Layers::GLOSS_FROM_DETAIL;
             layers.gloss = 0.0;
-            layers.albedo_scale = if alpha_test { 1.0 } else { 2.0 };
-        } else {
-            layers.albedo_scale = 2.0;
+            if alpha_test {
+                base.diffuse_transmission = LEAF_TRANSMISSION;
+            }
         }
+        layers.albedo_scale = 2.0;
     } else {
         let colormap_gloss = technique.contains("colormapgloss");
         if let Some(normal) = normal_map {

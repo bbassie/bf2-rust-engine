@@ -318,7 +318,7 @@ fn receive_shots(
         let Some(weapon) = vehicles.get(shot.vehicle).ok().and_then(|d| d.0.guns.get(shot.gun as usize)) else {
             continue;
         };
-        spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle), library.as_deref());
+        spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle));
         if let Some((muzzle, _)) = library.as_deref().and_then(|l| l.muzzle(&weapon.name)) {
             effects.write(SpawnEffect::new(muzzle, shot.origin).with_forward(shot.direction));
         }

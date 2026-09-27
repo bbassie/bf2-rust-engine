@@ -178,9 +178,6 @@ pub struct Menu {
     grab_on_start: bool,
     /// Enter was pressed: the page's main button.
     submit: bool,
-    /// Bumped to rebuild the page, e.g. when a server picked from the list fills in the
-    /// address fields.
-    rebuild: u32,
 }
 
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
@@ -229,10 +226,10 @@ enum MenuButton {
     ResetBindings,
     /// Join page: ask for servers again.
     Refresh,
-    /// Join page: pick the listed server with this index.
-    Server(usize),
-    /// Join page: star or unstar the listed server with this index.
-    Favourite(usize),
+    /// Join page: pick the listed server at this address and game port.
+    Server(String, u16),
+    /// Join page: star or unstar the listed server at this address and game port.
+    Favourite(String, u16),
     /// Join page: star the address typed in.
     AddFavourite,
 }
@@ -262,8 +259,8 @@ impl MenuButton {
             MenuButton::Rebind(action) => format!("bind:{}", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
             MenuButton::Refresh => "browser:refresh".into(),
-            MenuButton::Server(index) => format!("server:{index}"),
-            MenuButton::Favourite(index) => format!("favourite:{index}"),
+            MenuButton::Server(address, port) => format!("server:{address}:{port}"),
+            MenuButton::Favourite(address, port) => format!("favourite:{address}:{port}"),
             MenuButton::AddFavourite => "favourite:add".into(),
         }
     }

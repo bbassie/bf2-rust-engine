@@ -5,16 +5,23 @@
 //! [`ProjectileMotion`], and hear about hits, kills and detonations, but never decide them.
 //! Hits on destroyable objects and explosions are passed on as messages (see
 //! `destruction`).
+//!
+//! Bullets and rockets hit soldiers in BF2's per-bone hit zones (`game_shared::hitzones`),
+//! each body part through its own damage table column. They are judged against where the
+//! soldiers were in the world the shooter saw: clients show other soldiers a little in the
+//! past, and say which server tick they were looking at (`InputFrame::view_tick`), so the
+//! server keeps a short history of every soldier's pose and rewinds up to [`MAX_REWIND`].
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use avian3d::prelude::*;
 use bevy::{ecs::system::SystemParam, prelude::*};
-use bevy_replicon::prelude::*;
-use game_data::{FireKind, FireMode, Guidance, TriggerBy, WeaponDesc};
+use bevy_replicon::{prelude::*, server::server_tick::ServerTick};
+use game_data::{FireKind, FireMode, Guidance, HitZone, TriggerBy, WeaponDesc};
 use game_shared::{
     conquest::RoundState,
     effects::PlayEffect,
+    hitzones::{BodyPose, HEAD},
     input::Buttons,
     physics::GameLayer,
     projectile::{
@@ -23,7 +30,7 @@ use game_shared::{
     },
     protocol::{ControlledBy, HitConfirmed, Player, ShotFired, Team},
     revive::WRECK_HIT_POINTS,
-    soldier::{Health, Hitbox, Soldier, SoldierMotion, Stance, stance_height},
+    soldier::{Health, Hitbox, Soldier, SoldierMotion},
     statics::Destructible,
     vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
     weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, damage_at, spread_direction},
@@ -49,6 +56,7 @@ impl Plugin for CombatPlugin {
                 FixedUpdate,
                 (
                     clear_projectiles,
+                    record_poses,
                     fire_weapons,
                     simulate_projectiles,
                     trigger_mines,
@@ -155,8 +163,12 @@ struct Detonation {
     attacker: Attacker,
 }
 
-/// Damage multiplier for hits above the neck.
+/// Damage multiplier for hits on the head when the damage table isn't imported.
 const HEADSHOT_MULTIPLIER: f32 = 2.5;
+/// Hits are judged at most this many ticks in the past (250 ms).
+pub const MAX_REWIND: u32 = 15;
+/// Ticks of pose history kept per soldier.
+const POSE_HISTORY: usize = MAX_REWIND as usize + 4;
 /// Soldiers' `armor.defaultMaterial` (Human_body): the damage table column for explosions.
 const SOLDIER_ARMOR_MATERIAL: u32 = 24;
 /// How far wire-guided missiles look for what the shooter aims at.
@@ -168,6 +180,9 @@ const SEEKER_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
 const HEAVY: f32 = 1000.0;
 /// Smoke clouds billow up around this far above the grenade.
 const SMOKE_HEIGHT: f32 = 1.5;
+/// Seconds a smoke cloud stays after the grenade stops smoking: the effect's particles
+/// live about this long.
+const SMOKE_LINGER: f32 = 8.0;
 
 /// A projectile in flight or lying around (server only). All have a [`ProjectileMotion`];
 /// grenades, rockets and charges also the replicated [`Projectile`].
@@ -185,6 +200,9 @@ struct Live {
     fuse: f32,
     /// Steered by the shooter's aim until he lets go of the launcher.
     guided: bool,
+    /// Ticks the world the shooter saw lagged behind the server's: soldiers are hit where
+    /// they were that long ago.
+    rewind: u32,
 }
 
 impl Live {
@@ -194,6 +212,64 @@ impl Live {
             soldier: Some(self.shooter),
             weapon: Arc::from(self.weapon.name.as_str()),
         }
+    }
+}
+
+/// Where a soldier was over the last ticks, by server tick (server only).
+#[derive(Component, Default)]
+struct PoseHistory(VecDeque<(u32, BodyPose)>);
+
+impl PoseHistory {
+    /// The pose at `tick`, or the oldest one kept if that is further back.
+    fn at(&self, tick: u32) -> Option<BodyPose> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(t, _)| *t <= tick)
+            .or(self.0.front())
+            .map(|(_, pose)| *pose)
+    }
+}
+
+/// The server tick this tick's state goes out with (replicon counts it up after the
+/// simulation).
+fn current_tick(tick: &ServerTick) -> u32 {
+    tick.get().wrapping_add(1)
+}
+
+/// Remembers where every soldier is this tick.
+#[allow(clippy::type_complexity)]
+fn record_poses(
+    mut commands: Commands,
+    tick: Res<ServerTick>,
+    mut soldiers: Query<(Entity, &SoldierMotion, Has<Seated>, Option<&mut PoseHistory>), With<Soldier>>,
+) {
+    let tick = current_tick(&tick);
+    for (entity, motion, seated, history) in &mut soldiers {
+        let pose = BodyPose::of(motion, seated);
+        match history {
+            Some(mut history) => {
+                history.0.push_back((tick, pose));
+                while history.0.len() > POSE_HISTORY {
+                    history.0.pop_front();
+                }
+            }
+            None => {
+                commands.entity(entity).insert(PoseHistory(VecDeque::from([(tick, pose)])));
+            }
+        }
+    }
+}
+
+/// Ticks to rewind for an input made looking at `view_tick` (0: the present).
+/// `BF2_NO_LAG_COMPENSATION` turns rewinding off, for comparison.
+fn rewind_for(view_tick: u32, now: u32) -> u32 {
+    static OFF: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("BF2_NO_LAG_COMPENSATION").is_some());
+    match view_tick {
+        0 => 0,
+        _ if *OFF => 0,
+        view => now.checked_sub(view).unwrap_or(0).min(MAX_REWIND),
     }
 }
 
@@ -257,10 +333,12 @@ fn fire_weapons(
         Option<&Hitbox>,
     ), Without<Seated>>,
     placed: Query<(Entity, &Live, &ProjectileMotion)>,
+    tick: Res<ServerTick>,
     mut shots: MessageWriter<ToClients<ShotFired>>,
     mut detonations: MessageWriter<Detonation>,
 ) {
     let dt = time.delta_secs();
+    let now = current_tick(&tick);
     for (soldier, controlled_by, motion, applied, loadout, mut inventory, mut state, hitbox) in
         &mut soldiers
     {
@@ -392,6 +470,7 @@ fn fire_weapons(
                             age: 0.0,
                             fuse: desc.time_to_live - cooked,
                             guided: weapon.fire.guidance == Guidance::Wire,
+                            rewind: rewind_for(input.view_tick, now),
                         },
                         ProjectileMotion::new(origin, launch_velocity(&weapon, direction, soft, motion.velocity), motion.yaw),
                     ));
@@ -419,6 +498,11 @@ fn fire_weapons(
                         },
                     });
                 }
+                debug!(
+                    "{name} fires {} ({} ticks back)",
+                    weapon.name,
+                    rewind_for(input.view_tick, now)
+                );
                 if desc.is_object() {
                     let how = match (weapon.fire.kind, soft) {
                         (FireKind::Gun, _) => "fires",
@@ -437,15 +521,44 @@ fn fire_weapons(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A soldier bullets can hit, as the projectiles see it this tick.
+struct Target<'a> {
+    entity: Entity,
+    pose: BodyPose,
+    history: Option<&'a PoseHistory>,
+    zones: &'a [HitZone],
+}
+
+impl Target<'_> {
+    /// Its pose `rewind` ticks ago.
+    fn pose(&self, now: u32, rewind: u32) -> BodyPose {
+        match (rewind, self.history) {
+            (1.., Some(history)) => history.at(now.wrapping_sub(rewind)).unwrap_or(self.pose),
+            _ => self.pose,
+        }
+    }
+}
+
+/// The damage table factor for a projectile hitting a soldier's body part.
+fn body_part_factor(materials: Option<&Materials>, projectile: u32, part: u32) -> f32 {
+    match materials {
+        Some(materials) if !materials.0.damage.is_empty() => materials.0.damage_mod(projectile, part),
+        _ if part == HEAD => HEADSHOT_MULTIPLIER,
+        _ => 1.0,
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn simulate_projectiles(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,
+    tick: Res<ServerTick>,
+    armory: Res<Armory>,
     mut projectiles: Query<(Entity, &mut Live, &mut ProjectileMotion)>,
     shooters: Query<(&SoldierMotion, &Inventory)>,
     colliders: Query<&ColliderOf>,
-    soldiers: Query<&SoldierMotion, With<Soldier>>,
+    soldiers: Query<(Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>), With<Soldier>>,
     vehicles: Query<&VehicleData>,
     materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
@@ -455,6 +568,24 @@ fn simulate_projectiles(
     mut detonations: MessageWriter<Detonation>,
 ) {
     let dt = time.delta_secs();
+    let now = current_tick(&tick);
+    // Soldiers inside closed vehicles can't be hit; those on open seats can.
+    let targets: Vec<Target> = soldiers
+        .iter()
+        .filter(|(.., seated)| {
+            seated.is_none_or(|s| {
+                vehicles
+                    .get(s.vehicle)
+                    .is_ok_and(|v| v.0.desc.seats.get(s.seat as usize).is_some_and(|seat| seat.open))
+            })
+        })
+        .map(|(entity, motion, loadout, history, seated)| Target {
+            entity,
+            pose: BodyPose::of(motion, seated.is_some()),
+            history,
+            zones: armory.hit_zones(&loadout.kit),
+        })
+        .collect();
     for (entity, mut live, mut motion) in &mut projectiles {
         live.age += dt;
         let weapon = live.weapon.clone();
@@ -520,7 +651,27 @@ fn simulate_projectiles(
         if let Some(hitbox) = live.hitbox {
             filter = filter.with_excluded_entities([hitbox]);
         }
-        let step = projectile::step(&spatial, &filter, desc, &mut next, live.age, dt);
+        let (shooter, rewind) = (live.shooter, live.rewind);
+        let soldier_along = |origin: Vec3, direction: Dir3, length: f32| {
+            targets
+                .iter()
+                .filter(|target| target.entity != shooter)
+                .filter_map(|target| {
+                    let hit = target.pose(now, rewind).ray(target.zones, origin, *direction, length)?;
+                    Some((target.entity, hit))
+                })
+                .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
+                .map(|(entity, hit)| {
+                    let contact = projectile::Contact {
+                        entity,
+                        point: hit.point,
+                        normal: hit.normal,
+                        body_part: Some(hit.material),
+                    };
+                    (hit.distance, contact)
+                })
+        };
+        let step = projectile::step(&spatial, &filter, desc, &mut next, live.age, dt, soldier_along);
         if next != *motion {
             *motion = next;
         }
@@ -540,15 +691,21 @@ fn simulate_projectiles(
 
         let attacker = live.attacker();
         let body = colliders.get(hit.entity).map(|c| c.body).unwrap_or(hit.entity);
-        if let Ok(soldier) = soldiers.get(body) {
-            let head = hit.point.y - soldier.position.y > stance_height(soldier.stance) - 0.3
-                && soldier.stance != Stance::Prone;
-            let damage = damage_at(desc, live.travelled);
+        if let Some(part) = hit.body_part {
+            let factor = body_part_factor(materials.as_deref(), desc.material, part);
+            let damage = damage_at(desc, live.travelled) * factor;
+            if let Some(target) = targets.iter().find(|t| t.entity == hit.entity) {
+                let moved = target.pose(now, live.rewind).position.distance(target.pose.position);
+                debug!(
+                    "{} hit {:?} in material {part} (x{factor}) for {damage:.1}, judged {} ticks back (moved {moved:.2} m since)",
+                    weapon.name, hit.entity, live.rewind
+                );
+            }
             if damage > 0.0 {
                 soldier_hits.write(SoldierHit {
-                    victim: body,
-                    damage: damage * if head { HEADSHOT_MULTIPLIER } else { 1.0 },
-                    headshot: head,
+                    victim: hit.entity,
+                    damage,
+                    headshot: part == HEAD,
                     attacker: attacker.clone(),
                 });
             }
@@ -685,7 +842,7 @@ fn detonate(
                 SmokeCloud {
                     position: detonation.position + Vec3::Y * SMOKE_HEIGHT,
                     radius: smoke.radius,
-                    duration: smoke.duration,
+                    duration: smoke.duration + SMOKE_LINGER,
                     age: 0.0,
                 },
                 Replicated,
@@ -696,6 +853,9 @@ fn detonate(
                 targets: SendTargets::All,
                 message: PlayEffect {
                     up: detonation.normal,
+                    // Smoke keeps billowing out for the cloud's time.
+                    duration: desc.smoke.as_ref().map_or(0.0, |smoke| smoke.duration),
+                    material: desc.explosion_material,
                     ..PlayEffect::new(effect.clone(), detonation.position)
                 },
             });
@@ -921,6 +1081,7 @@ pub fn spawn_projectile(
             age: 0.0,
             fuse,
             guided: false,
+            rewind: 0,
         },
         ProjectileMotion::new(origin, velocity, 0.0),
     ));

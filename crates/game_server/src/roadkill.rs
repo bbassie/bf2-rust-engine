@@ -62,7 +62,12 @@ fn vehicles_meet_soldiers(
     )>,
     seated: Query<(Entity, &Seated, &ControlledBy)>,
     mut soldiers: Query<
-        (Entity, &mut SoldierMotion, &mut Transform, Option<&mut RunOver>),
+        (
+            Entity,
+            &mut SoldierMotion,
+            &mut Transform,
+            Option<&mut RunOver>,
+        ),
         (With<Soldier>, Without<Seated>),
     >,
     mut hits: MessageWriter<SoldierHit>,
@@ -91,10 +96,17 @@ fn vehicles_meet_soldiers(
         let shape = shapes.movement(motion.stance);
         let center = motion.position + motion.stance.collision_center();
         let mut contacts = Vec::new();
-        mover.intersections(shape, center, Quat::IDENTITY, 0.05, &filter, |vehicle, contact, normal| {
-            contacts.push((vehicle, contact.point, *normal, contact.penetration));
-            true
-        });
+        mover.intersections(
+            shape,
+            center,
+            Quat::IDENTITY,
+            0.05,
+            &filter,
+            |vehicle, contact, normal| {
+                contacts.push((vehicle, contact.point, *normal, contact.penetration));
+                true
+            },
+        );
         if contacts.is_empty() {
             continue;
         }
@@ -136,7 +148,11 @@ fn vehicles_meet_soldiers(
                 let driver = drivers.get(&vehicle);
                 let name = data.map_or("vehicle", |data| {
                     let desc = &data.0.desc;
-                    if desc.display_name.is_empty() { &desc.name } else { &desc.display_name }
+                    if desc.display_name.is_empty() {
+                        &desc.name
+                    } else {
+                        &desc.display_name
+                    }
                 });
                 hits.write(SoldierHit {
                     victim: soldier,
@@ -177,14 +193,19 @@ mod tests {
     /// A 4 m long box on the vehicle layer driving at `velocity`, a soldier at `soldier`.
     fn run(velocity: Vec3, soldier: Vec3, seconds: f32) -> (SoldierMotion, Vec<f32>) {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, TransformPlugin, AssetPlugin::default(), StatesPlugin))
-            .init_asset::<Mesh>()
-            .add_plugins((PhysicsPlugins::default(), SoldierPlugin, RoadkillPlugin))
-            .insert_state(ClientState::Disconnected)
-            .add_message::<SoldierHit>()
-            .init_resource::<Hits>()
-            .add_systems(FixedPostUpdate, collect_hits.after(vehicles_meet_soldiers))
-            .insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
+        app.add_plugins((
+            MinimalPlugins,
+            TransformPlugin,
+            AssetPlugin::default(),
+            StatesPlugin,
+        ))
+        .init_asset::<Mesh>()
+        .add_plugins((PhysicsPlugins::default(), SoldierPlugin, RoadkillPlugin))
+        .insert_state(ClientState::Disconnected)
+        .add_message::<SoldierHit>()
+        .init_resource::<Hits>()
+        .add_systems(FixedPostUpdate, collect_hits.after(vehicles_meet_soldiers))
+        .insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
         app.world_mut().spawn((
             RigidBody::Kinematic,
             Collider::cuboid(2.0, 1.5, 4.0),
@@ -195,7 +216,11 @@ mod tests {
         let player = app.world_mut().spawn_empty().id();
         let soldier = app
             .world_mut()
-            .spawn((Soldier, SoldierMotion::at(soldier, 0.0), ControlledBy(player)))
+            .spawn((
+                Soldier,
+                SoldierMotion::at(soldier, 0.0),
+                ControlledBy(player),
+            ))
             .id();
         app.finish();
         app.cleanup();

@@ -1,0 +1,22 @@
+// Round and career stats in the end-of-round summary: capture the test range's center flag
+// alone, then end the round from the chat (the host may use admin commands).
+// client --scenario scenarios/infra_stats.ron --out target/scenarios/infra/stats
+(
+    level: "test_range",
+    bots: 0,
+    team: 1,
+    steps: [
+        WaitReady,
+        Teleport((0.0, 10.2, 3.0), 0.0, 0.0),
+        Wait(12.0),
+        Screenshot("captured"),
+        Key(KeyT),
+        Frames(2),
+        Type("/tickets 0 2"),
+        Frames(2),
+        Key(Enter),
+        Wait(2.0),
+        Screenshot("summary"),
+        Quit,
+    ],
+)

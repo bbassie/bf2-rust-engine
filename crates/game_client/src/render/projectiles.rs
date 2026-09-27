@@ -6,24 +6,16 @@
 //! difference when one arrives. Our own launches start as predicted visuals that the
 //! server's projectile takes over once it shows up.
 //!
-//! Smoke clouds are drawn as a cluster of big soft sprites on top of the grenade's own
-//! particle effect (which alone is too thin to hide anything), and veil the screen while
-//! the camera is inside one.
+//! Smoke clouds are BF2's particle effect (sent by the server, kept billowing for the
+//! cloud's time); inside one the screen is veiled.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use avian3d::prelude::*;
-use bevy::{
-    asset::RenderAssetUsages,
-    gltf::GltfAssetLabel,
-    image::{ImageSampler, ImageSamplerDescriptor},
-    light::NotShadowCaster,
-    prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-};
+use bevy::{gltf::GltfAssetLabel, light::NotShadowCaster, prelude::*};
 use game_data::{Impact, WeaponDesc};
 use game_shared::{
-    projectile::{self, Projectile, ProjectileMotion, Smoke, SmokeCloud, collision_layers},
+    projectile::{self, Projectile, ProjectileMotion, Smoke, collision_layers},
     soldier::Hitbox,
     weapons::Armory,
 };
@@ -39,13 +31,12 @@ pub struct ProjectileRenderPlugin;
 
 impl Plugin for ProjectileRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SmokeMaterials>()
-            .add_systems(Startup, (create_assets, spawn_smoke_overlay))
+        app.add_systems(Startup, (create_assets, spawn_smoke_overlay))
             .add_systems(
                 Update,
                 (
                     (spawn_predicted, track_projectiles, move_visuals).chain(),
-                    (spawn_smoke_puffs, update_smoke_puffs, smoke_overlay).chain(),
+                    smoke_overlay,
                 ),
             );
     }
@@ -78,15 +69,12 @@ struct ProjectileVisual {
 struct ProjectileAssets {
     fallback: Handle<Mesh>,
     fallback_material: Handle<StandardMaterial>,
-    puff: Handle<Mesh>,
-    puff_texture: Handle<Image>,
 }
 
 fn create_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
 ) {
     commands.insert_resource(ProjectileAssets {
         fallback: meshes.add(Capsule3d::new(0.035, 0.08)),
@@ -95,43 +83,7 @@ fn create_assets(
             perceptual_roughness: 0.8,
             ..default()
         }),
-        puff: meshes.add(Rectangle::new(1.0, 1.0)),
-        puff_texture: images.add(puff_texture()),
     });
-}
-
-/// A soft, lumpy white blob: alpha falls off towards the edge, broken up by a little noise.
-fn puff_texture() -> Image {
-    const SIZE: u32 = 128;
-    let noise = |x: f32, y: f32| {
-        let wave = |fx: f32, fy: f32, phase: f32| ((x * fx + y * fy) * std::f32::consts::TAU + phase).sin();
-        (wave(2.0, 1.0, 0.3) + wave(-1.0, 3.0, 1.7) * 0.7 + wave(4.0, -3.0, 4.1) * 0.4 + wave(-5.0, -6.0, 2.2) * 0.25)
-            / 2.35
-    };
-    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for j in 0..SIZE {
-        for i in 0..SIZE {
-            let (x, y) = ((i as f32 + 0.5) / SIZE as f32, (j as f32 + 0.5) / SIZE as f32);
-            let r = ((x - 0.5).powi(2) + (y - 0.5).powi(2)).sqrt() * 2.0;
-            let alpha = ((1.0 - r * r) * 1.3 + noise(x, y) * 0.35 - 0.15).clamp(0.0, 1.0);
-            let alpha = if r >= 1.0 { 0.0 } else { alpha * alpha };
-            let shade = (235.0 + noise(y, x) * 20.0) as u8;
-            data.extend_from_slice(&[shade, shade, shade, (alpha * 255.0) as u8]);
-        }
-    }
-    let mut image = Image::new(
-        Extent3d {
-            width: SIZE,
-            height: SIZE,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
-    image
 }
 
 fn spawn_visual(
@@ -282,7 +234,7 @@ fn move_visuals(
                 if let Some(hitbox) = hitbox.filter(|_| visual.source.is_none()) {
                     filter = filter.with_excluded_entities([hitbox]);
                 }
-                let step = projectile::step(&spatial, &filter, desc, &mut visual.motion, visual.age, dt);
+                let step = projectile::step(&spatial, &filter, desc, &mut visual.motion, visual.age, dt, |_, _, _| None);
                 visual.stopped = step.hit.is_some();
             }
             None => {}
@@ -343,99 +295,4 @@ fn smoke_overlay(
             background.0 = color;
         }
     }
-}
-
-/// One sprite of a smoke cloud.
-#[derive(Component)]
-struct SmokePuff {
-    cloud: Entity,
-    /// From the cloud's center once it has spread, in meters.
-    offset: Vec3,
-    /// Width once spread.
-    size: f32,
-}
-
-/// Each cloud's sprites share a material, which fades with the cloud.
-#[derive(Resource, Default)]
-struct SmokeMaterials(HashMap<Entity, Handle<StandardMaterial>>);
-
-/// Sprites per smoke cloud.
-const PUFFS: usize = 18;
-/// How opaque the sprites are where the smoke is thickest.
-const PUFF_OPACITY: f32 = 0.8;
-
-fn spawn_smoke_puffs(
-    mut commands: Commands,
-    assets: Res<ProjectileAssets>,
-    mut smoke_materials: ResMut<SmokeMaterials>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    clouds: Query<(Entity, &SmokeCloud), Added<SmokeCloud>>,
-) {
-    for (entity, cloud) in &clouds {
-        let material = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.74, 0.73, 0.7, 0.0),
-            base_color_texture: Some(assets.puff_texture.clone()),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
-        });
-        smoke_materials.0.insert(entity, material.clone());
-        let radius = cloud.radius;
-        for _ in 0..PUFFS {
-            let angle = fastrand::f32() * std::f32::consts::TAU;
-            let out = fastrand::f32().sqrt() * radius * 0.6;
-            let offset = Vec3::new(
-                angle.cos() * out,
-                (fastrand::f32() * 0.5 - 0.15) * radius,
-                angle.sin() * out,
-            );
-            commands.spawn((
-                SmokePuff {
-                    cloud: entity,
-                    offset,
-                    size: radius * (0.9 + fastrand::f32() * 0.4),
-                },
-                Mesh3d(assets.puff.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform::from_translation(cloud.position).with_scale(Vec3::ZERO),
-                NotShadowCaster,
-            ));
-        }
-    }
-}
-
-/// Puffs billow out with the cloud, face the camera and fade with it.
-fn update_smoke_puffs(
-    mut commands: Commands,
-    clouds: Query<&SmokeCloud>,
-    camera: Query<&GlobalTransform, With<PlayerCamera>>,
-    mut smoke_materials: ResMut<SmokeMaterials>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut puffs: Query<(Entity, &SmokePuff, &mut Transform)>,
-) {
-    let Ok(camera) = camera.single() else {
-        return;
-    };
-    let facing = camera.rotation();
-    for (entity, puff, mut transform) in &mut puffs {
-        let Ok(cloud) = clouds.get(puff.cloud) else {
-            commands.entity(entity).despawn();
-            continue;
-        };
-        let spread = cloud.current_radius() / cloud.radius.max(0.1);
-        transform.translation = cloud.position + puff.offset * spread;
-        transform.rotation = facing;
-        transform.scale = Vec3::splat(puff.size * spread.max(0.2));
-    }
-    smoke_materials.0.retain(|cloud, material| match clouds.get(*cloud) {
-        Ok(cloud) => {
-            if let Some(mut material) = materials.get_mut(material.id()) {
-                material.base_color.set_alpha(cloud.density() * PUFF_OPACITY);
-            }
-            true
-        }
-        Err(_) => false,
-    });
 }

@@ -54,8 +54,9 @@ use game_data::JointInput;
 use game_shared::{
     input::Buttons,
     level::LoadedLevel,
-    soldier::{Health, SoldierMotion},
-    vehicle::{Seated, Vehicle, VehicleData},
+    protocol::{ControlledBy, Team},
+    soldier::{Health, Soldier, SoldierMotion},
+    vehicle::{Seated, Vehicle, VehicleData, VehicleHealth},
 };
 use serde::Deserialize;
 
@@ -65,7 +66,7 @@ use crate::{
     combat::WeaponSelection,
     local_input::LookState,
     menu::Screen,
-    net::{ActiveMatch, LocalSoldier},
+    net::{ActiveMatch, LocalPlayer, LocalSoldier},
     render::environment::Sun,
     vehicles::{SeatRequest, VehicleView},
 };
@@ -104,12 +105,22 @@ pub enum Step {
     Teleport((f32, f32, f32), f32, f32),
     /// Look direction: yaw, pitch in degrees.
     Look(f32, f32),
+    /// For this many seconds, keeps aiming at the nearest enemy soldier in sight as drawn
+    /// here (connected, that is in the past: tests lag compensation), this many meters
+    /// above his feet when standing (scaled down crouching and prone), and fires while it
+    /// has one. Logs whom.
+    TrackEnemy(f32, f32),
     /// Moves our soldier next to the first entry point of the nearest vehicle with this
     /// template (e.g. `"usjep_hmmwv"`), facing it. Singleplayer and listen server only.
     NearVehicle(String),
     /// Walks (sprinting, by input like a player) to the first entry point of the nearest
     /// vehicle with this template; works connected to a remote server. Gives up after 40 s.
     WalkToVehicle(String),
+    /// Until someone drives a vehicle of this template (gives up after 60 s).
+    WaitDriver(String),
+    /// Moves our soldier this many meters in front of the nearest vehicle of this template,
+    /// facing it (singleplayer and listen server only).
+    InFrontOf(String, f32),
     /// In a vehicle: moves to this seat (1-based), like pressing F1..F8.
     Seat(u8),
     /// In a vehicle: look direction relative to its heading (yaw, pitch in degrees).
@@ -137,8 +148,27 @@ pub enum Step {
     ReleaseKey(KeyCode),
     /// Clicks the UI button with this `Name`, e.g. `Click("kit:5")`.
     Click(String),
-    /// Our soldier dies (singleplayer and listen server only).
+    /// Our soldier dies outright (singleplayer and listen server only).
     Kill,
+    /// Our soldier is critically wounded: man down, waiting for a medic (singleplayer and
+    /// listen server only, like the steps below).
+    Down,
+    /// Our soldier loses this much health (keeping at least 1).
+    Hurt(f32),
+    /// The nearest teammate (without one, the nearest soldier) is moved 1.5 m in front of
+    /// us, facing us, with this much health: 0 or less wounds him critically (a body for the
+    /// shock paddles).
+    Summon(f32),
+    /// The nearest enemy is moved this many meters in front of us, facing away (a target to
+    /// spot).
+    SummonEnemy(f32),
+    /// Says something on the radio, as the commo rose would, e.g. `Radio(Spotted)`.
+    Radio(game_shared::radio::RadioCommand),
+    /// The nearest vehicle loses this many hit points (keeping at least 1).
+    DamageVehicle(f32),
+    /// Adds our health and ammo, the nearest teammate's health and the nearest vehicle's
+    /// hit points to the report.
+    Vitals(String),
     /// Saves `<out>/<name>.png` (or `name` itself if it ends in `.png`).
     Screenshot(String),
     /// Frame time statistics over this many seconds, logged and added to the report.
@@ -333,6 +363,7 @@ struct PlayerControls<'w, 's> {
     window: Single<'w, 's, Entity, With<PrimaryWindow>>,
     buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
     effects: MessageWriter<'w, crate::effects::SpawnEffect>,
+    radio: MessageWriter<'w, game_shared::radio::RadioRequest>,
 }
 
 /// The vehicles around, for [`run_scenario`].
@@ -343,6 +374,29 @@ struct Vehicles<'w, 's> {
     riders: Query<'w, 's, &'static Seated>,
     seated: Query<'w, 's, &'static Seated, With<LocalSoldier>>,
     seat: ResMut<'w, SeatRequest>,
+    health: Query<'w, 's, (&'static VehicleView, &'static mut VehicleHealth)>,
+}
+
+/// Our soldier and the others, for [`run_scenario`].
+#[derive(bevy::ecs::system::SystemParam)]
+struct Soldiers<'w, 's> {
+    local: Query<'w, 's, (&'static mut SoldierMotion, &'static mut Health), With<LocalSoldier>>,
+    local_inventory: Query<'w, 's, &'static game_shared::weapons::Inventory, With<LocalSoldier>>,
+    others: Query<
+        'w,
+        's,
+        (Entity, &'static ControlledBy, &'static mut SoldierMotion, &'static mut Health),
+        (With<Soldier>, Without<LocalSoldier>, Without<Seated>),
+    >,
+    teams: Query<'w, 's, &'static Team>,
+    local_team: Query<'w, 's, &'static Team, With<LocalPlayer>>,
+    drawn: Query<
+        'w,
+        's,
+        (Entity, &'static ControlledBy, &'static crate::prediction::SoldierRender),
+        (With<Soldier>, Without<LocalSoldier>),
+    >,
+    spatial: avian3d::prelude::SpatialQuery<'w, 's>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -363,8 +417,11 @@ fn run_scenario(
     level: Option<Res<LoadedLevel>>,
     player: PlayerControls,
     mut vehicles: Vehicles,
-    mut soldier: Query<(&mut SoldierMotion, &mut Health), With<LocalSoldier>>,
-    prediction: Res<crate::prediction::PredictionStats>,
+    soldiers: Soldiers,
+    (prediction, rendered): (
+        Res<crate::prediction::PredictionStats>,
+        Query<&crate::prediction::SoldierRender, With<LocalSoldier>>,
+    ),
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
     mut suns: Query<&mut DirectionalLight, With<Sun>>,
@@ -379,7 +436,17 @@ fn run_scenario(
         window,
         mut buttons,
         mut effects,
+        mut radio,
     } = player;
+    let Soldiers {
+        local: mut soldier,
+        local_inventory,
+        mut others,
+        teams,
+        local_team,
+        drawn,
+        spatial,
+    } = soldiers;
     let now = time.elapsed_secs();
     // Typed characters: text without a key the game reacts to.
     for c in std::mem::take(&mut runner.typed).chars() {
@@ -465,6 +532,41 @@ fn run_scenario(
                 set_look(&mut look, *yaw, *pitch);
                 Progress::Done
             }
+            Step::TrackEnemy(seconds, height) => {
+                let my_team = local_team.single().ok().copied();
+                let eye = rendered.single().ok().map(|r| r.eye_position());
+                let world = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+                let in_sight = |eye: Vec3, at: Vec3| {
+                    Dir3::new(at - eye).is_ok_and(|dir| spatial.cast_ray(eye, dir, eye.distance(at), true, &world).is_none())
+                };
+                let target = eye.and_then(|eye| {
+                    drawn
+                        .iter()
+                        .filter(|(_, c, _)| teams.get(c.0).ok().copied() != my_team)
+                        .map(|(entity, _, render)| {
+                            let scale = match render.stance {
+                                game_shared::soldier::Stance::Standing => 1.0,
+                                game_shared::soldier::Stance::Crouching => 0.65,
+                                game_shared::soldier::Stance::Prone => 0.2,
+                            };
+                            (entity, render.position + Vec3::Y * height * scale)
+                        })
+                        .filter(|(_, at)| in_sight(eye, *at))
+                        .min_by(|a, b| a.1.distance(eye).total_cmp(&b.1.distance(eye)))
+                        .map(|(entity, at)| (entity, at - eye))
+                });
+                if let Some((entity, to)) = target {
+                    look.yaw = (-to.x).atan2(-to.z);
+                    look.pitch = (to.y / to.length().max(0.01)).asin();
+                    if runner.frames % 30 == 0 {
+                        info!("scenario: tracking {entity:?} {:.1} m away", to.length());
+                    }
+                }
+                let done = elapsed >= *seconds;
+                input.buttons.set(Buttons::FIRE, target.is_some() && !done);
+                runner.frames += 1;
+                done_if(done)
+            }
             Step::NearVehicle(template) => {
                 let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
                 let nearest = vehicles
@@ -489,6 +591,48 @@ fn run_scenario(
                         look.pitch = -0.2;
                     }
                     _ => warn!("scenario: no {template} (or no soldier) to go to"),
+                }
+                Progress::Done
+            }
+            Step::WaitDriver(template) => {
+                let driven = vehicles.riders.iter().any(|seated| {
+                    seated.seat == 0
+                        && vehicles.all.get(seated.vehicle).is_ok_and(|(_, v, _)| v.template == *template)
+                });
+                done_if(driven || elapsed > 60.0)
+            }
+            Step::InFrontOf(template, distance) => {
+                // A driven one if there is, else the nearest.
+                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                let driven: Vec<Entity> = vehicles
+                    .riders
+                    .iter()
+                    .filter(|seated| seated.seat == 0)
+                    .map(|seated| seated.vehicle)
+                    .collect();
+                let nearest = vehicles
+                    .all
+                    .iter()
+                    .filter(|(_, v, _)| v.template == *template)
+                    .min_by(|a, b| {
+                        let d = |(e, _, v): &(Entity, &Vehicle, &VehicleView)| {
+                            (!driven.contains(e), v.transform.translation.distance(origin))
+                        };
+                        let (da, db) = (d(a), d(b));
+                        da.0.cmp(&db.0).then(da.1.total_cmp(&db.1))
+                    })
+                    .and_then(|(e, ..)| vehicles.vehicles.get(e).ok());
+                match (nearest, soldier.single_mut()) {
+                    (Some((_, view, data)), Ok((mut motion, _))) => {
+                        let front = data.0.desc.physics.bounds[0][2];
+                        let target = view.transform.transform_point(Vec3::new(0.0, 0.5, front - distance));
+                        motion.position = target;
+                        motion.velocity = Vec3::ZERO;
+                        let to = view.transform.translation - target;
+                        look.yaw = (-to.x).atan2(-to.z);
+                        look.pitch = -0.1;
+                    }
+                    _ => warn!("scenario: no {template} (or no soldier) to stand in front of"),
                 }
                 Progress::Done
             }
@@ -674,9 +818,124 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Kill => {
+                // Beyond what a medic can bring back.
+                for (_, mut health) in &mut soldier {
+                    health.current = -1000.0;
+                }
+                Progress::Done
+            }
+            Step::Down => {
                 for (_, mut health) in &mut soldier {
                     health.current = 0.0;
                 }
+                Progress::Done
+            }
+            Step::Hurt(amount) => {
+                for (_, mut health) in &mut soldier {
+                    health.current = (health.current - amount).max(1.0);
+                }
+                Progress::Done
+            }
+            Step::SummonEnemy(distance) => {
+                let team = local_team.single().ok().copied();
+                match soldier.single() {
+                    Ok((me, _)) => {
+                        let origin = me.position;
+                        let forward = Quat::from_rotation_y(look.yaw) * Vec3::NEG_Z;
+                        let spot = origin + Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::NEG_Z) * *distance;
+                        let nearest = others
+                            .iter_mut()
+                            .filter(|(_, owner, ..)| {
+                                let other = teams.get(owner.0).ok().copied();
+                                other != team && other.is_some_and(|t| t != Team::Spectator)
+                            })
+                            .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)));
+                        match nearest {
+                            Some((entity, _, mut motion, _)) => {
+                                motion.position = spot + Vec3::Y * 0.5;
+                                motion.velocity = Vec3::ZERO;
+                                motion.yaw = look.yaw;
+                                info!("scenario: summoned enemy {entity} to {spot:.1}");
+                            }
+                            None => warn!("scenario: no enemy to summon"),
+                        }
+                    }
+                    Err(_) => warn!("scenario: no soldier to summon an enemy to"),
+                }
+                Progress::Done
+            }
+            Step::Radio(command) => {
+                radio.write(game_shared::radio::RadioRequest { command: *command });
+                Progress::Done
+            }
+            Step::Summon(health) => {
+                let team = local_team.single().ok().copied();
+                match soldier.single() {
+                    Ok((me, _)) => {
+                        let origin = me.position;
+                        let forward = Quat::from_rotation_y(look.yaw) * Vec3::NEG_Z;
+                        let spot = origin + Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::NEG_Z) * 1.5;
+                        let any_teammate =
+                            others.iter().any(|(_, owner, ..)| teams.get(owner.0).ok().copied() == team);
+                        let nearest = others
+                            .iter_mut()
+                            .filter(|(_, owner, ..)| !any_teammate || teams.get(owner.0).ok().copied() == team)
+                            .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)));
+                        match nearest {
+                            Some((entity, _, mut motion, mut soldier_health)) => {
+                                motion.position = spot + Vec3::Y * 0.1;
+                                motion.velocity = Vec3::ZERO;
+                                motion.yaw = look.yaw + std::f32::consts::PI;
+                                soldier_health.current = *health;
+                                info!("scenario: summoned {entity} to {spot:.1} with {health} health");
+                            }
+                            None => warn!("scenario: no teammate to summon"),
+                        }
+                    }
+                    Err(_) => warn!("scenario: no soldier to summon a teammate to"),
+                }
+                Progress::Done
+            }
+            Step::DamageVehicle(amount) => {
+                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                let nearest = vehicles
+                    .health
+                    .iter_mut()
+                    .min_by(|a, b| {
+                        let d = |v: &VehicleView| v.transform.translation.distance(origin);
+                        d(a.0).total_cmp(&d(b.0))
+                    });
+                match nearest {
+                    Some((_, mut health)) => {
+                        health.current = (health.current - amount).max(1.0);
+                        info!("scenario: vehicle down to {:.0}/{:.0}", health.current, health.max);
+                    }
+                    None => warn!("scenario: no vehicle to damage"),
+                }
+                Progress::Done
+            }
+            Step::Vitals(name) => {
+                let team = local_team.single().ok().copied();
+                let (origin, own) = soldier
+                    .single()
+                    .map_or((Vec3::ZERO, -1.0), |(m, h)| (m.position, h.current));
+                let ammo = local_inventory.single().map(|i| format!("{:?}", i.ammo)).unwrap_or_default();
+                let mate = others
+                    .iter()
+                    .filter(|(_, owner, ..)| teams.get(owner.0).ok().copied() == team)
+                    .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)))
+                    .map_or(-1.0, |(.., h)| h.current);
+                let vehicle = vehicles
+                    .health
+                    .iter()
+                    .min_by(|a, b| {
+                        let d = |v: &VehicleView| v.transform.translation.distance(origin);
+                        d(a.0).total_cmp(&d(b.0))
+                    })
+                    .map_or(-1.0, |(_, h)| h.current);
+                let line = format!("{name}: health {own:.1}, ammo {ammo}, teammate {mate:.1}, vehicle {vehicle:.1}");
+                info!("scenario: {line}");
+                writeln!(runner.report, "{line}").ok();
                 Progress::Done
             }
             Step::Screenshot(name) => {
@@ -718,7 +977,7 @@ fn run_scenario(
                     let (p, v) = (m.position, m.velocity);
                     writeln!(
                         runner.report,
-                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} stamina {:.3}{}{} correction {:.4}",
+                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} eye {:7.3} stamina {:.3}{}{} correction {:.4}",
                         p.x,
                         p.y,
                         p.z,
@@ -727,6 +986,7 @@ fn run_scenario(
                         v.z,
                         if m.grounded { "G" } else { "-" },
                         m.stance,
+                        rendered.single().map_or(0.0, |r| r.eye_position().y),
                         m.stamina,
                         if m.sprinting { " sprint" } else { "" },
                         if m.can_fire() { "" } else { " nofire" },

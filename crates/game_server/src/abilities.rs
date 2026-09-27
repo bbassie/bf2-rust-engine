@@ -30,8 +30,8 @@ use game_shared::{
     physics::GameLayer,
     projectile::{Projectile, ProjectileMotion},
     protocol::{ControlledBy, KillFeed, Player, Score, Team},
-    revive::{Downed, GiveUp, MAN_DOWN_SECONDS, NoticeKind, ReplenishNotice, WRECK_HIT_POINTS},
-    soldier::{Health, Soldier, SoldierMotion},
+    revive::{Downed, GiveUp, MAN_DOWN_SECONDS, NoticeKind, ReplenishNotice},
+    soldier::{Health, Soldier, SoldierMotion, Stance},
     statics::{Destructible, DestroyedStatics, Inactive},
     vehicle::{Seated, VehicleData, VehicleHealth},
     weapons::{Armory, Inventory, Loadout},
@@ -59,7 +59,15 @@ impl Plugin for AbilitiesPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (charge_gadgets, revive_with_paddles, pick_up_bags, replenish_in_hand, bleed_out, send_notices)
+                (
+                    charge_gadgets,
+                    revive_with_paddles,
+                    pick_up_bags,
+                    replenish_in_hand,
+                    bleed_out,
+                    send_notices,
+                    forget_the_gone,
+                )
                     .chain()
                     .in_set(AbilitySystems)
                     .after(CombatSystems)
@@ -95,6 +103,9 @@ const ASSIST_DAMAGE: f32 = 50.0;
 pub const PADDLES_REACH: f32 = 2.8;
 /// Seconds between replenish notices.
 const NOTICE_INTERVAL: f32 = 1.0;
+/// Seconds a revived soldier stays down before he can get up (about the length of BF2's
+/// `3p_reviveOnBack`).
+const REVIVE_RECOVERY: f32 = 2.5;
 
 /// Server-side, next to [`Downed`]: how long a downed soldier has left, and how long he
 /// has been down.
@@ -245,7 +256,8 @@ impl Deaths<'_, '_> {
                     score.score += SCORE_KILL;
                 }
             }
-            None => info!("{} died", self.name(victim)),
+            // Falls, scripts, wrecks: `wound` or `die` says what became of him.
+            None => {}
         }
         // Enemies other than the killer who did much of the damage.
         let dealt = self.assists.0.remove(&soldier).unwrap_or_default();
@@ -313,8 +325,9 @@ impl Deaths<'_, '_> {
             }
             Err(_) => Team::default(),
         };
-        if down_for > 0.0 {
-            info!("{} died after {down_for:.1} s down", self.name(player));
+        match down_for > 0.0 {
+            true => info!("{} died after {down_for:.1} s down", self.name(player)),
+            false => info!("{} died", self.name(player)),
         }
         self.died.write(Died { player, team });
     }
@@ -470,7 +483,7 @@ fn revive_with_paddles(
     armory: Res<Armory>,
     teams: Query<&Team>,
     medics: Query<(Entity, &ControlledBy, &SoldierMotion, &Loadout, &Inventory), (Without<Downed>, Without<Seated>)>,
-    mut downed: Query<(Entity, &ControlledBy, &SoldierMotion, &mut Health), With<Downed>>,
+    mut downed: Query<(Entity, &ControlledBy, &mut SoldierMotion, &mut Health), With<Downed>>,
     mut shocked: Local<HashMap<Entity, u16>>,
     mut deaths: Deaths,
 ) {
@@ -516,10 +529,13 @@ fn revive_with_paddles(
             debug!("shock paddles: nobody to revive");
             continue;
         };
-        let Ok((soldier, owner, _, mut health)) = downed.get_mut(target) else {
+        let Ok((soldier, owner, mut body, mut health)) = downed.get_mut(target) else {
             continue;
         };
         health.current = (health.current + paddles.revive_health).clamp(1.0, health.max);
+        // He comes to lying down, and takes a moment to get up (BF2's revive animation).
+        body.stance = Stance::Prone;
+        body.stance_lock = body.stance_lock.max(REVIVE_RECOVERY);
         deaths.revive(soldier, owner.0, controlled_by.0);
     }
 }
@@ -676,6 +692,18 @@ fn pick_up_bags(
     }
 }
 
+/// What an engineer can repair: vehicles and damaged destroyable objects.
+#[derive(SystemParam)]
+struct Repairables<'w, 's> {
+    spatial: SpatialQuery<'w, 's>,
+    colliders: Query<'w, 's, &'static ColliderOf>,
+    vehicles: Query<'w, 's, (&'static VehicleData, &'static mut VehicleHealth)>,
+    crews: Query<'w, 's, (&'static Seated, &'static ControlledBy)>,
+    parts: Query<'w, 's, &'static Destructible, Without<Inactive>>,
+    destroyed: Query<'w, 's, &'static DestroyedStatics>,
+    object_health: ResMut<'w, ObjectHealth>,
+}
+
 /// Gadgets in hand: the medic bag heals and the ammo bag resupplies teammates around, the
 /// wrench repairs what is around while its trigger is held.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -683,7 +711,6 @@ fn replenish_in_hand(
     time: Res<Time>,
     armory: Res<Armory>,
     materials: Option<Res<Materials>>,
-    spatial: SpatialQuery,
     rounds: Query<&RoundState>,
     mut helpers: Query<
         (Entity, &ControlledBy, &SoldierMotion, &Loadout, &AppliedInput, &mut KitAbility),
@@ -694,12 +721,7 @@ fn replenish_in_hand(
         (With<Soldier>, Without<Downed>, Without<Seated>),
     >,
     teams: Query<&Team>,
-    colliders: Query<&ColliderOf>,
-    mut vehicles: Query<(&VehicleData, &mut VehicleHealth)>,
-    crews: Query<(&Seated, &ControlledBy)>,
-    parts: Query<&Destructible, Without<Inactive>>,
-    destroyed: Query<&DestroyedStatics>,
-    mut object_health: ResMut<ObjectHealth>,
+    mut repairables: Repairables,
     mut credit: ResMut<AmmoCredit>,
     mut ledger: ResMut<Ledger>,
     mut deaths: Deaths,
@@ -767,6 +789,15 @@ fn replenish_in_hand(
             let filter = SpatialQueryFilter::from_mask([GameLayer::Vehicle, GameLayer::World]);
             let mut vehicles_seen = Vec::new();
             let mut objects_seen = Vec::new();
+            let Repairables {
+                spatial,
+                colliders,
+                vehicles,
+                crews,
+                parts,
+                destroyed,
+                object_health,
+            } = &mut repairables;
             for collider in spatial.shape_intersections(&Collider::sphere(desc.radius), center, Quat::IDENTITY, &filter) {
                 let body = colliders.get(collider).map_or(collider, |c| c.body);
                 if vehicles.contains(body) {
@@ -878,6 +909,23 @@ fn send_notices(
             });
         }
     }
+}
+
+/// Drops what is kept about soldiers that are gone (round restarts, players leaving).
+fn forget_the_gone(
+    time: Res<Time>,
+    soldiers: Query<(), With<Soldier>>,
+    mut assists: ResMut<Assists>,
+    mut credit: ResMut<AmmoCredit>,
+    mut since: Local<f32>,
+) {
+    *since += time.delta_secs();
+    if *since < 5.0 {
+        return;
+    }
+    *since = 0.0;
+    assists.0.retain(|soldier, _| soldiers.contains(*soldier));
+    credit.0.retain(|(soldier, _), _| soldiers.contains(*soldier));
 }
 
 /// What a bot can use a gadget for.

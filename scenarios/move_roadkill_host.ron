@@ -1,0 +1,24 @@
+// Roadkill over the network, the victim's side (a listen server, so it can teleport): waits
+// until the other client drives a Vodnik, stands in front of it and gets run over. Pair with
+// move_roadkill_driver.ron:
+// client --host --port 16734 --scenario scenarios/move_roadkill_host.ron --out target/scenarios/move/roadkill_host
+// client --connect 127.0.0.1 --port 16734 --scenario scenarios/move_roadkill_driver.ron --out target/scenarios/move/roadkill_driver
+(
+    level: "strike_at_karkand",
+    size: 64,
+    // US, so the driver joins MEC, whose flags have the Vodniks.
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        WaitDriver("jep_vodnik"),
+        Wait(0.5),
+        InFrontOf("jep_vodnik", 12.0),
+        ThirdPerson(true),
+        Wait(0.3),
+        Screenshot("before"),
+        Trace("victim", 7.0),
+        Screenshot("after"),
+        Quit,
+    ],
+)

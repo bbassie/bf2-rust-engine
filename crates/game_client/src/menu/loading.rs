@@ -8,6 +8,9 @@ use super::*;
 pub(super) struct LoadingProgress {
     level_loaded: Option<f32>,
     last_busy: f32,
+    /// Frames in a row without assets arriving or shaders compiling. While a level builds,
+    /// frames are slow and one of them may see nothing arrive.
+    quiet_frames: u32,
 }
 
 /// Pipelines still compiling, counted in the render world. The world renders behind the
@@ -36,8 +39,17 @@ pub(super) struct LoadingMap;
 #[derive(Component)]
 pub(super) struct LoadingBar;
 
-pub(super) fn spawn_loading_screen(mut commands: Commands, mut progress: ResMut<LoadingProgress>) {
-    *progress = LoadingProgress::default();
+pub(super) fn spawn_loading_screen(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut progress: ResMut<LoadingProgress>,
+) {
+    // Busy from the start: after a map change the level is there at once, before any of its
+    // assets arrived.
+    *progress = LoadingProgress {
+        last_busy: time.elapsed_secs(),
+        ..default()
+    };
     commands
         .spawn((
             DespawnOnExit(Screen::Loading),
@@ -160,6 +172,9 @@ pub(super) fn track_loading(
     let compiling = compiling.0.load(Ordering::Relaxed) > 0;
     if images.read().count() + meshes.read().count() > 0 || compiling {
         progress.last_busy = now;
+        progress.quiet_frames = 0;
+    } else {
+        progress.quiet_frames += 1;
     }
     if active.setup.is_none() || menu.pending.is_some() {
         return;
@@ -168,7 +183,7 @@ pub(super) fn track_loading(
         return;
     };
     let loaded = *progress.level_loaded.get_or_insert(now);
-    let quiet = now - progress.last_busy > 0.4 || now - loaded > 20.0;
+    let quiet = (now - progress.last_busy > 0.4 && progress.quiet_frames >= 10) || now - loaded > 20.0;
     if !quiet || (player.is_empty() && !active.spectating()) {
         return;
     }

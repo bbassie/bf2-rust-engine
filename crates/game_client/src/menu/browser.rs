@@ -120,6 +120,15 @@ impl ServerBrowser {
         }
     }
 
+    /// Favourites first, then by ping, silent servers last.
+    fn sort(&mut self) {
+        self.entries.sort_by(|a, b| {
+            let key = |e: &BrowserEntry| (!e.favourite, e.ping_ms.is_none(), e.ping_ms.unwrap_or(0.0));
+            let (ka, kb) = (key(a), key(b));
+            ka.0.cmp(&kb.0).then(ka.1.cmp(&kb.1)).then(ka.2.total_cmp(&kb.2))
+        });
+    }
+
     /// Whether a query went out less than a moment ago.
     pub fn searching(&self, now: f32) -> bool {
         self.query.is_some_and(|(_, sent)| now - sent < 1.5)
@@ -174,6 +183,9 @@ pub(super) fn poll_browser(
             }
         }
     }
+    if replies.is_empty() {
+        return;
+    }
     for (ip, info) in replies {
         let ping = ((now - sent) * 1000.0).max(1.0);
         info!("browser: {} at {ip}:{} ({} ms)", info.name, info.port, ping.round());
@@ -212,11 +224,12 @@ pub(super) fn poll_browser(
         }
         browser.version += 1;
     }
+    browser.sort();
 }
 
 /// Stars or unstars a listed server.
-pub(super) fn toggle_favourite(settings: &mut Settings, browser: &mut ServerBrowser, index: usize) {
-    let Some(entry) = browser.entries.get_mut(index) else {
+pub(super) fn toggle_favourite(settings: &mut Settings, browser: &mut ServerBrowser, address: &str, port: u16) {
+    let Some(entry) = browser.entries.iter_mut().find(|e| e.address == address && e.port == port) else {
         return;
     };
     let favourites = &mut settings.favourite_servers;
@@ -234,6 +247,7 @@ pub(super) fn toggle_favourite(settings: &mut Settings, browser: &mut ServerBrow
             entry.favourite = true;
         }
     }
+    browser.sort();
     browser.version += 1;
 }
 
@@ -272,9 +286,9 @@ pub(super) fn build_server_list(
         commands.entity(*child).despawn();
     }
     commands.entity(list).with_children(|list| {
-        server_row(list, None, None);
-        for (index, entry) in browser.entries.iter().enumerate() {
-            server_row(list, Some(index), Some(entry));
+        server_row(list, None);
+        for entry in &browser.entries {
+            server_row(list, Some(entry));
         }
     });
 }
@@ -283,7 +297,7 @@ pub(super) fn build_server_list(
 const COLUMNS: [f32; 4] = [210.0, 90.0, 90.0, 56.0];
 
 /// A server (or, without one, the header): a favourite star and a row that selects it.
-fn server_row(list: &mut ChildSpawnerCommands, index: Option<usize>, entry: Option<&BrowserEntry>) {
+fn server_row(list: &mut ChildSpawnerCommands, entry: Option<&BrowserEntry>) {
     let info = entry.and_then(|e| e.info.as_ref());
     let incompatible = info.is_some_and(|i| i.protocol != game_shared::PROTOCOL_ID);
     let values: [String; 5] = match (entry, info) {
@@ -311,9 +325,9 @@ fn server_row(list: &mut ChildSpawnerCommands, index: Option<usize>, entry: Opti
         ..default()
     })
     .with_children(|row| {
-        match (index, entry) {
-            (Some(index), Some(entry)) => {
-                let action = MenuButton::Favourite(index);
+        match entry {
+            Some(entry) => {
+                let action = MenuButton::Favourite(entry.address.clone(), entry.port);
                 row.spawn((
                     Name::new(action.element_name()),
                     action,
@@ -338,9 +352,9 @@ fn server_row(list: &mut ChildSpawnerCommands, index: Option<usize>, entry: Opti
                 });
             }
         }
-        let mut cells_parent = match index {
-            Some(index) => {
-                let action = MenuButton::Server(index);
+        let mut cells_parent = match entry {
+            Some(entry) => {
+                let action = MenuButton::Server(entry.address.clone(), entry.port);
                 row.spawn((
                     Name::new(action.element_name()),
                     action,

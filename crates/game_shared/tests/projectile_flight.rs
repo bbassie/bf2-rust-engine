@@ -56,7 +56,7 @@ fn fly(
             let mut age = 0.0;
             while age < seconds {
                 age += DT;
-                let result = step(&spatial, &filter, &desc, &mut motion, age, DT);
+                let result = step(&spatial, &filter, &desc, &mut motion, age, DT, |_, _, _| None);
                 trace.push((result, motion));
                 if result.hit.is_some() {
                     break;

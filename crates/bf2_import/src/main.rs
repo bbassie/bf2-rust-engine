@@ -22,6 +22,7 @@ use rayon::prelude::*;
 
 mod ai;
 mod audio;
+mod commander;
 mod coords;
 mod dds;
 mod destruction;

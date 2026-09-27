@@ -57,6 +57,8 @@ pub struct Contact {
     pub entity: Entity,
     pub point: Vec3,
     pub normal: Vec3,
+    /// A soldier's body part: its damage table column (see [`crate::hitzones`]).
+    pub body_part: Option<u32>,
 }
 
 /// What happened during one [`step`].
@@ -84,17 +86,16 @@ const REST_SPEED: f32 = 0.6;
 /// Distance kept from surfaces so the next ray starts outside.
 const SKIN: f32 = 0.02;
 
-/// Layers a projectile runs into. Grenades and charges only bounce off the world and
-/// vehicles; what can hurt soldiers directly also hits soldiers.
-pub fn collision_layers(desc: &ProjectileDesc) -> LayerMask {
-    match desc.impact {
-        Impact::Stop => [GameLayer::World, GameLayer::Soldier, GameLayer::Vehicle].into(),
-        _ => [GameLayer::World, GameLayer::Vehicle].into(),
-    }
+/// Layers a projectile runs into: the world and vehicles. Soldiers are found by their hit
+/// zones instead (the `soldiers` of [`step`]).
+pub fn collision_layers(_desc: &ProjectileDesc) -> LayerMask {
+    [GameLayer::World, GameLayer::Vehicle].into()
 }
 
 /// Advances a projectile by `dt`: its rocket motor, gravity, and what it runs into.
 /// `age` is the seconds since launch (arming and motor delays count from it).
+/// `soldiers(origin, direction, length)` finds the nearest soldier along a stretch of the
+/// flight; only what can hurt soldiers directly (bullets, rockets, armed shells) asks.
 pub fn step(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
@@ -102,6 +103,7 @@ pub fn step(
     motion: &mut ProjectileMotion,
     age: f32,
     dt: f32,
+    mut soldiers: impl FnMut(Vec3, Dir3, f32) -> Option<(f32, Contact)>,
 ) -> Step {
     let mut result = Step::default();
     if motion.resting {
@@ -137,17 +139,35 @@ pub fn step(
         let Ok(direction) = Dir3::new(travel) else {
             break;
         };
-        let Some(hit) = spatial.cast_ray(motion.position, direction, length, true, filter) else {
-            motion.position += travel;
-            result.distance += length;
-            break;
+        let world = spatial.cast_ray(motion.position, direction, length, true, filter);
+        let reach = world.map_or(length, |hit| hit.distance);
+        let soldier = match desc.impact {
+            Impact::Stop if armed => soldiers(motion.position, direction, reach),
+            _ => None,
         };
-        let point = motion.position + direction * hit.distance;
-        result.distance += hit.distance;
-        let contact = Contact {
-            entity: hit.entity,
-            point,
-            normal: hit.normal,
+        let (distance, contact) = match (soldier, world) {
+            (Some(soldier), _) => soldier,
+            (None, Some(hit)) => (
+                hit.distance,
+                Contact {
+                    entity: hit.entity,
+                    point: motion.position + direction * hit.distance,
+                    normal: hit.normal,
+                    body_part: None,
+                },
+            ),
+            (None, None) => {
+                motion.position += travel;
+                result.distance += length;
+                break;
+            }
+        };
+        let point = contact.point;
+        result.distance += distance;
+        let hit = RayHitData {
+            entity: contact.entity,
+            distance,
+            normal: contact.normal,
         };
         match desc.impact {
             Impact::Stop if armed => {

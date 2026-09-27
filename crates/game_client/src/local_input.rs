@@ -133,8 +133,10 @@ pub fn build_input(
     cli: Res<crate::Cli>,
     selection: Res<crate::combat::WeaponSelection>,
     seat: Res<crate::vehicles::SeatRequest>,
+    view: Res<crate::combat::ViewTick>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
     active: Res<crate::net::ActiveMatch>,
+    downed: Query<&game_shared::revive::Downed, With<crate::net::LocalSoldier>>,
 ) {
     if active.setup.is_none() {
         return;
@@ -148,6 +150,7 @@ pub fn build_input(
         pitch: look.pitch,
         weapon: selection.index,
         seat: seat.0,
+        view_tick: view.tick,
         ..default()
     };
     history.next_seq = history.next_seq.wrapping_add(1);
@@ -182,6 +185,10 @@ pub fn build_input(
         }
     }
     look.jump_latched = false;
+    // Critically wounded: the server lies us still whatever we press; predict the same.
+    if let Ok(downed) = downed.single() {
+        frame = game_shared::revive::downed_input(frame, downed);
+    }
 
     history.frames.push_back(frame);
     while history.frames.len() > InputHistory::MAX {

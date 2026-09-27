@@ -67,9 +67,14 @@ pub struct MapRotation {
 }
 
 impl MapRotation {
-    /// The rotation of `settings`, positioned at its map (whose bots it applies).
-    pub fn new(settings: &mut ServerSettings) -> Self {
-        let maps = settings.rotation.clone();
+    /// The rotation of `settings` without levels that aren't there, positioned at the map
+    /// being played (whose bots it applies).
+    pub fn new(settings: &mut ServerSettings, paths: &GamePaths) -> Self {
+        let (maps, missing): (Vec<MapEntry>, Vec<MapEntry>) =
+            settings.rotation.iter().cloned().partition(|m| level_exists(paths, &m.level));
+        for map in missing {
+            warn!("map rotation: no level `{}` in {}", map.level, paths.imported.display());
+        }
         let current = maps
             .iter()
             .position(|m| m.level == settings.level && m.mode == settings.mode && m.size == settings.size)
