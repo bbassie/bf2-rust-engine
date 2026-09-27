@@ -30,6 +30,8 @@ pub struct LookState {
     pub yaw: f32,
     pub pitch: f32,
     pub sensitivity: f32,
+    /// Sensitivity multiplier while zoomed in.
+    pub zoom_scale: f32,
     /// Set when jump is pressed between ticks so short taps aren't lost.
     jump_latched: bool,
 }
@@ -40,6 +42,7 @@ impl Default for LookState {
             yaw: 0.0,
             pitch: 0.0,
             sensitivity: 0.0022,
+            zoom_scale: 1.0,
             jump_latched: false,
         }
     }
@@ -95,8 +98,9 @@ fn mouse_look(
     if !cursor_locked(&cursor) {
         return;
     }
-    look.yaw -= motion.delta.x * look.sensitivity;
-    look.pitch = (look.pitch - motion.delta.y * look.sensitivity)
+    let sensitivity = look.sensitivity * look.zoom_scale;
+    look.yaw -= motion.delta.x * sensitivity;
+    look.pitch = (look.pitch - motion.delta.y * sensitivity)
         .clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
     if keys.just_pressed(KeyCode::Space) {
         look.jump_latched = true;
@@ -111,6 +115,7 @@ pub fn build_input(
     mut history: ResMut<InputHistory>,
     mut packets: MessageWriter<InputPacket>,
     cli: Res<crate::Cli>,
+    selection: Res<crate::combat::WeaponSelection>,
 ) {
     if cli.debug_walk {
         look.yaw += 0.01;
@@ -119,6 +124,7 @@ pub fn build_input(
         seq: history.next_seq,
         yaw: look.yaw,
         pitch: look.pitch,
+        weapon: selection.index,
         ..default()
     };
     history.next_seq = history.next_seq.wrapping_add(1);
@@ -142,6 +148,10 @@ pub fn build_input(
         set(Buttons::AIM, mouse.pressed(MouseButton::Right));
         set(Buttons::USE, keys.pressed(KeyCode::KeyE));
         set(Buttons::RELOAD, keys.pressed(KeyCode::KeyR));
+        set(Buttons::FIRE_MODE, keys.pressed(KeyCode::KeyB));
+    }
+    if cli.debug_fire {
+        frame.buttons.set(Buttons::FIRE, true);
     }
     look.jump_latched = false;
 

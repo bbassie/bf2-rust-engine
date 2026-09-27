@@ -15,6 +15,8 @@ bitflags::bitflags! {
         const AIM    = 1 << 5;
         const USE    = 1 << 6;
         const RELOAD = 1 << 7;
+        /// Cycle the weapon's fire mode (single/burst/auto).
+        const FIRE_MODE = 1 << 8;
     }
 }
 
@@ -30,6 +32,8 @@ pub struct InputFrame {
     /// View pitch in radians (positive looks up).
     pub pitch: f32,
     pub buttons: Buttons,
+    /// Selected weapon: index into the soldier's loadout.
+    pub weapon: u8,
 }
 
 impl InputFrame {

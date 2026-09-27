@@ -3,13 +3,14 @@
 //! Registration order must be identical on client and server; keeping it all in this one
 //! plugin guarantees that. Replicon hashes the protocol and refuses mismatched clients.
 
-use bevy::prelude::*;
+use bevy::{ecs::entity::MapEntities, prelude::*};
 use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     input::InputPacket,
     soldier::{Health, InputAck, Soldier, SoldierMotion},
+    weapons::{Inventory, Loadout},
 };
 
 pub struct ProtocolPlugin;
@@ -26,8 +27,13 @@ impl Plugin for ProtocolPlugin {
             .replicate::<SoldierMotion>()
             .replicate::<InputAck>()
             .replicate::<Health>()
+            .replicate::<Loadout>()
+            .replicate::<Inventory>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
-            .add_client_message::<ClientHello>(Channel::Ordered);
+            .add_client_message::<ClientHello>(Channel::Ordered)
+            .add_mapped_server_message::<ShotFired>(Channel::Unreliable)
+            .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
+            .add_mapped_server_message::<KillFeed>(Channel::Ordered);
     }
 }
 
@@ -92,4 +98,38 @@ pub struct ControlledBy(#[entities] pub Entity);
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
 pub struct ClientHello {
     pub name: String,
+}
+
+/// Server -> clients: a soldier fired. Clients draw the tracer and play the sound; the
+/// shooter's own client already did so when it predicted the shot.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, MapEntities)]
+pub struct ShotFired {
+    #[entities]
+    pub soldier: Entity,
+    pub origin: Vec3,
+    pub direction: Vec3,
+    /// Index into the soldier's loadout.
+    pub weapon: u8,
+}
+
+/// Server -> the attacker: your shot hit someone (for the hit marker).
+#[derive(Message, Serialize, Deserialize, Clone, Debug, MapEntities)]
+pub struct HitConfirmed {
+    #[entities]
+    pub victim: Entity,
+    pub damage: f32,
+    pub headshot: bool,
+    pub killed: bool,
+}
+
+/// Server -> everyone: someone was killed.
+#[derive(Message, Serialize, Deserialize, Clone, Debug, MapEntities)]
+pub struct KillFeed {
+    /// The killer's player, if any.
+    #[entities]
+    pub killer: Option<Entity>,
+    #[entities]
+    pub victim: Entity,
+    pub weapon: String,
+    pub headshot: bool,
 }

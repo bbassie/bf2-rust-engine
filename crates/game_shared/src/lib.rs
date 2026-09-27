@@ -15,6 +15,7 @@ pub mod physics;
 pub mod protocol;
 pub mod soldier;
 pub mod statics;
+pub mod weapons;
 
 /// Simulation rate for gameplay and physics.
 pub const TICK_HZ: f64 = 60.0;
@@ -38,6 +39,7 @@ impl Plugin for SharedPlugin {
                 protocol::ProtocolPlugin,
                 soldier::SoldierPlugin,
                 level::LevelPlugin,
+                weapons::WeaponsPlugin,
             ));
     }
 }

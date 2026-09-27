@@ -15,6 +15,7 @@ bevy = { workspace = true, features = [
   "3d",
   "ui",
   "audio",
+  "wav",
   "dds",
   "serialize",
 ] }
@@ -34,3 +35,4 @@ game_data.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde_json = "1"
+fastrand = "2"

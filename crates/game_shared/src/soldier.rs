@@ -26,7 +26,8 @@ impl Plugin for SoldierPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SoldierTuning>()
             .init_resource::<SoldierShapes>()
-            .add_observer(add_soldier_physics);
+            .add_observer(add_soldier_physics)
+            .add_systems(FixedPostUpdate, fit_hitboxes_to_stance);
     }
 }
 
@@ -155,14 +156,73 @@ impl Default for SoldierShapes {
     }
 }
 
+/// The child entity holding a soldier's hitbox collider.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Hitbox {
+    pub entity: Entity,
+    pub stance: Stance,
+}
+
 /// Gives every soldier (spawned on the server or replicated to a client) a hitbox.
 /// The hitbox does not take part in the physics solver; it is only found by queries.
 fn add_soldier_physics(add: On<Add, Soldier>, mut commands: Commands, shapes: Res<SoldierShapes>) {
-    commands.entity(add.entity).insert(RigidBody::Kinematic).with_child((
-        shapes.standing.clone(),
-        Transform::from_translation(SOLDIER_CENTER),
-        CollisionLayers::new(GameLayer::Soldier, LayerMask::NONE),
+    let hitbox = commands
+        .spawn((
+            shapes.standing.clone(),
+            Transform::from_translation(SOLDIER_CENTER),
+            CollisionLayers::new(GameLayer::Soldier, LayerMask::NONE),
+            ChildOf(add.entity),
+        ))
+        .id();
+    commands.entity(add.entity).insert((
+        RigidBody::Kinematic,
+        Hitbox {
+            entity: hitbox,
+            stance: Stance::Standing,
+        },
     ));
+}
+
+/// Height of the top of the head above the feet, per stance.
+pub fn stance_height(stance: Stance) -> f32 {
+    match stance {
+        Stance::Standing => SOLDIER_HEIGHT,
+        Stance::Crouching => 1.25,
+        Stance::Prone => 0.5,
+    }
+}
+
+/// Crouching and prone soldiers are harder to hit: reshape the hitbox with the stance.
+fn fit_hitboxes_to_stance(
+    mut soldiers: Query<(&SoldierMotion, &mut Hitbox)>,
+    mut hitboxes: Query<(&mut Collider, &mut Transform)>,
+) {
+    for (motion, mut hitbox) in &mut soldiers {
+        if hitbox.stance == motion.stance {
+            continue;
+        }
+        hitbox.stance = motion.stance;
+        let Ok((mut collider, mut transform)) = hitboxes.get_mut(hitbox.entity) else {
+            continue;
+        };
+        let (shape, offset) = match motion.stance {
+            Stance::Prone => (
+                // Lying along the view direction.
+                Collider::capsule(0.25, SOLDIER_HEIGHT - 0.5),
+                Transform::from_xyz(0.0, 0.25, 0.0)
+                    .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            ),
+            stance => {
+                let height = stance_height(stance);
+                (
+                    Collider::capsule(SOLDIER_RADIUS, height - 2.0 * SOLDIER_RADIUS),
+                    Transform::from_xyz(0.0, height * 0.5, 0.0),
+                )
+            }
+        };
+        *collider = shape;
+        *transform = offset;
+    }
 }
 
 /// Advances one soldier by one tick.

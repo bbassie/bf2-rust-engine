@@ -24,9 +24,11 @@ use game_shared::{
     level::LoadedLevel,
     protocol::{ClientHello, ControlledBy, MatchInfo, Player, PlayerNetId, Team},
     soldier::{InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, step_soldier},
+    weapons::{Armory, Inventory, Loadout, WeaponState},
 };
 
 pub mod bots;
+pub mod combat;
 
 /// How the server was configured to run.
 #[derive(Resource, Clone, Debug)]
@@ -44,6 +46,8 @@ pub struct ServerSettings {
     /// Create a player for the local user (listen server / singleplayer).
     pub local_player: Option<String>,
     pub respawn_seconds: f32,
+    /// Whether bullets hurt teammates.
+    pub friendly_fire: bool,
 }
 
 impl Default for ServerSettings {
@@ -57,7 +61,8 @@ impl Default for ServerSettings {
             port: game_shared::DEFAULT_PORT,
             network: true,
             local_player: None,
-            respawn_seconds: 5.0,
+            respawn_seconds: 10.0,
+            friendly_fire: false,
         }
     }
 }
@@ -69,7 +74,7 @@ pub struct GameServerPlugin {
 impl Plugin for GameServerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.settings.clone())
-            .add_plugins(bots::BotPlugin)
+            .add_plugins((bots::BotPlugin, combat::CombatPlugin))
             .add_systems(Startup, (start_networking, start_match))
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
@@ -114,6 +119,21 @@ pub struct ClientPlayer(pub Entity);
 /// Server-side: the soldier a player currently controls.
 #[derive(Component)]
 pub struct Controls(pub Entity);
+
+/// Server-side: which kit slot (0..7) the player spawns with.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct KitChoice(pub u8);
+
+impl Default for KitChoice {
+    fn default() -> Self {
+        // Assault: a rifle, the most generally useful kit.
+        Self(2)
+    }
+}
+
+/// Server-side: the input applied to a soldier this tick (weapons read it after movement).
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct AppliedInput(pub InputFrame);
 
 /// Server-side: counts down until a player without a soldier respawns.
 #[derive(Component)]
@@ -329,17 +349,19 @@ fn apply_inputs(
             &mut SoldierMotion,
             &mut InputAck,
             &mut Transform,
+            &mut AppliedInput,
         ),
         With<Soldier>,
     >,
     mut buffers: Query<&mut InputBuffer>,
 ) {
     let dt = time.delta_secs();
-    for (controlled_by, mut motion, mut ack, mut transform) in &mut soldiers {
+    for (controlled_by, mut motion, mut ack, mut transform, mut applied) in &mut soldiers {
         let Ok(mut buffer) = buffers.get_mut(controlled_by.0) else {
             continue;
         };
         let input = buffer.next();
+        applied.0 = input;
         let mut next = *motion;
         step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover);
         motion.set_if_neq(next);
@@ -355,22 +377,31 @@ fn respawn_players(
     mut commands: Commands,
     time: Res<Time>,
     level: Res<LoadedLevel>,
+    armory: Res<Armory>,
     match_info: Single<&MatchInfo>,
-    mut players: Query<(Entity, &Team, Option<&mut RespawnTimer>), (With<Player>, Without<Controls>)>,
+    mut players: Query<
+        (Entity, &Team, Option<&KitChoice>, Option<&mut RespawnTimer>),
+        (With<Player>, Without<Controls>),
+    >,
 ) {
-    for (player, team, timer) in &mut players {
+    // Kits load right after the level; spawning earlier would leave soldiers unarmed.
+    if armory.kits.is_empty() {
+        return;
+    }
+    for (player, team, kit, timer) in &mut players {
+        let kit = kit.copied().unwrap_or_default();
         if *team == Team::Spectator {
             continue;
         }
         match timer {
             None => {
                 // First spawn is immediate.
-                spawn_soldier(&mut commands, player, *team, &level, &match_info);
+                spawn_soldier(&mut commands, player, *team, kit, &level, &armory, &match_info);
             }
             Some(mut timer) => {
                 if timer.0.tick(time.delta()).is_finished() {
                     commands.entity(player).remove::<RespawnTimer>();
-                    spawn_soldier(&mut commands, player, *team, &level, &match_info);
+                    spawn_soldier(&mut commands, player, *team, kit, &level, &armory, &match_info);
                 }
             }
         }
@@ -382,17 +413,32 @@ pub fn spawn_soldier(
     commands: &mut Commands,
     player: Entity,
     team: Team,
+    kit: KitChoice,
     level: &LoadedLevel,
+    armory: &Armory,
     match_info: &MatchInfo,
 ) -> Entity {
     let (position, yaw) = pick_spawn(level, match_info, team);
     let motion = SoldierMotion::at(position, yaw);
+    let team_index = if team == Team::Two { 1 } else { 0 };
+    let loadout = armory
+        .kit_for(team_index, kit.0 as usize)
+        .map(|k| Loadout {
+            kit: k.name.clone(),
+            weapons: k.weapons.clone(),
+        })
+        .unwrap_or_default();
+    let inventory = Inventory::full(&loadout, armory);
     let soldier = commands
         .spawn((
             Soldier,
             ControlledBy(player),
             motion,
             motion.body_transform(),
+            loadout,
+            inventory,
+            WeaponState::default(),
+            AppliedInput::default(),
             Replicated,
         ))
         .id();

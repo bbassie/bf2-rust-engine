@@ -27,6 +27,7 @@ mod meshes;
 mod roads;
 mod soldiers;
 mod terrain;
+mod weapons;
 
 #[derive(Parser)]
 #[command(version, about = "Convert content from a Battlefield 2 installation")]
@@ -97,10 +98,12 @@ fn main() -> Result<()> {
                 match level::import_level(&install, &level, &cli.out) {
                     Ok(report) => {
                         log::info!(
-                            "{}: {} statics, {} roads, {} templates, {} mesh files, modes [{}] in {:.1}s",
+                            "{}: {} statics, {} roads, {} kits, {} weapons, {} templates, {} mesh files, modes [{}] in {:.1}s",
                             level.name,
                             report.statics,
                             report.roads,
+                            report.kits,
+                            report.weapons,
                             report.templates,
                             report.meshes,
                             report.game_modes.join(", "),

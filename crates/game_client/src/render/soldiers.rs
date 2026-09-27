@@ -1,8 +1,11 @@
-//! Soldier visuals: the team's imported BF2 soldier model with movement animations, or a
-//! team-colored capsule when no model is available (e.g. on the test range).
+//! Soldier visuals: the team's imported BF2 soldier model with movement animations and the
+//! weapon in hand, or a team-colored capsule when no model is available (test range).
+//!
+//! Animation is layered like BF2: the legs play the soldier's movement clips, the upper
+//! body plays the matching clip of the current weapon's animation set.
 
 use bevy::{
-    gltf::Gltf,
+    gltf::{Gltf, GltfMesh},
     platform::collections::HashMap,
     prelude::*,
     world_serialization::WorldInstanceReady,
@@ -13,6 +16,7 @@ use game_shared::{
     level::LoadedLevel,
     protocol::{ControlledBy, Team},
     soldier::{SOLDIER_CENTER, SOLDIER_HEIGHT, SOLDIER_RADIUS, Soldier, Stance},
+    weapons::{Armory, Inventory, Loadout},
 };
 
 use crate::{
@@ -32,8 +36,8 @@ impl Plugin for SoldierRenderPlugin {
                 Update,
                 (
                     load_team_models.run_if(resource_exists_and_changed::<LoadedLevel>),
-                    build_animation_graphs,
                     attach_models,
+                    attach_weapons,
                 ),
             )
             .add_systems(
@@ -45,7 +49,7 @@ impl Plugin for SoldierRenderPlugin {
     }
 }
 
-/// Clips used for movement, by lowercase BF2 file name.
+/// Movement clips, by lowercase BF2 file name.
 mod clips {
     pub const STAND: &str = "3p_stand";
     pub const RUN_FORWARD: &str = "3p_runforward";
@@ -72,26 +76,24 @@ mod clips {
     ];
 }
 
-/// Upper-body animations while holding a weapon. Until kits exist everyone carries the
-/// same rifle.
+/// Upper-body set for weapons without their own.
 const DEFAULT_WEAPON_ANIMATIONS: &str = "objects/weapons/handheld/rurif_ak47/animations/3p.glb";
 
-/// The soldier model each team wears (the first kit's body for now).
+/// Loaded soldier models and animation graphs.
 #[derive(Resource, Default)]
 struct SoldierModels {
-    teams: [Option<SoldierModel>; 2],
-    weapon_animations: Option<Handle<Gltf>>,
-}
-
-struct SoldierModel {
-    gltf: Handle<Gltf>,
-    animations: Option<ModelAnimations>,
+    /// The model each team wears (its first kit's body for now).
+    teams: [Option<Handle<Gltf>>; 2],
+    /// Weapon upper-body animation sets by path.
+    weapon_sets: HashMap<String, Handle<Gltf>>,
+    /// One graph per (team model, weapon set).
+    graphs: HashMap<(usize, String), ModelAnimations>,
 }
 
 #[derive(Clone)]
 struct ModelAnimations {
     graph: Handle<AnimationGraph>,
-    /// Per movement clip: the legs clip and the matching upper-body (weapon) clip.
+    /// Per movement clip: the legs clip and the matching upper-body clip.
     nodes: HashMap<&'static str, (AnimationNodeIndex, Option<AnimationNodeIndex>)>,
 }
 
@@ -115,11 +117,28 @@ struct SoldierVisual {
 #[derive(Component)]
 struct AttachedBody(Option<usize>);
 
-/// The animation player inside an attached model, and the clip it plays.
+/// Parts of an attached model found when its scene spawned.
 #[derive(Component)]
-struct SoldierAnimator {
+struct ModelRig {
     player: Entity,
+    /// Weapon part bones `mesh1..mesh8`.
+    weapon_bones: [Option<Entity>; 8],
+}
+
+/// Animation state of a visual.
+#[derive(Component, Default)]
+struct SoldierAnimator {
+    graph: Option<(usize, String)>,
     playing: &'static str,
+}
+
+/// The weapon model currently in the soldier's hands.
+#[derive(Component)]
+struct HeldWeapon {
+    name: String,
+    gltf: Option<Handle<Gltf>>,
+    parts: Vec<Entity>,
+    spawned: bool,
 }
 
 #[derive(Component)]
@@ -156,7 +175,7 @@ fn load_team_models(
     asset_server: Res<AssetServer>,
     mut models: ResMut<SoldierModels>,
 ) {
-    models.weapon_animations = Some(asset_server.load(format!("imported://{DEFAULT_WEAPON_ANIMATIONS}")));
+    models.graphs.clear();
     for (index, slot) in models.teams.iter_mut().enumerate() {
         *slot = level
             .desc
@@ -169,49 +188,58 @@ fn load_team_models(
                     .map_err(|err| warn!("soldier model: {err}"))
                     .ok()
             })
-            .map(|desc| SoldierModel {
-                gltf: asset_server.load(format!("imported://{}", desc.mesh)),
-                animations: None,
-            });
+            .map(|desc| asset_server.load(format!("imported://{}", desc.mesh)));
     }
 }
 
-fn build_animation_graphs(
-    mut models: ResMut<SoldierModels>,
-    gltfs: Res<Assets<Gltf>>,
-    mut graphs: ResMut<Assets<AnimationGraph>>,
-) {
-    let models = &mut *models;
-    let weapon = models.weapon_animations.as_ref().and_then(|h| gltfs.get(h));
-    for model in models.teams.iter_mut().flatten() {
-        if model.animations.is_some() {
-            continue;
-        }
-        let Some(gltf) = gltfs.get(&model.gltf) else {
+/// The graph for a team model holding a weapon with this animation set, built on first use
+/// once both files are loaded.
+fn graph_for(
+    models: &mut SoldierModels,
+    team: usize,
+    set: &str,
+    asset_server: &AssetServer,
+    gltfs: &Assets<Gltf>,
+    graphs: &mut Assets<AnimationGraph>,
+) -> Option<ModelAnimations> {
+    let key = (team, set.to_string());
+    if let Some(found) = models.graphs.get(&key) {
+        return Some(found.clone());
+    }
+    let body = gltfs.get(models.teams[team].as_ref()?)?;
+    let set_handle = models
+        .weapon_sets
+        .entry(set.to_string())
+        .or_insert_with(|| asset_server.load(format!("imported://{set}")))
+        .clone();
+    let weapon = gltfs.get(&set_handle)?;
+
+    let mut graph = AnimationGraph::new();
+    let mut nodes = HashMap::new();
+    for &name in clips::ALL {
+        let Some(legs) = body.named_animations.get(name) else {
             continue;
         };
-        let mut graph = AnimationGraph::new();
-        let mut nodes = HashMap::new();
-        for &name in clips::ALL {
-            let Some(legs) = gltf.named_animations.get(name) else {
-                continue;
-            };
-            let legs = graph.add_clip(legs.clone(), 1.0, graph.root);
-            // Weapon clips are named by state: `3p_crouchstill` pairs with `crouchstill`.
-            let state = match name.trim_start_matches("3p_") {
-                "runforwardjumploop" => "runforward",
-                other => other,
-            };
-            let upper = weapon
-                .and_then(|w| w.named_animations.get(state).or_else(|| w.named_animations.get("stand")))
-                .map(|clip| graph.add_clip(clip.clone(), 1.0, graph.root));
-            nodes.insert(name, (legs, upper));
-        }
-        model.animations = Some(ModelAnimations {
-            graph: graphs.add(graph),
-            nodes,
-        });
+        let legs = graph.add_clip(legs.clone(), 1.0, graph.root);
+        // Weapon clips are named by state: `3p_crouchstill` pairs with `crouchstill`.
+        let state = match name.trim_start_matches("3p_") {
+            "runforwardjumploop" => "runforward",
+            "walkleft" => "strafeleft",
+            "walkright" => "straferight",
+            other => other,
+        };
+        let upper = [state, name.trim_start_matches("3p_"), "stand"]
+            .iter()
+            .find_map(|s| weapon.named_animations.get(*s))
+            .map(|clip| graph.add_clip(clip.clone(), 1.0, graph.root));
+        nodes.insert(name, (legs, upper));
     }
+    let animations = ModelAnimations {
+        graph: graphs.add(graph),
+        nodes,
+    };
+    models.graphs.insert(key, animations.clone());
+    Some(animations)
 }
 
 fn spawn_visual(add: On<Add, Soldier>, mut commands: Commands) {
@@ -233,11 +261,7 @@ fn despawn_visual(remove: On<Remove, Soldier>, mut commands: Commands, visuals: 
     }
 }
 
-fn soldier_team(
-    soldier: Entity,
-    controllers: &Query<&ControlledBy>,
-    teams: &Query<&Team>,
-) -> Team {
+fn soldier_team(soldier: Entity, controllers: &Query<&ControlledBy>, teams: &Query<&Team>) -> Team {
     controllers
         .get(soldier)
         .ok()
@@ -269,7 +293,7 @@ fn attach_models(
             continue;
         }
         // Wait for the model to load before swapping out the capsule.
-        let scene = model.and_then(|(_, m)| gltfs.get(&m.gltf)).and_then(|g| g.default_scene.clone());
+        let scene = model.and_then(|(_, m)| gltfs.get(m)).and_then(|g| g.default_scene.clone());
         if model.is_some() && scene.is_none() {
             if attached.is_none() {
                 attach_capsule(&mut commands, entity, team, &placeholder);
@@ -279,33 +303,44 @@ fn attach_models(
         commands
             .entity(entity)
             .despawn_related::<Children>()
-            .remove::<SoldierAnimator>()
+            .remove::<(ModelRig, SoldierAnimator, HeldWeapon)>()
             .insert(AttachedBody(wanted));
-        match (scene, model) {
-            (Some(scene), Some(_)) => {
-                commands.spawn((WorldAssetRoot(scene), ChildOf(entity))).observe(
-                    |ready: On<WorldInstanceReady>,
-                     mut commands: Commands,
-                     children: Query<&Children>,
-                     players: Query<(), With<AnimationPlayer>>,
-                     parents: Query<&ChildOf>| {
-                        let Some(player) = children
-                            .iter_descendants(ready.entity)
-                            .find(|e| players.contains(*e))
-                        else {
-                            return;
-                        };
-                        if let Ok(visual) = parents.get(ready.entity) {
-                            commands.entity(visual.parent()).insert(SoldierAnimator {
-                                player,
-                                playing: "",
-                            });
-                        }
+        let Some(scene) = scene else {
+            attach_capsule(&mut commands, entity, team, &placeholder);
+            continue;
+        };
+        commands.spawn((WorldAssetRoot(scene), ChildOf(entity))).observe(
+            |ready: On<WorldInstanceReady>,
+             mut commands: Commands,
+             children: Query<&Children>,
+             players: Query<(), With<AnimationPlayer>>,
+             names: Query<&Name>,
+             parents: Query<&ChildOf>| {
+                let mut player = None;
+                let mut weapon_bones = [None; 8];
+                for descendant in children.iter_descendants(ready.entity) {
+                    if players.contains(descendant) {
+                        player = Some(descendant);
+                    }
+                    if let Ok(name) = names.get(descendant)
+                        && let Some(n) = name.as_str().strip_prefix("mesh").and_then(|n| n.parse::<usize>().ok())
+                        && (1..=8).contains(&n)
+                    {
+                        weapon_bones[n - 1] = Some(descendant);
+                    }
+                }
+                let (Some(player), Ok(visual)) = (player, parents.get(ready.entity)) else {
+                    return;
+                };
+                commands.entity(visual.parent()).insert((
+                    ModelRig {
+                        player,
+                        weapon_bones,
                     },
-                );
-            }
-            _ => attach_capsule(&mut commands, entity, team, &placeholder),
-        }
+                    SoldierAnimator::default(),
+                ));
+            },
+        );
     }
 }
 
@@ -331,6 +366,90 @@ fn attach_capsule(commands: &mut Commands, visual: Entity, team: Team, assets: &
                 Transform::from_xyz(0.0, SOLDIER_HEIGHT - 0.25, -SOLDIER_RADIUS + 0.02),
             ));
         });
+}
+
+/// The active weapon of a soldier.
+fn active_weapon<'a>(
+    armory: &'a Armory,
+    loadout: Option<&Loadout>,
+    inventory: Option<&Inventory>,
+) -> Option<&'a game_data::WeaponDesc> {
+    let (loadout, inventory) = (loadout?, inventory?);
+    armory.weapon(loadout.weapons.get(inventory.active as usize)?).map(|w| w.as_ref())
+}
+
+/// Puts the soldier's current weapon model on the weapon bones (part `n` on `mesh{n+1}`).
+#[allow(clippy::type_complexity)]
+fn attach_weapons(
+    mut commands: Commands,
+    armory: Res<Armory>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    gltf_meshes: Res<Assets<GltfMesh>>,
+    soldiers: Query<(Option<&Loadout>, Option<&Inventory>)>,
+    mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&mut HeldWeapon>)>,
+) {
+    for (entity, visual, rig, held) in &mut visuals {
+        let Ok((loadout, inventory)) = soldiers.get(visual.soldier) else {
+            continue;
+        };
+        let weapon = active_weapon(&armory, loadout, inventory);
+        let name = weapon.map_or(String::new(), |w| w.name.clone());
+        let mut held = match held {
+            Some(held) if held.name == name => held,
+            Some(mut held) => {
+                for part in held.parts.drain(..) {
+                    commands.entity(part).try_despawn();
+                }
+                held.name = name;
+                held.gltf = weapon.and_then(|w| w.mesh_3p.as_ref()).map(|p| asset_server.load(format!("imported://{p}")));
+                held.spawned = false;
+                held
+            }
+            None => {
+                commands.entity(entity).insert(HeldWeapon {
+                    name,
+                    gltf: weapon.and_then(|w| w.mesh_3p.as_ref()).map(|p| asset_server.load(format!("imported://{p}"))),
+                    parts: Vec::new(),
+                    spawned: false,
+                });
+                continue;
+            }
+        };
+        if held.spawned {
+            continue;
+        }
+        let Some(gltf) = held.gltf.as_ref().and_then(|h| gltfs.get(h)) else {
+            if held.gltf.is_none() {
+                held.spawned = true;
+            }
+            continue;
+        };
+        let mut parts = Vec::new();
+        for (index, mesh) in gltf.meshes.iter().enumerate() {
+            let (Some(bone), Some(mesh)) = (rig.weapon_bones.get(index).copied().flatten(), gltf_meshes.get(mesh)) else {
+                continue;
+            };
+            for primitive in &mesh.primitives {
+                let material: Handle<StandardMaterial> = primitive
+                    .material
+                    .as_ref()
+                    .and_then(|m| m.path())
+                    .and_then(|path| {
+                        let label = format!("{}/std", path.label()?);
+                        Some(asset_server.load(path.clone().with_label(label)))
+                    })
+                    .unwrap_or_default();
+                parts.push(
+                    commands
+                        .spawn((Mesh3d(primitive.mesh.clone()), MeshMaterial3d(material), ChildOf(bone)))
+                        .id(),
+                );
+            }
+        }
+        held.parts = parts;
+        held.spawned = true;
+    }
 }
 
 fn update_visuals(
@@ -378,35 +497,41 @@ fn movement_clip(render: &SoldierRender) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn animate(
     mut commands: Commands,
-    models: Res<SoldierModels>,
-    soldiers: Query<&SoldierRender>,
-    mut visuals: Query<(&SoldierVisual, &AttachedBody, &mut SoldierAnimator)>,
-    mut players: Query<(&mut AnimationPlayer, Has<AnimationGraphHandle>)>,
+    mut models: ResMut<SoldierModels>,
+    armory: Res<Armory>,
+    asset_server: Res<AssetServer>,
+    gltfs: Res<Assets<Gltf>>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    soldiers: Query<(&SoldierRender, Option<&Loadout>, Option<&Inventory>)>,
+    mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
+    mut players: Query<&mut AnimationPlayer>,
 ) {
-    for (visual, body, mut animator) in &mut visuals {
-        let (Ok(render), Some(team)) = (soldiers.get(visual.soldier), body.0) else {
+    for (visual, body, rig, mut animator) in &mut visuals {
+        let (Ok((render, loadout, inventory)), Some(team)) = (soldiers.get(visual.soldier), body.0) else {
             continue;
         };
-        let Some(animations) = models.teams[team].as_ref().and_then(|m| m.animations.as_ref()) else {
+        let set = active_weapon(&armory, loadout, inventory)
+            .and_then(|w| w.animations_3p.clone())
+            .unwrap_or_else(|| DEFAULT_WEAPON_ANIMATIONS.to_string());
+        let Some(animations) = graph_for(&mut models, team, &set, &asset_server, &gltfs, &mut graphs) else {
             continue;
         };
-        let Ok((mut player, has_graph)) = players.get_mut(animator.player) else {
-            continue;
-        };
-        if !has_graph {
-            // The graph may finish building after the model spawned.
-            commands
-                .entity(animator.player)
-                .insert(AnimationGraphHandle(animations.graph.clone()));
+        let key = (team, set);
+        if animator.graph.as_ref() != Some(&key) {
+            // New weapon set: swap graphs and restart the clips.
+            commands.entity(rig.player).insert(AnimationGraphHandle(animations.graph.clone()));
+            animator.graph = Some(key);
+            animator.playing = "";
             continue;
         }
         let wanted = movement_clip(render);
         if animator.playing == wanted {
             continue;
         }
-        let Some(&(legs, upper)) = animations.nodes.get(wanted) else {
+        let (Some(&(legs, upper)), Ok(mut player)) = (animations.nodes.get(wanted), players.get_mut(rig.player)) else {
             continue;
         };
         // Legs and upper body animate disjoint bones, so both play at full weight.

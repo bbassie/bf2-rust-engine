@@ -18,11 +18,13 @@ use game_data::{
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{coords, meshes::MeshConverter, roads, terrain};
+use crate::{coords, meshes::MeshConverter, roads, terrain, weapons};
 
 pub struct LevelReport {
     pub statics: usize,
     pub roads: usize,
+    pub kits: usize,
+    pub weapons: usize,
     pub templates: usize,
     pub meshes: usize,
     pub failed_meshes: Vec<String>,
@@ -61,6 +63,15 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
     let name = level.name.to_lowercase();
     let level_dir = out.join("levels").join(&name);
     let converter = MeshConverter::new(&vfs, out);
+
+    // Kits of both teams and the weapons they carry.
+    let level_teams = teams(&interp.world);
+    let kit_names: Vec<String> = level_teams
+        .iter()
+        .flat_map(|t| t.kits.iter().map(|k| k.kit.clone()))
+        .collect();
+    let (kit_count, weapon_count) = weapons::import(&mut interp, &converter, &kit_names, out)?;
+
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
     let world = &interp.world;
@@ -117,13 +128,15 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
         statics,
         roads,
         game_modes,
-        teams: teams(world),
+        teams: level_teams,
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
 
     Ok(LevelReport {
         statics: desc.statics.len(),
         roads: desc.roads.len(),
+        kits: kit_count,
+        weapons: weapon_count,
         templates: objects.values().filter(|o| !o.parts.is_empty()).count(),
         meshes: *mesh_count.lock().unwrap(),
         failed_meshes: failed.into_inner().unwrap(),

@@ -67,6 +67,22 @@ impl<'a> MeshConverter<'a> {
         result
     }
 
+    /// Copies any file (sounds, ...) from the game data into the output folder as-is.
+    pub fn file(&self, reference: &str) -> Option<String> {
+        let key = normalize(reference.trim_matches('"'));
+        if !self.vfs.exists(&key) {
+            log::debug!("file not found: {reference}");
+            return None;
+        }
+        let target = self.out.join(&key);
+        if !target.exists() {
+            let data = self.vfs.read(&key).ok()?;
+            std::fs::create_dir_all(target.parent()?).ok()?;
+            std::fs::write(&target, data).ok()?;
+        }
+        Some(key)
+    }
+
     fn copy_texture(&self, key: &str) -> Option<String> {
         // Absolute DICE build paths: keep what follows `/mods/<mod>/`.
         let key = match key.find("/mods/") {
@@ -98,25 +114,34 @@ impl<'a> MeshConverter<'a> {
     /// Converts a visible mesh (`objects/.../meshes/x.staticmesh`) to `objects/.../meshes/x.glb`.
     /// Returns the output path relative to the output root.
     pub fn convert_mesh(&self, mesh_path: &str) -> Result<String> {
-        let key = normalize(mesh_path);
-        self.once(&key.clone(), || self.convert_mesh_inner(key))
+        self.convert_mesh_geom(mesh_path, 0, "")
     }
 
-    fn convert_mesh_inner(&self, key: String) -> Result<String> {
+    /// Converts one geom of a mesh to `x{suffix}.glb` (weapons: geom 0 is first person,
+    /// geom 1 third person).
+    pub fn convert_mesh_geom(&self, mesh_path: &str, geom: usize, suffix: &str) -> Result<String> {
+        let key = normalize(mesh_path);
+        let job = format!("{key}#{geom}{suffix}");
+        let suffix = suffix.to_string();
+        self.once(&job, || self.convert_mesh_inner(key, geom, &suffix))
+    }
+
+    fn convert_mesh_inner(&self, key: String, geom: usize, suffix: &str) -> Result<String> {
         let kind = MeshKind::from_path(&key).context("not a mesh file")?;
-        let out_rel = format!("{}.glb", key.rsplit_once('.').map_or(key.as_str(), |(s, _)| s));
+        let out_rel = format!("{}{suffix}.glb", key.rsplit_once('.').map_or(key.as_str(), |(s, _)| s));
         if self.out.join(&out_rel).exists() {
             return Ok(out_rel);
         }
         let data = self.vfs.read(&key)?;
         let mesh = VisMesh::parse(&data, kind).with_context(|| format!("parsing {key}"))?;
-        let doc = self.build_document(&mesh, &out_rel);
+        anyhow::ensure!(geom < mesh.geoms.len(), "{key} has no geom {geom}");
+        let doc = self.build_document(&mesh, geom, &out_rel);
         doc.write(&self.out.join(&out_rel))
             .with_context(|| format!("writing {out_rel}"))?;
         Ok(out_rel)
     }
 
-    fn build_document(&self, mesh: &VisMesh, out_rel: &str) -> Document {
+    fn build_document(&self, mesh: &VisMesh, geom: usize, out_rel: &str) -> Document {
         let mut doc = Document::default();
         let mut image_index: HashMap<String, usize> = HashMap::new();
         let mut image = |doc: &mut Document, texture: &str| -> usize {
@@ -134,8 +159,8 @@ impl<'a> MeshConverter<'a> {
             .map(|i| mesh.attribute::<2>(Usage::TexCoord, i).unwrap_or_default())
             .collect();
 
-        // Only the first geom (intact / 3rd-person) and its most detailed LOD for now.
-        let Some(lod) = mesh.geoms.first().and_then(|g| g.lods.first()) else {
+        // The most detailed LOD of the requested geom.
+        let Some(lod) = mesh.geoms.get(geom).and_then(|g| g.lods.first()) else {
             return doc;
         };
 

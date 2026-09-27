@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub mod level;
 pub mod object;
 pub mod soldier;
+pub mod weapon;
 
 pub use level::*;
 pub use object::*;
 pub use soldier::*;
+pub use weapon::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {

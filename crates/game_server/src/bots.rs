@@ -3,19 +3,23 @@
 //! A bot is an ordinary [`Player`] whose [`InputBuffer`] is filled by a [`BotBrain`] instead
 //! of the network, so bots move with exactly the same rules as humans.
 //!
-//! This is the first, very small step towards BF2-style bots: for now they roam between
-//! control points and get themselves unstuck. The BF2 AI is layered (commander strategy →
-//! squad orders → individual behaviours with navmesh pathfinding) and will be built up here.
+//! This is the first, small step towards BF2-style bots: they roam between control points,
+//! get themselves unstuck, and fight enemies they can see. The BF2 AI is layered (commander
+//! strategy -> squad orders -> individual behaviours with navmesh pathfinding) and will be
+//! built up here.
 
 use std::f32::consts::{PI, TAU};
 
+use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use game_shared::{
     input::{Buttons, InputFrame},
     level::LoadedLevel,
-    protocol::{MatchInfo, Player, Team},
-    soldier::SoldierMotion,
+    physics::GameLayer,
+    protocol::{ControlledBy, MatchInfo, Player, Team},
+    soldier::{Soldier, SoldierMotion},
+    weapons::Inventory,
 };
 
 use crate::{Controls, InputBuffer, ServerSettings, ServerSimSystems, balanced_team};
@@ -50,9 +54,23 @@ const BOT_NAMES: &[&str] = &[
     "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu",
 ];
 
+/// How far bots look for enemies, meters.
+const SIGHT_RANGE: f32 = 150.0;
+
 #[derive(Component)]
 pub struct BotBrain {
     seq: u32,
+    /// Enemy soldier being engaged.
+    target: Option<Entity>,
+    scan_timer: f32,
+    /// Seconds before reacting to a newly seen target.
+    reaction: f32,
+    pitch: f32,
+    /// Slowly wandering aim offset (radians), so bots aren't perfect shots.
+    aim_error: Vec2,
+    /// Positive: holding the trigger for that long; negative: pausing between bursts.
+    burst: f32,
+    strafe: f32,
     goal: Option<Vec3>,
     goal_timer: f32,
     yaw: f32,
@@ -67,6 +85,13 @@ impl Default for BotBrain {
     fn default() -> Self {
         Self {
             seq: 0,
+            target: None,
+            scan_timer: 0.0,
+            reaction: 0.0,
+            pitch: 0.0,
+            aim_error: Vec2::ZERO,
+            burst: 0.0,
+            strafe: 1.0,
             goal: None,
             goal_timer: 0.0,
             yaw: fastrand::f32() * TAU,
@@ -101,27 +126,106 @@ fn spawn_bots(
             team,
             InputBuffer::default(),
             BotBrain::default(),
+            crate::KitChoice(fastrand::u8(0..7)),
             Replicated,
         ));
     }
     info!("added {} bots", settings.bots - existing);
 }
 
+#[allow(clippy::type_complexity)]
 fn think(
     time: Res<Time>,
     level: Res<LoadedLevel>,
+    spatial: SpatialQuery,
     match_info: Single<&MatchInfo>,
     mut bots: Query<(&mut BotBrain, &mut InputBuffer, &Team, Option<&Controls>)>,
-    soldiers: Query<&SoldierMotion>,
+    soldiers: Query<(Entity, &SoldierMotion, &ControlledBy, Option<&Inventory>), With<Soldier>>,
+    teams: Query<&Team>,
 ) {
     let dt = time.delta_secs();
     let layout = level.game_mode(&match_info.mode, match_info.size);
 
     for (mut brain, mut buffer, team, controls) in &mut bots {
-        let Some(motion) = controls.and_then(|c| soldiers.get(c.0).ok()) else {
+        let Some((own, motion, _, inventory)) = controls.and_then(|c| soldiers.get(c.0).ok()) else {
+            brain.target = None;
             continue;
         };
         brain.seq = brain.seq.wrapping_add(1);
+        let eye = motion.eye_position();
+
+        // Look for the nearest enemy in sight a few times per second.
+        brain.scan_timer -= dt;
+        if brain.scan_timer <= 0.0 {
+            brain.scan_timer = 0.25;
+            let visible = |target: Vec3| {
+                let to = target - eye;
+                Dir3::new(to).is_ok_and(|dir| {
+                    spatial
+                        .cast_ray(eye, dir, to.length(), true, &SpatialQueryFilter::from_mask(GameLayer::World))
+                        .is_none()
+                })
+            };
+            let best = soldiers
+                .iter()
+                .filter(|(entity, _, controlled, _)| {
+                    *entity != own && teams.get(controlled.0).is_ok_and(|t| *t != *team)
+                })
+                .map(|(entity, m, _, _)| (entity, m.position.distance(motion.position), m.position))
+                .filter(|(_, distance, _)| *distance < SIGHT_RANGE)
+                .filter(|(_, _, position)| visible(*position + Vec3::Y * 1.2))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(entity, _, _)| entity);
+            if best != brain.target {
+                brain.target = best;
+                brain.reaction = 0.25 + fastrand::f32() * 0.5;
+                brain.aim_error = Vec2::new(fastrand::f32() - 0.5, fastrand::f32() - 0.5) * 0.15;
+            }
+        }
+        let target = brain.target.and_then(|t| soldiers.get(t).ok()).map(|(_, m, _, _)| *m);
+        if target.is_none() {
+            brain.target = None;
+        }
+        let weapon = inventory.map_or(0, |i| i.active);
+
+        if let Some(target) = target {
+            // Aim at the chest, with an error that shrinks while tracking.
+            let aim_at = target.position + Vec3::Y * if target.stance == game_shared::soldier::Stance::Prone { 0.3 } else { 1.2 };
+            let to = aim_at - eye;
+            let desired_yaw = (-to.x).atan2(-to.z) + brain.aim_error.x;
+            let desired_pitch = to.y.atan2(Vec2::new(to.x, to.z).length()) + brain.aim_error.y;
+            brain.aim_error *= 1.0 - (0.8 * dt).min(1.0);
+            brain.aim_error += Vec2::new(fastrand::f32() - 0.5, fastrand::f32() - 0.5) * 0.02 * (to.length() / 50.0);
+            brain.yaw = turn_towards(brain.yaw, desired_yaw, 5.0 * dt);
+            brain.pitch += (desired_pitch - brain.pitch).clamp(-4.0 * dt, 4.0 * dt);
+            brain.reaction -= dt;
+
+            let on_target = (angle_delta(brain.yaw, desired_yaw).abs() + (brain.pitch - desired_pitch).abs()) < 0.08;
+            let mut frame = InputFrame {
+                seq: brain.seq,
+                yaw: brain.yaw,
+                pitch: brain.pitch,
+                weapon,
+                ..default()
+            };
+            if brain.reaction <= 0.0 && on_target {
+                brain.burst -= dt;
+                if brain.burst < -0.3 - fastrand::f32() * 0.3 {
+                    brain.burst = 0.2 + fastrand::f32() * 0.4;
+                }
+                if brain.burst > 0.0 {
+                    frame.buttons |= Buttons::FIRE;
+                }
+            }
+            // Strafe while fighting; switch direction now and then.
+            if fastrand::f32() < dt * 0.7 {
+                brain.strafe = -brain.strafe;
+            }
+            frame.set_movement(Vec2::new(brain.strafe, 0.0));
+            buffer.push(frame);
+            continue;
+        }
+        brain.pitch = 0.0;
 
         let reached = brain
             .goal
@@ -157,6 +261,7 @@ fn think(
             seq: brain.seq,
             yaw: brain.yaw,
             pitch: 0.0,
+            weapon,
             ..default()
         };
         let mut movement = Vec2::Y;
@@ -208,12 +313,16 @@ fn flat(v: Vec3) -> Vec3 {
     Vec3::new(v.x, 0.0, v.z)
 }
 
-fn turn_towards(current: f32, target: f32, max_step: f32) -> f32 {
-    let mut delta = (target - current) % TAU;
+fn angle_delta(from: f32, to: f32) -> f32 {
+    let mut delta = (to - from) % TAU;
     if delta > PI {
         delta -= TAU;
     } else if delta < -PI {
         delta += TAU;
     }
-    current + delta.clamp(-max_step, max_step)
+    delta
+}
+
+fn turn_towards(current: f32, target: f32, max_step: f32) -> f32 {
+    current + angle_delta(current, target).clamp(-max_step, max_step)
 }

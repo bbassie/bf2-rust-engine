@@ -59,6 +59,7 @@ fn spawn_camera(mut commands: Commands) {
             position: Vec3::new(0.0, 40.0, 60.0),
         },
         Transform::from_xyz(0.0, 40.0, 60.0),
+        SpatialListener::new(0.25),
     ));
 }
 
@@ -104,6 +105,7 @@ fn update_camera(
     cursor: Single<&CursorOptions>,
     look: Res<LookState>,
     third_person: Res<ThirdPerson>,
+    cli: Res<crate::Cli>,
     spatial: avian3d::prelude::SpatialQuery,
     soldier: Query<&SoldierRender, With<LocalSoldier>>,
     camera: Single<(&mut Transform, &mut Spectator), With<PlayerCamera>>,
@@ -115,7 +117,11 @@ fn update_camera(
         let eye = render.eye_position();
         transform.translation = if third_person.0 {
             // Over the shoulder, pulled in if a wall is in the way.
-            let offset = rotation * Vec3::new(0.6, 0.3, 3.2);
+            let local = match cli.tp_offset.as_deref() {
+                Some(&[x, y, z]) => Vec3::new(x, y, z),
+                _ => Vec3::new(0.6, 0.3, 3.2),
+            };
+            let offset = rotation * local;
             let distance = Dir3::new(offset)
                 .ok()
                 .and_then(|dir| {
@@ -135,6 +141,10 @@ fn update_camera(
             eye
         };
         transform.rotation = rotation;
+        if third_person.0 && cli.tp_offset.is_some() {
+            // Debug camera placement: look back at the soldier.
+            transform.look_at(eye - Vec3::Y * 0.4, Vec3::Y);
+        }
         spectator.position = transform.translation;
         return;
     }

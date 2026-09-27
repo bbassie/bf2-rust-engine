@@ -19,6 +19,7 @@ use game_server::{GameServerPlugin, ServerSettings};
 use game_shared::{SharedPlugin, config::GamePaths};
 
 mod camera;
+mod combat;
 mod hud;
 mod local_input;
 mod net;
@@ -66,12 +67,18 @@ pub struct Cli {
     /// Start in third-person view (toggle with V).
     #[arg(long)]
     third_person: bool,
+    /// Debug: third-person camera offset `x,y,z` relative to the view (default 0.6,0.3,3.2).
+    #[arg(long, hide = true, value_delimiter = ',', allow_hyphen_values = true)]
+    tp_offset: Option<Vec<f32>>,
     /// Log per-pass render timings every few seconds.
     #[arg(long)]
     diagnostics: bool,
     /// Disable sun shadows (for performance comparisons).
     #[arg(long)]
     no_shadows: bool,
+    /// Debug: hold the trigger (to test weapons without a human).
+    #[arg(long, hide = true)]
+    debug_fire: bool,
     /// Debug: walk in circles and jump without any input, to exercise prediction.
     #[arg(long, hide = true)]
     debug_walk: bool,
@@ -112,6 +119,7 @@ fn main() -> AppExit {
         camera::CameraPlugin,
         render::RenderPlugin,
         hud::HudPlugin,
+        combat::ClientCombatPlugin,
     ))
     .insert_resource(paths);
 
