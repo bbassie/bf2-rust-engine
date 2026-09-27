@@ -26,7 +26,8 @@
         Wait(1.5),
         ThirdPerson(true),
         Look(20.0, -4.0),
-        Wait(0.5),
+        // The third-person body's pipelines compile once it is first drawn.
+        Wait(2.5),
         Screenshot("tp_back"),
         Look(200.0, -4.0),
         Wait(0.5),

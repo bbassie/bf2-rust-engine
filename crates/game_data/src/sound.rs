@@ -5,6 +5,7 @@
 //!   that pick them: footsteps and bullet impacts by surface material, near misses by
 //!   projectile material, soldier voices, explosions.
 //! - `levels/<name>/sounds.ron` ([`LevelSounds`]): ambience.
+//! - [`VehicleSounds`]: engines, part of a vehicle's description.
 //!
 //! Surface and projectile materials are the ids of the damage table (`materials.ron`).
 
@@ -186,6 +187,66 @@ pub struct AmbientSound {
     pub radius: f32,
 }
 
+/// What a vehicle's engine sounds like (in `vehicles/<name>.ron`).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct VehicleSounds {
+    /// Loops that play while someone drives, their pitch and volume following the revs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine: Vec<EngineSound>,
+    /// The engine starting when a driver gets in, and stopping when the driver leaves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<SoundDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<SoundDesc>,
+    /// Changing up a gear. The revs climb through `gears` gears up to the top speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gear_shift: Option<SoundDesc>,
+    #[serde(default = "default_gears")]
+    pub gears: u32,
+    /// Heard inside, by whoever sits in the vehicle (not positional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interior: Option<SoundDesc>,
+}
+
+/// An engine loop.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EngineSound {
+    pub sound: SoundDesc,
+    /// Multipliers on the sound's pitch and volume by the revs (0 idling to 1 at the top of
+    /// a gear): points `[revs, value]`, linear in between. Empty: 1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pitch: Vec<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volume: Vec<[f32; 2]>,
+    /// `Some(true)`: heard while the engine pulls, `Some(false)`: while it doesn't (coasting,
+    /// braking), `None`: always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<bool>,
+}
+
+/// The value of a curve of `[x, value]` points at `x`: linear between points, flat beyond
+/// the ends. `default` without points.
+pub fn curve_at(points: &[[f32; 2]], x: f32, default: f32) -> f32 {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return default;
+    };
+    if x <= first[0] {
+        return first[1];
+    }
+    for pair in points.windows(2) {
+        let ([x0, y0], [x1, y1]) = (pair[0], pair[1]);
+        if x <= x1 {
+            let t = if x1 > x0 { (x - x0) / (x1 - x0) } else { 1.0 };
+            return y0 + (y1 - y0) * t;
+        }
+    }
+    last[1]
+}
+
+fn default_gears() -> u32 {
+    4
+}
+
 /// Also accepts a bare path, which older imports wrote for weapon sounds.
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -256,6 +317,16 @@ mod tests {
         assert!(falloff.gain(100.0) < 0.05);
         assert!((falloff.distance_for(0.5) - 5.6).abs() < 1e-3);
         assert!((falloff.gain(falloff.distance_for(0.01)) - 0.01).abs() < 1e-5);
+    }
+
+    #[test]
+    fn interpolates_curves() {
+        let points = [[0.0, 0.5], [0.5, 1.0], [1.0, 1.5]];
+        assert_eq!(curve_at(&points, -1.0, 9.0), 0.5);
+        assert!((curve_at(&points, 0.25, 9.0) - 0.75).abs() < 1e-6);
+        assert!((curve_at(&points, 0.75, 9.0) - 1.25).abs() < 1e-6);
+        assert_eq!(curve_at(&points, 2.0, 9.0), 1.5);
+        assert_eq!(curve_at(&[], 0.3, 9.0), 9.0);
     }
 
     #[test]

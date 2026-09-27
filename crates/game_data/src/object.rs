@@ -44,7 +44,8 @@ pub struct ObjectPart {
     /// direct hits. Unset: the armor's material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hit_material: Option<u32>,
-    /// Soldiers climb this part: a BF2 `Ladder` object, climbed on its local -Z side.
+    /// Soldiers climb this part: a BF2 `Ladder` object, climbed on its local +Z side (its
+    /// wall brackets reach back to -Z).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ladder: bool,
     /// Relative to the object's origin.

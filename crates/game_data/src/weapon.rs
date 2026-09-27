@@ -187,6 +187,11 @@ impl ProjectileDesc {
     pub fn is_object(&self) -> bool {
         self.explodes() || self.smoke.is_some() || self.trigger.is_some() || self.impact != Impact::Stop
     }
+
+    /// Ends with a bang, a flash or smoke; bullets just stop.
+    pub fn goes_off(&self) -> bool {
+        self.explodes() || self.smoke.is_some() || (self.is_object() && self.detonation_effect.is_some())
+    }
 }
 
 /// What a projectile does when it hits something.

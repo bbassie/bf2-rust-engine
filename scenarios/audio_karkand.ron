@@ -1,8 +1,8 @@
 // Audio on Karkand, checked through the log (you can't hear a scenario): run with
 // RUST_LOG=info,audio=debug and look for `play ...`, `culled ...` and `ambience ...` lines.
-// Footsteps on the square by gait and stance, a jump landing, our rifle (fire, dry fire after
-// the magazines run out is not reached here), reload, fire mode, zoom, weapon switch, then the
-// bots fighting around us (their fire near and far, bullets cracking past, impacts).
+// Footsteps on the square by gait and stance, a jump landing, our rifle (fire, impacts, fire
+// mode, zoom, reload, weapon switch), then the bots fighting in the distance (their fire near
+// and far, impacts, deaths). `audio_combat.ron` puts us under fire.
 // RUST_LOG=info,audio=debug target/debug/deps/client.exe --scenario scenarios/audio_karkand.ron --out target/scenarios/audio/karkand
 (
     level: "strike_at_karkand",

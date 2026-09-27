@@ -93,6 +93,17 @@ impl NavGrid {
         })
     }
 
+    /// Whether a soldier at `from` (feet) can walk straight to `to` without a jump, a drop
+    /// or brushing a wall: for short moves that need no path (strafing, closing in).
+    pub fn walkable_line(&self, from: Vec3, to: Vec3) -> bool {
+        let Some(start) = self.locate(from, 1.0, None) else {
+            return false;
+        };
+        let region = self.cell(start).region;
+        self.locate(to, 0.5, Some(region))
+            .is_some_and(|end| (self.cell(end).y - to.y).abs() < 1.0 && self.straight_walk(start, end))
+    }
+
     /// A* from `start` to `goal`, or towards `target` if there is no goal cell. Returns the
     /// cells of the path and whether it reached the goal.
     fn search(&self, start: CellRef, goal: Option<CellRef>, target: Vec3) -> (Vec<CellRef>, bool) {

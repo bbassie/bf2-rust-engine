@@ -347,10 +347,12 @@ impl WeaponState {
             }
             return None;
         }
-        // Grenades and charges come out of the pouch by themselves.
+        // Grenades and charges come out of the pouch by themselves; an empty gun reloads on
+        // a fresh pull of the trigger (not while it is still held after the last shot, which
+        // would cut a guided missile's wire).
         let auto_reload = weapon.fire.kind != FireKind::Gun;
         let wants_reload = input.reload && in_mag < magazine;
-        let empty = in_mag == 0 && !unlimited && (input.fire || auto_reload);
+        let empty = in_mag == 0 && !unlimited && (pressed || auto_reload);
         if (wants_reload || empty) && spare > 0 && self.wind_up.is_none() {
             self.reload = weapon.reload_time;
             self.burst_left = 0;
@@ -428,8 +430,9 @@ impl WeaponState {
             return None;
         };
         let held = held + dt;
-        let cooked = (held - fire.pull_back).max(0.0);
-        if cooks(&weapon.projectile) && cooked >= weapon.projectile.time_to_live {
+        let cooks = cooks(&weapon.projectile);
+        let cooked = if cooks { (held - fire.pull_back).max(0.0) } else { 0.0 };
+        if cooks && cooked >= weapon.projectile.time_to_live {
             self.wind_up = None;
             ammo[0] = ammo[0].saturating_sub(1);
             self.cooldown = shot_interval(weapon);
@@ -463,9 +466,7 @@ pub fn shot_interval(weapon: &WeaponDesc) -> f32 {
 
 /// Grenades with a fuse cook in the hand once wound up; mines and charges don't.
 pub fn cooks(projectile: &ProjectileDesc) -> bool {
-    projectile.impact == Impact::Bounce
-        && (projectile.explodes() || projectile.smoke.is_some())
-        && projectile.time_to_live < 100.0
+    projectile.impact == Impact::Bounce && projectile.goes_off() && projectile.time_to_live < 100.0
 }
 
 /// Damage of a projectile after travelling `distance` meters.

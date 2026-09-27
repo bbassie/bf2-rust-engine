@@ -1,0 +1,23 @@
+// Frame times of wide views over a 2 km map (terrain LOD, surrounding terrain, water).
+// client --scenario scenarios/terrain_perf.ron --out target/scenarios/veg/terrain_perf
+(
+    level: "dragon_valley",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((0.0, 180.0, 0.0), 45.0, -10.0),
+        Wait(2.0),
+        Screenshot("wide_45"),
+        Measure("wide a", 4.0),
+        Camera((-600.0, 220.0, 600.0), 135.0, -8.0),
+        Wait(1.0),
+        Screenshot("wide_135"),
+        Measure("wide b", 4.0),
+        Camera((276.0, 93.8, -194.0), 120.0, -4.0),
+        Wait(1.0),
+        Screenshot("ground"),
+        Measure("ground", 4.0),
+        Quit,
+    ],
+)

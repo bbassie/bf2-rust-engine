@@ -379,9 +379,10 @@ pub fn step_soldier(
     let center = m.stance.collision_center();
     let start = m.position + center;
 
-    // Grounded is re-checked from the position, so a replayed state always agrees.
+    // Grounded is re-checked from the position, so a replayed state always agrees. As far
+    // down as the snap reaches: resting on an edge, the gap below can be centimeters.
     let ground = if m.grounded {
-        world.ground(shape, start, 4.0 * SKIN)
+        world.ground(shape, start, tuning.snap_distance + SKIN)
     } else {
         None
     };
@@ -589,6 +590,19 @@ fn climb(
     };
     let speed = dir * climb_speed(tuning, dir);
 
+    // Down to the ground: off at the bottom.
+    if speed < 0.0 {
+        let shape = shapes.movement(Stance::Standing);
+        let center = m.position + Stance::Standing.collision_center();
+        if let Some(ground) = world.ground(shape, center, -speed * dt + 5.0 * SKIN) {
+            m.position.y -= ground.gap();
+            m.velocity = Vec3::ZERO;
+            m.climbing = false;
+            m.grounded = true;
+            return;
+        }
+    }
+
     // Up or down the rails, pulled onto the line the soldier holds on to. Like BF2's
     // ladder "seat" this ignores collisions: eaves often hang over the top of a ladder.
     let height = ladder.local(m.position).y;
@@ -601,18 +615,10 @@ fn climb(
     if speed > 0.0 && height >= ladder.top() {
         // Over the top: hop onto what is behind the ladder.
         m.climbing = false;
-        m.velocity = -ladder.front * 2.5 + Vec3::Y * 3.0;
-    } else if speed < 0.0 {
-        let shape = shapes.movement(Stance::Standing);
-        let center = m.position + Stance::Standing.collision_center();
-        if let Some(ground) = world.ground(shape, center, 5.0 * SKIN) {
-            m.position.y -= ground.gap();
-            m.velocity = Vec3::ZERO;
-            m.climbing = false;
-            m.grounded = true;
-        } else if height < -ladder.top() - 0.2 {
-            m.climbing = false;
-        }
+        m.velocity = -ladder.front * 3.0 + Vec3::Y * 3.0;
+    } else if speed < 0.0 && height < -ladder.top() - 0.2 {
+        // Off the bottom of a ladder that ends in the air.
+        m.climbing = false;
     }
 }
 
@@ -646,7 +652,7 @@ fn mount(m: &SoldierMotion, ladder: &Ladder, wish: Vec3) -> Option<Vec3> {
         (within && towards).then_some(m.position)
     } else {
         let on_top = m.grounded
-            && local.z >= -(hold + LADDER_REACH + 0.3)
+            && local.z >= -(hold + LADDER_REACH + 0.6)
             && (local.y - ladder.top()).abs() < 0.7;
         (on_top && wish.dot(ladder.front) > 0.5)
             .then(|| ladder.world(Vec3::new(0.0, ladder.top() - 1.2, hold)))
@@ -699,7 +705,8 @@ struct Slide {
 }
 
 struct Ground {
-    distance: f32,
+    /// How far the capsule can move down to rest on it, keeping the skin width.
+    gap: f32,
     /// Normal of the surface to walk along.
     normal: Vec3,
     /// Height of the surface the capsule rests on.
@@ -710,8 +717,7 @@ impl Ground {
     /// How far to move down to rest on it. Sub-millimeter gaps are left alone, so standing
     /// still doesn't jitter.
     fn gap(&self) -> f32 {
-        let gap = self.distance - SKIN;
-        if gap > 1e-4 { gap } else { 0.0 }
+        if self.gap > 1e-4 { self.gap } else { 0.0 }
     }
 }
 
@@ -830,27 +836,41 @@ impl Surroundings<'_, '_, '_> {
         if normal.y < self.min_normal_y {
             return None;
         }
-        // The shape cast's distance is off by millimeters (more on long thin triangles),
-        // which makes a soldier standing still jitter. When it agrees with the distance to
-        // the surface's plane, the capsule rests on the face: use the exact one. Further
-        // than the plane, it hangs over an edge: the distance to the contact point.
+        // The cast's distance is short by up to millimeters, more on long thin triangles.
+        // When it agrees with the distance to the surface's plane, the capsule rests on the
+        // face: use the exact one (with the skin width above it). Further than the plane,
+        // the capsule hangs over an edge: the exact distance keeping the skin width from the
+        // contact point. Nearer, it touches something else first.
         let half_height = shape.aabb(Vec3::ZERO, Quat::IDENTITY).size().y * 0.5;
         let sphere = center - Vec3::Y * (half_height - SOLDIER_RADIUS);
         let on_plane = Vec3::new(origin.x, height, origin.z);
         let to_plane = (normal.dot(sphere - on_plane) - SOLDIER_RADIUS) / normal.y;
-        let distance = if (hit.distance - to_plane).abs() < 0.02 {
-            to_plane
-        } else if hit.distance > to_plane {
-            let across = Vec2::new(hit.point1.x - sphere.x, hit.point1.z - sphere.z).length();
-            let below = (SOLDIER_RADIUS * SOLDIER_RADIUS - across * across)
-                .max(0.0)
-                .sqrt();
-            sphere.y - below - hit.point1.y
+        let across = Vec2::new(hit.point1.x - sphere.x, hit.point1.z - sphere.z).length();
+        let reach = SOLDIER_RADIUS + SKIN;
+        let gap = if hit.distance > to_plane + 0.006 && across < reach {
+            sphere.y - hit.point1.y - (reach * reach - across * across).sqrt()
         } else {
-            hit.distance
+            // Keeping the skin width from everything on the way down, like move-and-slide
+            // does: closer than that to a wall, the next move would push the capsule away.
+            let clear = self
+                .mover
+                .cast_move(
+                    shape,
+                    center,
+                    Quat::IDENTITY,
+                    Vec3::NEG_Y * max_distance,
+                    SKIN,
+                    &self.filter,
+                )
+                .map_or(max_distance, |h| h.distance);
+            if (hit.distance - to_plane).abs() < 0.006 {
+                (to_plane - SKIN).min(clear)
+            } else {
+                clear
+            }
         };
         Some(Ground {
-            distance,
+            gap,
             // Nearly flat counts as flat, so walking never creeps up or down.
             normal: if normal.y > 0.9995 { Vec3::Y } else { normal },
             height,

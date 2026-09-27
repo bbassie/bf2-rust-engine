@@ -6,12 +6,14 @@ use bevy::{
     ecs::system::SystemParam,
     gltf::{GltfMaterialExtras, GltfPrimitive},
     image::{ImageAddressMode, ImageLoaderSettings, ImageSamplerDescriptor},
-    pbr::{ExtendedMaterial, MaterialExtension},
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
     platform::collections::HashMap,
     prelude::*,
-    render::render_resource::{AsBindGroup, ShaderType},
+    render::render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError},
     shader::ShaderRef,
 };
+use game_shared::{config::GamePaths, level::LoadedLevel};
 
 pub struct MaterialsPlugin;
 
@@ -24,6 +26,7 @@ impl Plugin for MaterialsPlugin {
             MaterialPlugin::<TerrainMaterial>::default(),
         ))
         .init_resource::<Bf2MaterialCache>()
+        .add_systems(Update, load_env_map.run_if(resource_exists_and_changed::<LoadedLevel>))
         .add_systems(PostUpdate, swap_scene_materials);
     }
 }
@@ -106,7 +109,7 @@ pub type Bf2Material = ExtendedMaterial<StandardMaterial, Bf2Layers>;
 /// Bindless, so the thousands of objects with different textures still batch into few draw
 /// calls (in the main pass, the prepass and every shadow cascade). All layers share the
 /// detail texture's sampler; the base color is the `StandardMaterial`'s.
-#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[data(50, Bf2LayersUniform, binding_array(101))]
 #[bindless(index_table(range(50..58), binding(100)))]
 pub struct Bf2Layers {
@@ -116,7 +119,7 @@ pub struct Bf2Layers {
     pub gloss: f32,
     /// Albedo factor: BF2 doubles the lighting of static meshes.
     pub albedo_scale: f32,
-    /// Detail texture (UV1), multiplies the base color.
+    /// Detail texture (UV1) or wreck map (UV0), multiplies the base color.
     #[texture(51)]
     #[sampler(52)]
     pub detail: Option<Handle<Image>>,
@@ -136,6 +139,22 @@ pub struct Bf2Layers {
     /// Reflection cube map for `EnvMap` techniques.
     #[texture(57, dimension = "cube")]
     pub env_map: Option<Handle<Image>>,
+}
+
+impl Default for Bf2Layers {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            gloss: STATIC_GLOSS,
+            albedo_scale: 1.0,
+            detail: None,
+            dirt: None,
+            crack: None,
+            normal: None,
+            crack_normal: None,
+            env_map: None,
+        }
+    }
 }
 
 impl Bf2Layers {
@@ -163,6 +182,8 @@ impl Bf2Layers {
     pub const ENV_MAP: u32 = 1 << 13;
     /// `AnimatedUV` at rest: the color map's UV is UV0 + UV1.
     pub const UV_SUM: u32 = 1 << 14;
+    /// Wrecks: the `detail` texture is a wreck map on UV0 that darkens color and gloss.
+    pub const WRECK: u32 = 1 << 15;
 }
 
 #[derive(ShaderType, Clone, Default)]
@@ -194,6 +215,24 @@ impl MaterialExtension for Bf2Layers {
     fn prepass_fragment_shader() -> ShaderRef {
         "embedded://client/render/shaders/bf2_material.wgsl".into()
     }
+
+    /// `BF2_MATERIAL_DEBUG=lighting` (grey albedo), `normals`, `gloss` or `env` shows one term;
+    /// `nolayers` draws the base color only (to measure the layers' cost).
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        static DEBUG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let debug = DEBUG.get_or_init(|| std::env::var("BF2_MATERIAL_DEBUG").ok());
+        if let (Some(debug), Some(fragment)) = (debug, descriptor.fragment.as_mut()) {
+            fragment
+                .shader_defs
+                .push(format!("BF2_DEBUG_{}", debug.to_ascii_uppercase()).as_str().into());
+        }
+        Ok(())
+    }
 }
 
 /// One BF2 material per glTF material, shared by everything using it.
@@ -201,6 +240,9 @@ impl MaterialExtension for Bf2Layers {
 struct Bf2MaterialCache {
     materials: HashMap<AssetId<StandardMaterial>, Handle<Bf2Material>>,
     untextured: Option<Handle<Bf2Material>>,
+    /// The level's environment cube map and the materials reflecting it.
+    env_map: Option<Handle<Image>>,
+    env_users: Vec<Handle<Bf2Material>>,
 }
 
 /// Makes BF2 materials from glTF materials: the `StandardMaterial` Bevy's glTF loader
@@ -253,8 +295,12 @@ impl Bf2Materials<'_> {
             .path()
             .map(|p| p.path().to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        let material = describe(base, &bf2, &path, &self.asset_server);
+        let material = describe(base, &bf2, &path, &self.asset_server, self.cache.env_map.as_ref());
+        let reflects = technique_reflects(&bf2);
         let handle = self.materials.add(material);
+        if reflects {
+            self.cache.env_users.push(handle.clone());
+        }
         self.cache.materials.insert(standard.id(), handle.clone());
         Some(handle)
     }
@@ -279,10 +325,33 @@ fn static_layers(technique: &str) -> (Vec<&'static str>, bool) {
     (layers, rest.contains("parallax"))
 }
 
-/// Gloss of surfaces without a gloss map (BF2's global `StaticGloss`, value unknown).
+/// Gloss of surfaces without a gloss map (BF2's `StaticGloss`, set per material in `.tweak`
+/// files; the default isn't known).
 const STATIC_GLOSS: f32 = 0.15;
+/// Gloss of glass (`AlphaEnvMap`): the reflectance of real glass.
+const GLASS_GLOSS: f32 = 0.5;
 
-fn describe(mut base: StandardMaterial, bf2: &serde_json::Value, path: &str, asset_server: &AssetServer) -> Bf2Material {
+fn technique_reflects(bf2: &serde_json::Value) -> bool {
+    bf2["kind"] != "static" && bf2["technique"].as_str().is_some_and(|t| t.to_ascii_lowercase().contains("envmap"))
+}
+
+/// Points an `EnvMap` material at the level's cube map (none: no reflection).
+fn set_env_map(layers: &mut Bf2Layers, env_map: Option<Handle<Image>>) {
+    if env_map.is_some() {
+        layers.flags |= Bf2Layers::ENV_MAP;
+    } else {
+        layers.flags &= !Bf2Layers::ENV_MAP;
+    }
+    layers.env_map = env_map;
+}
+
+fn describe(
+    mut base: StandardMaterial,
+    bf2: &serde_json::Value,
+    path: &str,
+    asset_server: &AssetServer,
+    env_map: Option<&Handle<Image>>,
+) -> Bf2Material {
     let technique = bf2["technique"].as_str().unwrap_or_default().to_ascii_lowercase();
     let maps: Vec<Option<&str>> = bf2["maps"]
         .as_array()
@@ -291,7 +360,12 @@ fn describe(mut base: StandardMaterial, bf2: &serde_json::Value, path: &str, ass
     let map = |i: usize| maps.get(i).copied().flatten().map(|p| format!("imported://{p}"));
     let color = |i: usize| map(i).map(|p| asset_server.load::<Image>(p));
     let linear = |i: usize| {
-        map(i).map(|p| asset_server.load_with_settings::<Image, ImageLoaderSettings>(p, |s| s.is_srgb = false))
+        map(i).map(|p| {
+            asset_server
+                .load_builder()
+                .with_settings(|s: &mut ImageLoaderSettings| s.is_srgb = false)
+                .load::<Image>(p)
+        })
     };
     // Older files have no `kind`; static techniques are the ones made of layers.
     let kind = bf2["kind"]
@@ -299,11 +373,7 @@ fn describe(mut base: StandardMaterial, bf2: &serde_json::Value, path: &str, ass
         .unwrap_or(if technique.starts_with("base") { "static" } else { "bundled" });
     let alpha_test = matches!(base.alpha_mode, AlphaMode::Mask(_));
 
-    let mut layers = Bf2Layers {
-        gloss: STATIC_GLOSS,
-        albedo_scale: 1.0,
-        ..default()
-    };
+    let mut layers = Bf2Layers::default();
     // The glTF normal texture (loaded as linear data) is applied by the extension.
     let normal_map = base.normal_map_texture.take();
     base.metallic = 0.0;
@@ -377,8 +447,47 @@ fn describe(mut base: StandardMaterial, bf2: &serde_json::Value, path: &str, ass
         if technique.contains("animateduv") {
             layers.flags |= Bf2Layers::UV_SUM;
         }
+        if technique.contains("alpha") && technique.contains("envmap") {
+            layers.gloss = GLASS_GLOSS;
+        }
+        // The map list is color, normal, wreck; wreck maps end in `_w` or `_wreck_c`.
+        let stem = |i: usize| {
+            maps.get(i).copied().flatten().map(|p| {
+                let p = p.to_ascii_lowercase();
+                p.trim_end_matches(".dds").rsplit('/').next().unwrap_or_default().to_string()
+            })
+        };
+        if let Some(wreck) = (1..maps.len()).find(|&i| stem(i).is_some_and(|s| s.ends_with("_w") || s.contains("wreck"))) {
+            layers.detail = color(wreck);
+            layers.flags |= Bf2Layers::WRECK;
+        }
+        if technique.contains("envmap") {
+            set_env_map(&mut layers, env_map.cloned());
+        }
     }
     Bf2Material { base, extension: layers }
+}
+
+/// Loads the level's environment cube map (`levels/<name>/envmaps/envmap0.dds`, BF2's
+/// `Envmaps/EnvMap0.dds`) and hands it to the materials that reflect it.
+fn load_env_map(
+    level: Res<LoadedLevel>,
+    paths: Res<GamePaths>,
+    asset_server: Res<AssetServer>,
+    mut cache: ResMut<Bf2MaterialCache>,
+    mut materials: ResMut<Assets<Bf2Material>>,
+) {
+    let path = format!("levels/{}/envmaps/envmap0.dds", level.desc.name);
+    cache.env_map = paths
+        .imported
+        .join(&path)
+        .exists()
+        .then(|| asset_server.load(format!("imported://{path}")));
+    for handle in &cache.env_users {
+        if let Some(mut material) = materials.get_mut(handle) {
+            set_env_map(&mut material.extension, cache.env_map.clone());
+        }
+    }
 }
 
 /// glTF scenes (soldiers, first-person arms, flags) spawn with Bevy's `StandardMaterial`;

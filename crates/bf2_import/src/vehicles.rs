@@ -59,6 +59,7 @@ pub fn import(
             .unwrap_or(desc.engine.top_speed);
         tune_engine(&mut desc);
         desc.weapons = weapon_descs(interp, converter, localization, &desc, out);
+        desc.sounds = crate::sounds::SoundConverter::new(converter.vfs, out).vehicle(&interp.world, name);
         game_data::write_ron(out.join("vehicles").join(format!("{name}.ron")), &desc)?;
         written.push(name.clone());
     }
@@ -442,6 +443,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         seats: seat_descs,
         entry_points,
         weapons: Vec::new(),
+        sounds: Default::default(),
     };
     let bounds = hull_bounds(world, converter, &nodes, &desc);
     let height = bounds[1][1] - bounds[0][1];

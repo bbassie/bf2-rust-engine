@@ -97,6 +97,7 @@ pub(super) fn switch(p: &mut ChildSpawnerCommands, toggle: Toggle) {
         Button,
         Node {
             width: px(44),
+            flex_shrink: 0.0,
             height: px(24),
             border_radius: BorderRadius::all(px(12)),
             ..default()
@@ -190,6 +191,7 @@ pub(super) fn text_field(p: &mut ChildSpawnerCommands, field: TextField, value: 
     p.spawn((
         Node {
             width: px(width),
+            flex_shrink: 0.0,
             padding: UiRect::axes(px(10), px(7)),
             border: UiRect::all(px(1)),
             border_radius: BorderRadius::all(px(6)),

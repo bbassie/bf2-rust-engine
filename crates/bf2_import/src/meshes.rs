@@ -511,3 +511,79 @@ fn sanitize_uv(uv: [f32; 2]) -> [f32; 2] {
         [0.0, 0.0]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bf2_formats::mesh::{DeclType, VertexElement};
+
+    use super::*;
+
+    #[test]
+    fn static_layers_need_extra_uvs_and_tangents() {
+        let layers = StaticLayers::parse("BaseDetailDirtCrackNDetailNCrack");
+        assert_eq!(layers.color_uvs(), Some([2, 3]));
+        assert!(layers.normal_mapped());
+        let layers = StaticLayers::parse("BaseDetailCrackNDetailNCrack");
+        assert_eq!(layers.color_uvs(), Some([2, 2]));
+        let layers = StaticLayers::parse("BaseDetailNDetailparallaxdetail");
+        assert_eq!(layers.color_uvs(), None);
+        assert!(layers.normal_mapped());
+        assert!(!StaticLayers::parse("BaseDetail").normal_mapped());
+    }
+
+    /// A quad in the XY plane facing -Z (BF2 space), u along +X and v along -Y, with zero
+    /// tangents: the rebuilt tangent runs along +u and the binormal `cross(T, N) * w` along -v.
+    #[test]
+    fn rebuilds_missing_tangents_like_bf2() {
+        let element = |offset, ty, usage| VertexElement {
+            offset,
+            ty,
+            usage,
+            usage_index: 0,
+        };
+        let vertices: [([f32; 3], [f32; 2]); 4] = [
+            ([0.0, 0.0, 0.0], [0.0, 1.0]),
+            ([1.0, 0.0, 0.0], [1.0, 1.0]),
+            ([1.0, 1.0, 0.0], [1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0]),
+        ];
+        let mut vertex_data = Vec::new();
+        for (position, uv) in vertices {
+            for f in position.into_iter().chain([0.0, 0.0, -1.0]).chain(uv).chain([0.0; 3]) {
+                vertex_data.extend_from_slice(&f32::to_le_bytes(f));
+            }
+        }
+        let mesh = VisMesh {
+            kind: MeshKind::Bundled,
+            version: 10,
+            elements: vec![
+                element(0, DeclType::Float3, Usage::Position),
+                element(12, DeclType::Float3, Usage::Normal),
+                element(24, DeclType::Float2, Usage::TexCoord),
+                element(32, DeclType::Float3, Usage::Tangent),
+            ],
+            stride: 44,
+            vertex_count: 4,
+            vertex_data,
+            indices: vec![0, 2, 1, 0, 3, 2],
+            geoms: Vec::new(),
+        };
+        let material = Material {
+            alpha_mode: AlphaMode::Opaque,
+            fx_file: String::new(),
+            technique: String::new(),
+            maps: Vec::new(),
+            vstart: 0,
+            istart: 0,
+            inum: 6,
+            vnum: 4,
+        };
+        let frames = tangent_frames(&mesh, &material, 0);
+        for v in 0..4 {
+            let [x, y, z, w] = frames[&v];
+            assert!((Vec3::new(x, y, z) - Vec3::X).length() < 1e-5, "{:?}", frames[&v]);
+            // cross(T, N) * w in BF2 space: cross(+X, -Z) = +Y is already -v, so w = 1.
+            assert_eq!(w, 1.0);
+        }
+    }
+}

@@ -37,7 +37,8 @@ use bf2_formats::{
     vfs::normalize,
 };
 use game_data::{
-    AmbientSound, Falloff, FootstepSounds, ImpactSounds, LevelSounds, SoundDesc, SoundLibrary,
+    AmbientSound, EngineSound, Falloff, FootstepSounds, ImpactSounds, LevelSounds, SoundDesc,
+    SoundLibrary, VehicleSounds,
 };
 
 use crate::{audio, coords};
@@ -127,6 +128,154 @@ impl<'a> SoundConverter<'a> {
             looping: get("loopcount") == Some("0"),
         })
     }
+}
+
+impl SoundConverter<'_> {
+    /// A vehicle's engine sounds: the `Sound` children of its `Engine` (`*_Engine_Idle`,
+    /// `_Rpm1` coasting, `_Rpm2` pulling, `_Load` gear changes) and the driver's `*_Ambient`.
+    /// Their `pitchEnvelope`/`volumeEnvelope` scale pitch and volume by the revs [inferred:
+    /// the idle's curve starts at 0.62 of its pitch 1.5]. The idle sample holds the
+    /// start, a loop region and the stop, which are split into three files.
+    pub fn vehicle(&self, world: &World, name: &str) -> VehicleSounds {
+        let mut sounds = VehicleSounds {
+            gears: 4,
+            ..Default::default()
+        };
+        let Some(root) = world.template(name) else {
+            return sounds;
+        };
+        let child = |template: &bf2_formats::con::Template, suffix: &str| {
+            template
+                .children
+                .iter()
+                .map(|c| c.template.to_ascii_lowercase())
+                .find(|c| c.starts_with("s_") && c.ends_with(suffix))
+        };
+        sounds.interior = child(root, "_ambient").and_then(|s| self.template(world, &s)).map(|mut s| {
+            s.falloff = None;
+            s
+        });
+        // The road engine: amphibians have a water engine too, with `_WaterEngine_*` sounds.
+        let mut pending = vec![(name.to_ascii_lowercase(), 0)];
+        let engine = loop {
+            let Some((name, depth)) = pending.pop() else { return sounds };
+            let Some(template) = world.template(&name).filter(|_| depth < 16) else { continue };
+            let sounding = child(template, "_engine_idle").or_else(|| child(template, "_engine_rpm1"));
+            if template.ty.eq_ignore_ascii_case("engine") && sounding.is_some() {
+                break template;
+            }
+            pending.extend(template.children.iter().map(|c| (c.template.to_ascii_lowercase(), depth + 1)));
+        };
+        sounds.gears = engine.get_f32("setnumberofgears").map_or(4, |g| g.max(1.0) as u32);
+        sounds.gear_shift = child(engine, "_engine_load").and_then(|s| self.template(world, &s));
+        let has_loaded = child(engine, "_engine_rpm2").is_some();
+        for (suffix, load) in [("_engine_idle", None), ("_engine_rpm1", has_loaded.then_some(false)), ("_engine_rpm2", Some(true))] {
+            let Some(name) = child(engine, suffix) else { continue };
+            let Some(template) = world.template(&name) else { continue };
+            let Some(mut sound) = self.desc(&name, &template.props) else { continue };
+            let pitch = envelope_points(template.get_str("pitchenvelope"));
+            if load.is_none()
+                && let Some((start, idle, stop)) = sound.files.first().and_then(|f| self.split_loop(f))
+            {
+                let part = |file: String| SoundDesc {
+                    files: vec![file],
+                    looping: false,
+                    ..sound.clone()
+                };
+                sounds.start = start.map(part);
+                sounds.stop = stop.map(part);
+                sound.files = vec![idle];
+            }
+            sound.looping = true;
+            sounds.engine.push(EngineSound {
+                sound,
+                pitch,
+                volume: envelope_points(template.get_str("volumeenvelope")),
+                load,
+            });
+        }
+        sounds
+    }
+
+    /// Splits a sample with a loop region (a cue point with a `ltxt` length, as Sound Forge
+    /// writes them) into `<file>_start.wav`, `_loop.wav` and `_stop.wav`: the parts before,
+    /// in and after the region. The start and stop are `None` when empty.
+    fn split_loop(&self, file: &str) -> Option<(Option<String>, String, Option<String>)> {
+        let data = std::fs::read(self.out.join(file)).ok()?;
+        let (channels, rate, samples) = audio::read_pcm16_wav(&data)?;
+        let (start, length) = loop_region(&data)?;
+        let frames = samples.len() / channels as usize;
+        let (start, end) = (start.min(frames), (start + length).min(frames));
+        if end <= start {
+            return None;
+        }
+        let stem = file.strip_suffix(".wav")?;
+        let write = |suffix: &str, range: std::ops::Range<usize>| -> Option<String> {
+            if range.is_empty() {
+                return None;
+            }
+            let target = format!("{stem}_{suffix}.wav");
+            let path = self.out.join(&target);
+            if !path.exists() {
+                let part = &samples[range.start * channels as usize..range.end * channels as usize];
+                std::fs::write(path, audio::pcm16_wav(channels, rate, part)).ok()?;
+            }
+            Some(target)
+        };
+        Some((write("start", 0..start), write("loop", start..end)?, write("stop", end..frames)))
+    }
+}
+
+/// The first cue point with a region length (`LIST`/`adtl`/`ltxt`): start and length in
+/// frames.
+fn loop_region(wav: &[u8]) -> Option<(usize, usize)> {
+    let u32_at = |data: &[u8], at: usize| Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    let (mut cues, mut regions) = (HashMap::new(), Vec::new());
+    let mut at = 12;
+    while at + 8 <= wav.len() {
+        let size = u32_at(wav, at + 4)? as usize;
+        let body = wav.get(at + 8..(at + 8 + size).min(wav.len()))?;
+        match &wav[at..at + 4] {
+            b"cue " => {
+                for i in 0..u32_at(body, 0)? as usize {
+                    let entry = 4 + i * 24;
+                    cues.insert(u32_at(body, entry)?, u32_at(body, entry + 20)? as usize);
+                }
+            }
+            b"LIST" if body.get(0..4) == Some(b"adtl") => {
+                let mut sub = 4;
+                while sub + 8 <= body.len() {
+                    let sub_size = u32_at(body, sub + 4)? as usize;
+                    if &body[sub..sub + 4] == b"ltxt" {
+                        regions.push((u32_at(body, sub + 8)?, u32_at(body, sub + 12)? as usize));
+                    }
+                    sub += 8 + sub_size + (sub_size & 1);
+                }
+            }
+            _ => {}
+        }
+        at += 8 + size + (size & 1);
+    }
+    regions
+        .into_iter()
+        .find_map(|(cue, length)| Some((*cues.get(&cue)?, length)).filter(|(_, l)| *l > 0))
+}
+
+/// The points of an envelope over its control value (the engine's revs):
+/// `<control>/<?>/<min>/<max>/<?>/<count>` then `<x>/<y>/<?>` per point, `y` clamped to
+/// min..max [inferred from the engine sounds' curves].
+fn envelope_points(envelope: Option<&str>) -> Vec<[f32; 2]> {
+    let values: Vec<f32> = envelope
+        .unwrap_or_default()
+        .split('/')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let [_, _, min, max, _, count, ..] = values[..] else {
+        return Vec::new();
+    };
+    (0..count as usize)
+        .map_while(|i| Some([*values.get(6 + i * 3)?, values.get(7 + i * 3)?.clamp(min, max.max(min))]))
+        .collect()
 }
 
 /// The random factors in the last two values of an envelope, when they form a range.
@@ -389,6 +538,35 @@ mod tests {
         assert_eq!(envelope_range(Some("0/1/0/2/0/1/0/1/0/")), [1.0; 2]);
         assert_eq!(envelope_range(Some("0/1/0/1/0/0/")), [1.0; 2]);
         assert_eq!(envelope_range(None), [1.0; 2]);
+    }
+
+    #[test]
+    fn reads_engine_curves() {
+        assert_eq!(
+            envelope_points(Some("0/1/0/1.5/0/2/0/0.62/0/0.79/1.6/0/")),
+            vec![[0.0, 0.62], [0.79, 1.5]]
+        );
+        assert_eq!(envelope_points(Some("0/1/0/1/0/0/")), Vec::<[f32; 2]>::new());
+        assert!(envelope_points(None).is_empty());
+    }
+
+    #[test]
+    fn finds_loop_regions() {
+        let mut wav = audio::pcm16_wav(1, 22050, &[0; 100]);
+        let mut cue = b"cue ".to_vec();
+        cue.extend(28u32.to_le_bytes());
+        cue.extend(1u32.to_le_bytes());
+        for value in [7u32, 40, u32::from_le_bytes(*b"data"), 0, 0, 40] {
+            cue.extend(value.to_le_bytes());
+        }
+        let mut list = b"LIST".to_vec();
+        let ltxt: Vec<u8> = [b"ltxt".to_vec(), 12u32.to_le_bytes().to_vec(), 7u32.to_le_bytes().to_vec(), 30u32.to_le_bytes().to_vec(), b"rgn ".to_vec()].concat();
+        list.extend(((4 + ltxt.len()) as u32).to_le_bytes());
+        list.extend(b"adtl");
+        list.extend(ltxt);
+        wav.extend(cue);
+        wav.extend(list);
+        assert_eq!(loop_region(&wav), Some((40, 30)));
     }
 
     #[test]

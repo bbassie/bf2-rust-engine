@@ -28,7 +28,6 @@ use std::{
 use avian3d::prelude::*;
 use bevy::{
     asset::RenderAssetUsages,
-    audio::Volume,
     camera::visibility::RenderLayers,
     light::NotShadowCaster,
     mesh::{Indices, PrimitiveTopology},
@@ -38,12 +37,12 @@ use game_data::{Blend, EffectDesc, EmitShape, EmitterDesc, Facing, ImpactTable, 
 use game_shared::{
     config::GamePaths,
     effects::PlayEffect,
-    level::LoadedLevel,
+    level::{LevelEntity, LoadedLevel},
     physics::GameLayer,
     statics::StaticMesh,
 };
 
-use crate::{camera::PlayerCamera, render::viewmodel::VIEW_MODEL_LAYER};
+use crate::{audio::PlaySound, camera::PlayerCamera, render::viewmodel::VIEW_MODEL_LAYER};
 
 pub mod impacts;
 mod render;
@@ -63,8 +62,9 @@ impl Plugin for EffectsPlugin {
             .add_systems(
                 Update,
                 (
-                    (impacts::load_surfaces, preload_level_effects, set_particle_light)
+                    (clear_effects, impacts::load_surfaces, preload_level_effects, set_particle_light)
                         .run_if(resource_exists_and_changed::<LoadedLevel>),
+                    clear_effects.run_if(resource_removed::<LoadedLevel>),
                     receive_server_effects,
                     (update_flashes, update_debris),
                 ),
@@ -92,7 +92,7 @@ pub struct SpawnEffect {
     /// model and following the camera (our own muzzle flash).
     pub first_person: bool,
     /// Keep emitting for this many seconds (smoke grenades) instead of the effect's own
-    /// length: looping emitters loop, others fire again every half particle life.
+    /// length: looping emitters loop, others fire again after 40% of their particle life.
     pub duration: Option<f32>,
 }
 
@@ -163,6 +163,8 @@ pub struct EffectEmitter(pub String);
 pub struct EffectStats {
     pub effects: usize,
     pub particles: usize,
+    /// CPU time of the last simulation step.
+    pub simulate_ms: f32,
     since_log: f32,
 }
 
@@ -170,10 +172,10 @@ pub struct EffectStats {
 const MAX_PARTICLES: usize = 60_000;
 /// Point lights for flashes at once; the brightest near the camera win.
 const MAX_LIGHTS: usize = 8;
-/// Effect sounds playing at once.
-const MAX_SOUNDS: usize = 24;
 /// Effects this far from the camera aren't started.
 const MAX_DISTANCE: f32 = 600.0;
+/// Sustained one-shot emitters fire again after this fraction of their particles' life.
+const SUSTAIN_PERIOD: f32 = 0.4;
 /// Point light lumens per unit of BF2 light color and square meter of radius.
 const LIGHT_LUMENS: f32 = 25_000.0;
 
@@ -346,8 +348,15 @@ impl Default for ParticleLight {
 
 fn set_particle_light(mut commands: Commands, level: Res<LoadedLevel>) {
     let env = &level.desc.environment;
-    let light = Vec3::from_array(env.sun_color) * 0.9 + Vec3::from_array(env.ambient_color) * 0.45;
-    commands.insert_resource(ParticleLight(light.clamp(Vec3::splat(0.15), Vec3::splat(1.3))));
+    // Sprites are lit from all sides and shadow themselves: darker than sunlit ground.
+    let light = Vec3::from_array(env.sun_color) * 0.5 + Vec3::from_array(env.ambient_color) * 0.4;
+    commands.insert_resource(ParticleLight(light.clamp(Vec3::splat(0.1), Vec3::ONE)));
+}
+
+/// A new level, or none: what was running belongs to the old one.
+fn clear_effects(mut world: ResMut<EffectWorld>) {
+    world.instances.clear();
+    world.particles = 0;
 }
 
 fn receive_server_effects(mut received: MessageReader<PlayEffect>, mut effects: MessageWriter<SpawnEffect>) {
@@ -475,14 +484,13 @@ fn spawn_effects(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut world: ResMut<EffectWorld>,
     camera: Query<(Entity, &Transform), With<PlayerCamera>>,
-    sounds: Query<(), With<EffectSoundPlaying>>,
+    mut sounds: MessageWriter<PlaySound>,
 ) {
     let Some(mut library) = library else {
         requests.clear();
         return;
     };
     let camera = camera.single().ok();
-    let mut sound_count = sounds.iter().count();
     for request in requests.read() {
         if let Some((_, camera)) = camera
             && !request.first_person
@@ -543,6 +551,7 @@ fn spawn_effects(
                     * Vec3::from_array(std::array::from_fn(|i| spread[i].sample(fastrand::f32(), fastrand::bool())))
             };
             commands.spawn((
+                LevelEntity,
                 Transform::from_translation(request.position + request.rotation * Vec3::from_array(piece.position))
                     .with_rotation(request.rotation),
                 StaticMesh {
@@ -557,28 +566,29 @@ fn spawn_effects(
                 },
             ));
         }
-        for sound in &desc.sounds {
-            if sound_count >= MAX_SOUNDS || !sound.views.shows(request.first_person) || sound.files.is_empty() {
-                continue;
-            }
-            let file = &sound.files[fastrand::usize(..sound.files.len())];
-            commands.spawn((
-                AudioPlayer::new(asset_server.load(format!("imported://{file}"))),
-                PlaybackSettings::DESPAWN
-                    .with_volume(Volume::Linear(sound.volume))
-                    .with_spatial(true),
-                Transform::from_translation(request.position),
-                EffectSoundPlaying,
-            ));
-            sound_count += 1;
+        for sound in desc.sounds.iter().filter(|s| s.views.shows(request.first_person) && !s.files.is_empty()) {
+            sounds.write(PlaySound::at(sound, request.position).reason("effect"));
         }
         world.instances.push(instance);
     }
 }
 
-/// Starts the effect of new [`EffectEmitter`]s and moves running ones along.
+/// Where an emitter's entity is now. Root entities by their `Transform`: their
+/// `GlobalTransform` lags a frame (and is the origin in the frame they appear).
+type EmitterPlacement = (&'static Transform, &'static GlobalTransform, Has<ChildOf>);
+
+fn placement((transform, global, has_parent): (&Transform, &GlobalTransform, bool)) -> (Vec3, Quat) {
+    if has_parent {
+        let (_, rotation, position) = global.to_scale_rotation_translation();
+        (position, rotation)
+    } else {
+        (transform.translation, transform.rotation)
+    }
+}
+
+/// Starts the effect of new [`EffectEmitter`]s.
 fn follow_emitters(
-    added: Query<(Entity, &EffectEmitter, &GlobalTransform), Added<EffectEmitter>>,
+    added: Query<(Entity, &EffectEmitter, EmitterPlacement), Added<EffectEmitter>>,
     library: Option<ResMut<EffectLibrary>>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -588,11 +598,11 @@ fn follow_emitters(
     let Some(mut library) = library else {
         return;
     };
-    for (entity, emitter, transform) in &added {
+    for (entity, emitter, placed) in &added {
         let Some(effect) = library.prepare(&emitter.0, &asset_server, &mut meshes, &mut materials) else {
             continue;
         };
-        let (_, rotation, position) = transform.to_scale_rotation_translation();
+        let (position, rotation) = placement(placed);
         let mut instance = Instance::new(effect, position, rotation, false, f32::INFINITY);
         instance.follow = Some(entity);
         world.instances.push(instance);
@@ -607,8 +617,9 @@ fn simulate(
     mut stats: ResMut<EffectStats>,
     light: Option<Res<ParticleLight>>,
     camera: Query<&Transform, With<PlayerCamera>>,
-    followed: Query<&GlobalTransform, With<EffectEmitter>>,
+    followed: Query<EmitterPlacement, With<EffectEmitter>>,
 ) {
+    let started = std::time::Instant::now();
     let dt = time.delta_secs().min(0.1);
     let light = light.map_or(Vec3::ONE, |l| l.0);
     let camera = camera.single().copied().unwrap_or_default();
@@ -624,11 +635,7 @@ fn simulate(
         }
         if let Some(entity) = instance.follow {
             match followed.get(entity) {
-                Ok(transform) => {
-                    let (_, rotation, position) = transform.to_scale_rotation_translation();
-                    instance.position = position;
-                    instance.rotation = rotation;
-                }
+                Ok(placed) => (instance.position, instance.rotation) = placement(placed),
                 Err(_) => {
                     instance.follow = None;
                     instance.sustain = 0.0;
@@ -645,10 +652,17 @@ fn simulate(
     world.particles = alive;
     stats.effects = world.instances.len();
     stats.particles = alive;
+    stats.simulate_ms = started.elapsed().as_secs_f32() * 1000.0;
     stats.since_log += dt;
     if stats.since_log > 2.0 && alive > 0 {
         stats.since_log = 0.0;
-        debug!("effects: {} running, {alive} particles, {} drawn", stats.effects, batches.particle_count());
+        debug!(
+            "effects: {} running, {alive} particles, {} drawn; CPU {:.2} ms simulating, {:.2} ms uploading",
+            stats.effects,
+            batches.particle_count(),
+            stats.simulate_ms,
+            batches.upload_ms,
+        );
     }
 }
 
@@ -683,7 +697,7 @@ fn emit(instance: &mut Instance, budget: &mut usize) {
             }
             // The cycle is over: another one while sustained, else stop.
             if instance.age < instance.sustain {
-                let period = if desc.looping { window } else { window.max(desc.life[1] * 0.5) };
+                let period = if desc.looping { window } else { window.max(desc.life[1] * SUSTAIN_PERIOD) };
                 state.start += period.max(0.02);
                 state.emitted = 0;
             } else {
@@ -955,7 +969,3 @@ fn update_debris(
         transform.scale = Vec3::splat(shrink);
     }
 }
-
-/// An effect sound still playing (its entity despawns when done).
-#[derive(Component)]
-struct EffectSoundPlaying;

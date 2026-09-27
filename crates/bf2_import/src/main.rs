@@ -20,6 +20,7 @@ use bf2_formats::{
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 
+mod ai;
 mod audio;
 mod coords;
 mod dds;
@@ -63,6 +64,13 @@ enum Command {
     },
     /// Import soldier bodies (skinned mesh, skeleton, animations). Also done by `level`.
     Soldiers,
+    /// Import only the bots' hints (strategic areas, weapon templates) of imported levels.
+    /// Also done by `level`.
+    Ai {
+        names: Vec<String>,
+        #[arg(long)]
+        all: bool,
+    },
     /// Parse every mesh and collision mesh of a mod and report failures.
     Check {
         #[arg(long, default_value = "bf2")]
@@ -131,6 +139,22 @@ fn main() -> Result<()> {
             }
         }
         Command::Soldiers => import_soldiers(&install, &cli.out),
+        Command::Ai { names, all } => {
+            let levels = if all {
+                install.mods().iter().flat_map(|m| install.levels(m)).collect()
+            } else {
+                names
+                    .iter()
+                    .map(|n| install.find_level(n))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for level in levels {
+                match ai::import_only(&install, &level, &cli.out) {
+                    Ok((areas, weapons)) => log::info!("{}: {areas} strategic areas, {weapons} weapon templates", level.name),
+                    Err(err) => log::warn!("{}: {err:#}", level.name),
+                }
+            }
+        }
         Command::Check { r#mod } => check(&install, &r#mod)?,
     }
     Ok(())

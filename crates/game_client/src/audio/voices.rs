@@ -22,7 +22,7 @@ use bevy::{
     audio::{AudioSinkPlayback, PlaybackMode, SpatialAudioSink, Volume},
     prelude::*,
 };
-use game_data::{Falloff, SoundDesc};
+use game_data::{EffectSound, Falloff, SoundDesc};
 use game_shared::level::LevelEntity;
 
 use super::{AudioSystems, Sounds};
@@ -104,6 +104,17 @@ impl From<SoundDesc> for Sound {
 impl From<Arc<SoundDesc>> for Sound {
     fn from(desc: Arc<SoundDesc>) -> Self {
         Sound::Desc(desc)
+    }
+}
+
+/// Effect sounds don't say how they fade: played somewhere, they get [`DEFAULT_FALLOFF`].
+impl From<&EffectSound> for Sound {
+    fn from(sound: &EffectSound) -> Self {
+        Sound::Desc(Arc::new(SoundDesc {
+            files: sound.files.clone(),
+            volume: sound.volume,
+            ..SoundDesc::file("")
+        }))
     }
 }
 
@@ -201,6 +212,56 @@ struct Voice {
     fade: Option<f32>,
 }
 
+/// A looping voice another audio module steers (vehicle engines): it sets where the sound is,
+/// how loud and how fast every frame. Held voices aren't counted against [`MAX_VOICES`] and
+/// never make room for others.
+#[derive(Component)]
+pub struct HeldVoice {
+    /// `None`: not positional.
+    pub at: Option<Vec3>,
+    /// Volume before distance.
+    pub level: f32,
+    /// Playback speed (pitch).
+    pub speed: f32,
+}
+
+/// Starts a held voice playing `desc` (looping) from `listener`'s point of view.
+pub fn spawn_held(
+    commands: &mut Commands,
+    cache: &mut SoundCache,
+    assets: &AssetServer,
+    listener: Option<(Entity, &Transform)>,
+    desc: &SoundDesc,
+    held: HeldVoice,
+) -> Entity {
+    let file = &desc.files[fastrand::usize(..desc.files.len().max(1))];
+    let at = held.at.map(|at| (at, desc.falloff.unwrap_or(DEFAULT_FALLOFF)));
+    let positional = at.is_some() && listener.is_some();
+    let settings = PlaybackSettings {
+        mode: PlaybackMode::Loop,
+        volume: Volume::Linear(0.0),
+        speed: held.speed.max(0.05),
+        spatial: positional,
+        ..PlaybackSettings::LOOP
+    };
+    let voice = Voice {
+        file: file.clone(),
+        sound: sound_key(desc),
+        level: held.level,
+        at,
+        emitter: None,
+        started: 0.0,
+        gain: 0.0,
+        fade: None,
+    };
+    let mut entity = commands.spawn((AudioPlayer::new(cache.get(assets, file)), settings, voice, held, LevelEntity));
+    if let (Some((at, _)), Some((listener, transform))) = (at, listener) {
+        entity.insert((ChildOf(listener), Transform::from_translation(pan_offset(transform, at))));
+    }
+    debug!(target: "audio", "loop {file} starts");
+    entity.id()
+}
+
 #[derive(Resource, Default)]
 struct VoiceStats {
     started: u32,
@@ -241,7 +302,7 @@ fn start_sounds(
     mix: Res<AudioMix>,
     mut stats: ResMut<VoiceStats>,
     listener: Query<(Entity, &Transform), With<SpatialListener>>,
-    mut voices: Query<(Entity, &mut Voice)>,
+    mut voices: Query<(Entity, &mut Voice), Without<HeldVoice>>,
 ) {
     let listener: Option<Listener> = listener.iter().next();
     let now = time.elapsed_secs();
@@ -355,6 +416,7 @@ fn update_voices(
     mut voices: Query<(
         Entity,
         &mut Voice,
+        Option<&HeldVoice>,
         Option<&mut Transform>,
         Option<&mut AudioSink>,
         Option<&mut SpatialAudioSink>,
@@ -363,7 +425,7 @@ fn update_voices(
     let dt = time.delta_secs();
     let listener = listener.iter().next();
     let master = global.volume.to_linear();
-    for (entity, mut voice, transform, sink, spatial_sink) in &mut voices {
+    for (entity, mut voice, held, transform, sink, spatial_sink) in &mut voices {
         let mut fade = 1.0;
         if let Some(left) = &mut voice.fade {
             *left -= dt;
@@ -372,6 +434,12 @@ fn update_voices(
                 continue;
             }
             fade = *left / FADE;
+        }
+        if let Some(held) = held {
+            voice.level = held.level;
+            if let (Some(at), Some((_, falloff))) = (held.at, voice.at) {
+                voice.at = Some((at, falloff));
+            }
         }
         let mut gain = voice.level;
         if let (Some((at, falloff)), Some(listener)) = (voice.at, listener) {
@@ -382,10 +450,17 @@ fn update_voices(
         }
         voice.gain = gain;
         let volume = Volume::Linear(gain * fade * master);
+        let speed = held.map(|h| h.speed.max(0.05));
         if let Some(mut sink) = sink {
             sink.set_volume(volume);
+            if let Some(speed) = speed {
+                sink.set_speed(speed);
+            }
         } else if let Some(mut sink) = spatial_sink {
             sink.set_volume(volume * Volume::Linear(PAN_GAIN));
+            if let Some(speed) = speed {
+                sink.set_speed(speed);
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
-// Particle effects on Strike at Karkand: our muzzle flash and bullet impacts, a grenade
-// explosion, a rocket explosion, smoke, dust and blood.
+// Particle effects on Strike at Karkand: our muzzle flash, bullet impacts on concrete, wood
+// and metal, a grenade and a rocket explosion, a smoke grenade lasting 30 s.
 // client --scenario scenarios/effects_visual.ron --out target/scenarios/effects/visual
 (
     level: "strike_at_karkand",
@@ -9,44 +9,70 @@
         // The square, looking north along the street.
         Teleport((-184.0, 157.0, -85.0), 20.0, -4.0),
         Wait(1.5),
-        Screenshot("idle"),
-        // Firing: muzzle flash, impacts down the street.
+        // Firing: muzzle flashes (every few frames) and impacts down the street.
         Hold([Fire]),
-        Wait(0.05),
+        Frames(1),
         Screenshot("fire_1"),
-        Wait(0.12),
         Screenshot("fire_2"),
+        Screenshot("fire_3"),
+        Screenshot("fire_4"),
+        Screenshot("fire_5"),
+        Screenshot("fire_6"),
         Release([Fire]),
-        Look(20.0, -25.0),
+        // Impacts on the paving 4 m ahead.
+        Look(20.0, -22.0),
+        Wait(0.3),
         Hold([Fire]),
         Wait(0.3),
         Screenshot("impacts_ground"),
         Release([Fire]),
-        Look(20.0, -4.0),
+        Look(20.0, -10.0),
         Wait(1.0),
-        // Explosions 15 m ahead.
-        Effect("e_exp_grenade", (-189.0, 156.3, -99.0), 1, 0.0),
-        Wait(0.05),
+        // A grenade 8 m ahead.
+        Effect("e_exp_grenade", (-186.7, 155.6, -92.5), 1, 0.0),
+        Wait(0.12),
         Screenshot("grenade_1"),
-        Wait(0.25),
+        Wait(0.2),
         Screenshot("grenade_2"),
-        Wait(1.0),
+        Wait(0.5),
         Screenshot("grenade_3"),
         Wait(2.0),
-        Effect("e_exp_medium", (-189.0, 156.3, -99.0), 1, 0.0),
-        Wait(0.1),
+        // A rocket.
+        Effect("e_exp_medium", (-186.7, 155.6, -92.5), 1, 0.0),
+        Wait(0.05),
         Screenshot("rocket_1"),
-        Wait(0.6),
+        Wait(0.3),
         Screenshot("rocket_2"),
         Wait(3.0),
-        // Smoke that keeps coming for 30 s.
-        Effect("e_hgr_smokegrenade", (-189.0, 156.3, -99.0), 1, 30.0),
+        // A muzzle flash from the side: 2 m to the west, pointing north (to the right).
+        Look(90.0, -5.0),
+        Wait(0.2),
+        Effect("e_muzz_m4", (-186.0, 157.1, -85.0), 1, 0.0),
+        Screenshot("muzzle_3p"),
         Wait(1.0),
+        // Smoke 12 m ahead that keeps coming for 30 s.
+        Look(20.0, -4.0),
+        Effect("e_hgr_smokegrenade", (-188.1, 155.6, -96.3), 1, 30.0),
+        Wait(1.5),
         Screenshot("smoke_1"),
-        Wait(4.0),
+        Wait(5.0),
         Screenshot("smoke_2"),
         Wait(10.0),
         Screenshot("smoke_3"),
+        // Wood: boards across the fence gap, 1.2 m ahead.
+        Teleport((-170.08, 156.3, 66.2), 0.0, -8.0),
+        Wait(1.0),
+        Hold([Fire]),
+        Wait(0.25),
+        Screenshot("impacts_wood"),
+        Release([Fire]),
+        // Whatever is to the side.
+        Look(90.0, -5.0),
+        Wait(0.5),
+        Hold([Fire]),
+        Wait(0.25),
+        Screenshot("impacts_side"),
+        Release([Fire]),
         Quit,
     ],
 )

@@ -4,7 +4,7 @@
 
 use avian3d::prelude::*;
 use bevy::{ecs::system::SystemParam, prelude::*};
-use game_data::{FireKind, Impact, ProjectileDesc, WeaponDesc};
+use game_data::{FireKind, Impact, ProjectileDesc, TriggerDesc, WeaponDesc};
 use serde::{Deserialize, Serialize};
 
 use crate::physics::GameLayer;
@@ -75,10 +75,10 @@ pub struct Step {
 }
 
 /// Share of the speed into a surface kept when bouncing off it.
-const RESTITUTION: f32 = 0.35;
+const RESTITUTION: f32 = 0.3;
 /// Coulomb friction of a bouncing projectile: every bounce takes this times the impulse off
 /// the speed along the surface. Also makes grenades roll to a stop.
-const FRICTION: f32 = 0.45;
+const FRICTION: f32 = 0.7;
 /// Slower than this on level enough ground, a bouncing projectile lies still.
 const REST_SPEED: f32 = 0.6;
 /// Distance kept from surfaces so the next ray starts outside.
@@ -223,6 +223,18 @@ pub fn launch_origin(spatial: &SpatialQuery, eye: Vec3, view: Quat, offset: Vec3
     }
 }
 
+/// Whether a mine's trigger catches something at `target` moving at `speed` (m/s): close
+/// enough, fast enough, and in front if the trigger only looks ahead.
+pub fn in_trigger(trigger: &TriggerDesc, mine: &ProjectileMotion, target: Vec3, speed: f32) -> bool {
+    let offset = target - mine.position;
+    if offset.length() > trigger.radius || speed < trigger.min_speed {
+        return false;
+    }
+    let along_ground = Vec3::new(offset.x, 0.0, offset.z);
+    trigger.angle <= 0.0
+        || (along_ground.length() > 0.01 && along_ground.angle_between(mine.facing()).to_degrees() <= trigger.angle)
+}
+
 /// A smoke cloud (replicated). Hides soldiers from bots and blocks the view.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct SmokeCloud {
@@ -304,6 +316,27 @@ mod tests {
         assert!((v.normalize().angle_between(Vec3::NEG_Z) - 0.1).abs() < 1e-4);
         let v = steer(Vec3::NEG_Z * 10.0, Vec3::new(0.01, 0.0, -1.0), 0.1);
         assert!(v.normalize().angle_between(Vec3::new(0.01, 0.0, -1.0).normalize()) < 1e-4);
+    }
+
+    #[test]
+    fn claymores_catch_what_moves_in_front_of_them() {
+        let trigger = TriggerDesc {
+            by: game_data::TriggerBy::Soldiers,
+            radius: 7.0,
+            angle: 30.0,
+            min_speed: 1.0,
+        };
+        // Facing -Z.
+        let mine = ProjectileMotion::new(Vec3::ZERO, Vec3::ZERO, 0.0);
+        let ahead = Vec3::new(1.0, 0.9, -4.0);
+        assert!(in_trigger(&trigger, &mine, ahead, 3.0));
+        assert!(!in_trigger(&trigger, &mine, ahead, 0.5), "sneaking past");
+        assert!(!in_trigger(&trigger, &mine, Vec3::new(0.0, 0.9, -8.0), 3.0), "too far");
+        assert!(!in_trigger(&trigger, &mine, Vec3::new(4.0, 0.9, -2.0), 3.0), "off to the side");
+        assert!(!in_trigger(&trigger, &mine, Vec3::new(0.0, 0.9, 3.0), 3.0), "behind");
+        // Turned to face +X.
+        let mine = ProjectileMotion::new(Vec3::ZERO, Vec3::ZERO, -std::f32::consts::FRAC_PI_2);
+        assert!(in_trigger(&trigger, &mine, Vec3::new(4.0, 0.9, 0.5), 3.0));
     }
 
     #[test]

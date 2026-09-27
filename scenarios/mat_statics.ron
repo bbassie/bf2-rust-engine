@@ -20,12 +20,12 @@
         Camera((-181.0, 158.0, -84.0), 10.0, -40.0),
         Wait(1.0),
         Screenshot("paving_crack"),
-        // house_medium_02: dirt and cracks, facing south (in shade).
-        Camera((-176.0, 158.5, -56.0), 0.0, 6.0),
+        // house_high_02_v2: dirt and cracks on its west face (in shade).
+        Camera((-160.0, 158.5, -96.0), -90.0, 8.0),
         Wait(1.0),
         Screenshot("house_shade"),
         // stonefence_l: parallax detail.
-        Camera((-310.5, 169.0, -117.0), 56.0, -18.0),
+        Camera((-313.0, 168.8, -117.0), 24.0, -16.0),
         Wait(1.0),
         Screenshot("fence_parallax"),
         // Street view with many objects.

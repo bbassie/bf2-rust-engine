@@ -1,0 +1,48 @@
+// Undergrowth and water on Karkand, from fixed spectator views.
+// client --scenario scenarios/veg_karkand.ron --out target/scenarios/veg/karkand
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        // Grass fields.
+        Camera((-204.0, 166.6, 192.0), 90.0, -8.0),
+        Wait(2.0),
+        Screenshot("grass"),
+        Measure("grass", 4.0),
+        Camera((-212.0, 166.2, 202.0), 200.0, -20.0),
+        Wait(1.0),
+        Screenshot("grass_close"),
+        Camera((148.0, 154.5, -272.0), 45.0, -10.0),
+        Wait(1.0),
+        Screenshot("grass_east"),
+        // Flowers and desert bushes.
+        Camera((-380.0, 170.6, -118.0), 90.0, -15.0),
+        Wait(1.0),
+        Screenshot("flowers"),
+        Camera((-160.0, 165.0, 190.0), 0.0, -12.0),
+        Wait(1.0),
+        Screenshot("bushes"),
+        // The river through town.
+        Camera((-4.0, 149.5, 64.0), 0.0, -30.0),
+        Wait(1.0),
+        Screenshot("water_shallow"),
+        Camera((344.0, 152.0, -110.0), 90.0, -10.0),
+        Wait(1.0),
+        Screenshot("water_lake"),
+        Measure("water", 4.0),
+        Camera((0.0, 230.0, -440.0), 0.0, -6.0),
+        Wait(1.0),
+        Screenshot("edge_north"),
+        Ssao(false),
+        WaitReady,
+        Camera((-4.0, 149.5, 64.0), 0.0, -30.0),
+        Wait(1.0),
+        Screenshot("water_shallow_nossao"),
+        Camera((-204.0, 166.6, 192.0), 90.0, -8.0),
+        Wait(1.0),
+        Screenshot("grass_nossao"),
+        Quit,
+    ],
+)

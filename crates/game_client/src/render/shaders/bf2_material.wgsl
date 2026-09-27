@@ -88,6 +88,7 @@ const ALPHA_FROM_DETAIL: u32 = 2048u;
 const ALPHA_FROM_COLOR: u32 = 4096u;
 const ENV_MAP: u32 = 8192u;
 const UV_SUM: u32 = 16384u;
+const WRECK: u32 = 32768u;
 
 const LAYER_DETAIL: u32 = 0u;
 const LAYER_DIRT: u32 = 1u;
@@ -104,10 +105,15 @@ const FRESNEL_R0: f32 = 0.4132;
 
 fn layers_of(slot: u32) -> Bf2Layers {
 #ifdef BINDLESS
-    return bf2_layers[bf2_indices[slot].material];
+    var layers = bf2_layers[bf2_indices[slot].material];
 #else
-    return bf2_layers_bound;
+    var layers = bf2_layers_bound;
 #endif
+#ifdef BF2_DEBUG_NOLAYERS
+    // Base color only, to measure what the layers cost.
+    layers.flags = 0u;
+#endif
+    return layers;
 }
 
 fn sample_layer(slot: u32, layer: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
@@ -167,6 +173,10 @@ struct SurfaceInput {
     world_normal: vec3<f32>,
     world_tangent: vec4<f32>,
     has_tangents: bool,
+    // The normal the prepass wrote, when the main pass reads it (`LOAD_PREPASS_NORMALS`):
+    // normal maps are then only sampled for gloss.
+    prepass_normal: vec3<f32>,
+    has_prepass_normal: bool,
     // Towards the camera.
     V: vec3<f32>,
     front_facing: bool,
@@ -193,6 +203,7 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
 
     var color = in.base;
     var gloss = layers.gloss;
+    var gloss_scale = 1.0;
 
     let N = in.world_normal;
     let T = in.world_tangent.xyz;
@@ -216,6 +227,11 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
             color.a *= detail.a;
         }
     }
+    if (flags & WRECK) != 0u {
+        let wreck = sample_layer(in.slot, LAYER_DETAIL, in.uv, uv_dx, uv_dy);
+        color = vec4(color.rgb * wreck.rgb, color.a);
+        gloss_scale = wreck.g;
+    }
     if (flags & GLOSS_FROM_BASE) != 0u {
         gloss = color.a;
         color.a = select(1.0, dot(color.rgb, vec3(1.0)), (flags & ALPHA_FROM_COLOR) != 0u);
@@ -233,7 +249,9 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
     color = vec4(min(color.rgb * layers.albedo_scale, vec3(1.0)), color.a);
 
     var world_normal = normalize(N);
-    if normal_mapped && (flags & NORMAL_MAP) != 0u {
+    let map_normal = !in.has_prepass_normal;
+    let normal_texel = map_normal || (flags & GLOSS_FROM_NORMAL) != 0u;
+    if normal_mapped && normal_texel && (flags & NORMAL_MAP) != 0u {
         var normal_uv = in.uv;
         var normal_dx = uv_dx;
         var normal_dy = uv_dy;
@@ -244,7 +262,7 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
         }
         let texel = sample_layer(in.slot, LAYER_NORMAL, normal_uv, normal_dx, normal_dy);
         var Nt = texel.rgb;
-        if (flags & CRACK_NORMAL) != 0u {
+        if map_normal && (flags & CRACK_NORMAL) != 0u {
             let crack_normal = sample_layer(in.slot, LAYER_CRACK_NORMAL, in.packed.zw, packed_dx.zw, packed_dy.zw);
             Nt = mix(Nt, crack_normal.rgb, crack_mask);
         }
@@ -254,7 +272,7 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
         if (flags & GLOSS_FROM_NORMAL) != 0u {
             gloss = texel.a;
         }
-    } else if normal_mapped && (flags & OBJECT_SPACE) != 0u {
+    } else if normal_mapped && normal_texel && (flags & OBJECT_SPACE) != 0u {
         let texel = sample_layer(in.slot, LAYER_NORMAL, in.uv, uv_dx, uv_dy);
         // Bind pose normal, BF2's left-handed space mirrored to ours.
         let n = normalize(texel.rgb * 2.0 - 1.0) * vec3(1.0, 1.0, -1.0);
@@ -276,6 +294,10 @@ fn bf2_surface(in: SurfaceInput, layers: Bf2Layers) -> Surface {
     if in.double_sided && !in.front_facing {
         world_normal = -world_normal;
     }
+    if in.has_prepass_normal {
+        world_normal = in.prepass_normal;
+    }
+    gloss *= gloss_scale;
 
     if (flags & ENV_MAP) != 0u {
         let env = sample_env(in.slot, reflect(-in.V, world_normal));
@@ -442,6 +464,10 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     surface_in.world_tangent = in.world_tangent;
     surface_in.has_tangents = true;
 #endif
+#ifdef LOAD_PREPASS_NORMALS
+    surface_in.prepass_normal = pbr_input.N;
+    surface_in.has_prepass_normal = true;
+#endif
     surface_in.V = pbr_input.V;
     surface_in.front_facing = is_front;
     surface_in.double_sided =
@@ -459,10 +485,23 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #endif
 
     pbr_input.material.base_color = pbr_functions::alpha_discard(pbr_input.material, pbr_input.material.base_color);
+#ifdef BF2_DEBUG_LIGHTING
+    pbr_input.material.base_color = vec4(vec3(0.5), pbr_input.material.base_color.a);
+#endif
 
     var out: FragmentOutput;
     out.color = pbr_functions::apply_pbr_lighting(pbr_input);
     out.color = pbr_functions::main_pass_post_lighting_processing(pbr_input, out.color);
+#ifdef BF2_DEBUG_NORMALS
+    out.color = vec4(pbr_input.N * 0.5 + vec3(0.5), 1.0);
+#endif
+#ifdef BF2_DEBUG_GLOSS
+    out.color = vec4(vec3(surface.gloss), 1.0);
+#endif
+#ifdef BF2_DEBUG_ENV
+    // The environment map everywhere (black where a material has none).
+    out.color = vec4(sample_env(slot, reflect(-pbr_input.V, pbr_input.N)), 1.0);
+#endif
     return out;
 }
 

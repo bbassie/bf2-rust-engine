@@ -85,17 +85,26 @@ fn vertex(in: Vertex) -> VertexOutput {
     return out;
 }
 
+fn to_gamma(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow(c, vec3(2.2));
+}
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas, atlas_sampler, in.uv);
     if texel.a < params.wind.z {
         discard;
     }
-    // BF2 multiplies the (mostly grey) plant textures with the terrain colour map.
+    // BF2 multiplies the (mostly grey) plant textures with the terrain colour map and a
+    // brightness factor in gamma space; the same product in linear space is far darker.
     let ground_uv = (in.world_position.xz - params.ground_rect.xy) / params.ground_rect.zw;
     let ground_color = textureSample(ground, ground_sampler, ground_uv).rgb;
-    let tint = mix(vec3(1.0), ground_color, in.tint.x);
-    let albedo = min(texel.rgb * tint * params.distances.w * in.tint.y, vec3(1.0));
+    let tint = mix(vec3(1.0), to_gamma(ground_color), in.tint.x);
+    let albedo = to_linear(min(to_gamma(texel.rgb) * tint * params.distances.w * in.tint.y, vec3(1.0)));
 
     var pbr_input = pbr_input_new();
     pbr_input.material.base_color = vec4(albedo, 1.0);

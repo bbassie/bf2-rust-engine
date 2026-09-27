@@ -52,6 +52,19 @@
         Wait(0.6),
         Screenshot("gp30_boom"),
         Wait(1.0),
+        // 6 m from a wall: the shell hits it before arming, bounces off and goes off on the
+        // next impact.
+        Teleport((-184.0, 157.0, -30.0), 180.0, 0.0),
+        Hold([Reload]),
+        Wait(0.1),
+        Release([Reload]),
+        Wait(4.5),
+        Hold([Fire]),
+        Wait(0.1),
+        Release([Fire]),
+        Wait(0.5),
+        Screenshot("gp30_dud"),
+        Wait(1.0),
         Quit,
     ],
 )

@@ -11,6 +11,9 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
     mesh_view_bindings::view,
 }
+#ifdef VISIBILITY_RANGE_DITHER
+#import bevy_pbr::pbr_functions::visibility_range_dither
+#endif
 
 struct TerrainLayers {
     // Meters per repeat, top projection, for detail textures 0..3 and 4..5.
@@ -44,11 +47,19 @@ fn top(t: texture_2d<f32>, xz: vec2<f32>, tile: f32) -> vec3<f32> {
     return textureSample(t, detail_sampler, xz / max(tile, 0.01)).rgb;
 }
 
+fn gamma(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
 @fragment
 fn fragment(
     in: VertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
+#ifdef VISIBILITY_RANGE_DITHER
+    // Cross-fade between terrain levels of detail.
+    visibility_range_dither(in.position, in.visibility_range_dither);
+#endif
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let world = in.world_position.xyz;
     let normal = normalize(in.world_normal);
@@ -77,9 +88,11 @@ fn fragment(
     let d4 = top(detail_4, world.xz, layers.tile_b.x);
     let d5 = top(detail_5, world.xz, layers.tile_b.y);
 
+    // BF2 blends and modulates in gamma space, where the detail textures average 0.5 grey;
+    // the same `2 * detail` on linear values would darken the colour map about 2.3 times.
     let weights = array<f32, 6>(wa.b, wa.g, wa.r, wb.b, wb.g, wb.r);
-    var detail = rock * weights[0] + d1 * weights[1] + d2 * weights[2]
-        + d3 * weights[3] + d4 * weights[4] + d5 * weights[5];
+    var detail = gamma(rock) * weights[0] + gamma(d1) * weights[1] + gamma(d2) * weights[2]
+        + gamma(d3) * weights[3] + gamma(d4) * weights[4] + gamma(d5) * weights[5];
     // Where the weights don't add up to 1, fill with neutral grey.
     let total = weights[0] + weights[1] + weights[2] + weights[3] + weights[4] + weights[5];
     detail += vec3(0.5) * max(1.0 - total, 0.0);
@@ -91,8 +104,9 @@ fn fragment(
         factor = vec3(1.0);
     }
 
+    // The colour map is linear, so the gamma-space factor is applied as pow(factor, 2.2).
     let base = pbr_input.material.base_color;
-    pbr_input.material.base_color = vec4(min(base.rgb * factor, vec3(1.0)), base.a);
+    pbr_input.material.base_color = vec4(min(base.rgb * pow(factor, vec3(2.2)), vec3(1.0)), base.a);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
     var out: FragmentOutput;

@@ -15,7 +15,7 @@ use game_shared::vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleM
 use crate::{
     audio::PlaySound,
     combat::{EffectAssets, spawn_tracer},
-    effects::EffectLibrary,
+    effects::{EffectLibrary, SpawnEffect},
     local_input::LookState,
     net::LocalSoldier,
 };
@@ -304,13 +304,14 @@ fn update_hud(
     }
 }
 
-/// Tracers and sounds of vehicle guns.
+/// Tracers, muzzle flashes and sounds of vehicle guns.
 fn receive_shots(
     mut commands: Commands,
     mut shots: MessageReader<VehicleShot>,
     assets: Res<EffectAssets>,
     library: Option<Res<EffectLibrary>>,
     mut sounds: MessageWriter<PlaySound>,
+    mut effects: MessageWriter<SpawnEffect>,
     vehicles: Query<&VehicleData>,
 ) {
     for shot in shots.read() {
@@ -318,6 +319,9 @@ fn receive_shots(
             continue;
         };
         spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle), library.as_deref());
+        if let Some((muzzle, _)) = library.as_deref().and_then(|l| l.muzzle(&weapon.name)) {
+            effects.write(SpawnEffect::new(muzzle, shot.origin).with_forward(shot.direction));
+        }
         if let Some(sound) = &weapon.sounds.fire_3p {
             sounds.write(PlaySound::at(sound.clone(), shot.origin).emitter(shot.vehicle).reason("vehicle gun"));
         }

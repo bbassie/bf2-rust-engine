@@ -30,6 +30,7 @@ use game_shared::{
     weapons::{Armory, Inventory, Loadout, WeaponState},
 };
 
+pub mod ai;
 pub mod bots;
 pub mod combat;
 pub mod conquest;
@@ -61,6 +62,8 @@ pub struct ServerSettings {
     pub respawn_seconds: f32,
     /// Whether bullets hurt teammates.
     pub friendly_fire: bool,
+    /// How well bots aim and how quickly they react, 0..1 (BF2's bot skill).
+    pub bot_skill: f32,
 }
 
 impl Default for ServerSettings {
@@ -78,6 +81,7 @@ impl Default for ServerSettings {
             local_team: 1,
             respawn_seconds: 10.0,
             friendly_fire: false,
+            bot_skill: 0.5,
         }
     }
 }

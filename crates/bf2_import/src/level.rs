@@ -151,6 +151,8 @@ pub fn import_level(
         .collect();
     // The top-down map BF2 shows in game, copied as-is (north up, not flipped).
     let minimap = converter.file(&format!("{base}/hud/minimap/ingamemap.dds"));
+    // The cube map `EnvMap` materials reflect; the game finds it by this path.
+    converter.file(&format!("{base}/envmaps/envmap0.dds"));
     let ticket_loss_at_end_per_minute = world
         .commands
         .iter()
@@ -175,6 +177,10 @@ pub fn import_level(
         vegetation,
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
+    match crate::ai::import(&mut interp, &vfs, &base, &kit_names, &desc.game_modes, &level_dir, out) {
+        Ok((areas, weapons)) => log::info!("{name}: {areas} strategic areas, {weapons} weapon templates for bots"),
+        Err(err) => log::warn!("ai: {err:#}"),
+    }
 
     // Vehicles the spawners of any layout create.
     let mut vehicle_names: Vec<String> = desc
@@ -187,6 +193,7 @@ pub fn import_level(
     vehicle_names.dedup();
     let missing_templates = interp.missing_templates.keys().cloned().collect();
     let vehicles = vehicles::import(&mut interp, &converter, localization, &vehicle_names, out)?;
+    crate::effects::import_vehicle_weapons(&interp.world, out);
 
     Ok(LevelReport {
         statics: desc.statics.len(),

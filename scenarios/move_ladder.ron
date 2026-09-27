@@ -1,4 +1,4 @@
-// Ladders on Karkand: up a house ladder onto the roof, back down, jumping off.
+// Ladders on Karkand: up house ladders onto the roof, back down from the roof, jumping off.
 // Needs templates imported with ladder parts marked (bf2-import level strike_at_karkand).
 // client --scenario scenarios/move_ladder.ron --out target/scenarios/move/ladder
 (
@@ -8,34 +8,42 @@
         WaitReady,
         ThirdPerson(true),
 
-        // ladder_7m on the house south of the square, climbed from the west.
-        Teleport((-186.5, 156.5, 1.95), -90.0, 10.0),
+        // house_low_02, 7.8 m ladder on its north wall, climbed from the north.
+        Teleport((-188.25, 157.0, -248.3), 180.0, 10.0),
         Wait(1.0),
-        Screenshot("ladder_bottom"),
+        Screenshot("low_bottom"),
         Move(0.0, 1.0),
-        Trace("up", 1.3),
-        Screenshot("ladder_climbing"),
-        Trace("up_top", 3.0),
-        Screenshot("ladder_roof"),
+        Trace("low_up", 2.0),
+        Screenshot("low_climbing"),
+        Trace("low_top", 3.5),
+        Screenshot("low_roof"),
         Move(0.0, 0.0),
 
-        // Back onto it from the roof, looking down: climb down.
-        Look(90.0, -40.0),
+        // Turn around and get back on from the roof, looking down: down to the street.
+        Look(0.0, -40.0),
         Wait(0.3),
         Move(0.0, 1.0),
-        Trace("down", 3.5),
-        Screenshot("ladder_down"),
+        Trace("low_down", 4.0),
+        Screenshot("low_down"),
         Move(0.0, 0.0),
 
         // Up halfway, then jump off.
-        Look(-90.0, 10.0),
+        Look(180.0, 10.0),
         Move(0.0, 1.0),
-        Trace("up_again", 1.5),
+        Trace("low_again", 2.0),
         Hold([Jump]),
-        Trace("jump_off", 1.5),
+        Trace("low_jump_off", 1.5),
         Release([Jump]),
         Move(0.0, 0.0),
-        Screenshot("jumped_off"),
+        Screenshot("low_jumped_off"),
+
+        // house_medium_04, 4.5 m ladder, climbed from the west.
+        Teleport((-188.6, 158.0, -217.88), -90.0, 10.0),
+        Wait(1.0),
+        Move(0.0, 1.0),
+        Trace("medium_up", 4.0),
+        Screenshot("medium_roof"),
+        Move(0.0, 0.0),
         Quit,
     ],
 )

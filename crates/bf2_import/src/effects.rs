@@ -147,33 +147,52 @@ fn weapon_effects(interp: &mut Interpreter, kits: &[String]) -> WeaponEffectTabl
         for child in &kit.children {
             let name = child.template.to_ascii_lowercase();
             interp.ensure_template(&name);
-            let Some(weapon) = interp.world.template(&name).cloned() else {
-                continue;
-            };
-            if !weapon.ty.eq_ignore_ascii_case("genericfirearm") {
-                continue;
-            }
-            let mut effects = WeaponEffects::default();
-            if let Some(muzzle) = weapon
-                .children
-                .iter()
-                .find(|c| c.template.to_ascii_lowercase().starts_with("e_muzz"))
-            {
-                effects.muzzle = Some(muzzle.template.to_ascii_lowercase());
-                effects.muzzle_offset = coords::position(muzzle.position.unwrap_or_default());
-            }
-            if let Some(projectile) = weapon.get_str("projectiletemplate").map(str::to_string) {
+            if let Some(projectile) = interp.world.template(&name).and_then(|w| w.get_str("projectiletemplate")) {
+                let projectile = projectile.to_string();
                 interp.ensure_template(&projectile);
-                effects.detonation = interp
-                    .world
-                    .template(&projectile)
-                    .and_then(|p| p.get_str("detonation.endeffecttemplate"))
-                    .map(str::to_ascii_lowercase);
             }
-            table.weapons.insert(name, effects);
+            if let Some(effects) = interp.world.template(&name).and_then(|w| weapon_entry(&interp.world, w)) {
+                table.weapons.insert(name, effects);
+            }
         }
     }
     table
+}
+
+/// Adds the guns of the vehicles loaded by now (every `GenericFireArm` template) to
+/// `effects/weapons.ron`. Their muzzle flashes are among the imported effects already.
+pub fn import_vehicle_weapons(world: &World, out: &Path) {
+    let mut table = WeaponEffectTable::default();
+    for (name, template) in &world.templates {
+        if let Some(effects) = weapon_entry(world, template) {
+            table.weapons.insert(name.clone(), effects);
+        }
+    }
+    if let Err(err) = merge_weapon_effects(out, table) {
+        log::warn!("weapons.ron: {err:#}");
+    }
+}
+
+/// The muzzle flash (a child effect bundle `e_muzz*`) and detonation of a weapon template.
+fn weapon_entry(world: &World, weapon: &Template) -> Option<WeaponEffects> {
+    if !weapon.ty.eq_ignore_ascii_case("genericfirearm") {
+        return None;
+    }
+    let mut effects = WeaponEffects::default();
+    if let Some(muzzle) = weapon
+        .children
+        .iter()
+        .find(|c| c.template.to_ascii_lowercase().starts_with("e_muzz"))
+    {
+        effects.muzzle = Some(muzzle.template.to_ascii_lowercase());
+        effects.muzzle_offset = coords::position(muzzle.position.unwrap_or_default());
+    }
+    effects.detonation = weapon
+        .get_str("projectiletemplate")
+        .and_then(|p| world.template(p))
+        .and_then(|p| p.get_str("detonation.endeffecttemplate"))
+        .map(str::to_ascii_lowercase);
+    Some(effects)
 }
 
 fn merge_weapon_effects(out: &Path, table: WeaponEffectTable) -> Result<()> {

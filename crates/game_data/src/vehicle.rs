@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Placement, WeaponDesc};
+use crate::{Placement, VehicleSounds, WeaponDesc};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VehicleDesc {
@@ -46,6 +46,8 @@ pub struct VehicleDesc {
     pub entry_points: Vec<EntryPointDesc>,
     #[serde(default)]
     pub weapons: Vec<VehicleWeaponDesc>,
+    #[serde(default)]
+    pub sounds: VehicleSounds,
 }
 
 impl VehicleDesc {

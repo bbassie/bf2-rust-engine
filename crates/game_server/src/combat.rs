@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_replicon::prelude::*;
 use game_data::{FireKind, FireMode, Guidance, TriggerBy, WeaponDesc};
 use game_shared::{
@@ -18,11 +18,13 @@ use game_shared::{
     input::Buttons,
     physics::GameLayer,
     projectile::{
-        self, Projectile, ProjectileMotion, SmokeCloud, collision_layers, launch_origin, launch_velocity, steer,
+        self, Projectile, ProjectileMotion, SmokeCloud, collision_layers, in_trigger, launch_origin, launch_velocity,
+        steer,
     },
     protocol::{ControlledBy, HitConfirmed, KillFeed, Player, Score, ShotFired, Team},
     soldier::{Health, Hitbox, Soldier, SoldierMotion, Stance, stance_height},
     statics::Destructible,
+    vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
     weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, damage_at, spread_direction},
 };
 
@@ -39,6 +41,7 @@ impl Plugin for CombatPlugin {
             .add_message::<Explosion>()
             .add_message::<StaticHit>()
             .add_message::<SoldierHit>()
+            .add_message::<VehicleHit>()
             .add_message::<Detonation>()
             .add_systems(
                 FixedUpdate,
@@ -50,6 +53,7 @@ impl Plugin for CombatPlugin {
                     detonate,
                     age_smoke,
                     explode,
+                    damage_vehicles,
                     damage_soldiers,
                     kill_the_dead,
                 )
@@ -127,6 +131,14 @@ struct SoldierHit {
     attacker: Attacker,
 }
 
+/// Server-side: damage for a vehicle this tick, through its armor already.
+#[derive(Message, Clone, Debug)]
+struct VehicleHit {
+    vehicle: Entity,
+    damage: f32,
+    attacker: Attacker,
+}
+
 /// Server-side: a grenade, rocket or charge goes off.
 #[derive(Message, Clone, Debug)]
 struct Detonation {
@@ -147,6 +159,9 @@ const HEADSHOT_MULTIPLIER: f32 = 2.5;
 const SOLDIER_ARMOR_MATERIAL: u32 = 24;
 /// How far wire-guided missiles look for what the shooter aims at.
 const GUIDANCE_RANGE: f32 = 2000.0;
+/// Guided missiles only follow an aim point at most this far off their nose (radians; BF2's
+/// `seek.maxAngleLock 90` of every wire-guided missile).
+const SEEKER_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
 /// Vehicle mines go off under bodies at least this heavy (kg).
 const HEAVY: f32 = 1000.0;
 /// Smoke clouds billow up around this far above the grenade.
@@ -238,7 +253,7 @@ fn fire_weapons(
         &mut Inventory,
         &mut WeaponState,
         Option<&Hitbox>,
-    )>,
+    ), Without<Seated>>,
     placed: Query<(Entity, &Live, &ProjectileMotion)>,
     mut shots: MessageWriter<ToClients<ShotFired>>,
     mut detonations: MessageWriter<Detonation>,
@@ -429,8 +444,10 @@ fn simulate_projectiles(
     shooters: Query<(&SoldierMotion, &Inventory)>,
     colliders: Query<&ColliderOf>,
     soldiers: Query<&SoldierMotion, With<Soldier>>,
+    vehicles: Query<&VehicleData>,
     destructibles: Query<(), With<Destructible>>,
     mut soldier_hits: MessageWriter<SoldierHit>,
+    mut vehicle_hits: MessageWriter<VehicleHit>,
     mut static_hits: MessageWriter<StaticHit>,
     mut detonations: MessageWriter<Detonation>,
 ) {
@@ -439,7 +456,7 @@ fn simulate_projectiles(
         live.age += dt;
         let weapon = live.weapon.clone();
         let desc = &weapon.projectile;
-        let goes_off = desc.explodes() || desc.smoke.is_some();
+        let goes_off = desc.goes_off();
         if live.age >= live.fuse {
             if goes_off {
                 detonations.write(Detonation {
@@ -477,9 +494,17 @@ fn simulate_projectiles(
                         .and_then(|dir| spatial.cast_ray(eye, dir, GUIDANCE_RANGE, true, &filter))
                         .map_or(GUIDANCE_RANGE, |hit| hit.distance);
                     let to = eye + aim * distance - next.position;
-                    if to.length() > desc.guidance_min_distance && live.age >= desc.motor_delay {
+                    let in_view = to.angle_between(next.velocity) <= SEEKER_ANGLE;
+                    if in_view && to.length() > desc.guidance_min_distance && live.age >= desc.motor_delay {
                         next.velocity = steer(next.velocity, to, desc.turn_rate * dt);
                     }
+                    debug!(
+                        "{} at {:.1} flying {:.2}, steering towards {:.1}",
+                        weapon.name,
+                        next.position,
+                        next.velocity.normalize_or_zero(),
+                        eye + aim * distance
+                    );
                 }
                 None => {
                     live.guided = false;
@@ -521,6 +546,16 @@ fn simulate_projectiles(
                     victim: body,
                     damage: damage * if head { HEADSHOT_MULTIPLIER } else { 1.0 },
                     headshot: head,
+                    attacker: attacker.clone(),
+                });
+            }
+        } else if let Ok(vehicle) = vehicles.get(body) {
+            let armor = armor_damage_modifier(desc.material, vehicle.0.desc.armor_material);
+            let damage = damage_at(desc, live.travelled) * armor;
+            if damage > 0.0 {
+                vehicle_hits.write(VehicleHit {
+                    vehicle: body,
+                    damage,
                     attacker: attacker.clone(),
                 });
             }
@@ -575,13 +610,9 @@ fn trigger_mines(
                     .iter()
                     .find(|(soldier, target, controlled_by)| {
                         let team = teams.get(controlled_by.0).ok().copied();
-                        let offset = target.position + Vec3::Y * 0.9 - motion.position;
-                        let ahead = Vec3::new(offset.x, 0.0, offset.z).angle_between(motion.facing()).to_degrees();
                         *soldier != live.shooter
                             && (team.is_none() || team != owner_team)
-                            && offset.length() <= trigger.radius
-                            && target.velocity.length() >= trigger.min_speed
-                            && (trigger.angle <= 0.0 || ahead <= trigger.angle)
+                            && in_trigger(trigger, motion, target.position + Vec3::Y * 0.9, target.velocity.length())
                     })
                     .map(|(_, _, controlled_by)| {
                         players.get(controlled_by.0).map_or("a soldier".to_string(), |p| p.name.clone())
@@ -678,25 +709,30 @@ fn age_smoke(mut commands: Commands, time: Res<Time>, mut clouds: Query<(Entity,
     }
 }
 
-/// Explosions hurt every soldier nearby, less with distance, by the blast's material
-/// against the soldier's.
+/// Explosions hurt every soldier and vehicle nearby, less with distance, by the blast's
+/// material against the soldier's or the vehicle's blast sensitivity. Hulls shield those
+/// inside closed seats.
 fn explode(
     mut explosions: MessageReader<Explosion>,
     materials: Option<Res<Materials>>,
-    soldiers: Query<(Entity, &SoldierMotion), With<Soldier>>,
+    soldiers: Query<(Entity, &SoldierMotion, Option<&Seated>), With<Soldier>>,
+    vehicles: Query<(Entity, &Position, &VehicleData, &VehicleHealth)>,
     mut hits: MessageWriter<SoldierHit>,
+    mut vehicle_hits: MessageWriter<VehicleHit>,
 ) {
     for explosion in explosions.read() {
         let factor = materials
             .as_ref()
             .map_or(1.0, |m| m.0.damage_mod(explosion.material, SOLDIER_ARMOR_MATERIAL));
-        if factor <= 0.0 {
-            continue;
-        }
-        for (soldier, motion) in &soldiers {
+        for (soldier, motion, seated) in &soldiers {
+            let exposed = seated.is_none_or(|s| {
+                vehicles
+                    .get(s.vehicle)
+                    .is_ok_and(|(_, _, data, _)| data.0.desc.seats.get(s.seat as usize).is_some_and(|seat| seat.open))
+            });
             let center = motion.position + Vec3::Y * 0.9;
             let distance = center.distance(explosion.position);
-            if distance < explosion.radius && explosion.reaches(center) {
+            if factor > 0.0 && exposed && distance < explosion.radius && explosion.reaches(center) {
                 hits.write(SoldierHit {
                     victim: soldier,
                     damage: explosion.damage * (1.0 - distance / explosion.radius) * factor,
@@ -704,6 +740,78 @@ fn explode(
                     attacker: explosion.attacker.clone(),
                 });
             }
+        }
+        // Blasts without a material of their own count as BF2's blast wave.
+        let material = if explosion.material == 0 { BLAST_MATERIAL } else { explosion.material };
+        for (vehicle, position, data, health) in &vehicles {
+            if health.wrecked() {
+                continue;
+            }
+            let desc = &data.0.desc;
+            // Measured to the hull's surface, roughly.
+            let reach = Vec3::from_array(desc.physics.bounds[1]).length().min(4.0);
+            let distance = (position.0.distance(explosion.position) - reach).max(0.0);
+            let sensitivity = armor_damage_modifier(material, desc.blast_material);
+            if distance < explosion.radius && sensitivity > 0.0 && explosion.reaches(position.0) {
+                vehicle_hits.write(VehicleHit {
+                    vehicle,
+                    damage: explosion.damage * (1.0 - distance / explosion.radius) * sensitivity,
+                    attacker: explosion.attacker.clone(),
+                });
+            }
+        }
+    }
+}
+
+/// Vehicles that can be hurt, with their crews (who decide whose side a vehicle is on).
+#[derive(SystemParam)]
+struct VehicleTargets<'w, 's> {
+    vehicles: Query<'w, 's, (&'static VehicleData, &'static mut VehicleHealth)>,
+    seated: Query<'w, 's, (&'static Seated, &'static ControlledBy)>,
+}
+
+/// Damage to vehicles, unless their crew is on the attacker's side (without friendly fire).
+/// A vehicle out of hit points is wrecked by `vehicles`, which kills its crew.
+fn damage_vehicles(
+    settings: Res<ServerSettings>,
+    host: Option<Res<HostPlayer>>,
+    clients: Query<&PlayerClient>,
+    teams: Query<&Team>,
+    mut hits: MessageReader<VehicleHit>,
+    mut targets: VehicleTargets,
+    mut confirmations: MessageWriter<ToClients<HitConfirmed>>,
+) {
+    for hit in hits.read() {
+        let attacker_team = hit.attacker.player.and_then(|p| teams.get(p).ok()).copied();
+        let friendly = targets
+            .seated
+            .iter()
+            .filter(|(seated, _)| seated.vehicle == hit.vehicle)
+            .any(|(_, crew)| attacker_team.is_some() && teams.get(crew.0).ok().copied() == attacker_team);
+        if friendly && !settings.friendly_fire {
+            continue;
+        }
+        let Ok((data, mut health)) = targets.vehicles.get_mut(hit.vehicle) else {
+            continue;
+        };
+        if health.wrecked() {
+            continue;
+        }
+        health.current = (health.current - hit.damage).max(0.0);
+        info!(
+            "{} took {:.1} damage from {}, {:.0} left",
+            data.0.desc.name, hit.damage, hit.attacker.weapon, health.current
+        );
+        if let Some(client) = hit.attacker.player.and_then(|p| player_client(p, &clients, host.as_deref())) {
+            confirmations.write(ToClients {
+                targets: SendTargets::Single(client),
+                message: HitConfirmed {
+                    victim: hit.vehicle,
+                    damage: hit.damage,
+                    headshot: false,
+                    killed: health.wrecked(),
+                },
+            });
         }
     }
 }

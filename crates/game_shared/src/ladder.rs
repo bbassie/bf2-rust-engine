@@ -2,7 +2,8 @@
 //!
 //! The importer marks ladder parts of objects; loading gives their entity a [`LadderPart`],
 //! and this module adds a box on the [`GameLayer::Ladder`] layer around the ladder's
-//! collision mesh (a thin plate against the wall; the rungs stick out on its local -Z side).
+//! collision mesh: a thin plate along the rails, with the wall brackets reaching back to its
+//! local -Z (0.5 m for BF2's house ladders), so it is climbed on its +Z side.
 //! Movement finds ladders through spatial queries, so client prediction and the server
 //! always agree without replicating anything.
 
@@ -50,11 +51,11 @@ pub struct Ladder {
 
 impl Ladder {
     pub fn from_box(position: Vec3, rotation: Quat, half_extents: Vec3) -> Self {
-        let front = rotation * Vec3::NEG_Z;
+        let front = rotation * Vec3::Z;
         Self {
             center: position,
             up: rotation * Vec3::Y,
-            front: Vec3::new(front.x, 0.0, front.z).normalize_or(Vec3::NEG_Z),
+            front: Vec3::new(front.x, 0.0, front.z).normalize_or(Vec3::Z),
             side: rotation * Vec3::X,
             half: half_extents,
         }

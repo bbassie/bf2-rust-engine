@@ -33,6 +33,9 @@ struct Cli {
     /// Number of bots.
     #[arg(long, default_value_t = 0)]
     bots: u32,
+    /// Bot skill, 0..1: aim and reaction time.
+    #[arg(long, default_value_t = 0.5)]
+    bot_skill: f32,
     /// Accept players from other machines (listen on all interfaces). Without it only
     /// clients on this machine can connect.
     #[arg(long)]
@@ -70,6 +73,7 @@ fn main() -> AppExit {
                 mode: cli.mode,
                 size: cli.size,
                 bots: cli.bots,
+                bot_skill: cli.bot_skill.clamp(0.0, 1.0),
                 max_clients: cli.max_players,
                 port: cli.port,
                 network: true,

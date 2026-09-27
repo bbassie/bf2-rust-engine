@@ -9,6 +9,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub mod ai;
 pub mod effect;
 pub mod level;
 pub mod material;
@@ -19,6 +20,7 @@ pub mod vegetation;
 pub mod vehicle;
 pub mod weapon;
 
+pub use ai::*;
 pub use effect::*;
 pub use level::*;
 pub use material::*;

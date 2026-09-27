@@ -31,6 +31,9 @@ impl Plugin for ParticleRenderPlugin {
 const CHUNK: usize = 2048;
 /// Floats per particle in the storage buffer (see `Particle` in the shader).
 const FLOATS: usize = 20;
+const STRIDE: usize = FLOATS * 4;
+/// Smallest buffer, in particles.
+const MIN_CAPACITY: usize = 256;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct ParticleMaterial {
@@ -88,7 +91,7 @@ pub struct GpuParticle {
 }
 
 impl GpuParticle {
-    fn write(&self, out: &mut Vec<u8>) {
+    fn write(&self, out: &mut [u8]) {
         let floats: [f32; FLOATS] = [
             self.position.x,
             self.position.y,
@@ -111,10 +114,16 @@ impl GpuParticle {
             self.params.z,
             self.params.w,
         ];
-        for value in floats {
-            out.extend_from_slice(&value.to_le_bytes());
+        for (bytes, value) in out.chunks_exact_mut(4).zip(floats) {
+            bytes.copy_from_slice(&value.to_le_bytes());
         }
     }
+}
+
+/// Orders floats like their values when compared as integers.
+fn sort_key(value: f32) -> u32 {
+    let bits = value.to_bits();
+    if bits >> 31 == 1 { !bits } else { bits | 1 << 31 }
 }
 
 /// What a frame draws: particles by texture and render layer, collected by the simulation.
@@ -122,6 +131,8 @@ impl GpuParticle {
 pub struct Batches {
     batches: HashMap<(AssetId<Image>, usize), Batch>,
     chunk_meshes: Vec<Handle<Mesh>>,
+    /// CPU time of the last upload (sorting and writing the buffers).
+    pub upload_ms: f32,
 }
 
 struct Batch {
@@ -133,8 +144,9 @@ struct Batch {
     capacity: usize,
     chunks: Vec<Entity>,
     particles: Vec<GpuParticle>,
-    /// Distance along the view of each particle, to sort far to near.
-    depths: Vec<(f32, u32)>,
+    /// Distance along the view of each particle (as a sort key), to sort far to near.
+    depths: Vec<(u32, u32)>,
+    depth_sum: f32,
     shown: usize,
 }
 
@@ -150,9 +162,11 @@ impl Batches {
             chunks: Vec::new(),
             particles: Vec::new(),
             depths: Vec::new(),
+            depth_sum: 0.0,
             shown: 0,
         });
-        batch.depths.push((depth, batch.particles.len() as u32));
+        batch.depths.push((sort_key(depth), batch.particles.len() as u32));
+        batch.depth_sum += depth;
         batch.particles.push(particle);
     }
 
@@ -175,18 +189,19 @@ pub fn upload(
     let (camera_position, forward) = camera
         .single()
         .map_or((Vec3::ZERO, Vec3::NEG_Z), |c| (c.translation(), c.forward().as_vec3()));
-    let Batches { batches, chunk_meshes } = &mut *batches;
+    let started = std::time::Instant::now();
+    let Batches { batches, chunk_meshes, upload_ms } = &mut *batches;
     for batch in batches.values_mut() {
         let count = batch.particles.len();
         if count == 0 && batch.shown == 0 {
             continue;
         }
-        if count > batch.capacity {
-            batch.capacity = count.next_power_of_two().max(256);
-            let buffer = buffers.add(ShaderBuffer::new(
-                &vec![0; batch.capacity * FLOATS * 4],
-                RenderAssetUsages::default(),
-            ));
+        // Room for twice the particles; shrinks when far too big (the whole buffer is
+        // uploaded every frame).
+        let wanted = (count * 2).next_power_of_two().max(MIN_CAPACITY);
+        if count > batch.capacity || (wanted * 2 < batch.capacity && batch.capacity > MIN_CAPACITY) {
+            batch.capacity = wanted;
+            let buffer = buffers.add(ShaderBuffer::new(&vec![0; batch.capacity * STRIDE], RenderAssetUsages::default()));
             match &batch.material {
                 Some(material) => {
                     if let Some(mut material) = materials.get_mut(material) {
@@ -207,12 +222,11 @@ pub fn upload(
         };
 
         // Far to near, so alpha blending comes out right.
-        batch.depths.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-        let mut data = Vec::with_capacity(batch.capacity * FLOATS * 4);
-        for &(_, index) in &batch.depths {
-            batch.particles[index as usize].write(&mut data);
+        batch.depths.sort_unstable_by_key(|&(depth, _)| std::cmp::Reverse(depth));
+        let mut data = vec![0; batch.capacity * STRIDE];
+        for (slot, &(_, index)) in data.chunks_exact_mut(STRIDE).zip(&batch.depths) {
+            batch.particles[index as usize].write(slot);
         }
-        data.resize(batch.capacity * FLOATS * 4, 0);
         if let Some(mut buffer) = buffers.get_mut(buffer) {
             buffer.data = Some(data);
         }
@@ -240,11 +254,7 @@ pub fn upload(
                     .id(),
             );
         }
-        let center = if count > 0 {
-            batch.depths.iter().map(|d| d.0).sum::<f32>() / count as f32
-        } else {
-            0.0
-        };
+        let center = batch.depth_sum / count.max(1) as f32;
         for (index, &chunk) in batch.chunks.iter().enumerate() {
             let Ok((mut visibility, mut transform)) = chunks.get_mut(chunk) else {
                 continue;
@@ -258,7 +268,9 @@ pub fn upload(
         batch.shown = count;
         batch.particles.clear();
         batch.depths.clear();
+        batch.depth_sum = 0.0;
     }
+    *upload_ms = started.elapsed().as_secs_f32() * 1000.0;
 }
 
 /// Quads `first * CHUNK ..` as `(particle, corner u, corner v)` positions.

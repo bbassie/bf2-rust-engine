@@ -448,6 +448,15 @@ mod tests {
     }
 
     #[test]
+    fn walks_straight_lines_in_the_open_only() {
+        let grid = grid(wall(Some((4.1, 5.1))));
+        let y = Vec3::ZERO;
+        assert!(grid.walkable_line(y + Vec3::new(-10.0, 0.0, -5.0), y + Vec3::new(-2.0, 0.0, -3.0)));
+        // Through the wall: the other side is reachable, but only through the door.
+        assert!(!grid.walkable_line(y + Vec3::new(-10.0, 0.0, -5.0), y + Vec3::new(-10.0, 0.0, 5.0)));
+    }
+
+    #[test]
     fn walls_separate_regions() {
         let grid = grid(wall(None));
         let path = grid

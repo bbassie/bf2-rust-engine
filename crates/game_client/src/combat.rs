@@ -6,7 +6,7 @@ use std::{collections::VecDeque, sync::Arc};
 
 use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
-use game_data::{FireMode, WeaponDesc};
+use game_data::{FireKind, FireMode, WeaponDesc};
 use game_shared::{
     input::Buttons,
     physics::GameLayer,
@@ -104,13 +104,20 @@ struct LocalWeapon {
     ammo: Vec<[u16; 2]>,
     /// A throw was on its way out of the hand last tick.
     launching: bool,
+    /// Seconds the grenade or mine in hand has been used up.
+    used_up_for: f32,
 }
+
+/// Seconds after the last grenade or mine is thrown until the primary weapon comes out.
+const TOGGLE_WHEN_USED_UP: f32 = 0.8;
 
 /// A shot we predicted this tick, spawned as visuals in `Update` (and heard, see `audio`).
 #[derive(Message)]
 pub(crate) struct LocalShot {
     pub direction: Vec3,
     pub weapon: Arc<WeaponDesc>,
+    /// Which of a shotgun's pellets this is (0 for everything else).
+    pub pellet: u32,
 }
 
 /// A grenade, rocket or charge we predicted leaving our hands this tick (see
@@ -241,6 +248,7 @@ fn predict_local_shots(
     spatial: SpatialQuery,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
+    mut selection: ResMut<WeaponSelection>,
     mut soldier: Query<
         (&SoldierMotion, &Loadout, Ref<Inventory>, &mut LocalWeapon),
         (With<LocalSoldier>, Without<game_shared::vehicle::Seated>),
@@ -291,6 +299,16 @@ fn predict_local_shots(
     feedback.reloading = state.reload > 0.0;
     feedback.cooking = state.wind_up.is_some();
     feedback.detonator = state.detonator;
+    // Out of grenades or mines: back to the primary weapon once the throw is over (BF2
+    // `ammo.toggleWhenNoAmmo`).
+    let used_up = weapon.fire.kind == FireKind::Thrown && ammo == [0, 0] && state.launch.is_none();
+    local.used_up_for = if used_up { local.used_up_for + dt } else { 0.0 };
+    if local.used_up_for > TOGGLE_WHEN_USED_UP && selection.index == active {
+        let primary = loadout.weapons.iter().position(|w| armory.weapon(w).is_some_and(|w| w.slot == 3));
+        if let Some(primary) = primary {
+            selection.index = primary as u8;
+        }
+    }
     // A throw animates from letting go, before the grenade leaves the hand.
     let launching = state.launch.is_some();
     let released = launching && !local.launching;
@@ -305,7 +323,7 @@ fn predict_local_shots(
     let view = Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0);
     let direction = spread_direction(view * Vec3::NEG_Z, cone, (fastrand::f32(), fastrand::f32()));
     let pellets = weapon.projectiles_per_shot.max(1);
-    for _ in 0..pellets {
+    for pellet in 0..pellets {
         let direction = match pellets {
             1 => direction,
             _ => spread_direction(direction, weapon.pellet_spread, (fastrand::f32(), fastrand::f32())),
@@ -313,6 +331,7 @@ fn predict_local_shots(
         shots.write(LocalShot {
             direction,
             weapon: weapon.clone(),
+            pellet,
         });
     }
     if weapon.projectile.is_object() {
@@ -341,7 +360,7 @@ pub(crate) fn spawn_tracer(
     ignore: Option<Entity>,
     library: Option<&EffectLibrary>,
 ) {
-    if weapon.projectile.velocity <= 0.0 || weapon.projectile.is_object() {
+    if weapon.projectile.velocity <= 0.0 {
         return;
     }
     commands.spawn((
@@ -383,7 +402,14 @@ fn spawn_local_shots(
         // From roughly where the muzzle is, just below and right of the eye.
         let origin = camera.translation + camera.rotation * Vec3::new(0.12, -0.1, -0.4);
         let hitbox = soldier.map(|(_, hitbox)| hitbox.entity);
-        spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon, hitbox, library);
+        // Grenades, rockets and charges are drawn as themselves (`render::projectiles`).
+        if !shot.weapon.projectile.is_object() {
+            spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon, hitbox, library);
+        }
+        // Shotguns fire several pellets but flash once.
+        if shot.pellet > 0 {
+            continue;
+        }
         let Some((muzzle, offset)) = library.and_then(|l| l.muzzle(&shot.weapon.name)) else {
             continue;
         };
@@ -425,7 +451,9 @@ fn receive_shots(
         };
         // Tracer from the gun rather than the eye.
         let gun = shot.origin - Vec3::Y * 0.15;
-        spawn_tracer(&mut commands, &assets, gun, shot.direction, weapon, hitbox.map(|h| h.entity), library);
+        if !weapon.projectile.is_object() {
+            spawn_tracer(&mut commands, &assets, gun, shot.direction, weapon, hitbox.map(|h| h.entity), library);
+        }
         // Shotguns fire several pellets but flash once.
         if flashed.contains(&shot.soldier) {
             continue;

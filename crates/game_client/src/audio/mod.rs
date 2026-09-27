@@ -11,8 +11,9 @@
 //! - [`footsteps`]: every soldier's steps by stance and speed on the surface under them,
 //!   landings and ladder rungs.
 //! - [`ambience`]: the level's looping background sounds, fading in around their areas.
+//! - [`vehicles`]: engines following the revs while someone drives.
 //!
-//! Sounds come from `sounds.ron` (shared: footsteps, impacts, voices), the weapons'
+//! Sounds come from `sounds.ron` (shared: footsteps, impacts, voices), the weapon and vehicle
 //! descriptions and `levels/<name>/sounds.ron` (ambience), all written by the importer.
 //! `RUST_LOG=info,audio=debug` logs every sound started or dropped, with its gain.
 
@@ -26,6 +27,7 @@ use crate::{camera::CameraSystems, prediction::RenderStateSystems};
 
 mod ambience;
 mod footsteps;
+mod vehicles;
 mod voices;
 mod weapons;
 
@@ -51,6 +53,7 @@ impl Plugin for AudioPlugin {
             weapons::WeaponAudioPlugin,
             footsteps::FootstepPlugin,
             ambience::AmbiencePlugin,
+            vehicles::VehicleAudioPlugin,
         ));
     }
 }

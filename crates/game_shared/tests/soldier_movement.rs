@@ -236,7 +236,9 @@ fn steps_up_ledges() {
             let m = settled(&mut app, Vec3::ZERO);
             let trace = walk(&mut app, m, 90, Buttons::empty());
             let last = trace.last().unwrap();
-            if (last.position.y - (height + 0.01)).abs() >= 0.01 || trace.iter().any(|t| !t.grounded) {
+            if (last.position.y - (height + 0.01)).abs() >= 0.01
+                || trace.iter().any(|t| !t.grounded)
+            {
                 print_trace(&format!("step {height} trimesh {trimesh}"), &trace[..40]);
             }
             assert!(
@@ -527,6 +529,23 @@ fn replays_identically() {
         let b = simulate(&mut app, a[from], frames[from + 1..].to_vec());
         assert_eq!(&a[from + 1..], &b[..], "replay from tick {from} diverged");
     }
+
+    // On and off a ladder too.
+    let mut app = ladder_world();
+    let m = settled(&mut app, Vec3::new(0.1, 0.0, 0.0));
+    let mut frames = vec![input(0.0, 1.0, Buttons::empty()); 120];
+    frames.push(input(0.0, 1.0, Buttons::JUMP));
+    frames.extend(vec![input(0.0, 1.0, Buttons::empty()); 200]);
+    let a = simulate(&mut app, m, frames.clone());
+    assert!(a.iter().any(|t| t.climbing));
+    for from in [40, 100, 125, 200] {
+        let b = simulate(&mut app, a[from], frames[from + 1..].to_vec());
+        assert_eq!(
+            &a[from + 1..],
+            &b[..],
+            "ladder replay from tick {from} diverged"
+        );
+    }
 }
 
 #[test]
@@ -670,13 +689,12 @@ fn falls_off_ledges() {
 /// A 4 m high building (roof from z = -2 to -10) with a ladder on its wall facing +Z.
 fn ladder_world() -> App {
     let mut app = world(&[block([-5.0, 0.0, -10.0], [10.0, 4.0, 8.0])], true);
-    // Like BF2's ladder collision: a thin plate against the wall, climbed on its local -Z
-    // side, which faces away from the wall.
+    // Like BF2's ladder collision: a thin plate along the rails, 0.5 m out from the wall on
+    // its brackets, climbed on its local +Z side.
     app.world_mut().spawn((
         RigidBody::Static,
         Collider::cuboid(0.52, 4.3, 0.03),
-        Transform::from_xyz(0.0, 1.85, -1.98)
-            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+        Transform::from_xyz(0.0, 1.85, -1.5),
         CollisionLayers::new(GameLayer::World, LayerMask::ALL),
         LadderPart,
     ));
@@ -791,11 +809,77 @@ fn rests_on_a_sill_against_a_wall() {
     let trace = simulate(&mut app, m, frames);
     print_trace("sill", &trace[35..100]);
     let last = trace.last().unwrap();
-    assert!(last.grounded && last.position.y > 0.5, "didn't get onto the sill: {last:?}");
+    assert!(
+        last.grounded && last.position.y > 0.5,
+        "didn't get onto the sill: {last:?}"
+    );
     let settled = &trace[trace.len() - 30..];
-    if let Some(t) = settled.iter().find(|t| t.position != last.position || t.velocity != last.velocity) {
-        panic!("jitters on the sill:
+    if let Some(t) = settled
+        .iter()
+        .find(|t| t.position != last.position || t.velocity != last.velocity)
+    {
+        panic!(
+            "jitters on the sill:
 {t:?}
-{last:?}");
+{last:?}"
+        );
     }
+}
+
+/// Karkand's eastern barrack, from the imported level (skipped without it): jumping onto
+/// its 0.6 m ledge and pushing against the wall above used to jitter.
+#[test]
+fn rests_on_karkand_barrack_ledge() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../imported/objects/staticobjects/military/buildings/mi_barrack_mech/meshes/mi_barrack_mech.collision.glb",
+    );
+    let Ok(bytes) = std::fs::read(&path) else {
+        println!("skipped: {} not imported", path.display());
+        return;
+    };
+    let gltf = gltf::Gltf::from_slice(&bytes).unwrap();
+    let blob = gltf.blob.as_deref().unwrap();
+    let mesh = gltf
+        .meshes()
+        .find(|m| m.name() == Some("part0_soldier"))
+        .unwrap();
+    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+    for primitive in mesh.primitives() {
+        let reader = primitive.reader(|_| Some(blob));
+        let base = vertices.len() as u32;
+        vertices.extend(reader.read_positions().unwrap().map(Vec3::from_array));
+        let flat: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
+        indices.extend(
+            flat.chunks_exact(3)
+                .map(|t| [base + t[0], base + t[1], base + t[2]]),
+        );
+    }
+    let mut app = physics_app();
+    let layers = CollisionLayers::new(GameLayer::World, LayerMask::ALL);
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(200.0, 1.0, 200.0),
+        Transform::from_xyz(226.0, 152.706 - 0.5, -185.0),
+        layers,
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::trimesh(vertices, indices),
+        Transform::from_xyz(228.5, 154.91, -189.7)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+        layers,
+    ));
+    let mut app = ready(app);
+    let m = settled(&mut app, Vec3::new(226.73, 153.0, -181.0));
+    let mut frames = vec![input(0.0, 1.0, Buttons::SPRINT); 90];
+    frames.push(input(0.0, 1.0, Buttons::SPRINT | Buttons::JUMP));
+    frames.extend(vec![input(0.0, 1.0, Buttons::SPRINT); 180]);
+    let trace = simulate(&mut app, m, frames);
+    let last = *trace.last().unwrap();
+    print_trace("barrack", &trace[trace.len() - 20..]);
+    let moving = trace[trace.len() - 60..]
+        .iter()
+        .filter(|t| t.position != last.position)
+        .count();
+    assert_eq!(moving, 0, "jitters on the ledge: {last:?}");
 }

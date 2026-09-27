@@ -172,7 +172,6 @@ impl BulletTracer<'_, '_> {
             if let (false, Some(ear)) = (cracked, listener) {
                 let along = (ear - position).dot(*dir).clamp(0.0, reach);
                 let closest = position + dir * along;
-                debug!(target: "audio", "TEMP segment {t:.2}: closest {:.1} m, travelled {travelled:.1}, hit {}", closest.distance(ear), hit.is_some());
                 if closest.distance(ear) < FLYBY_RADIUS && travelled + along > FLYBY_MIN_TRAVEL {
                     cracked = true;
                     self.flyby(projectile.material, closest, now + t + along / length * dt);

@@ -52,6 +52,7 @@ const CHUNK_SIZE: f32 = 16.0;
 /// Plants are drawn this much further than the level asks for (BF2's 30..75 m were tuned
 /// for 2005 hardware).
 const DISTANCE_SCALE: f32 = 1.25;
+const MAX_DISTANCE: f32 = 80.0;
 /// Fraction of the plants still drawn where they start to fade out.
 const KEEP_AT_FADE: f32 = 0.45;
 /// Chunk builds started per frame.
@@ -200,7 +201,7 @@ fn load_vegetation(
         lookup[material.id as usize] = Some(i as u8);
     }
     let atlas = asset_server.load(format!("imported://levels/{}/{}", level.desc.name, desc.atlas));
-    let view_distance = desc.view_distance * DISTANCE_SCALE;
+    let view_distance = (desc.view_distance * DISTANCE_SCALE).min(MAX_DISTANCE);
     commands.insert_resource(Undergrowth {
         data: Arc::new(PlantData {
             desc,
@@ -239,37 +240,30 @@ fn stream_undergrowth(
     };
 
     // Finished builds.
-    let finished: Vec<IVec2> = undergrowth
+    let finished: Vec<(IVec2, Option<Mesh>)> = undergrowth
         .building
         .iter_mut()
         .filter_map(|(key, task)| check_ready(task).map(|mesh| (*key, mesh)))
-        .map(|(key, mesh)| {
-            if !in_range(key) {
-                return key;
-            }
-            let entity = mesh.map(|mesh| {
-                let material = patch_material(undergrowth, &level, key, &asset_server, &mut materials);
-                commands
-                    .spawn((
-                        UndergrowthChunk,
-                        LevelEntity,
-                        Mesh3d(meshes.add(mesh)),
-                        MeshMaterial3d(material),
-                        Transform::from_translation(Vec3::new(
-                            key.x as f32 * CHUNK_SIZE,
-                            0.0,
-                            key.y as f32 * CHUNK_SIZE,
-                        )),
-                        NotShadowCaster,
-                    ))
-                    .id()
-            });
-            undergrowth.chunks.insert(key, entity);
-            key
-        })
         .collect();
-    for key in finished {
+    for (key, mesh) in finished {
         undergrowth.building.remove(&key);
+        if !in_range(key) {
+            continue;
+        }
+        let entity = mesh.map(|mesh| {
+            let material = patch_material(undergrowth, &level, key, &asset_server, &mut materials);
+            commands
+                .spawn((
+                    UndergrowthChunk,
+                    LevelEntity,
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(Vec3::new(key.x as f32 * CHUNK_SIZE, 0.0, key.y as f32 * CHUNK_SIZE)),
+                    NotShadowCaster,
+                ))
+                .id()
+        });
+        undergrowth.chunks.insert(key, entity);
     }
 
     // Chunks out of range.
