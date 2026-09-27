@@ -777,10 +777,11 @@ impl BotBrain {
                     && to.length() < 500.0
                     && motion.velocity.dot(to) > 0.97 * speed * to.length()
                     && w.is_enemy(projectile.player, me.team)
+                    && w.armory.weapon(&projectile.weapon).is_some_and(|d| d.projectile.explodes())
             });
             if incoming {
                 frame.buttons |= Buttons::COUNTERMEASURE;
-                ride.countermeasure_cooldown = 4.0;
+                ride.countermeasure_cooldown = 8.0;
                 team_stats.countermeasures += 1;
             }
         }

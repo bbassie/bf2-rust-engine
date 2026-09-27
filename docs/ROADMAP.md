@@ -116,7 +116,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - [x] Infantry navigation from our collision data: layered walkability grid, cached,
   background A*; stuck events down from ~250/min to 1-3/min
-- Path costs per vehicle class (in progress)
+- [x] Vehicle navigation from our collision data: a 1 m vehicle grid with path costs per vehicle
+  class (wheeled, tracked, amphibious: slopes, water depth, clearance for the vehicle's width,
+  BF2's road meshes), other vehicles driven around, connected areas per class; a water grid for
+  boats and an air map for aircraft; paths in 17-29 ms on background threads
 - [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
   orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
   settings, ladders in navigation
@@ -125,7 +128,14 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   flashbangs, tear gas and gas masks, repair vehicles and assets, throw bags
 - [x] Utility behaviours weighted like `AIBehaviours.ai`, BF2's weapon AI templates (ranges,
   firing poses)
-- Bots driving vehicles and flying through the same input channels as players (in progress)
+- [x] Bots in vehicles through the same use button, seat keys and inputs as players: squads take
+  transports, APCs and tanks to distant objectives (claimed seats, drivers wait for riders),
+  gunners join teammates' vehicles, stationary weapons are manned; pure pursuit driving with
+  stuck recovery, tanks stop to fight, gunners lead their targets; boats, transport helicopters
+  that land squads, attack helicopters that circle and fire, jets that take off and patrol;
+  countermeasures, getting out at the objective, when wrecked or stuck; infantry shoot exposed
+  crews, lay AT mines and use C4. Still rough: tight streets (2-5 stuck events per vehicle-minute
+  on Karkand), carrier jump jets, jet dogfights
 
 ## M5: Presentation
 
