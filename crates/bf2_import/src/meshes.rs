@@ -25,6 +25,8 @@ use crate::{
 /// Version of the visible mesh conversion; older `.glb` files are converted again.
 /// 3: static meshes carry their lightmap UVs (`_LIGHTMAP_UV`).
 const MESH_VERSION: u64 = 3;
+/// Version of rigged (vehicle) meshes, which also split BF2's UV-animated faces.
+const RIGGED_MESH_VERSION: u64 = 6;
 
 /// glTF vertex attribute with a static mesh's lightmap UVs (BF2's last UV set, as stored:
 /// no V flip), for meshes with at least 3 UV sets. The client registers it as a custom
@@ -164,7 +166,8 @@ impl<'a> MeshConverter<'a> {
     fn convert_mesh_inner(&self, key: String, geom: usize, lod: usize, suffix: &str, rigged: bool) -> Result<String> {
         let kind = MeshKind::from_path(&key).context("not a mesh file")?;
         let out_rel = format!("{}{suffix}.glb", key.rsplit_once('.').map_or(key.as_str(), |(s, _)| s));
-        if mesh_version(&self.out.join(&out_rel)).is_some_and(|v| v >= MESH_VERSION) {
+        let version = if rigged { RIGGED_MESH_VERSION } else { MESH_VERSION };
+        if mesh_version(&self.out.join(&out_rel)).is_some_and(|v| v >= version) {
             return Ok(out_rel);
         }
         let data = self.vfs.read(&key)?;
@@ -206,7 +209,7 @@ impl<'a> MeshConverter<'a> {
         let Some(lod) = mesh.geoms.get(geom).and_then(|g| g.lods.get(lod)) else {
             return doc;
         };
-        doc.extras = json!({ "bf2_mesh_version": MESH_VERSION });
+        doc.extras = json!({ "bf2_mesh_version": if rigged { RIGGED_MESH_VERSION } else { MESH_VERSION } });
 
         // Bundled meshes: one glTF mesh per part (vertices are part-local and placed by the
         // template hierarchy). Other kinds: a single mesh.
@@ -218,6 +221,10 @@ impl<'a> MeshConverter<'a> {
         let buckets = if rigged { 1 } else { part_count };
         let mut part_primitives: Vec<Vec<glb::Primitive>> = (0..buckets).map(|_| Vec::new()).collect();
 
+        let bands = match &blend {
+            Some(b) if rigged => uv_animation_bands(mesh, lod, b, &positions),
+            _ => HashMap::new(),
+        };
         for (material_index, material) in lod.materials.iter().enumerate() {
             let maps: Vec<(String, Option<String>)> = material
                 .texture_maps()
@@ -270,12 +277,45 @@ impl<'a> MeshConverter<'a> {
                 }),
             });
             let material_id = doc.materials.len() - 1;
+            let triangles: Vec<[u32; 3]> = mesh
+                .material_triangles(material)
+                .into_iter()
+                .filter(|tri| tri.iter().all(|&v| (v as usize) < positions.len()))
+                .collect();
+            // Rigged: faces BF2 animates through a UV matrix (tracks, wheel hubs) get a
+            // material of their own per matrix, so each can be scrolled.
+            let animated = match &blend {
+                Some(b) if rigged && material.technique.to_ascii_lowercase().contains("animateduv") => {
+                    Some(uv_animation_groups(b, &triangles, &positions, &uv_sets, &bands))
+                }
+                _ => None,
+            };
+            let mut group_materials: Vec<usize> = vec![material_id];
+            let mut group_of: HashMap<u16, usize> = HashMap::from([(0, 0)]);
+            for (key, animation) in animated.iter().flat_map(|a| &a.animations) {
+                let mut extras = doc.materials[material_id].extras.clone();
+                extras["bf2"]["uv_animation"] = animation.clone();
+                let base = &doc.materials[material_id];
+                let copy = glb::Material {
+                    name: format!("{}_uv{key}", base.name),
+                    base_color: base.base_color,
+                    base_color_uv: base.base_color_uv,
+                    normal: base.normal,
+                    alpha: base.alpha,
+                    double_sided: base.double_sided,
+                    extras,
+                };
+                doc.materials.push(copy);
+                group_of.insert(*key, group_materials.len());
+                group_materials.push(doc.materials.len() - 1);
+            }
+            let groups = group_materials.len();
 
-            // Remap the material's vertices into compact per-part primitives.
-            let mut remap: Vec<HashMap<u32, u32>> = vec![HashMap::new(); buckets];
-            let mut prims: Vec<glb::Primitive> = (0..buckets)
-                .map(|_| glb::Primitive {
-                    material: Some(material_id),
+            // Remap the material's vertices into compact per-part (and per UV matrix) primitives.
+            let mut remap: Vec<HashMap<u32, u32>> = vec![HashMap::new(); buckets * groups];
+            let mut prims: Vec<glb::Primitive> = (0..buckets * groups)
+                .map(|slot| glb::Primitive {
+                    material: Some(group_materials[slot % groups]),
                     uvs: vec![Vec::new(); uv_sets.len().min(2)],
                     extra_vec2: lightmap_set
                         .map(|_| vec![(LIGHTMAP_UV_ATTRIBUTE.to_string(), Vec::new())])
@@ -283,19 +323,18 @@ impl<'a> MeshConverter<'a> {
                     ..Default::default()
                 })
                 .collect();
-            for tri in mesh.material_triangles(material) {
-                if tri.iter().any(|&v| v as usize >= positions.len()) {
-                    continue;
-                }
+            for (t, tri) in triangles.iter().enumerate() {
                 let part_of = |v: u32| match (&blend, mesh.kind) {
                     (Some(b), MeshKind::Bundled) => (b[v as usize][0] as usize).min(part_count - 1),
                     _ => 0,
                 };
                 let part = if rigged { 0 } else { part_of(tri[0]) };
-                let prim = &mut prims[part];
+                let group = animated.as_ref().and_then(|a| group_of.get(&a.triangle_groups[t]).copied()).unwrap_or(0);
+                let slot = part * groups + group;
+                let prim = &mut prims[slot];
                 // Reverse winding: the Z mirror flips handedness.
                 for &v in [tri[0], tri[2], tri[1]].iter() {
-                    let index = *remap[part].entry(v).or_insert_with(|| {
+                    let index = *remap[slot].entry(v).or_insert_with(|| {
                         let vi = v as usize;
                         prim.positions.push(coords::position(positions[vi]));
                         if rigged {
@@ -326,9 +365,9 @@ impl<'a> MeshConverter<'a> {
                     prim.indices.push(index);
                 }
             }
-            for (part, prim) in prims.into_iter().enumerate() {
+            for (slot, prim) in prims.into_iter().enumerate() {
                 if !prim.indices.is_empty() {
-                    part_primitives[part].push(prim);
+                    part_primitives[slot / groups].push(prim);
                 }
             }
         }
@@ -568,6 +607,187 @@ fn normalize_or_up(v: [f32; 3]) -> [f32; 3] {
     } else {
         [0.0, 1.0, 0.0]
     }
+}
+
+/// A material's faces by the UV matrix BF2 animates them with (the fourth blend index), and
+/// for each group what the game needs to animate it like BF2 (`bf2.uv_animation` in the
+/// material extras): the matrix `index`; for scrolling faces (tracks, tread on wheel rims)
+/// the sign per UV axis that moves the texture backwards along the bottom (`flow`, from which
+/// way the UV runs along the length of the lowest faces; belts repeat their texture per link,
+/// so per face); for turning faces (wheel hubs, whose second UV set is the offset from the
+/// centre in the first) the `center` and the sign that turns them forwards (`spin`, from
+/// whether the UV mapping mirrors the side view). Turning faces are grouped by their centre,
+/// as a hub's rings turn about centres of their own.
+struct UvAnimationGroups {
+    /// Per triangle: its group's key, 0 for faces that don't move.
+    triangle_groups: Vec<u16>,
+    animations: Vec<(u16, serde_json::Value)>,
+}
+
+/// UV centres closer than this are one.
+const UV_CENTER_TOLERANCE: f32 = 0.003;
+
+/// The heights (lowest, highest) of the faces each UV matrix animates over the whole model
+/// (those on the hull where the belt runs there): a belt's lower run is at the bottom.
+fn uv_animation_bands(mesh: &VisMesh, lod: &bf2_formats::mesh::Lod, blend: &[[u8; 4]], positions: &[[f32; 3]]) -> HashMap<u8, (f32, f32)> {
+    let mut corners: HashMap<u8, (Vec<f32>, Vec<f32>)> = HashMap::new();
+    for material in lod.materials.iter().filter(|m| m.technique.to_ascii_lowercase().contains("animateduv")) {
+        for tri in mesh.material_triangles(material) {
+            if tri.iter().any(|&v| v as usize >= positions.len()) {
+                continue;
+            }
+            let [a, b, c] = tri.map(|v| blend[v as usize][3]);
+            let index = if b == c { b } else { a };
+            if index == 0 {
+                continue;
+            }
+            let entry = corners.entry(index).or_default();
+            for &v in &tri {
+                let y = coords::position(positions[v as usize])[1];
+                if blend[v as usize][0] == 0 { entry.0.push(y) } else { entry.1.push(y) }
+            }
+        }
+    }
+    corners
+        .into_iter()
+        .map(|(index, (hull, parts))| {
+            let heights = if hull.len() >= 10 { hull } else { parts };
+            let band = heights.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &y| (lo.min(y), hi.max(y)));
+            (index, band)
+        })
+        .collect()
+}
+
+fn uv_animation_groups(
+    blend: &[[u8; 4]],
+    triangles: &[[u32; 3]],
+    positions: &[[f32; 3]],
+    uv_sets: &[Vec<[f32; 2]>],
+    bands: &HashMap<u8, (f32, f32)>,
+) -> UvAnimationGroups {
+    let uv = |set: usize, v: usize| uv_sets.get(set).and_then(|s| s.get(v)).copied().map_or([0.0; 2], sanitize_uv);
+    let offset = |v: usize| uv(1, v).iter().any(|c| c.abs() > 1e-4);
+    // Turning corners: the centres (first UV set) they turn about, per matrix index.
+    let mut centers: Vec<(u8, [f32; 2])> = Vec::new();
+    let mut center_of = |index: u8, c: [f32; 2]| -> usize {
+        let near = |(i, k): &(u8, [f32; 2])| {
+            *i == index && (k[0] - c[0]).abs() < UV_CENTER_TOLERANCE && (k[1] - c[1]).abs() < UV_CENTER_TOLERANCE
+        };
+        match centers.iter().position(near) {
+            Some(n) => n,
+            None => {
+                centers.push((index, c));
+                centers.len() - 1
+            }
+        }
+    };
+    // Each face goes with the matrix most of its corners use; turning faces with the centre
+    // of their first turning corner. Keys: the index for scrolling, 16 + centre for turning.
+    let triangle_groups: Vec<u16> = triangles
+        .iter()
+        .map(|tri| {
+            let [a, b, c] = tri.map(|v| blend[v as usize][3]);
+            let index = if b == c { b } else { a };
+            if index == 0 {
+                return 0;
+            }
+            match tri.iter().map(|&v| v as usize).find(|&v| blend[v][3] == index && offset(v)) {
+                Some(v) => 16 + center_of(index, uv(0, v)) as u16,
+                None => index as u16,
+            }
+        })
+        .collect();
+    let mut keys: Vec<u16> = triangle_groups.iter().copied().filter(|k| *k != 0).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut animations = Vec::new();
+    for key in keys {
+        let mut vertices: Vec<usize> = triangles
+            .iter()
+            .zip(&triangle_groups)
+            .filter(|(_, g)| **g == key)
+            .flat_map(|(tri, _)| tri.map(|v| v as usize))
+            .collect();
+        vertices.sort_unstable();
+        vertices.dedup();
+        // Side view in our coordinates: z along the hull (forward is -z), y up.
+        let side = |v: usize| {
+            let p = coords::position(positions[v]);
+            (p[2], p[1])
+        };
+        let part = |v: usize| blend[v][0];
+        let animation = if key >= 16 {
+            let (index, center) = centers[(key - 16) as usize];
+            // Offsets from the centre against positions around each part's middle.
+            let mut middles: HashMap<u8, ((f32, f32), f32)> = HashMap::new();
+            for &v in vertices.iter().filter(|&&v| offset(v)) {
+                let (z, y) = side(v);
+                let entry = middles.entry(part(v)).or_default();
+                entry.0 = (entry.0.0 + z, entry.0.1 + y);
+                entry.1 += 1.0;
+            }
+            let mut m = [[0.0f32; 2]; 2];
+            for &v in vertices.iter().filter(|&&v| offset(v)) {
+                let ((sz, sy), n) = middles[&part(v)];
+                let (z, y) = side(v);
+                let (dz, dy) = (z - sz / n, y - sy / n);
+                let o = uv(1, v);
+                m[0][0] += o[0] * dz;
+                m[0][1] += o[0] * dy;
+                m[1][0] += o[1] * dz;
+                m[1][1] += o[1] * dy;
+            }
+            let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+            json!({
+                "index": index,
+                "center": center,
+                "spin": if det < 0.0 { -1.0 } else { 1.0 },
+            })
+        } else {
+            // The lowest faces: those on the hull if the belt runs there, else each part's.
+            let faces: Vec<[usize; 3]> = triangles
+                .iter()
+                .zip(&triangle_groups)
+                .filter(|(_, g)| **g == key)
+                .map(|(tri, _)| tri.map(|v| v as usize))
+                .collect();
+            let on_hull: Vec<[usize; 3]> = faces.iter().copied().filter(|f| f.iter().all(|&v| part(v) == 0)).collect();
+            let chosen = if on_hull.len() >= 10 { on_hull } else { faces };
+            let (low, high) = bands.get(&(key as u8)).copied().unwrap_or((f32::MIN, f32::MAX));
+            let quarter = (high - low) * 0.25;
+            let within = |f: &[usize; 3], below: bool| {
+                f.iter().all(|&v| if below { side(v).1 <= low + quarter } else { side(v).1 >= high - quarter })
+            };
+            // Along the bottom the texture must move backwards; faces only on top (the upper
+            // run of a belt) move forwards.
+            let on_bottom = chosen.iter().any(|f| within(f, true));
+            let reverse = if on_bottom { 1.0 } else { -1.0 };
+            let bottom = |f: &&[usize; 3]| within(f, on_bottom);
+            // How the UV changes along z within each face (x runs across the belt).
+            let mut along = [0.0f32; 2];
+            for face in chosen.iter().filter(bottom) {
+                let p = face.map(|v| coords::position(positions[v]));
+                let (dz1, dx1, dz2, dx2) = (p[1][2] - p[0][2], p[1][0] - p[0][0], p[2][2] - p[0][2], p[2][0] - p[0][0]);
+                let det = dz1 * dx2 - dz2 * dx1;
+                if det.abs() < 1e-6 {
+                    continue;
+                }
+                let t = face.map(|v| uv(0, v));
+                for (axis, total) in along.iter_mut().enumerate() {
+                    let (du1, du2) = (t[1][axis] - t[0][axis], t[2][axis] - t[0][axis]);
+                    *total += (du1 * dx2 - du2 * dx1) / det * det.abs();
+                }
+            }
+            // The texture must move towards +z (backwards) along the bottom.
+            let flow = |a: f32| if a > 0.0 { -reverse } else { reverse };
+            json!({
+                "index": key,
+                "flow": [flow(along[0]), flow(along[1])],
+            })
+        };
+        animations.push((key, animation));
+    }
+    UvAnimationGroups { triangle_groups, animations }
 }
 
 fn sanitize_uv(uv: [f32; 2]) -> [f32; 2] {

@@ -4,13 +4,16 @@
 //! one, its interior (BF2's cockpits and sights), shown instead to an occupant looking out of
 //! a closed seat. Models are rigged: each model file is one skinned mesh whose joints are the
 //! part entities, so geometry spanning parts (track belts) follows all of them; older imports
-//! draw one mesh per part through the static object pipeline.
+//! draw one mesh per part through the static object pipeline. Tracks animate like BF2's:
+//! the belt and wheel textures scroll, hub textures and drive sprockets turn with the
+//! distance each track has run (road wheels themselves stand still).
 
 use std::collections::HashMap;
 
 use bevy::{
     camera::visibility::NoFrustumCulling,
     gltf::Gltf,
+    math::Affine2,
     mesh::skinning::SkinnedMesh,
     prelude::*,
 };
@@ -19,7 +22,7 @@ use game_shared::{
     vehicle::{Seated, VehicleData, VehicleHealth, joint_rotation},
 };
 
-use super::materials::Bf2Materials;
+use super::materials::{Bf2Material, Bf2Materials};
 
 use crate::{
     camera::ThirdPerson,
@@ -36,7 +39,13 @@ impl Plugin for VehicleRenderPlugin {
             .add_systems(Update, spawn_rigs)
             .add_systems(
                 PostUpdate,
-                (pose_parts, show_interior, show_wrecks, play_armor_effects, hide_burnt_wrecks)
+                (
+                    (run_tracks, (pose_parts, scroll_tracks)).chain(),
+                    show_interior,
+                    show_wrecks,
+                    play_armor_effects,
+                    hide_burnt_wrecks,
+                )
                     .after(VehicleViewSystems)
                     .before(TransformSystems::Propagate),
             );
@@ -206,6 +215,48 @@ struct VehicleParts {
     spin: Vec<f32>,
 }
 
+/// How far each track has run, meters: per UV animation and per track wheel of the vehicle,
+/// at their side (the tracks run at different speeds while turning), and the heading last
+/// frame, for the turn rate.
+#[derive(Component, Default)]
+struct TrackTravel {
+    animations: Vec<f32>,
+    wheels: Vec<f32>,
+    heading: Option<f32>,
+}
+
+/// A primitive whose texture BF2 animates with the track (its own copy of the material),
+/// from its material's `bf2.uv_animation` extras.
+#[derive(Component)]
+struct UvAnimated {
+    vehicle: Entity,
+    material: Handle<Bf2Material>,
+    /// Index into the vehicle's `uv_animations`.
+    animation: usize,
+    /// Turning: the UV centre and which way is forwards; scrolling: which way per UV axis.
+    center: Option<Vec2>,
+    spin: f32,
+    flow: Vec2,
+}
+
+impl UvAnimated {
+    /// From a material's extras: the animation's slot in the vehicle's list, the flow, the
+    /// centre and the spin.
+    fn from_extras(extras: &str, desc: &game_data::VehicleDesc) -> Option<(usize, Vec2, Option<Vec2>, f32)> {
+        let value: serde_json::Value = serde_json::from_str(extras).ok()?;
+        let animation = &value["bf2"]["uv_animation"];
+        let index = animation["index"].as_u64()? as u8;
+        let slot = desc.uv_animations.iter().position(|a| a.index == index)?;
+        let pair = |v: &serde_json::Value| Some(Vec2::new(v[0].as_f64()? as f32, v[1].as_f64()? as f32));
+        Some((
+            slot,
+            pair(&animation["flow"]).unwrap_or(Vec2::ZERO),
+            pair(&animation["center"]),
+            animation["spin"].as_f64().unwrap_or(1.0) as f32,
+        ))
+    }
+}
+
 /// A rigged model of a vehicle: one skinned mesh whose joint `n` is `joints[n]` (the part
 /// drawing mesh index `n`). Joints no part draws collapse out of sight.
 #[derive(Component)]
@@ -294,7 +345,8 @@ fn spawn_parts(
 #[allow(clippy::too_many_arguments)]
 fn spawn_rigs(
     mut commands: Commands,
-    rigs: Query<(Entity, &VehicleRig)>,
+    rigs: Query<(Entity, &VehicleRig, &ChildOf)>,
+    vehicles: Query<&VehicleData>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<bevy::gltf::GltfMesh>>,
     skins: Res<Assets<bevy::gltf::GltfSkin>>,
@@ -302,7 +354,8 @@ fn spawn_rigs(
     mut materials: Bf2Materials,
     asset_server: Res<AssetServer>,
 ) {
-    for (entity, rig) in &rigs {
+    for (entity, rig, child_of) in &rigs {
+        let vehicle = child_of.parent();
         if let bevy::asset::LoadState::Failed(err) = asset_server.load_state(&rig.gltf) {
             warn!("vehicle model failed to load: {err}");
             commands.entity(entity).remove::<VehicleRig>();
@@ -342,9 +395,29 @@ fn spawn_rigs(
             let rigged = meshes
                 .get(&primitive.mesh)
                 .is_some_and(|m| m.attribute(Mesh::ATTRIBUTE_JOINT_INDEX).is_some());
+            // Track faces scroll on a material of their own.
+            let animated = vehicles.get(vehicle).ok().and_then(|data| {
+                let extras = primitive.material_extras.as_ref()?;
+                UvAnimated::from_extras(&extras.value, &data.0.desc)
+            });
+            let (material, animated) = match animated {
+                Some((animation, flow, center, spin)) => {
+                    let material = materials.duplicate(&material);
+                    let animated = UvAnimated {
+                        vehicle,
+                        material: material.clone(),
+                        animation,
+                        center,
+                        spin,
+                        flow,
+                    };
+                    (material, Some(animated))
+                }
+                None => (material, None),
+            };
             match (&skinned, rigged) {
                 (Some(skinned), true) => {
-                    commands.spawn((
+                    let mut mesh = commands.spawn((
                         Mesh3d(primitive.mesh.clone()),
                         MeshMaterial3d(material),
                         skinned.clone(),
@@ -352,6 +425,9 @@ fn spawn_rigs(
                         NoFrustumCulling,
                         ChildOf(entity),
                     ));
+                    if let Some(animated) = animated {
+                        mesh.insert(animated);
+                    }
                 }
                 _ => {
                     let part = rig.joints.get(&0).copied().unwrap_or(entity);
@@ -362,13 +438,95 @@ fn spawn_rigs(
     }
 }
 
+/// Runs each track on by what its side travelled this frame: the vehicle's speed plus its
+/// turn rate times the side's distance from the middle.
+fn run_tracks(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut vehicles: Query<(Entity, &VehicleView, &VehicleData, Option<&mut TrackTravel>)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, view, data, travel) in &mut vehicles {
+        let desc = &data.0.desc;
+        if desc.uv_animations.is_empty() && desc.track_wheels.is_empty() {
+            continue;
+        }
+        let Some(mut travel) = travel else {
+            commands.entity(entity).insert(TrackTravel {
+                animations: vec![0.0; desc.uv_animations.len()],
+                wheels: vec![0.0; desc.track_wheels.len()],
+                heading: None,
+            });
+            continue;
+        };
+        let heading = crate::vehicles::heading(view.transform.rotation);
+        let turn = travel.heading.replace(heading).map_or(0.0, |before| {
+            let d = (heading - before + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            if dt > 0.0 { d / dt } else { 0.0 }
+        });
+        let run = |side: f32| (view.speed + turn * side) * dt;
+        for (distance, animation) in travel.animations.iter_mut().zip(&desc.uv_animations) {
+            *distance += run(animation.side);
+        }
+        for (distance, wheel) in travel.wheels.iter_mut().zip(&desc.track_wheels) {
+            *distance += run(wheel.side);
+        }
+    }
+}
+
+/// Moves the track textures to where their track has run, like BF2's UV matrices: belts and
+/// wheel rims scroll (wrapping where their texture repeats), hubs turn about their centres.
+fn scroll_tracks(
+    animated: Query<&UvAnimated>,
+    vehicles: Query<(&VehicleData, &TrackTravel)>,
+    mut materials: ResMut<Assets<Bf2Material>>,
+) {
+    for animated in &animated {
+        let Ok((data, travel)) = vehicles.get(animated.vehicle) else {
+            continue;
+        };
+        let (Some(desc), Some(&distance)) = (
+            data.0.desc.uv_animations.get(animated.animation),
+            travel.animations.get(animated.animation),
+        ) else {
+            continue;
+        };
+        let transform = match (&desc.motion, animated.center) {
+            (game_data::UvMotion::Scroll { size, wrap }, None) => {
+                let axis = |i: usize| {
+                    if size[i] > 0.0 && wrap[i] > 0.0 { (distance / size[i]).rem_euclid(wrap[i]) } else { 0.0 }
+                };
+                Affine2::from_translation(Vec2::new(axis(0), axis(1)) * animated.flow)
+            }
+            (game_data::UvMotion::Spin { radius, scale }, Some(center)) => {
+                let angle = -animated.spin * distance / radius.max(0.05);
+                let scale = Vec2::from_array(*scale);
+                Affine2::from_translation(center)
+                    * Affine2::from_scale(scale)
+                    * Affine2::from_angle(angle)
+                    * Affine2::from_scale(scale.recip())
+                    * Affine2::from_translation(-center)
+            }
+            _ => continue,
+        };
+        if let Some(material) = materials.get(&animated.material)
+            && material.base.uv_transform == transform
+        {
+            continue;
+        }
+        if let Some(mut material) = materials.get_mut(&animated.material) {
+            material.base.uv_transform = transform;
+        }
+    }
+}
+
 fn pose_parts(
     time: Res<Time>,
-    mut vehicles: Query<(&VehicleView, &VehicleData, &mut VehicleParts)>,
+    mut vehicles: Query<(&VehicleView, &VehicleData, &mut VehicleParts, Option<&TrackTravel>)>,
     mut transforms: Query<&mut Transform>,
 ) {
     let dt = time.delta_secs();
-    for (view, data, mut parts) in &mut vehicles {
+    for (view, data, mut parts, travel) in &mut vehicles {
         let model = &data.0;
         let VehicleParts { parts, spin, .. } = &mut *parts;
         for (i, &entity) in parts.iter().enumerate() {
@@ -382,7 +540,9 @@ fn pose_parts(
         }
         for (wi, wheel) in model.desc.wheels.iter().enumerate() {
             let angle = &mut spin[wi];
-            *angle = (*angle - view.speed / wheel.radius.max(0.1) * dt) % std::f32::consts::TAU;
+            if wheel.turns {
+                *angle = (*angle - view.speed / wheel.radius.max(0.1) * dt) % std::f32::consts::TAU;
+            }
             let offset = view.wheels.get(wi).copied().unwrap_or(0.0);
             let Some(&entity) = parts.get(wheel.part as usize) else {
                 continue;
@@ -390,6 +550,16 @@ fn pose_parts(
             if let Ok(mut transform) = transforms.get_mut(entity) {
                 transform.translation.y -= offset;
                 transform.rotation *= Quat::from_rotation_x(*angle);
+            }
+        }
+        // Drive sprockets turn with their track.
+        for (wheel, distance) in model.desc.track_wheels.iter().zip(travel.map_or(&[][..], |t| t.wheels.as_slice())) {
+            let Some(&entity) = parts.get(wheel.part as usize) else {
+                continue;
+            };
+            if let Ok(mut transform) = transforms.get_mut(entity) {
+                let angle = (-distance / wheel.radius.max(0.05)) % std::f32::consts::TAU;
+                transform.rotation *= Quat::from_rotation_x(angle);
             }
         }
     }

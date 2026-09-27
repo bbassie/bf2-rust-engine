@@ -17,6 +17,8 @@ bitflags::bitflags! {
         const RELOAD = 1 << 7;
         /// Cycle the weapon's fire mode (single/burst/auto).
         const FIRE_MODE = 1 << 8;
+        /// In a vehicle: decoy flares or smoke grenades.
+        const COUNTERMEASURE = 1 << 9;
     }
 }
 

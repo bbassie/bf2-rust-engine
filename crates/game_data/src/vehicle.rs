@@ -57,6 +57,11 @@ pub struct VehicleDesc {
     pub armor_material: u32,
     #[serde(default)]
     pub blast_material: u32,
+    /// The faces direct hits land on, by material (front, sides, rear, tracks, glass): a
+    /// `.glb` with a mesh `part{N}` for part N (part space) and a primitive per material,
+    /// whose glTF material is named by its id. Hits missing them take `armor_material`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armor_mesh: Option<String>,
     /// What's left after destruction: one mesh per piece, piece `n` in place of the part
     /// drawn with mesh index `n` of the hull's model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +75,12 @@ pub struct VehicleDesc {
     pub parts: Vec<VehiclePart>,
     #[serde(default)]
     pub wheels: Vec<WheelDesc>,
+    /// How tracks scroll their textures and turn their wheel hubs (tracked vehicles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uv_animations: Vec<UvAnimationDesc>,
+    /// Drive sprockets and idlers: parts that turn with their track (`rotateAsAnimatedUV`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_wheels: Vec<TrackWheelDesc>,
     /// Seat 0 is the driver.
     #[serde(default)]
     pub seats: Vec<SeatDesc>,
@@ -345,6 +356,13 @@ pub struct EngineDesc {
     pub turn_rate: f32,
     /// Friction coefficients of the tyres or tracks: along and across the rolling direction.
     pub grip: [f32; 2],
+    /// Share of the grip left to a sliding tyre (BF2 `wheelLatMinDynamicFriction`).
+    #[serde(default = "one")]
+    pub slide_grip: f32,
+    /// BF2's automatic gearbox (`c_ETNewCar2` engines); without one the engine pushes with
+    /// `drive_force`, falling off towards the top speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gearbox: Option<GearboxDesc>,
 }
 
 impl Default for EngineDesc {
@@ -356,8 +374,39 @@ impl Default for EngineDesc {
             brake_force: 10000.0,
             turn_rate: 0.8,
             grip: [1.0, 1.0],
+            slide_grip: 1.0,
+            gearbox: None,
         }
     }
+}
+
+/// An automatic gearbox after BF2's `c_ETNewCar2`: the engine turns with the wheels through
+/// each gear's ratio, changes up and down at fixed shares of its top revs and pulls nothing
+/// while changing.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GearboxDesc {
+    /// Forward gears, first to top.
+    pub gears: Vec<GearDesc>,
+    pub reverse: GearDesc,
+    /// Changes up above this share of the top revs, down below this one (`setGearUp`,
+    /// `setGearDown`).
+    pub shift_up: f32,
+    pub shift_down: f32,
+    /// Seconds without drive while changing gear (`setGearChangeTime`).
+    pub shift_time: f32,
+    /// Idle revs as a share of the top revs (`newCar2.minRpm` / `maxRpm`).
+    pub idle: f32,
+    /// Force holding the vehicle back with the throttle closed, newtons
+    /// (`newCar2.engineBrakeTorque`).
+    pub engine_brake: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct GearDesc {
+    /// Speed at the top revs, m/s.
+    pub top_speed: f32,
+    /// Drive force at full throttle, newtons (all wheels).
+    pub force: f32,
 }
 
 /// One node of the vehicle's part tree.
@@ -460,6 +509,39 @@ pub struct WheelDesc {
     /// Suspension stiffness and damping as tuned in BF2 (`setStrength`, `setDamping`).
     pub strength: f32,
     pub damping: f32,
+    /// The model turns with the wheel; tank road wheels (BF2 `rotateUV`) stand still and
+    /// scroll their texture instead, as the track belt around them is skinned to them.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub turns: bool,
+}
+
+/// BF2's UV animation of one track side (`animatedUVTranslation*`, `animatedUVRotation*` on
+/// its wheels): the model's faces that name UV matrix `index` scroll or turn as the track
+/// moves (which way is in their material's `bf2.uv_animation` extras).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UvAnimationDesc {
+    pub index: u8,
+    /// The track side that drives it: its wheels' x in hull space.
+    pub side: f32,
+    pub motion: UvMotion,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum UvMotion {
+    /// The texture moves one UV unit per `size` meters of track along each axis, wrapping
+    /// at `wrap` (`animatedUVTranslationSize`, `animatedUVTranslationMax`; 0: still).
+    Scroll { size: [f32; 2], wrap: [f32; 2] },
+    /// The texture turns with a wheel of `radius`, in UV space scaled by `scale`
+    /// (`animatedUVRotationRadius`, `animatedUVRotationScale`).
+    Spin { radius: f32, scale: [f32; 2] },
+}
+
+/// A part that turns with its track like a wheel of `radius` (drive sprockets).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TrackWheelDesc {
+    pub part: u32,
+    pub side: f32,
+    pub radius: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -525,6 +607,22 @@ pub struct VehicleWeaponDesc {
     /// The sight drawn over the view from its seat (BF2's vehicle HUD for the weapon).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sight: Vec<HudPicture>,
+    /// Countermeasures (BF2's `PIFlareFire` launchers: decoy flares, smoke grenades), fired
+    /// by the countermeasure key instead of a trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub countermeasure: Option<CountermeasureDesc>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CountermeasureDesc {
+    /// Rounds per press (`fire.burstSize`).
+    pub burst: u32,
+    /// Where the rounds leave in turn (the launcher's barrels), part space; none: the muzzle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub barrels: Vec<crate::Placement>,
+    /// Decoy flares: heat seekers aimed at the vehicle lose it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decoy: bool,
 }
 
 /// A picture of a HUD overlay, placed on BF2's 800x600 HUD screen (centred on wider screens,
@@ -596,4 +694,12 @@ fn is_zero(v: &u32) -> bool {
 
 fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }

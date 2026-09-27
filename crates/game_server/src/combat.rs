@@ -32,7 +32,7 @@ use game_shared::{
     revive::{Downed, WRECK_HIT_POINTS},
     soldier::{Health, Hitbox, Soldier, SoldierMotion},
     statics::Destructible,
-    vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
+    vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, VehicleState, armor_damage_modifier},
     weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, damage_at, spread_direction},
 };
 
@@ -40,6 +40,7 @@ use crate::{
     AppliedInput, HostPlayer, PlayerClient, ServerSettings, ServerSimSystems,
     abilities::{BleedOut, Deaths, hurts_downed},
     destruction::Materials,
+    vehicles::Decoy,
 };
 
 pub struct CombatPlugin;
@@ -579,7 +580,7 @@ fn simulate_projectiles(
         (Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>),
         (With<Soldier>, Without<Downed>),
     >,
-    vehicles: Query<(&VehicleData, &Position, &LinearVelocity)>,
+    vehicles: Query<(&VehicleData, &Position, &LinearVelocity, &Rotation, Option<&VehicleState>, Option<&Decoy>)>,
     materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
     mut soldier_hits: MessageWriter<SoldierHit>,
@@ -671,7 +672,11 @@ fn simulate_projectiles(
         if let Some(target) = live.target {
             // Heat seeking: towards where the aircraft will be, until it slips out of view.
             match vehicles.get(target) {
-                Ok((_, position, velocity)) => {
+                Ok((.., Some(decoy))) if decoy.active(time.elapsed_secs()) => {
+                    info!("{} lost its target to decoy flares", weapon.name);
+                    live.target = None;
+                }
+                Ok((_, position, velocity, ..)) => {
                     let to = position.0 - next.position;
                     if to.length() < HEAT_PROXIMITY {
                         detonations.write(Detonation {
@@ -731,6 +736,7 @@ fn simulate_projectiles(
                     (hit.distance, contact)
                 })
         };
+        let incoming = next.velocity;
         let step = projectile::step(&spatial, &filter, desc, &mut next, live.age, dt, soldier_along);
         if next != *motion {
             *motion = next;
@@ -769,9 +775,22 @@ fn simulate_projectiles(
                     attacker: attacker.clone(),
                 });
             }
-        } else if let Ok((vehicle, ..)) = vehicles.get(body) {
-            let armor = damage_mod(materials.as_deref(), desc.material, vehicle.0.desc.armor_material);
+        } else if let Ok((vehicle, position, _, rotation, state, _)) = vehicles.get(body) {
+            // The face it hits: front, side or rear armour, tracks, glass.
+            let inverse = rotation.0.inverse();
+            let joints = state.map_or(&[][..], |s| s.joints.as_slice());
+            let face = vehicle
+                .0
+                .armor_material_at(joints, inverse * (hit.point - position.0), inverse * incoming);
+            let material = face.unwrap_or(vehicle.0.desc.armor_material);
+            let armor = damage_mod(materials.as_deref(), desc.material, material);
             let damage = damage_at(desc, live.travelled) * armor;
+            debug!(
+                "{} hit {} on material {material}{} (x{armor}) for {damage:.1}",
+                weapon.name,
+                vehicle.0.desc.name,
+                if face.is_none() { " (no armour face)" } else { "" }
+            );
             if damage > 0.0 {
                 vehicle_hits.write(VehicleHit {
                     vehicle: body,
@@ -1129,10 +1148,11 @@ pub fn spawn_projectile(
     ignore: Option<Entity>,
     origin: Vec3,
     direction: Vec3,
+    inherited: Vec3,
     target: Option<Entity>,
 ) {
     let fuse = weapon.projectile.time_to_live;
-    let velocity = direction * weapon.projectile.velocity;
+    let velocity = direction * weapon.projectile.velocity + inherited;
     let guided = weapon.fire.guidance == Guidance::Wire;
     let object = weapon.projectile.is_object();
     let name = weapon.name.clone();

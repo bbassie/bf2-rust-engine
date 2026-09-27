@@ -127,7 +127,8 @@ pub enum Step {
     VehicleLook(f32, f32),
     /// Logs our vehicle's position, speed and orientation, and adds it to the report.
     VehicleInfo(String),
-    /// Logs every moving or occupied vehicle (works connected to a remote server too).
+    /// Logs every moving or occupied vehicle (works connected to a remote server too); with a
+    /// label starting with "all", every vehicle.
     LogVehicles(String),
     /// Spectating: puts the camera `distance` meters behind and `height` meters above the
     /// fastest driven vehicle matching a filter (a template, `land`, `air`, `helicopter`,
@@ -156,6 +157,8 @@ pub enum Step {
     /// Weapon index in the kit.
     Weapon(u8),
     ThirdPerson(bool),
+    /// Scales the vehicle chase camera's distance (1 = normal).
+    ChaseZoom(f32),
     Ssao(bool),
     Shadows(bool),
     /// Changes a setting for this run (`Settings::set`), e.g. `Setting("bloom", "on")`,
@@ -224,6 +227,7 @@ pub enum Button {
     Use,
     Reload,
     FireMode,
+    Countermeasure,
 }
 
 impl Button {
@@ -238,6 +242,7 @@ impl Button {
             Button::Use => Buttons::USE,
             Button::Reload => Buttons::RELOAD,
             Button::FireMode => Buttons::FIRE_MODE,
+            Button::Countermeasure => Buttons::COUNTERMEASURE,
         }
     }
 }
@@ -352,6 +357,8 @@ fn count_waiting_pipelines(cache: Res<PipelineCache>, waiting: Res<WaitingPipeli
 #[derive(Resource, Default)]
 struct Readiness {
     last_asset_event: f32,
+    /// The last event, logged when `WaitReady` times out.
+    last_asset: String,
     last_pipeline_wait: f32,
 }
 
@@ -359,9 +366,20 @@ fn note_asset_events<A: Asset>(
     mut events: MessageReader<AssetEvent<A>>,
     time: Res<Time<Real>>,
     mut readiness: ResMut<Readiness>,
+    server: Res<AssetServer>,
 ) {
-    if events.read().next().is_some() {
+    if let Some(event) = events.read().last() {
         readiness.last_asset_event = time.elapsed_secs();
+        if time.elapsed_secs() > 60.0 {
+            let path = match event {
+                AssetEvent::Added { id }
+                | AssetEvent::Modified { id }
+                | AssetEvent::LoadedWithDependencies { id }
+                | AssetEvent::Removed { id }
+                | AssetEvent::Unused { id } => server.get_path(*id),
+            };
+            readiness.last_asset = format!("{event:?} {path:?}");
+        }
     }
 }
 
@@ -390,6 +408,7 @@ struct PlayerControls<'w, 's> {
     input: ResMut<'w, ScenarioInput>,
     look: ResMut<'w, LookState>,
     third_person: ResMut<'w, ThirdPerson>,
+    chase_zoom: ResMut<'w, crate::camera::ChaseZoom>,
     selection: ResMut<'w, WeaponSelection>,
     keyboard: MessageWriter<'w, KeyboardInput>,
     window: Single<'w, 's, Entity, With<PrimaryWindow>>,
@@ -434,7 +453,7 @@ impl Vehicles<'_, '_> {
         let forward = t.rotation * Vec3::NEG_Z;
         let right = t.rotation * Vec3::X;
         format!(
-            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2}, replayed {} corrected {:.3}",
+            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2} gear {}, replayed {} corrected {:.3}",
             t.translation.x,
             t.translation.y,
             t.translation.z,
@@ -444,6 +463,7 @@ impl Vehicles<'_, '_> {
             forward.y.clamp(-1.0, 1.0).asin().to_degrees(),
             (-right.y).clamp(-1.0, 1.0).asin().to_degrees(),
             state.engine,
+            state.gear + 1,
             self.prediction.replayed,
             self.prediction.last_correction,
         )
@@ -504,6 +524,7 @@ fn run_scenario(
         mut input,
         mut look,
         mut third_person,
+        mut chase_zoom,
         mut selection,
         mut keyboard,
         window,
@@ -574,7 +595,16 @@ fn run_scenario(
                     && now - readiness.last_asset_event > 1.0
                     && now - readiness.last_pipeline_wait > 0.5;
                 if ready || elapsed > 90.0 {
-                    let note = if ready { "" } else { " (timed out)" };
+                    let note = if ready {
+                        String::new()
+                    } else {
+                        format!(
+                            " (timed out; last asset event {:.1} s ago: {}, last pipeline wait {:.1} s ago)",
+                            now - readiness.last_asset_event,
+                            readiness.last_asset,
+                            now - readiness.last_pipeline_wait
+                        )
+                    };
                     info!("scenario: ready after {now:.1} s{note}");
                     Progress::Done
                 } else {
@@ -786,18 +816,21 @@ fn run_scenario(
             }
             Step::LogVehicles(label) => {
                 let mut lines = Vec::new();
+                let all = label.starts_with("all");
                 for (entity, vehicle, view) in &vehicles.all {
                     let riders = vehicles.riders.iter().filter(|s| s.vehicle == entity).count();
-                    if riders == 0 && view.speed.abs() < 0.5 {
+                    if riders == 0 && view.speed.abs() < 0.5 && !all {
                         continue;
                     }
                     let p = view.transform.translation;
+                    let hp = vehicles.health.get(entity).map_or(f32::NAN, |(_, h)| h.current);
                     lines.push(format!(
-                        "{} at ({:.1}, {:.1}, {:.1}) {:.1} km/h, {riders} aboard",
+                        "{} at ({:.1}, {:.1}, {:.1}) heading {:.0}, {:.1} km/h, {hp:.0} hp, {riders} aboard",
                         vehicle.template,
                         p.x,
                         p.y,
                         p.z,
+                        crate::vehicles::heading(view.transform.rotation).to_degrees(),
                         view.speed * 3.6
                     ));
                 }
@@ -939,8 +972,9 @@ fn run_scenario(
                                 Some(format!("{} {:.0}/{:.0}", p.name, a[0].to_degrees(), a[1].to_degrees()))
                             })
                             .collect();
+                        let wheels: Vec<String> = view.wheels.iter().map(|w| format!("{w:.2}")).collect();
                         format!(
-                            "{label}: {} seat {} at ({:.1}, {:.1}, {:.1}), {:.1} km/h, heading {:.0} deg, tilt {:.0} deg, aim [{}]",
+                            "{label}: {} seat {} at ({:.2}, {:.2}, {:.2}), {:.1} km/h, heading {:.0} deg, tilt {:.1} deg, aim [{}], wheels down [{}]",
                             model.desc.name,
                             seated.seat + 1,
                             t.translation.x,
@@ -949,7 +983,8 @@ fn run_scenario(
                             view.speed * 3.6,
                             crate::vehicles::heading(t.rotation).to_degrees(),
                             up,
-                            aims.join(", ")
+                            aims.join(", "),
+                            wheels.join(" ")
                         )
                     }
                     None => format!("{label}: not in a vehicle"),
@@ -977,6 +1012,10 @@ fn run_scenario(
             }
             Step::ThirdPerson(on) => {
                 third_person.0 = *on;
+                Progress::Done
+            }
+            Step::ChaseZoom(zoom) => {
+                chase_zoom.0 = *zoom;
                 Progress::Done
             }
             Step::Ssao(on) => {

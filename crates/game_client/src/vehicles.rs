@@ -509,11 +509,13 @@ fn spawn_hud(mut commands: Commands) {
 }
 
 /// The vehicle lines of the HUD: vehicle, seat, speed and hit points (aircraft add altitude,
-/// throttle and afterburner), then the seat's guns with rounds, heat and lock.
+/// throttle and afterburner), then the seat's guns with rounds, heat and lock, and its
+/// countermeasures with their key.
 fn update_hud(
     seated: Query<&Seated, With<LocalSoldier>>,
     vehicles: Query<(&VehicleView, &VehicleData, Option<&VehicleHealth>, Option<&VehicleWeapons>)>,
     spatial: SpatialQuery,
+    actions: Actions,
     mut text: Single<&mut Text, With<VehicleHudText>>,
 ) {
     let lines = seated
@@ -568,7 +570,13 @@ fn update_hud(
                         || gun.display_name == desc.display_name
                         || gun.display_name.contains('_');
                     let name = if unnamed { readable_name(&gun.name, &desc.name) } else { gun.display_name.clone() };
-                    let mut entry = format!("{}{}{name}", if status.selected { "> " } else { "  " }, if w.alt_fire { "[2] " } else { "" });
+                    let trigger = match (&w.countermeasure, w.alt_fire) {
+                        (Some(_), _) => format!("[{}] ", actions.label(Action::Countermeasures)),
+                        (None, true) => "[2] ".into(),
+                        (None, false) => String::new(),
+                    };
+                    let chosen = status.selected && w.countermeasure.is_none();
+                    let mut entry = format!("{}{trigger}{name}", if chosen { "> " } else { "  " });
                     let _ = match (status.reloading, status.rounds) {
                         (true, _) => write!(entry, "  reloading"),
                         (false, u16::MAX) => Ok(()),

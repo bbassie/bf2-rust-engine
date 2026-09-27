@@ -1,15 +1,15 @@
 //! Vehicle engines: while a vehicle has a driver its engine loops play at the hull, their
 //! pitch and volume following the revs through BF2's curves ([`game_data::VehicleSounds`]).
-//! BF2's engine model isn't known; here the revs climb through the gears as the vehicle
-//! speeds up (with a gear change sound at each shift), and the pulling and coasting loops
-//! crossfade with the acceleration. The engine starts when a driver gets in and stops when
+//! Vehicles with a gearbox replicate their gear and revs; for the others the revs climb
+//! through the sound's gears as the vehicle speeds up. Each shift up plays the gear change
+//! sound, and the pulling and coasting loops crossfade with the acceleration. The engine starts when a driver gets in and stops when
 //! the driver leaves or the vehicle is wrecked; occupants also hear the interior loop.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 use game_data::{VehicleSounds, curve_at};
-use game_shared::vehicle::{Seated, VehicleData, VehicleHealth};
+use game_shared::vehicle::{Seated, VehicleData, VehicleHealth, VehicleState};
 
 use super::{
     AudioSystems,
@@ -65,7 +65,7 @@ fn engines(
     mut cache: ResMut<SoundCache>,
     assets: Res<AssetServer>,
     listener: Query<(Entity, &Transform), With<SpatialListener>>,
-    vehicles: Query<(Entity, &VehicleView, &VehicleData, Option<&VehicleHealth>)>,
+    vehicles: Query<(Entity, &VehicleView, &VehicleData, Option<&VehicleHealth>, Option<&VehicleState>)>,
     seated: Query<(&Seated, Has<LocalSoldier>)>,
     mut held: Query<&mut HeldVoice>,
     mut engines: Local<HashMap<Entity, Engine>>,
@@ -78,7 +78,7 @@ fn engines(
         *last_log = time.elapsed_secs();
     }
     let listener = listener.iter().next();
-    for (vehicle, view, data, health) in &vehicles {
+    for (vehicle, view, data, health, state) in &vehicles {
         let desc = &data.0.desc;
         let audio: &VehicleSounds = &desc.sounds;
         let driven = seated.iter().any(|(s, _)| s.vehicle == vehicle && s.seat == 0);
@@ -111,17 +111,27 @@ fn engines(
             continue;
         }
 
-        // Up through the gears to the top speed.
-        let gears = audio.gears.max(1);
-        let progress = (speed / desc.engine.top_speed.max(1.0)).clamp(0.0, 1.0) * gears as f32;
-        let gear = (progress as u32).min(gears - 1);
+        // Vehicles with a gearbox replicate their gear and revs; the others go up through the
+        // sound's gears to the top speed.
+        let (gear, target) = match (desc.engine.gearbox.as_ref(), state) {
+            (Some(gearbox), Some(state)) => {
+                let revs = ((state.engine - gearbox.idle) / (1.0 - gearbox.idle)).clamp(0.0, 1.0);
+                (state.gear.max(0) as u32, if speed < CRAWL { IDLE_REVS } else { revs })
+            }
+            _ => {
+                let gears = audio.gears.max(1);
+                let progress = (speed / desc.engine.top_speed.max(1.0)).clamp(0.0, 1.0) * gears as f32;
+                let gear = (progress as u32).min(gears - 1);
+                let revs = LOW_REVS + (1.0 - LOW_REVS) * (progress - gear as f32).min(1.0);
+                (gear, if speed < CRAWL { IDLE_REVS } else { revs })
+            }
+        };
         if gear > engine.gear
             && let Some(shift) = &audio.gear_shift
         {
             sounds.write(PlaySound::at(shift, hull).emitter(vehicle).reason("gear shift"));
         }
         engine.gear = gear;
-        let target = if speed < CRAWL { IDLE_REVS } else { LOW_REVS + (1.0 - LOW_REVS) * (progress - gear as f32).min(1.0) };
         engine.revs += (target - engine.revs) * (1.0 - (-REVS_RATE * dt).exp());
         let pulling = if speed < CRAWL { 0.0 } else { (acceleration / FULL_LOAD).clamp(0.0, 1.0).max(0.3) };
         engine.load += (pulling - engine.load) * (1.0 - (-LOAD_RATE * dt).exp());

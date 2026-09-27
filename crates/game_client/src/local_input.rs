@@ -184,6 +184,7 @@ pub fn build_input(
         set(Buttons::USE, Action::Use);
         set(Buttons::RELOAD, Action::Reload);
         set(Buttons::FIRE_MODE, Action::FireMode);
+        set(Buttons::COUNTERMEASURE, Action::Countermeasures);
         if look.jump_latched {
             frame.buttons.insert(Buttons::JUMP);
         }

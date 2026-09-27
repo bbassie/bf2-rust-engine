@@ -108,13 +108,19 @@ helicopter, sea, stationary) comes from the engine type.
   the vehicle's `SeatInputs`, and it is carried along at its seat every tick. Guns fire from
   their seat's triggers (weapon keys pick among the guns of one trigger) with BF2 overheat;
   wire/TV guided missiles follow the gunner's aim, heat seekers lock on piloted aircraft.
+  Direct hits take the damage table's factor for the armour face they strike (BF2's
+  per-face collision materials: tank front, sides, rear and top, tracks, glass;
+  `vehicles/<name>.armor.glb`); penetrable faces let the shot through to the armour behind.
   Crashes (speed along the contact) and deep water damage the vehicle.
 - **Simulation** (`game_shared::vehicle` and `game_shared::flight`): each vehicle is an avian
   dynamic body (compound of convex hulls of the hull and turret collision; stationary weapons
   are static). `step_vehicle` computes its push for one tick from the driver's inputs:
   - land: per wheel a raycast spring holds it up; tyres cancel sideways sliding up to their
-    grip and push with the engine force (falling off towards top speed) or brake. Tracked
-    vehicles instead hold both tracks to a commanded speed and turn rate (skid steering).
+    grip (less once sliding, BF2's dynamic friction) and push with the engine or brake.
+    Wheeled vehicles drive through BF2's automatic gearbox (`c_ETNewCar2`: gear ratios,
+    shift points, no pull while changing gear, a rev limiter, engine braking; forces from
+    `setTorque` × `setDifferential` × ratio / wheel radius, top speed from BF2's AI);
+    tracked vehicles hold both tracks to a commanded speed and turn rate (skid steering).
   - jets: throttle spools (hands off holds cruise, parked idles), thrust fades towards top
     speed (the afterburner raises it), each wing lifts with its BF2 lift plus flap lift times
     its control surface deflection and speed squared, clamped at the stall angle; plate and
@@ -139,6 +145,11 @@ helicopter, sea, stationary) comes from the engine type.
   100 ms in the past, interpolated. `--no-vehicle-prediction` turns it off.
 - **Client**: vehicle meshes are glTF skins with one joint per part (triangles spanning parts,
   like track belts, bend with them); parts are posed from the replicated joints and wheels.
+  Tracks animate like BF2's UV matrices: the importer splits the faces each matrix moves into
+  materials of their own (with the scroll direction and hub centres in their extras), and
+  each vehicle scrolls its belts and rim treads and turns its hub textures and sprockets by
+  the distance each track ran; tank road wheels (`rotateUV`) don't turn their geometry, as
+  the belt around them is skinned to them.
   First person shows the interior mesh (BF2 geom 0), the seated soldier (its seat pose) and,
   for gunners, the weapon's BF2 HUD sight (reticle, periscope frame) from
   `menu/hud/hudsetup/vehicles`, laid out on BF2's 800x600 screen. The camera uses the seat's

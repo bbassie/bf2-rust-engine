@@ -18,7 +18,7 @@ use std::{
 use avian3d::prelude::*;
 use bevy::{ecs::entity::MapEntities, prelude::*};
 use bevy_replicon::prelude::*;
-use game_data::{DriveKind, JointInput, VehicleCategory, VehicleDesc, WeaponDesc};
+use game_data::{DriveKind, GearboxDesc, JointInput, VehicleCategory, VehicleDesc, WeaponDesc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -119,9 +119,13 @@ pub struct VehicleState {
     pub joints: Vec<[f32; 3]>,
     /// How far each wheel hangs below its rest position, meters (negative: pushed up).
     pub wheels: Vec<f32>,
-    /// Rotor speed or throttle, 0..1 (for rotor blades, sounds and the HUD).
+    /// Rotor speed, throttle or (with a gearbox) revs, 0..1 (for rotor blades, sounds and the
+    /// HUD).
     #[serde(default)]
     pub engine: f32,
+    /// Gearbox: the gear, 0 for first, -1 for reverse.
+    #[serde(default)]
+    pub gear: i8,
     /// Afterburner meter, 0..1 (for the HUD).
     #[serde(default)]
     pub boost: f32,
@@ -237,6 +241,15 @@ pub struct VehicleModel {
     pub collider: Option<Collider>,
     /// The guns' weapon descriptions, shared with the projectiles they fire.
     pub guns: Vec<Arc<WeaponDesc>>,
+    /// The faces direct hits land on (see [`VehicleDesc::armor_mesh`]).
+    pub armor: Vec<ArmorFaces>,
+}
+
+/// A part's armour: its projectile collision triangles (part space) and their materials.
+pub struct ArmorFaces {
+    pub part: usize,
+    pub triangles: Vec<[Vec3; 3]>,
+    pub materials: Vec<u32>,
 }
 
 impl VehicleModel {
@@ -282,10 +295,40 @@ impl VehicleModel {
             inertia,
             collider: None,
             guns,
+            armor: Vec::new(),
         };
         model.rest_hull = model.part_transforms(&[]);
         model.collider = model.build_collider(paths);
+        if let Some(path) = &model.desc.armor_mesh {
+            model.armor = load_armor(&paths.find(path)).unwrap_or_else(|err| {
+                warn!("vehicle armour {path}: {err:#}");
+                Vec::new()
+            });
+        }
         model
+    }
+
+    /// The material of the armour a shot along `direction` meets first around `point` (both
+    /// hull space, the point on the collision hull), with the joints at `joints`.
+    pub fn armor_material_at(&self, joints: &[[f32; 3]], point: Vec3, direction: Vec3) -> Option<u32> {
+        let direction = direction.try_normalize()?;
+        // The collision hull is convex; the armour may lie a little inside or outside it.
+        let origin = point - direction * ARMOR_PROBE_BEFORE;
+        let transforms = self.part_transforms(joints);
+        let mut nearest = (ARMOR_PROBE_LENGTH, None);
+        for faces in &self.armor {
+            let Some(part) = transforms.get(faces.part) else { continue };
+            let inverse = part.compute_affine().inverse();
+            let (o, d) = (inverse.transform_point3(origin), inverse.transform_vector3(direction));
+            for (triangle, material) in faces.triangles.iter().zip(&faces.materials) {
+                if let Some(t) = ray_triangle(o, d, triangle)
+                    && t < nearest.0
+                {
+                    nearest = (t, Some(*material));
+                }
+            }
+        }
+        nearest.1
     }
 
     /// A part's rest orientation in hull space.
@@ -437,6 +480,70 @@ fn load_collision_points(path: &Path, part: u32) -> anyhow::Result<Vec<Vec3>> {
     Ok(points)
 }
 
+/// How far before the hit point on the collision hull the armour probe starts, and how far
+/// it looks, meters.
+const ARMOR_PROBE_BEFORE: f32 = 1.0;
+const ARMOR_PROBE_LENGTH: f32 = 4.0;
+
+/// Reads an armour `.glb` (`VehicleDesc::armor_mesh`): mesh `part{N}` per part, a primitive
+/// per material, the glTF material named by its id.
+fn load_armor(path: &Path) -> anyhow::Result<Vec<ArmorFaces>> {
+    let bytes = std::fs::read(path)?;
+    let gltf = gltf::Gltf::from_slice(&bytes)?;
+    let blob = gltf.blob.as_deref().unwrap_or_default();
+    let mut armor = Vec::new();
+    for mesh in gltf.meshes() {
+        let Some(part) = mesh.name().and_then(|n| n.strip_prefix("part")).and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        let mut faces = ArmorFaces {
+            part,
+            triangles: Vec::new(),
+            materials: Vec::new(),
+        };
+        for primitive in mesh.primitives() {
+            let Some(material) = primitive.material().name().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let reader = primitive.reader(|_| Some(blob));
+            let (Some(positions), Some(indices)) = (reader.read_positions(), reader.read_indices()) else {
+                continue;
+            };
+            let positions: Vec<Vec3> = positions.map(Vec3::from_array).collect();
+            let indices: Vec<u32> = indices.into_u32().collect();
+            for t in indices.chunks_exact(3) {
+                let corner = |i: u32| positions.get(i as usize).copied().unwrap_or_default();
+                faces.triangles.push([corner(t[0]), corner(t[1]), corner(t[2])]);
+                faces.materials.push(material);
+            }
+        }
+        armor.push(faces);
+    }
+    Ok(armor)
+}
+
+/// Distance along a ray (unit `direction`) to where it crosses a triangle, either side.
+fn ray_triangle(origin: Vec3, direction: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
+    let (e1, e2) = (*b - *a, *c - *a);
+    let p = direction.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let s = origin - *a;
+    let u = s.dot(p) / det;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s.cross(e1);
+    let v = direction.dot(q) / det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = e2.dot(q) / det;
+    (t >= 0.0).then_some(t)
+}
+
 /// Vehicle descriptions, loaded from `imported/vehicles/` when first needed.
 #[derive(Resource, Default)]
 pub struct VehicleLibrary {
@@ -475,6 +582,9 @@ pub struct VehicleSim {
     pub flight: FlightState,
     /// Sequence number of the driver's input applied this tick.
     pub driver_seq: u32,
+    /// Gearbox: the gear (-1 reverse) and the seconds left of a gear change.
+    pub gear: i8,
+    pub shift: f32,
 }
 
 impl VehicleSim {
@@ -483,6 +593,8 @@ impl VehicleSim {
             compression: vec![0.0; desc.wheels.len()],
             flight: FlightState::new(),
             driver_seq: 0,
+            gear: 0,
+            shift: 0.0,
         }
     }
 }
@@ -532,6 +644,7 @@ fn add_vehicle_physics(
             joints: vec![[0.0; 3]; model.joint_count],
             wheels: vec![0.0; desc.wheels.len()],
             engine: 0.0,
+            gear: 0,
             boost: 1.0,
         },
         VehicleSim::new(desc),
@@ -716,6 +829,18 @@ pub fn step_vehicle(
     // Wings, engines, rotor, floaters.
     let mut push = flight::flight_forces(model, body, &joints, &controls, &mut sim.flight, &around, dt);
 
+    // Gearbox: the pull at full throttle and the revs (in coarse steps, so they don't
+    // replicate every tick).
+    let gearbox = desc.engine.gearbox.as_ref().filter(|_| desc.drive == DriveKind::Wheeled);
+    let (pull, revs) = match gearbox {
+        Some(gearbox) if driver.is_some() => {
+            let (pull, revs) = step_gearbox(gearbox, sim, throttle, forward_speed, dt);
+            (pull, (revs * 50.0).round() / 50.0)
+        }
+        Some(_) => (0.0, 0.0),
+        None => (0.0, sim.flight.engine()),
+    };
+
     // Suspension, tyres and tracks.
     let tracked = desc.drive == DriveKind::Tracked;
     let rolling = desc.drive == DriveKind::Rolling;
@@ -821,6 +946,8 @@ pub fn step_vehicle(
                 } else if throttle != 0.0 && forward_speed * throttle < -0.5 {
                     // Pressing against the direction of travel brakes.
                     stop
+                } else if throttle != 0.0 && gearbox.is_some() {
+                    pull * throttle.abs() / carriers
                 } else if throttle != 0.0 {
                     let limit = if throttle > 0.0 { top } else { desc.engine.reverse_speed.max(1.0) };
                     let ratio = (forward_speed.abs() / limit).min(1.3);
@@ -828,6 +955,10 @@ pub fn step_vehicle(
                 } else if forward_speed.abs() < 1.0 {
                     // Standing: the brakes hold it on slopes.
                     stop
+                } else if let Some(gearbox) = gearbox {
+                    // Rolling resistance and engine braking.
+                    let hold = gearbox.engine_brake / carriers + brake * 0.02;
+                    stop.clamp(-hold, hold)
                 } else {
                     // Rolling resistance and engine braking.
                     stop * 0.08
@@ -837,7 +968,9 @@ pub fn step_vehicle(
             // Friction ellipse: the tyre can't give more than its load allows.
             let (max_long, max_lat) = (mu_long * load, mu_lat * load);
             let usage = ((long / max_long.max(1e-3)).powi(2) + (lat / max_lat.max(1e-3)).powi(2)).sqrt();
-            let scale = if usage > 1.0 { 1.0 / usage } else { 1.0 };
+            // A sliding tyre grips less, down to its dynamic friction.
+            let sliding = 1.0 + (desc.engine.slide_grip - 1.0) * (usage - 1.0).clamp(0.0, 1.0);
+            let scale = if usage > 1.0 { sliding / usage } else { 1.0 };
             let contact_height = frame.translation.y - wheel.radius - wheel_offsets[wi];
             let lift = (com_height - contact_height).max(0.0) * ANTI_ROLL;
             push.forces.push(((*fwd * long + side * lat) * scale, contact + up * lift));
@@ -855,11 +988,52 @@ pub fn step_vehicle(
     *state = VehicleState {
         joints,
         wheels: wheel_offsets,
-        engine: sim.flight.engine(),
+        engine: revs,
+        gear: sim.gear,
         // Coarse steps, so the meter doesn't replicate every tick.
         boost: (sim.flight.boost * 50.0).round() / 50.0,
     };
     push
+}
+
+/// Share of the top revs up to which the engine pulls fully; the rev limiter takes the pull
+/// away from there to the top revs.
+const REV_LIMITER: f32 = 0.95;
+
+/// One tick of an automatic gearbox: picks forward or reverse with the throttle, changes gear
+/// at its shift points (pulling nothing while it changes) and returns the pull at full
+/// throttle along the hull (negative in reverse) and the revs as a share of the top revs.
+fn step_gearbox(gearbox: &GearboxDesc, sim: &mut VehicleSim, throttle: f32, forward_speed: f32, dt: f32) -> (f32, f32) {
+    let top_gear = gearbox.gears.len() as i8 - 1;
+    if throttle < 0.0 && forward_speed < 0.5 {
+        sim.gear = -1;
+    } else if (throttle > 0.0 && forward_speed > -0.5 && sim.gear < 0) || sim.gear > top_gear {
+        sim.gear = 0;
+    }
+    sim.shift = (sim.shift - dt).max(0.0);
+    let gear = |g: i8| if g < 0 { &gearbox.reverse } else { &gearbox.gears[g as usize] };
+    let mut revs = forward_speed.abs() / gear(sim.gear).top_speed.max(0.1);
+    if sim.gear >= 0 && sim.shift == 0.0 {
+        let next = if revs > gearbox.shift_up && sim.gear < top_gear {
+            sim.gear + 1
+        } else if revs < gearbox.shift_down && sim.gear > 0 {
+            sim.gear - 1
+        } else {
+            sim.gear
+        };
+        if next != sim.gear {
+            sim.gear = next;
+            sim.shift = gearbox.shift_time;
+            revs = forward_speed.abs() / gear(next).top_speed.max(0.1);
+        }
+    }
+    let pull = if sim.shift > 0.0 {
+        0.0
+    } else {
+        let limiter = ((1.0 - revs) / (1.0 - REV_LIMITER)).clamp(0.0, 1.0);
+        gear(sim.gear).force * limiter * if sim.gear < 0 { -1.0 } else { 1.0 }
+    };
+    (pull, revs.clamp(gearbox.idle, 1.0))
 }
 
 /// What each gunner looks at: guns converge on the point under their crosshair.
