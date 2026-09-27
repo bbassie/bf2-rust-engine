@@ -40,3 +40,8 @@ serde_json = "1"
 fastrand = "2"
 # Downloads a server's content when joining (https for download URLs on a CDN).
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+# Bevy's `wayland` feature links libwayland-client at build time (needs libwayland-dev).
+# Load it at runtime instead, like winit already does for X11.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-dlopen"] }
