@@ -390,8 +390,13 @@ impl Default for ParticleLight {
 
 fn set_particle_light(mut commands: Commands, level: Res<LoadedLevel>) {
     let env = &level.desc.environment;
-    // Sprites are lit from all sides and shadow themselves: darker than sunlit ground.
-    let light = Vec3::from_array(env.sun_color) * 0.5 + Vec3::from_array(env.ambient_color) * 0.4;
+    // Sprites are lit from all sides and shadow themselves: darker than sunlit ground. BF2
+    // lights them with their own sun and shadow colours where the level has them (dark on
+    // night levels, whose dynamic ambient colour is white).
+    let light = match &env.lighting {
+        Some(l) => (Vec3::from_array(l.effect_sun) + Vec3::from_array(l.effect_shadow)) * 0.6,
+        None => Vec3::from_array(env.sun_color) * 0.5 + Vec3::from_array(env.ambient_color) * 0.4,
+    };
     commands.insert_resource(ParticleLight(light.clamp(Vec3::splat(0.1), Vec3::ONE)));
 }
 
@@ -447,7 +452,6 @@ fn receive_server_effects(
         };
         let point = effect.position + up * 0.5 - up * hit.distance;
         let surface = surfaces.material(hit.entity, point);
-        debug!("{} on surface {surface}: {:?}", effect.name, library.impact(material, surface));
         if let Some(name) = library.impact(material, surface) {
             effects.write(SpawnEffect::new(name, point).with_up(hit.normal));
         }

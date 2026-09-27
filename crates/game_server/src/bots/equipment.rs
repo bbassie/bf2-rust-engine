@@ -87,7 +87,6 @@ impl BotBrain {
             let stronger = self
                 .flash
                 .is_none_or(|(old, s, age)| !flash_effect(&old, s, age).1 || strength > s);
-            debug!("ai: flashbang {:.1} m away, strength {strength:.2}", eye.distance(at));
             if strength > 0.15 && stronger {
                 self.flash = Some((desc, strength, 0.0));
                 team_stats.flashed += 1;
@@ -253,7 +252,8 @@ impl BotBrain {
             && !matches!(self.activity, Activity::Repair { .. })
             && let Some(target) = self.find_repair(w, me)
         {
-            offer(best, 4.0, Activity::Repair { target, time: 25.0 });
+            // A destroyed asset takes about half a minute of wrench work.
+            offer(best, 4.0, Activity::Repair { target, time: 60.0 });
         }
 
         // Bags to teammates a few meters away (those closer get them held out).
@@ -452,7 +452,7 @@ fn ammo_left(me: &Me, weapon: u8) -> u16 {
 }
 
 /// The team of a vehicle's crew, if anyone is in it.
-fn crew_team(w: &Senses, vehicle: Entity) -> Option<Team> {
+pub(super) fn crew_team(w: &Senses, vehicle: Entity) -> Option<Team> {
     w.soldiers
         .iter()
         .find(|(.., seated, _)| seated.is_some_and(|s| s.vehicle == vehicle))

@@ -22,7 +22,7 @@ use super::{CommanderScreen, GOLD, Tool, font, map_point, map_size, map_uv};
 use crate::{
     commander::markers::{asset_color, order_color},
     conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD},
-    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerBody, MarkerIcon, MarkerIcons, MarkerPointer, SOLDIER_LAYER},
+    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER, SQUAD_LABEL},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -651,8 +651,8 @@ fn update_map(
     soldiers: Query<(Entity, &SoldierRender, &ControlledBy, Has<LocalSoldier>), (With<Soldier>, Without<Seated>)>,
     effects: Query<(Entity, &AssetEffect)>,
     markers: Res<MapMarkers>,
-    map: Single<Entity, With<ScreenMap>>,
-    mut areas: Query<(Entity, &MapIcon, &mut Node), (Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerPointer>)>,
+    map: Single<(Entity, &ComputedNode), With<ScreenMap>>,
+    mut areas: Query<(Entity, &MapIcon, &mut Node), NotMarker>,
     mut icons: MarkerIcons,
 ) {
     let Some(level) = level.filter(|_| screen.open) else {
@@ -673,7 +673,7 @@ fn update_map(
             Some(member) => {
                 let color = if screen.squad == Some(member.squad) { SQUAD } else { FRIENDLY };
                 let marker = MapMarker::dot(entity, render.position, color, if member.leader { 8.5 } else { 6.0 });
-                if member.leader { marker.label(squad_name(member.squad)) } else { marker }
+                if member.leader { marker.label(squad_name(member.squad)).priority(SQUAD_LABEL) } else { marker }
             }
             None => MapMarker::dot(entity, render.position, NEUTRAL, 5.5),
         };
@@ -683,15 +683,9 @@ fn update_map(
         .iter()
         .chain(&markers.0)
         .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
-    icons.sync(
-        *map,
-        placed,
-        IconStyle {
-            scale: 1.3,
-            labels: true,
-            turn: 0.0,
-        },
-    );
+    let (map, node) = *map;
+    // Sized for the 648 px map of a 720p window, a little larger on larger ones.
+    icons.sync(map, placed, IconStyle::big_map(node, 1.3, 648.0));
 
     // The areas our strikes, UAVs and crates cover.
     let mut wanted: HashMap<IconKey, IconSpec> = HashMap::default();
@@ -720,7 +714,7 @@ fn update_map(
             }
             Some(spec) => {
                 commands.entity(icon_entity).despawn();
-                spawn_icon(&mut commands, *map, &level, icon.0, spec);
+                spawn_icon(&mut commands, map, &level, icon.0, spec);
             }
             None => {
                 commands.entity(icon_entity).despawn();
@@ -728,6 +722,6 @@ fn update_map(
         }
     }
     for (key, spec) in wanted {
-        spawn_icon(&mut commands, *map, &level, key, spec);
+        spawn_icon(&mut commands, map, &level, key, spec);
     }
 }

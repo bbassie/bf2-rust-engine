@@ -713,6 +713,28 @@ mod tests {
     }
 
     #[test]
+    fn takes_a_human_commanders_orders() {
+        let points = [point(0, 0.0, 0.0), point(1, 0.0, 200.0)];
+        let map = StrategicMap {
+            areas: build_areas(None, &points),
+            ..default()
+        };
+        let state = |owner: Team| Some(FlagState { owner, flag: owner, height: 1.0, rate: 0.0 });
+        let states = [state(Team::One), state(Team::Two)];
+        let order = |kind, position| CommanderOrder { team: Team::One, squad: 1, kind, position };
+        // At the enemy's flag: take it; at our own: hold it; anywhere else: hold that point.
+        let at_b = commanded_order(&map, &states, Team::One, &order(CommanderOrderKind::Move, Vec3::new(5.0, 0.0, 195.0)))
+            .unwrap();
+        assert_eq!((at_b.kind, at_b.area, at_b.point), (OrderKind::Attack, 1, None));
+        let at_a = commanded_order(&map, &states, Team::One, &order(CommanderOrderKind::Attack, Vec3::ZERO)).unwrap();
+        assert_eq!((at_a.kind, at_a.area), (OrderKind::Defend, 0));
+        let far = Vec3::new(120.0, 0.0, 100.0);
+        let elsewhere = commanded_order(&map, &states, Team::One, &order(CommanderOrderKind::Defend, far)).unwrap();
+        assert_eq!((elsewhere.kind, elsewhere.point), (OrderKind::Defend, Some(far)));
+        assert!(elsewhere.commanded);
+    }
+
+    #[test]
     fn values_flags_along_the_front() {
         let points = [point(0, 0.0, 0.0), point(1, 0.0, 200.0), point(2, 0.0, 400.0)];
         let map = StrategicMap {

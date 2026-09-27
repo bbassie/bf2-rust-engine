@@ -3,10 +3,10 @@
 //!
 //! Flags show as their owner's flag on a pole (a crossed-out one for main bases, which can't
 //! be captured) on a dot of the owner's colour. Vehicles show as BF2's white silhouettes
-//! (a box shaped by their class without one) turned with the hull: ours in our colour
-//! (green when a squad mate is in), empty ones grey (only those our side or both sides
-//! spawn), enemy ones in red while spotted; tanks, APCs and anti-air with a line for the
-//! turret.
+//! (a box shaped by their class without one), sized by class and turned with the hull: the
+//! one we sit in in white (like our own marker), our team's in our colour (green when a
+//! squad mate is in), empty ones grey (only those our side or both sides spawn), enemy ones
+//! in red while spotted; tanks, APCs and anti-air with a line for the turret.
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_data::VehicleClass;
@@ -21,8 +21,8 @@ use game_shared::{
 
 use crate::{
     conquest_hud::{FRIENDLY, NEUTRAL, SQUAD, team_color},
-    map_markers::{FLAG_LAYER, MapMarker, MapMarkers, MarkerSystems, VEHICLE_LAYER},
-    net::LocalPlayer,
+    map_markers::{CONTROL_POINT_LABEL, FLAG_LAYER, MapMarker, MapMarkers, MarkerSystems, VEHICLE_LAYER},
+    net::{LocalPlayer, LocalSoldier},
     vehicles::VehicleView,
 };
 
@@ -149,8 +149,11 @@ fn flag_markers(
         markers.0.push(MapMarker {
             image,
             frame,
+            bounds: Some(FLAG_BOUNDS),
             layer: FLAG_LAYER,
-            ..MapMarker::dot(entity, cp.position, team_color(state.owner, team), size).label(cp.name.clone())
+            ..MapMarker::dot(entity, cp.position, team_color(state.owner, team), size)
+                .label(cp.name.clone())
+                .priority(CONTROL_POINT_LABEL)
         });
     }
 }
@@ -162,19 +165,40 @@ pub const FLAG_CLOTH: Rect = Rect {
     max: Vec2::new(33.0 / 33.0, 20.5 / 33.0),
 };
 
-/// Size and shape (width over height) of a vehicle without an icon.
-fn class_shape(class: VehicleClass) -> (f32, f32) {
+/// What map flag icons show (the pole's foot, the cloth and a main base's crossed-out circle),
+/// for keeping labels clear of them.
+pub const FLAG_BOUNDS: Rect = Rect {
+    min: Vec2::new(6.0 / 33.0, 4.0 / 33.0),
+    max: Vec2::new(33.0 / 33.0, 26.0 / 33.0),
+};
+
+/// Minimap size of a vehicle's icon (BF2's 16 px silhouettes leave a margin), by class: big
+/// armour and aircraft stand out, guns stay small.
+pub fn icon_size(class: VehicleClass) -> f32 {
     match class {
-        VehicleClass::Tank => (15.0, 0.7),
-        VehicleClass::Apc => (14.0, 0.6),
-        VehicleClass::AntiAir => (14.0, 0.7),
-        VehicleClass::Jeep => (12.0, 0.55),
-        VehicleClass::Boat => (12.0, 0.45),
-        VehicleClass::Jet => (16.0, 0.5),
-        VehicleClass::Helicopter => (13.0, 1.0),
-        VehicleClass::Stationary => (9.0, 1.0),
+        VehicleClass::Tank | VehicleClass::Jet | VehicleClass::Helicopter => 28.0,
+        VehicleClass::Apc | VehicleClass::AntiAir => 26.0,
+        VehicleClass::Jeep | VehicleClass::Boat => 22.0,
+        VehicleClass::Stationary => 17.0,
     }
 }
+
+/// Size and shape (width over height) of a vehicle without an icon.
+pub fn class_shape(class: VehicleClass) -> (f32, f32) {
+    match class {
+        VehicleClass::Tank => (19.0, 0.7),
+        VehicleClass::Apc => (18.0, 0.6),
+        VehicleClass::AntiAir => (18.0, 0.7),
+        VehicleClass::Jeep => (15.0, 0.55),
+        VehicleClass::Boat => (15.0, 0.45),
+        VehicleClass::Jet => (20.0, 0.5),
+        VehicleClass::Helicopter => (16.0, 1.0),
+        VehicleClass::Stationary => (10.0, 1.0),
+    }
+}
+
+/// The vehicle we sit in.
+const OURS: Color = Color::srgb(0.97, 0.97, 0.98);
 
 /// Clockwise from north of a direction.
 fn heading(direction: Vec3) -> f32 {
@@ -188,10 +212,12 @@ fn vehicle_markers(
     vehicles: Query<(Entity, &Vehicle, &VehicleView, Option<&VehicleHealth>, Option<&VehicleData>, Option<&Spotted>)>,
     riders: Query<(&Seated, &ControlledBy)>,
     players: Query<(&Team, Option<&SquadMember>)>,
+    seat: Query<&Seated, With<LocalSoldier>>,
     mut turrets: Local<HashMap<String, Option<usize>>>,
     mut markers: ResMut<MapMarkers>,
 ) {
     let (team, squad) = local_side(&local);
+    let ours = seat.single().ok().map(|s| s.vehicle);
     // Who is in each vehicle.
     let mut crews: HashMap<Entity, (Team, bool)> = HashMap::default();
     for (seated, controlled_by) in &riders {
@@ -208,6 +234,7 @@ fn vehicle_markers(
         }
         let template = vehicle.template.to_ascii_lowercase();
         let color = match crews.get(&entity) {
+            _ if ours == Some(entity) => OURS,
             Some((side, squad_mate)) if team == Team::Spectator => {
                 if *squad_mate { SQUAD } else { team_color(*side, team) }
             }
@@ -240,7 +267,7 @@ fn vehicle_markers(
             Some(heading(view.transform.rotation * part.rotation * Vec3::NEG_Z))
         });
         let (size, aspect) = match icon.and_then(|i| i.image.clone()) {
-            Some(_) => (17.0, 1.0),
+            Some(_) => (icon_size(class), 1.0),
             None => class_shape(class),
         };
         markers.0.push(MapMarker {

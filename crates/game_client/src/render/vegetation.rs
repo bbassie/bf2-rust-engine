@@ -76,6 +76,9 @@ struct UndergrowthParams {
     ground_rect: Vec4,
     distances: Vec4,
     wind: Vec4,
+    /// Lit like the terrain (`environment::LightScale::uniforms`).
+    light_sun: Vec4,
+    light_ambient: Vec4,
 }
 
 impl Material for UndergrowthMaterial {
@@ -327,6 +330,9 @@ fn patch_material(
     let corner = heightmap.origin.xz() + patch.as_vec2() * patch_size;
     let fade_start = undergrowth.view_distance * (1.0 - desc.fade.clamp(0.05, 1.0));
     let wind = Vec2::new(0.8, 0.6);
+    // BF2 lit undergrowth with the terrain's light.
+    let light = super::environment::LevelLight::new(&level.desc.environment);
+    let (light_sun, light_ambient) = light.terrain.uniforms();
     let material = materials.add(UndergrowthMaterial {
         params: UndergrowthParams {
             ground_rect: Vec4::new(corner.x, corner.y, patch_size, patch_size),
@@ -338,6 +344,8 @@ fn patch_material(
                 if ground.is_some() { desc.brightness } else { 1.0 },
             ),
             wind: Vec4::new(wind.x, wind.y, desc.alpha_cutoff, KEEP_AT_FADE),
+            light_sun,
+            light_ambient,
         },
         atlas: undergrowth.atlas.clone(),
         ground,

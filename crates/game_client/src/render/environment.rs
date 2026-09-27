@@ -1,4 +1,37 @@
 //! Sun, sky, ambient light and fog from the level's environment settings.
+//!
+//! # Lighting model
+//!
+//! BF2 lit its world with baked lightmaps and per-kind light colours in gamma space (see
+//! [`game_data::WorldLighting`]); we light it in real time with one sun (the moon on night
+//! levels) and one ambient light, derived from those colours ([`LevelLight`]):
+//!
+//! - The global ambient and sun light static objects (whose albedo carries BF2's `x 2`,
+//!   see `bf2_material.wgsl`) as BF2's `static_sky` and `static_sun` did: a BF2 light `L`
+//!   (gamma space, applied to a gamma-space texture) is `L^2.2` in linear light. The ambient
+//!   is the sky light an open surface gets: `0.65` (BF2's sky normal) x `0.85` (sky
+//!   visibility of open surfaces in the lightmaps) x `static_sky`.
+//! - Terrain and undergrowth scale both by their own factors ([`LightScale`]): BF2 lit them
+//!   with `terrain_gi` (x 0.85 sky visibility) and `2 x terrain_sun`, on a colour map
+//!   without the statics' `x 2`.
+//! - Trees (and their distant stand-ins) scale them by BF2's tree colours relative to the
+//!   static ones (`tree_ambient / 2` and `tree_sun`; within 0.5..2 of them in gamma space).
+//! - Soldiers and vehicles use the global light as they are: BF2 lit them about as much
+//!   relative to the world as our albedos without the statics' `x 2` do.
+//! - BF2's sun and shade differ by up to 20 times in linear light (it clamped, and
+//!   saturated sunlit surfaces); we keep a flatter ratio: sun and ambient have separate
+//!   exposures ([`AMBIENT_EXPOSURE`], [`SUN_EXPOSURE`]) tuned so Strike at Karkand keeps
+//!   the brightness it had. Other levels keep BF2's relative brightness and sun-to-shade
+//!   ratio, compressed by [`ADAPTATION`] (an eye adapting between levels) and
+//!   [`CONTRAST`], and their tints.
+//! - Night levels (BF2 lit statics and terrain without sun, but gave soldiers moonlight):
+//!   the moon (the dynamic sun colour) lights everything, at [`MOON`] times the ambient's
+//!   brightness, casting shadows. The colours are the faked-HDR "dark-adapted" ones BF2
+//!   showed while the player looked at dark surroundings.
+//!
+//! Levels without [`game_data::WorldLighting`] (made without BF2's `sky.con`) are lit from
+//! the dynamic `ambient_color` and `sun_color` alone. `BF2_LIGHT=ambient=9,sun=1.2,...`
+//! overrides the constants for tuning (keys: ambient, sun, adapt, contrast, moon, tint).
 
 use bevy::{
     asset::{LoadState, embedded_asset},
@@ -37,10 +70,227 @@ impl Plugin for EnvironmentPlugin {
     }
 }
 
-/// Illuminance (lux) of the sun. BF2 adds about 2 x sun on top of 2 x ambient (in gamma
-/// terms) and saturates; ~4000 lux adds about 1.3x the face-value luminance of the ambient
-/// model below, so sunlit surfaces stay readable and shade isn't crushed by tonemapping.
+/// Illuminance (lux) of the sun on levels without world lighting. BF2 adds about 2 x sun on
+/// top of 2 x ambient (in gamma terms) and saturates; ~4000 lux adds about 1.3x the
+/// face-value luminance of the ambient, so sunlit surfaces stay readable and shade isn't
+/// crushed by tonemapping.
 const SUN_ILLUMINANCE: f32 = 4_000.0;
+/// Luminance (cd/m2) of linear light 1: a white surface shows white at the default exposure.
+const LIGHT_UNIT: f32 = 1_000.0;
+
+/// Linear ambient light per unit of BF2 light^2.2 (see the module docs).
+pub const AMBIENT_EXPOSURE: f32 = 9.2;
+/// Linear sunlight (1 = [`LIGHT_UNIT`] on a surface facing it) per unit of BF2 light^2.2.
+pub const SUN_EXPOSURE: f32 = 1.17;
+/// How much of the brightness difference between a level and Strike at Karkand is
+/// compensated (0: none, BF2's; 1: all levels equally bright), in log space.
+pub const ADAPTATION: f32 = 0.25;
+/// How much of a level's sun-to-shade ratio beyond Strike at Karkand's is kept (0: all
+/// levels have Karkand's; 1: BF2's), in log space: BF2's range, from overcast levels with a
+/// faint sun to harsh ones with dark shade, is too wide without its clamping.
+pub const CONTRAST: f32 = 0.5;
+/// Moonlight on night levels, relative to the ambient's brightness.
+pub const MOON: f32 = 0.6;
+/// Strength of the levels' light tints (1: BF2's; 0: grey light).
+pub const TINT: f32 = 1.0;
+
+/// Sky light on open static surfaces: BF2's sky normal (0.65) x open sky visibility (0.85).
+const OPEN_SKY_STATIC: f32 = 0.65 * 0.85;
+/// Sky light on open terrain: the terrain lightmaps' sky visibility there.
+const OPEN_SKY_TERRAIN: f32 = 0.85;
+/// Strike at Karkand's static sky and sun: the level whose brightness the exposures keep.
+const REFERENCE_SKY: [f32; 3] = [0.53, 0.45, 0.28];
+const REFERENCE_SUN: [f32; 3] = [0.8, 0.74, 0.58];
+const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
+
+/// Factors on the global sun and ambient light for one kind of surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightScale {
+    pub sun: Vec3,
+    pub ambient: Vec3,
+}
+
+impl LightScale {
+    pub const ONE: Self = Self {
+        sun: Vec3::ONE,
+        ambient: Vec3::ONE,
+    };
+
+    /// For shaders: xyz of the first scale the albedo (so direct light), of the second the
+    /// diffuse occlusion (so ambient light, which the albedo also scales).
+    pub fn uniforms(&self) -> (Vec4, Vec4) {
+        let sun = self.sun.max(Vec3::splat(1e-6));
+        (sun.extend(1.0), (self.ambient / sun).extend(1.0))
+    }
+
+    /// One factor for both, for a surface lit by the ambient and the sun x `n_dot_l`.
+    pub fn average(&self, light: &LevelLight, n_dot_l: f32) -> Vec3 {
+        let lit = light.ambient + light.sun * n_dot_l;
+        (light.ambient * self.ambient + light.sun * n_dot_l * self.sun) / lit.max(Vec3::splat(1e-6))
+    }
+}
+
+/// The level's light in linear units (see the module docs).
+#[derive(Clone, Copy, Debug)]
+pub struct LevelLight {
+    /// Ambient light, 1 = [`LIGHT_UNIT`].
+    pub ambient: Vec3,
+    /// Sun (or moon) light on a surface facing it, 1 = [`LIGHT_UNIT`].
+    pub sun: Vec3,
+    /// Terrain and undergrowth.
+    pub terrain: LightScale,
+    /// Trees.
+    pub trees: LightScale,
+    pub night: bool,
+}
+
+/// Tuning constants, overridable with `BF2_LIGHT`.
+#[derive(Clone, Copy, Debug)]
+struct Knobs {
+    ambient: f32,
+    sun: f32,
+    adapt: f32,
+    contrast: f32,
+    moon: f32,
+    tint: f32,
+}
+
+impl Knobs {
+    fn get() -> Self {
+        static KNOBS: std::sync::OnceLock<Knobs> = std::sync::OnceLock::new();
+        *KNOBS.get_or_init(|| {
+            let mut knobs = Knobs {
+                ambient: AMBIENT_EXPOSURE,
+                sun: SUN_EXPOSURE,
+                adapt: ADAPTATION,
+                contrast: CONTRAST,
+                moon: MOON,
+                tint: TINT,
+            };
+            for pair in std::env::var("BF2_LIGHT").unwrap_or_default().split(',') {
+                let Some((key, value)) = pair.split_once('=') else { continue };
+                let Ok(value) = value.trim().parse::<f32>() else { continue };
+                match key.trim() {
+                    "ambient" => knobs.ambient = value,
+                    "sun" => knobs.sun = value,
+                    "adapt" => knobs.adapt = value,
+                    "contrast" => knobs.contrast = value,
+                    "moon" => knobs.moon = value,
+                    "tint" => knobs.tint = value,
+                    other => warn!("BF2_LIGHT: unknown key {other}"),
+                }
+            }
+            knobs
+        })
+    }
+}
+
+/// A BF2 (gamma-space) light as linear light, its tint scaled by `tint` at equal luminance.
+fn to_linear(c: Vec3, tint: f32) -> Vec3 {
+    let linear = c.max(Vec3::ZERO).powf(2.2);
+    let y = linear.dot(LUMA);
+    if y <= 1e-9 || tint == 1.0 {
+        return linear;
+    }
+    let chroma = (linear / y).powf(tint);
+    chroma * (y / chroma.dot(LUMA).max(1e-9))
+}
+
+impl LevelLight {
+    pub fn new(env: &game_data::EnvironmentDesc) -> Self {
+        let Some(lighting) = &env.lighting else {
+            return Self::from_dynamic(env);
+        };
+        let k = Knobs::get();
+        let (l, moon) = lighting.dark_adapted(env.sun_color);
+        let v = Vec3::from_array;
+        let dim = |c: [f32; 3]| v(c).dot(LUMA) < 0.05;
+        let night = lighting.dark_adapted.is_some() || (dim(l.static_sun) && dim(l.terrain_sun));
+
+        let ambient_static = to_linear(OPEN_SKY_STATIC * v(l.static_sky), k.tint);
+        let ambient_terrain = to_linear(OPEN_SKY_TERRAIN * v(l.terrain_gi), k.tint);
+        let (sun_static, sun_terrain) = if night {
+            let tint = to_linear(v(moon), k.tint);
+            let tint = tint / tint.dot(LUMA).max(1e-9);
+            let moon = tint * k.moon * ambient_static.dot(LUMA) * k.ambient / k.sun;
+            // The same light on the terrain's albedo, which lacks the statics' x 2.
+            (moon, moon * 2f32.powf(2.2))
+        } else {
+            // Overcast levels may have (almost) no sun on statics but some on the terrain.
+            let terrain = v(l.terrain_sun) * 2.0 * l.terrain_sun_scale;
+            let floor = terrain.normalize_or(Vec3::ONE) * 0.03;
+            let statics = if dim(l.static_sun) { v(l.static_sun).max(floor) } else { v(l.static_sun) };
+            (to_linear(statics, k.tint), to_linear(terrain, k.tint))
+        };
+        let ratio = |a: Vec3, b: Vec3| (a + Vec3::splat(1e-7)) / (b + Vec3::splat(1e-7));
+        let terrain = LightScale {
+            sun: ratio(sun_terrain, sun_static),
+            ambient: ratio(ambient_terrain, ambient_static),
+        };
+        // BF2's leaf shader: `texture x 2 x (tree_sun x N.L + tree_ambient / 2)`. Its moonlight
+        // is the statics' here. Some levels set odd tree colours (Leviathan: black ambient).
+        let (low, high) = (Vec3::splat(0.25), Vec3::splat(4.0));
+        let trees = LightScale {
+            sun: if night {
+                Vec3::ONE
+            } else {
+                ratio(to_linear(v(l.tree_sun), k.tint), sun_static).clamp(low, high)
+            },
+            ambient: ratio(to_linear(0.5 * v(l.tree_ambient), k.tint), ambient_static).clamp(low, high),
+        };
+
+        let (reference_ambient, reference_sun) = (
+            k.ambient * to_linear(OPEN_SKY_STATIC * v(REFERENCE_SKY), 1.0).dot(LUMA),
+            k.sun * to_linear(v(REFERENCE_SUN), 1.0).dot(LUMA),
+        );
+        let mut ambient = ambient_static * k.ambient;
+        let mut sun = sun_static * k.sun;
+        if !night {
+            // Towards Karkand's sun-to-shade ratio, keeping their product.
+            let ratio = sun.dot(LUMA) / ambient.dot(LUMA).max(1e-9);
+            let wanted = reference_sun / reference_ambient;
+            let shift = (ratio / wanted).max(1e-9).powf((1.0 - k.contrast) * 0.5);
+            ambient *= shift;
+            sun /= shift;
+        }
+        let level = |ambient: f32, sun: f32| ambient + 0.5 * sun;
+        let exposure = (level(reference_ambient, reference_sun) / level(ambient.dot(LUMA), sun.dot(LUMA)).max(1e-6))
+            .powf(k.adapt);
+        Self {
+            ambient: ambient * exposure,
+            sun: sun * exposure,
+            terrain,
+            trees,
+            night,
+        }
+    }
+
+    /// From the dynamic ambient and sun colours alone: BF2 lights in gamma space,
+    /// `texture x 2 x (ambient + sun x N.L)`, so shade shows at `(2 x ambient)^2.2` of the
+    /// texture's own luminance. Many levels have an overbright sun (up to ~2.3), made for
+    /// BF2's clamped lighting: its hue at the usual brightness.
+    fn from_dynamic(env: &game_data::EnvironmentDesc) -> Self {
+        let sun = Vec3::from_array(env.sun_color);
+        let ambient = Vec3::from_array(env.ambient_color);
+        Self {
+            ambient: (2.0 * ambient).clamp(Vec3::ZERO, Vec3::ONE).powf(2.2),
+            sun: sun / sun.max_element().max(1.0) * SUN_ILLUMINANCE / (LIGHT_UNIT * std::f32::consts::PI),
+            terrain: LightScale::ONE,
+            trees: LightScale::ONE,
+            night: false,
+        }
+    }
+
+    /// The sun as a directional light: colour and illuminance (lux).
+    fn sun_light(&self) -> (Color, f32) {
+        let max = self.sun.max_element().max(1e-9);
+        let color = self.sun / max;
+        (
+            Color::linear_rgb(color.x, color.y, color.z),
+            max * LIGHT_UNIT * std::f32::consts::PI,
+        )
+    }
+}
 
 /// The level's sun (lights the world layer only).
 #[derive(Component)]
@@ -73,15 +323,23 @@ fn apply_environment(
         commands.entity(entity).despawn();
     }
     let direction = Vec3::from_array(env.sun_direction).normalize_or(Vec3::NEG_Y);
-    // Many levels have an overbright sun (components up to ~2.3), made for BF2's clamped
-    // lighting: keep its hue at the usual brightness (brighter looks washed out here).
-    let sun = Vec3::from_array(env.sun_color);
-    let sun_color = rgb((sun / sun.max_element().max(1.0)).to_array());
+    let light = LevelLight::new(env);
+    info!(
+        "level light: ambient {:.3?}, sun {:.3?}, terrain x{:.2?} sun x{:.2?}, trees x{:.2?} sun x{:.2?}{}",
+        light.ambient,
+        light.sun,
+        light.terrain.ambient,
+        light.terrain.sun,
+        light.trees.ambient,
+        light.trees.sun,
+        if light.night { ", night" } else { "" }
+    );
+    let (sun_color, illuminance) = light.sun_light();
     commands.spawn((
         Sun,
         DirectionalLight {
             color: sun_color,
-            illuminance: SUN_ILLUMINANCE,
+            illuminance,
             shadow_maps_enabled: !cli.no_shadows,
             ..default()
         },
@@ -90,14 +348,9 @@ fn apply_environment(
     ));
 
     clear.0 = rgb(env.sky_color);
-    // BF2 lights in gamma space: colour = texture * 2 * (ambient + sun * n.l), so a surface
-    // in shade shows at 2 * ambient of its texture brightness; in linear terms that is
-    // (2 * ambient)^2.2 of the luminance at which a texture shows at face value (~1000
-    // cd/m2 at the default exposure).
-    let ambient_linear = env.ambient_color.map(|c| (2.0 * c).clamp(0.0, 1.0).powf(2.2));
     *ambient = GlobalAmbientLight {
-        color: Color::linear_rgb(ambient_linear[0], ambient_linear[1], ambient_linear[2]),
-        brightness: 1000.0,
+        color: Color::linear_rgb(light.ambient.x, light.ambient.y, light.ambient.z),
+        brightness: LIGHT_UNIT,
         ..default()
     };
     // BF2's view distances were tuned for 2005 hardware (Karkand: 140 m). Stretch them;

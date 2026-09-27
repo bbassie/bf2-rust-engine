@@ -17,6 +17,21 @@ pub struct ObjectDesc {
     /// Hit points and what happens when they run out, for objects that can be destroyed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub armor: Option<ArmorDesc>,
+    /// Distance (m) from the camera to the object's origin beyond which it isn't drawn
+    /// (BF2 stops drawing small objects early; big ones reach the fog). `None`: drawn as far
+    /// as the view reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_distance: Option<f32>,
+}
+
+/// A lower-detail version of a part's mesh.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MeshLod {
+    /// `.glb` path relative to the imported root, laid out like the full-detail mesh (the
+    /// part's `mesh_index` picks the same piece).
+    pub mesh: String,
+    /// Distance (m) from the camera from which this LOD replaces the more detailed one.
+    pub distance: f32,
 }
 
 /// One visual and/or collision piece of an object.
@@ -40,6 +55,13 @@ pub struct ObjectPart {
     pub wreck_mesh: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wreck_collision: Option<String>,
+    /// Lower-detail versions of `mesh`, most detailed first, with the distances they take
+    /// over at. Only for drawing: collision always uses `collision`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lods: Vec<MeshLod>,
+    /// The same for `wreck_mesh`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wreck_lods: Vec<MeshLod>,
     /// Destroyable objects: material of the collision surface, the damage table column for
     /// direct hits. Unset: the armor's material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,4 +157,34 @@ impl Spread {
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parts are flattened maps in RON; the LOD structs inside must read back.
+    #[test]
+    fn lods_round_trip_through_ron() {
+        let object = ObjectDesc {
+            name: "house".into(),
+            parts: vec![ObjectPart {
+                mesh: Some("house.glb".into()),
+                lods: vec![MeshLod {
+                    mesh: "house_lod1.glb".into(),
+                    distance: 35.0,
+                }],
+                ..Default::default()
+            }],
+            draw_distance: Some(470.0),
+            ..Default::default()
+        };
+        let text = ron::ser::to_string_pretty(&object, ron::ser::PrettyConfig::default()).unwrap();
+        let back: ObjectDesc = ron::from_str(&text).unwrap();
+        assert_eq!(back.parts[0].lods, object.parts[0].lods);
+        assert_eq!(back.draw_distance, Some(470.0));
+        // Old imports without the fields still load.
+        let old: ObjectDesc = ron::from_str(r#"(name: "x", parts: [{"mesh": Some("x.glb"), "position": (0.0, 0.0, 0.0)}])"#).unwrap();
+        assert!(old.parts[0].lods.is_empty() && old.draw_distance.is_none());
+    }
 }

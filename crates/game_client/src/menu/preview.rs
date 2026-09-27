@@ -1,7 +1,8 @@
 //! The map preview of the level pages: the level's map with what the picked layout puts on
-//! it, drawn like the deploy screen: control points with their names and first owners'
+//! it, drawn like the in-game maps: control points with their names and first owners'
 //! flags (main bases crossed out: they can't be captured), and the vehicles each side's
-//! spawners make, turned the way they face.
+//! spawners make, turned the way they face. Names are placed so that they don't cover each
+//! other (see `map_markers::place_labels`).
 
 use game_data::VehicleClass;
 use game_shared::protocol::Team;
@@ -9,12 +10,16 @@ use game_shared::protocol::Team;
 use super::*;
 use crate::{
     conquest_hud::{NEUTRAL, team_color},
-    map_icons::FLAG_CLOTH,
+    map_icons::{FLAG_BOUNDS, FLAG_CLOTH, class_shape, icon_size},
+    map_markers::{LabelRequest, label_bundle, label_node, place_labels, silhouette},
 };
 
-/// Size of a control point's icon and of a vehicle's, in pixels, on a 300 px preview.
-const FLAG: f32 = 28.0;
-const VEHICLE: f32 = 13.0;
+/// Size of a control point's icon, in pixels, on a 300 px preview.
+const FLAG: f32 = 26.0;
+/// Vehicles, against their size on the minimap.
+const VEHICLE: f32 = 0.66;
+/// Font size of the names on a 300 px preview.
+const NAME: f32 = 11.0;
 
 /// The team a layout's `initial_team` (0 neutral, 1, 2) means.
 fn side(team: u8) -> Team {
@@ -72,11 +77,22 @@ pub(super) fn layout_preview(
         else {
             return;
         };
-        let at = |position: [f32; 3]| {
-            let uv = ((Vec2::new(position[0], position[2]) - corner) / meters).clamp(Vec2::ZERO, Vec2::ONE);
-            (percent(uv.x * 100.0), percent(uv.y * 100.0))
+        let uv = |position: [f32; 3]| ((Vec2::new(position[0], position[2]) - corner) / meters).clamp(Vec2::ZERO, Vec2::ONE);
+        let at = |uv: Vec2| (percent(uv.x * 100.0), percent(uv.y * 100.0));
+        let anchor = |uv: Vec2| {
+            let (left, top) = at(uv);
+            Node {
+                position_type: PositionType::Absolute,
+                left,
+                top,
+                width: px(0),
+                height: px(0),
+                ..default()
+            }
         };
         let load = |path: &Option<String>| path.as_ref().map(|p| asset_server.load::<Image>(format!("imported://{p}")));
+        // What the names keep clear of, in pixels.
+        let mut obstacles = Vec::new();
 
         // Vehicles, under the flags: each spawner's vehicle for the side holding its point.
         for spawner in &preview.vehicles {
@@ -89,56 +105,61 @@ pub(super) fn layout_preview(
             let Some(template) = spawner.templates[index].as_ref().or(spawner.templates[1 - index].as_ref()) else {
                 continue;
             };
-            let icon = level.vehicle_icons.get(&template.to_ascii_lowercase());
-            if icon.is_some_and(|i| i.class == VehicleClass::Stationary && i.icon.is_none()) || icon.is_none() {
+            let Some(icon) = level.vehicle_icons.get(&template.to_ascii_lowercase()) else {
+                continue;
+            };
+            if icon.class == VehicleClass::Stationary && icon.icon.is_none() {
                 continue;
             }
             let color = if owner == 0 { NEUTRAL } else { team_color(side(owner), local) };
             let forward = Quat::from_array(spawner.placement.rotation) * Vec3::NEG_Z;
-            let heading = forward.x.atan2(-forward.z);
-            let (left, top) = at(spawner.placement.position);
-            let edge = VEHICLE * scale;
-            frame
-                .spawn(Node {
+            let rotation = UiTransform::from_rotation(Rot2::radians(forward.x.atan2(-forward.z)));
+            let point = uv(spawner.placement.position);
+            let image = load(&icon.icon);
+            let (edge, aspect) = match image {
+                Some(_) => (icon_size(icon.class), 1.0),
+                None => class_shape(icon.class),
+            };
+            let (width, height) = (edge * VEHICLE * scale * aspect, edge * VEHICLE * scale);
+            let half = if image.is_some() { Vec2::splat(height * 0.36) } else { Vec2::new(width, height) / 2.0 };
+            obstacles.push(Rect::from_center_half_size(point * size, half));
+            frame.spawn(anchor(point)).with_children(|anchor| {
+                let body = Node {
                     position_type: PositionType::Absolute,
-                    left,
-                    top,
-                    width: px(0),
-                    height: px(0),
+                    left: px(-width / 2.0),
+                    top: px(-height / 2.0),
+                    width: px(width),
+                    height: px(height),
                     ..default()
-                })
-                .with_children(|anchor| {
-                    let body = Node {
-                        position_type: PositionType::Absolute,
-                        left: px(-edge / 2.0),
-                        top: px(-edge / 2.0),
-                        width: px(edge),
-                        height: px(edge),
-                        ..default()
-                    };
-                    let rotation = UiTransform::from_rotation(Rot2::radians(heading));
-                    match load(&icon.and_then(|i| i.icon.clone())) {
-                        Some(image) => {
-                            anchor.spawn((body, rotation, ImageNode::new(image).with_color(color)));
-                        }
-                        None => {
-                            anchor.spawn((
-                                Node {
-                                    width: px(edge * 0.6),
-                                    left: px(-edge * 0.3),
-                                    border_radius: BorderRadius::all(px(2)),
-                                    ..body
-                                },
-                                rotation,
-                                BackgroundColor(color),
-                            ));
-                        }
+                };
+                match image {
+                    Some(image) => {
+                        anchor.spawn((body, rotation)).with_children(|body| {
+                            for part in silhouette(&image, color, width, height) {
+                                body.spawn(part);
+                            }
+                        });
                     }
-                });
+                    None => {
+                        anchor.spawn((
+                            Node {
+                                border: UiRect::all(px(1)),
+                                border_radius: BorderRadius::all(px(2)),
+                                ..body
+                            },
+                            rotation,
+                            BackgroundColor(color),
+                            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                        ));
+                    }
+                }
+            });
         }
 
         // Control points: the first owner's flag (its pole on the point, the cloth on a box of
-        // the owner's colour; a dot without an icon), and the name.
+        // the owner's colour; a dot without an icon).
+        let edge = FLAG * scale;
+        let mut names = Vec::new();
         for cp in &preview.control_points {
             let owner = side(cp.initial_team);
             let icons = &level.icons[(cp.initial_team as usize).min(2)];
@@ -147,84 +168,83 @@ pub(super) fn layout_preview(
             } else {
                 load(&icons.map)
             };
-            let (left, top) = at(cp.position);
+            let point = uv(cp.position);
             let color = team_color(owner, local);
-            let edge = FLAG * scale;
-            frame
-                .spawn(Node {
-                    position_type: PositionType::Absolute,
-                    left,
-                    top,
-                    width: px(0),
-                    height: px(0),
-                    ..default()
-                })
-                .with_children(|anchor| {
-                    match image {
-                        Some(image) => {
-                            let cloth = FLAG_CLOTH;
-                            anchor
-                                .spawn((
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: px(-edge / 2.0 + cloth.min.x * edge),
-                                        top: px(-edge / 2.0 + cloth.min.y * edge),
-                                        width: px(cloth.width() * edge),
-                                        height: px(cloth.height() * edge),
-                                        border_radius: BorderRadius::all(px(2)),
-                                        ..default()
-                                    },
-                                    BackgroundColor(color),
-                                ))
-                                .with_child((
-                                    ImageNode::new(image),
-                                    Node {
-                                        position_type: PositionType::Absolute,
-                                        left: px(-cloth.min.x * edge),
-                                        top: px(-cloth.min.y * edge),
-                                        width: px(edge),
-                                        height: px(edge),
-                                        ..default()
-                                    },
-                                ));
-                        }
-                        None => {
-                            let dot = edge * 0.5;
-                            anchor.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: px(-dot / 2.0),
-                                    top: px(-dot / 2.0),
-                                    width: px(dot),
-                                    height: px(dot),
-                                    border: UiRect::all(px(1.5)),
-                                    border_radius: BorderRadius::MAX,
-                                    ..default()
-                                },
-                                BackgroundColor(color),
-                                BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                            ));
-                        }
-                    }
-                    if labels && !cp.name.is_empty() {
-                        anchor.spawn((
-                            text(cp.name.clone(), 11.0, TEXT),
-                            TextShadow {
-                                offset: Vec2::splat(1.0),
-                                color: Color::srgba(0.0, 0.0, 0.0, 0.9),
-                            },
-                            TextLayout::justify(Justify::Center),
+            let icon = match image {
+                Some(_) => Rect::from_corners(FLAG_BOUNDS.min * edge - edge / 2.0, FLAG_BOUNDS.max * edge - edge / 2.0),
+                None => Rect::from_center_half_size(Vec2::ZERO, Vec2::splat(edge * 0.25)),
+            };
+            obstacles.push(Rect::from_corners(point * size + icon.min, point * size + icon.max));
+            if labels && !cp.name.is_empty() {
+                names.push((
+                    point,
+                    cp.name.clone(),
+                    LabelRequest {
+                        at: point * size,
+                        icon,
+                        chars: cp.name.chars().count(),
+                        font: NAME * scale,
+                        priority: 0,
+                        previous: None,
+                        own: Some(obstacles.len() - 1),
+                    },
+                ));
+            }
+            frame.spawn(anchor(point)).with_children(|anchor| match image {
+                Some(image) => {
+                    let cloth = FLAG_CLOTH;
+                    anchor
+                        .spawn((
                             Node {
                                 position_type: PositionType::Absolute,
-                                top: px(4.0),
-                                left: px(-60),
-                                width: px(120),
-                                justify_content: JustifyContent::Center,
+                                left: px(-edge / 2.0 + cloth.min.x * edge),
+                                top: px(-edge / 2.0 + cloth.min.y * edge),
+                                width: px(cloth.width() * edge),
+                                height: px(cloth.height() * edge),
+                                border_radius: BorderRadius::all(px(2)),
+                                ..default()
+                            },
+                            BackgroundColor(color),
+                        ))
+                        .with_child((
+                            ImageNode::new(image),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px(-cloth.min.x * edge),
+                                top: px(-cloth.min.y * edge),
+                                width: px(edge),
+                                height: px(edge),
                                 ..default()
                             },
                         ));
-                    }
-                });
+                }
+                None => {
+                    let dot = edge * 0.5;
+                    anchor.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(-dot / 2.0),
+                            top: px(-dot / 2.0),
+                            width: px(dot),
+                            height: px(dot),
+                            border: UiRect::all(px(1.5)),
+                            border_radius: BorderRadius::MAX,
+                            ..default()
+                        },
+                        BackgroundColor(color),
+                        BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                    ));
+                }
+            });
+        }
+
+        // The names, above every icon, where they fit.
+        let requests: Vec<LabelRequest> = names.iter().map(|(_, _, request)| request.clone()).collect();
+        let area = Rect::new(0.0, 0.0, size, size);
+        for ((point, name, request), spot) in names.iter().zip(place_labels(&requests, &obstacles, area)) {
+            let Some(spot) = spot else { continue };
+            let (left, top) = at(*point);
+            frame.spawn((label_bundle(name, request.font * spot.scale), label_node(left, top, spot.offset, spot.size)));
         }
     });
 }

@@ -9,7 +9,9 @@
 //! weights (`AIBehaviours.ai`: fire 7.5, special 3, take cover 2, move 1): shoot what it
 //! sees, take cover when hurt, flank or throw a grenade at enemies behind cover, turn on
 //! whoever shoots it, and otherwise carry out its squad's order: capture or hold a flag, or
-//! keep up with its leader. Movement follows paths on the navigation grid ([`crate::nav`]).
+//! keep up with its leader. Its kit adds options ([`equipment`]): launchers and rockets,
+//! reviving, bags, repairs, flashbangs and tear gas. Movement follows paths on the
+//! navigation grid ([`crate::nav`]).
 
 use std::{
     f32::consts::{PI, TAU},
@@ -144,6 +146,9 @@ const REVIVE_DISTANCE: f32 = 35.0;
 const REVIVE_UTILITY: f32 = 4.5;
 /// How close teammates must be for a held bag to reach them, meters.
 const BAG_REACH: f32 = 4.0;
+/// `BotBrain::spot` keys that aren't areas: a commander's point, and roaming.
+const POINT_SPOT: usize = usize::MAX - 1;
+const ROAM_SPOT: usize = usize::MAX;
 
 /// Per-minute movement statistics, logged to see how well bots get around.
 #[derive(Resource, Default)]
@@ -245,6 +250,8 @@ pub struct BotBrain {
     launch_cooldown: f32,
     bag_cooldown: f32,
     repair_cooldown: f32,
+    /// What it repaired last (repairs taken up again after a fight count once).
+    last_repair: Option<RepairTarget>,
     /// The last flashbang that blinded it: how, how strongly, how long ago.
     flash: Option<(FlashbangDesc, f32, f32)>,
     /// Blinded or dazed by it right now.
@@ -362,6 +369,7 @@ impl Default for BotBrain {
             launch_cooldown: 5.0,
             bag_cooldown: 0.0,
             repair_cooldown: 0.0,
+            last_repair: None,
             flash: None,
             blind: false,
             dazed: false,
@@ -930,6 +938,7 @@ impl BotBrain {
             Activity::Flank { time, .. } if time > 0.0 => best = (3.0, self.activity),
             Activity::Search { time, .. } if time > 0.0 => best = (2.5, self.activity),
             Activity::Revive { time, .. } if time > 0.0 => best = (REVIVE_UTILITY, self.activity),
+            Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
             _ => {}
         }
         let consider = |best: &mut (f32, Activity), utility: f32, activity: Activity| {
@@ -1083,7 +1092,10 @@ impl BotBrain {
                 Activity::Throw { .. } => team_stats.bags += 1,
                 Activity::Launch { target: LaunchTarget::Vehicle(_), .. } => team_stats.rockets += 1,
                 Activity::Launch { .. } => team_stats.launches += 1,
-                Activity::Repair { .. } => team_stats.repairs += 1,
+                Activity::Repair { target, .. } if self.last_repair != Some(target) => {
+                    self.last_repair = Some(target);
+                    team_stats.repairs += 1;
+                }
                 Activity::Revive { .. } => team_stats.revives += 1,
                 _ => {}
             }
@@ -1350,12 +1362,21 @@ impl BotBrain {
                 .and_then(|(_, area)| w.map.route_waypoint(position, area).or_else(|| self.flank_via(w, me, area)));
         }
         let area = order.map(|(_, a)| (a, &w.map.areas[a]));
+        // A human commander may send a squad to a point away from the flags.
+        let point = me
+            .member
+            .filter(|_| !human_led)
+            .and_then(|m| w.strategy.orders.get(&(me.team, m.squad)))
+            .and_then(|o| o.point);
 
         // Members keep up with their leader until they are close to the objective.
-        let follow = leader.filter(|l| match area {
-            None => true,
-            Some((_, area)) if human_led => l.position.distance(area.position) > area.radius + 25.0,
-            Some((_, area)) => area.position.distance(position) > 45.0 && area.position.distance(l.position) > 25.0,
+        let follow = leader.filter(|l| match (area, point) {
+            (_, Some(point)) => point.distance(position) > 40.0 && point.distance(l.position) > 20.0,
+            (None, None) => true,
+            (Some((_, area)), None) if human_led => l.position.distance(area.position) > area.radius + 25.0,
+            (Some((_, area)), None) => {
+                area.position.distance(position) > 45.0 && area.position.distance(l.position) > 25.0
+            }
         });
         if let (Some(leader), Some(squad)) = (follow, squad) {
             let slot = squad.slot(me.player).unwrap_or(0);
@@ -1376,6 +1397,10 @@ impl BotBrain {
             return;
         }
 
+        if let Some(point) = point {
+            self.hold_point(w, me, point, intent, dt);
+            return;
+        }
         let Some((area_index, area)) = area else {
             self.roam(w, me, intent);
             return;
@@ -1534,12 +1559,45 @@ impl BotBrain {
             .map_or(self.yaw, |p| yaw_to(p - area.position))
     }
 
+    /// A commander's point away from the flags: a spot of its own near it, held facing the
+    /// enemy.
+    fn hold_point(&mut self, w: &Senses, me: &Me, point: Vec3, intent: &mut Intent, dt: f32) {
+        let position = me.motion.position;
+        self.spot_timer -= dt;
+        let stale = self.spot.is_none_or(|(key, spot)| key != POINT_SPOT || spot.distance(point) > 12.0);
+        if stale || self.spot_timer <= 0.0 {
+            let angle = hash01(self.seed, 5) * TAU + fastrand::f32();
+            let candidate = point + Vec3::new(angle.cos(), 0.0, angle.sin()) * (2.0 + 6.0 * fastrand::f32());
+            let spot = w
+                .nav()
+                .and_then(|nav| nav.locate(candidate, 3.0, None).map(|c| nav.position(c)))
+                .unwrap_or(point);
+            self.spot = Some((POINT_SPOT, spot));
+            self.spot_timer = 15.0 + 15.0 * fastrand::f32();
+        }
+        let (_, spot) = self.spot.unwrap();
+        let distance = flat(spot - position).length();
+        if distance > 1.2 {
+            intent.goal = Some(Goal {
+                position: spot,
+                tolerance: 1.0,
+                sprint: distance > 40.0,
+            });
+            self.spot_timer = self.spot_timer.max(2.0);
+        } else {
+            self.sweep += dt * 0.4;
+            let facing = self.last_seen.map_or(self.yaw, |(at, _)| yaw_to(at - position));
+            intent.look = Look::Yaw(facing + self.sweep.sin() * 1.0);
+            intent.buttons |= Buttons::CROUCH;
+        }
+    }
+
     /// Levels without control points: wander about.
     fn roam(&mut self, w: &Senses, me: &Me, intent: &mut Intent) {
         let position = me.motion.position;
         let reached = self.spot.is_none_or(|(_, spot)| flat(spot - position).length() < 2.0);
         if reached || self.spot_timer <= 0.0 {
-            self.spot = Some((usize::MAX, random_spot(&w.level, position)));
+            self.spot = Some((ROAM_SPOT, random_spot(&w.level, position)));
             self.spot_timer = 40.0 + 40.0 * fastrand::f32();
         }
         if let Some((_, spot)) = self.spot {
@@ -1913,7 +1971,20 @@ impl BotBrain {
         };
         if !self.deployed {
             self.deployed = true;
-            let kit = squad::choose_kit(&w.armory, t, &w.snapshot.kits[t], player, deployment.kit, &self.personality);
+            let enemy_vehicles = w
+                .vehicles
+                .iter()
+                .filter(|(vehicle, ..)| equipment::crew_team(w, *vehicle).is_some_and(|t| t == team.opponent()))
+                .count();
+            let kit = squad::choose_kit(
+                &w.armory,
+                t,
+                &w.snapshot.kits[t],
+                player,
+                deployment.kit,
+                &self.personality,
+                enemy_vehicles,
+            );
             if kit != deployment.kit {
                 deployment.kit = kit;
             }

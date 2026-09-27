@@ -5,6 +5,7 @@
 //! bf2-import --bf2 "C:\Program Files (x86)\EA Games\Battlefield 2" list
 //! bf2-import --bf2 ... level strike_at_karkand
 //! bf2-import --bf2 ... level --all
+//! bf2-import --bf2 ... light --all     # only the world lighting of imported levels
 //! bf2-import --bf2 ... check          # parse every mesh and collision mesh, report failures
 //! ```
 
@@ -30,6 +31,8 @@ mod effects;
 mod glb;
 mod hitzones;
 mod level;
+mod lighting;
+mod lods;
 mod meshes;
 mod roads;
 mod soldiers;
@@ -71,6 +74,13 @@ enum Command {
     /// Import only the bots' hints (strategic areas, weapon templates) of imported levels.
     /// Also done by `level`.
     Ai {
+        names: Vec<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Update only the world lighting (`sky.con`) in imported levels' `level.ron`. Also
+    /// done by `level`.
+    Light {
         names: Vec<String>,
         #[arg(long)]
         all: bool,
@@ -155,6 +165,35 @@ fn main() -> Result<()> {
             for level in levels {
                 match ai::import_only(&install, &level, &cli.out) {
                     Ok((areas, weapons)) => log::info!("{}: {areas} strategic areas, {weapons} weapon templates", level.name),
+                    Err(err) => log::warn!("{}: {err:#}", level.name),
+                }
+            }
+        }
+        Command::Light { names, all } => {
+            let levels = if all {
+                install.mods().iter().flat_map(|m| install.levels(m)).collect()
+            } else {
+                if names.is_empty() {
+                    bail!("name at least one level, or pass --all");
+                }
+                names
+                    .iter()
+                    .map(|n| install.find_level(n))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for level in levels {
+                match lighting::import_only(&install, &level, &cli.out) {
+                    Ok(Some(l)) => log::info!(
+                        "{}: static sky {:?} sun {:?}, terrain GI {:?} sun {:?} (lightmap sun x{:.2}){}",
+                        level.name,
+                        l.static_sky,
+                        l.static_sun,
+                        l.terrain_gi,
+                        l.terrain_sun,
+                        l.terrain_sun_scale,
+                        if l.dark_adapted.is_some() { ", faked HDR" } else { "" }
+                    ),
+                    Ok(None) => log::info!("{}: no world lighting in its scripts", level.name),
                     Err(err) => log::warn!("{}: {err:#}", level.name),
                 }
             }

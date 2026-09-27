@@ -63,7 +63,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Medic, support and engineer abilities: medic/ammo bags (held or thrown), wrench repairs
   of vehicles and objects, kit ability charge, BF2 scoring
 
-## M2: Conquest (in progress)
+## M2: Conquest
 
 - [x] Control points: flags lowered and raised by the team with more soldiers in the radius,
   using each point's capture times (BF2's `gpm_cq` rules)
@@ -117,9 +117,11 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
   orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
   settings, ladders in navigation
-- AI commander using assets, bots using launchers/repairs (in progress)
-- Strategic layer from `StrategicAreas.ai`, squad orders, individual utility behaviours
-  seeded from `AIBehaviours.ai` and per-object AI templates
+- [x] AI commander (takes the post, gives way to humans, squad orders, artillery, UAV, scans,
+  supply drops); bots follow a human commander's orders, use launchers, wire-guided rockets,
+  flashbangs, tear gas and gas masks, repair vehicles and assets, throw bags
+- [x] Utility behaviours weighted like `AIBehaviours.ai`, BF2's weapon AI templates (ranges,
+  firing poses)
 - Bots driving vehicles and flying through the same input channels as players
 
 ## M5: Presentation
@@ -128,6 +130,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   meshes, environment maps
 - [x] Water, undergrowth/overgrowth, surrounding terrain, view distance setting (grows with
   altitude), BF2's distant tree stand-ins
+- Lighting depth (in progress): per-map world lighting from BF2's values (night maps), directional
+  sky ambient, BF2's baked sky visibility as ambient occlusion (the sun stays dynamic), light
+  probes for soldiers and vehicles, tonemapping and bloom
 - Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
 - [x] Effects: BF2's particle effects for muzzle flashes, impacts per surface, explosions with
   their material-manager dust columns, smoke, destruction, scorch decals
@@ -149,4 +154,6 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Modding workflow: mods authored directly in glTF + RON (`mods/`, see docs/MODDING.md)
 - [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
   map changes; server config file; persistent player stats
+- Content download (in progress): clients download a server's mods (and, if its admin opts in,
+  the converted BF2 assets) on join, cached by hash, so modded servers need no install step
 - [x] Master server: servers register and heartbeat, the browser lists internet servers

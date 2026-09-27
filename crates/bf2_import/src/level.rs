@@ -15,12 +15,12 @@ use bf2_formats::{
 };
 use game_data::{
     ControlPointDesc, EnvironmentDesc, FlagModels, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
-    Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, TeamVoice, VehicleSpawnerDesc,
+    Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, TeamVoice, TerrainDesc, VehicleSpawnerDesc,
 };
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{audio, coords, destruction, meshes::MeshConverter, roads, terrain, vehicles, weapons};
+use crate::{audio, coords, destruction, lods, meshes::MeshConverter, roads, terrain, vehicles, weapons};
 
 pub struct LevelReport {
     pub statics: usize,
@@ -65,7 +65,18 @@ pub fn import_level(
         }
         let start = interp.world.instances.len();
         interp.run(&path, &["host".to_string()]);
-        layouts.push((mode, size, start..interp.world.instances.len()));
+        let range = start..interp.world.instances.len();
+        // Layouts reuse template names with other ids and teams (the game only ever loads
+        // one), and a later layout's `ObjectTemplate.create` replaces the template: keep
+        // this layout's own (Operation Blue Pearl 16 got the 64 player Market and Yard).
+        let templates: HashMap<String, Template> = interp.world.instances[range.clone()]
+            .iter()
+            .filter_map(|i| {
+                let template = interp.world.template(&i.template)?;
+                Some((i.template.to_ascii_lowercase(), template.clone()))
+            })
+            .collect();
+        layouts.push((mode, size, range, templates));
     }
 
     let name = level.name.to_lowercase();
@@ -151,8 +162,8 @@ pub fn import_level(
 
     let game_modes: Vec<GameModeDesc> = layouts
         .iter()
-        .map(|(mode, size, range)| {
-            build_game_mode(world, localization, mode, *size, &world.instances[range.clone()])
+        .map(|(mode, size, range, templates)| {
+            build_game_mode(templates, localization, mode, *size, &world.instances[range.clone()])
         })
         .collect();
     // The top-down map BF2 shows in game, copied as-is (north up, not flipped).
@@ -167,12 +178,13 @@ pub fn import_level(
         .and_then(|c| c.args.first()?.parse().ok())
         .unwrap_or(200.0);
 
+    let environment = environment(world, &converter, &terrain, &level_dir);
     let desc = LevelDesc {
         name: name.clone(),
         display_name,
         terrain: Some(terrain),
         water,
-        environment: environment(world, &converter),
+        environment,
         statics,
         roads,
         game_modes,
@@ -265,6 +277,7 @@ fn build_object(
     let mut parts = Vec::new();
     let kind = world.template(name).map(|t| t.ty.clone()).unwrap_or_default();
     let mut visited = HashSet::new();
+    let mut bounds = ObjectBounds::default();
     flatten(
         world,
         name,
@@ -276,12 +289,18 @@ fn build_object(
         &mut parts,
         &mut visited,
         0,
+        &mut bounds,
     );
     ObjectDesc {
         name: name.to_string(),
         kind,
         parts,
         armor: world.template(name).and_then(|t| destruction::armor(world, t, converter)),
+        draw_distance: if bounds.vegetation {
+            None
+        } else {
+            lods::draw_distance(world.template(name), bounds.radius)
+        },
     }
 }
 
@@ -290,6 +309,15 @@ fn build_object(
 struct Inherited {
     mesh: Option<String>,
     collision: Option<String>,
+    /// Lower LODs of `mesh` and its radius.
+    lods: lods::ObjectLods,
+}
+
+/// How far the visible parts of an object reach from its origin, for its draw distance.
+#[derive(Default)]
+struct ObjectBounds {
+    radius: f32,
+    vegetation: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,6 +332,7 @@ fn flatten(
     parts: &mut Vec<ObjectPart>,
     visited: &mut HashSet<String>,
     depth: u32,
+    bounds: &mut ObjectBounds,
 ) {
     let Some(template) = world.template(name) else {
         return;
@@ -344,6 +373,16 @@ fn flatten(
     let own_collision = collision_source.as_deref().and_then(|path| convert(path, true));
     let has_geometry_part = template.get("geometrypart").is_some();
     let has_collision_part = template.get("collisionpart").is_some();
+    // Lower LODs of the mesh this part draws (its own or, for a geometry part, the parent's).
+    let own_lods = own_mesh.as_ref().and(mesh_source.as_deref()).map(|path| {
+        let geometry = template.geometry.as_deref().and_then(|g| world.geometry(g));
+        lods::object_lods(converter, geometry, path)
+    });
+    let part_lods = match (&own_lods, &own_mesh) {
+        (Some(own), _) => Some(own.clone()),
+        (None, None) if has_geometry_part && inherited.mesh.is_some() => Some(inherited.lods.clone()),
+        _ => None,
+    };
     let mesh = own_mesh.clone().or_else(|| has_geometry_part.then(|| inherited.mesh.clone()).flatten());
     let collision = own_collision
         .clone()
@@ -364,6 +403,14 @@ fn flatten(
 
     if mesh.is_some() || collision.is_some() {
         let (scale, rotation, translation) = transform.to_scale_rotation_translation();
+        let part_lods = part_lods.filter(|_| mesh.is_some()).unwrap_or_default();
+        if mesh.is_some() {
+            bounds.vegetation |= part_lods.vegetation;
+            bounds.radius = bounds
+                .radius
+                .max(translation.length() + part_lods.radius * scale.max_element());
+        }
+        let wreck_mesh_set = wreck_mesh.is_some();
         parts.push(ObjectPart {
             mesh,
             mesh_index: template.get_f32("geometrypart").unwrap_or(0.0) as u32,
@@ -373,6 +420,8 @@ fn flatten(
             wreck_collision,
             hit_material,
             ladder: template.ty.eq_ignore_ascii_case("ladder"),
+            wreck_lods: if wreck_mesh_set { part_lods.wreck_lods.clone() } else { Vec::new() },
+            lods: part_lods.lods,
             placement: Placement {
                 position: translation.to_array(),
                 rotation: rotation.to_array(),
@@ -384,6 +433,7 @@ fn flatten(
     let inherited = Inherited {
         mesh: own_mesh.or(inherited.mesh),
         collision: own_collision.or(inherited.collision),
+        lods: own_lods.unwrap_or(inherited.lods),
     };
     visited.insert(name.to_ascii_lowercase());
     for child in &template.children {
@@ -406,13 +456,16 @@ fn flatten(
             parts,
             visited,
             depth + 1,
+            bounds,
         );
     }
     visited.remove(&name.to_ascii_lowercase());
 }
 
+/// A layout from its instances and the templates they had when its script ran (by
+/// lowercased name).
 fn build_game_mode(
-    world: &World,
+    templates: &HashMap<String, Template>,
     localization: &Localization,
     mode: &str,
     size: u32,
@@ -424,7 +477,7 @@ fn build_game_mode(
         ..Default::default()
     };
     for instance in instances {
-        let Some(template) = world.template(&instance.template) else {
+        let Some(template) = templates.get(&instance.template.to_ascii_lowercase()) else {
             continue;
         };
         let Some(placement) = instance_placement(instance) else {
@@ -486,7 +539,7 @@ fn build_game_mode(
     layout
 }
 
-fn environment(world: &World, converter: &MeshConverter) -> EnvironmentDesc {
+fn environment(world: &World, converter: &MeshConverter, terrain: &TerrainDesc, level_dir: &Path) -> EnvironmentDesc {
     let defaults = EnvironmentDesc::default();
     let color = |name: &str| world.setting(name).and_then(parse_vec3).map(terrain::normalize_color);
     let fog = world
@@ -500,12 +553,13 @@ fn environment(world: &World, converter: &MeshConverter) -> EnvironmentDesc {
         Some([start, end, ..]) if end > start => [*start, *end],
         _ => defaults.fog_range,
     };
+    let sun_direction = world
+        .setting("lightmanager.sundirection")
+        .and_then(parse_vec3)
+        .map(coords::direction)
+        .unwrap_or(defaults.sun_direction);
     EnvironmentDesc {
-        sun_direction: world
-            .setting("lightmanager.sundirection")
-            .and_then(parse_vec3)
-            .map(coords::direction)
-            .unwrap_or(defaults.sun_direction),
+        sun_direction,
         sun_color: color("lightmanager.suncolor").unwrap_or(defaults.sun_color),
         ambient_color: color("lightmanager.ambientcolor").unwrap_or(defaults.ambient_color),
         sky_color: fog_color,
@@ -513,6 +567,7 @@ fn environment(world: &World, converter: &MeshConverter) -> EnvironmentDesc {
         fog_range,
         view_distance: view_distance.unwrap_or(fog_range[1]).max(fog_range[1]),
         sky: sky(world, converter),
+        lighting: crate::lighting::level_lighting(world, Some(terrain), level_dir, sun_direction),
     }
 }
 
