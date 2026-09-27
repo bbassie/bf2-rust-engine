@@ -1,0 +1,25 @@
+// Roadkill over the network, the driver's side: gets in the nearest Vodnik, waits for the
+// host to stand in front of it (move_roadkill_host.ron), then drives at it.
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        WalkToVehicle("jep_vodnik"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(3.0),
+        VehicleInfo("waiting"),
+        Move(0.0, 1.0),
+        Wait(2.0),
+        VehicleInfo("driving"),
+        Wait(2.0),
+        Move(0.0, -1.0),
+        Wait(1.5),
+        Move(0.0, 0.0),
+        VehicleInfo("stopped"),
+        Quit,
+    ],
+)

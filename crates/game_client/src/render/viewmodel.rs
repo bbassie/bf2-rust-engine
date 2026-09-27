@@ -276,6 +276,15 @@ fn local_weapon<'a>(armory: &'a Armory, loadout: &Loadout, inventory: &Inventory
         .map(|w| w.as_ref())
 }
 
+/// What the hands hold: the weapon, or the C4 detonator while it is out. Returns a name to
+/// tell them apart, the first-person model and the animation set.
+fn held<'a>(weapon: &'a game_data::WeaponDesc, detonator: bool) -> (String, Option<&'a String>, Option<&'a String>) {
+    match weapon.detonator.as_ref().filter(|_| detonator) {
+        Some(d) => (format!("{}/detonator", weapon.name), d.mesh_1p.as_ref(), d.animations_1p.as_ref()),
+        None => (weapon.name.clone(), weapon.mesh_1p.as_ref(), weapon.animations_1p.as_ref()),
+    }
+}
+
 /// Puts the active weapon's first-person parts on the arms' weapon bones.
 #[allow(clippy::type_complexity)]
 fn attach_weapon(
@@ -285,6 +294,7 @@ fn attach_weapon(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     mut materials: Bf2Materials,
+    feedback: Res<CombatFeedback>,
     soldier: Query<(&Loadout, &Inventory), With<LocalSoldier>>,
     mut roots: Query<(&ViewRig, &mut ViewState)>,
 ) {
@@ -294,16 +304,14 @@ fn attach_weapon(
     let Some(weapon) = local_weapon(&armory, loadout, inventory) else {
         return;
     };
-    if state.weapon != weapon.name {
+    let (held, mesh_1p, _) = held(weapon, feedback.detonator);
+    if state.weapon != held {
         for part in state.parts.drain(..) {
             commands.entity(part).try_despawn();
         }
-        state.weapon = weapon.name.clone();
+        state.weapon = held;
         state.parts_ready = false;
-        state.weapon_gltf = weapon
-            .mesh_1p
-            .as_ref()
-            .map(|path| asset_server.load(format!("imported://{path}")));
+        state.weapon_gltf = mesh_1p.map(|path| asset_server.load(format!("imported://{path}")));
     }
     if state.parts_ready {
         return;
@@ -403,7 +411,11 @@ fn animate_view_model(
     feedback: Res<CombatFeedback>,
     mut zoom: ResMut<Zoom>,
     third_person: Res<ThirdPerson>,
-    soldier: Query<(&Loadout, &Inventory, &SoldierMotion), (With<LocalSoldier>, Without<game_shared::vehicle::Seated>)>,
+    // Critically wounded soldiers hold nothing.
+    soldier: Query<
+        (&Loadout, &Inventory, &SoldierMotion),
+        (With<LocalSoldier>, Without<game_shared::vehicle::Seated>, Without<game_shared::revive::Downed>),
+    >,
     mut roots: Query<(&ViewRig, &mut ViewState, &mut Visibility)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
@@ -414,9 +426,16 @@ fn animate_view_model(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
+    // Both hands on a ladder: the weapon is slung, as in BF2's ladder seat.
+    if motion.climbing {
+        visibility.set_if_neq(Visibility::Hidden);
+        state.animated_weapon.clear();
+        return;
+    }
     let weapon = local_weapon(&armory, loadout, inventory);
-    let set = weapon.and_then(|w| w.animations_1p.clone());
-    let (Some(weapon), Some(set)) = (weapon, set) else {
+    let held = weapon.map(|w| held(w, feedback.detonator));
+    let set = held.as_ref().and_then(|(_, _, set)| set.cloned());
+    let (Some(weapon), Some((held, ..)), Some(set)) = (weapon, held, set) else {
         // Nothing to hold (or no first-person animations for it).
         visibility.set_if_neq(Visibility::Hidden);
         return;
@@ -443,8 +462,8 @@ fn animate_view_model(
     }
     // One-shot starting now, and its fade in.
     let mut started = None;
-    if state.animated_weapon != weapon.name {
-        state.animated_weapon = weapon.name.clone();
+    if state.animated_weapon != held {
+        state.animated_weapon = held;
         state.shots_seen = feedback.shots_fired;
         state.was_reloading = false;
         started = clip("deploy").map(|c| (OneShot::new(c, FADE_ONE_SHOT_OUT), 0.0));

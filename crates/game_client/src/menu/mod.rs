@@ -6,6 +6,7 @@
 //! `start`, `pause:leave`, `tab:graphics`, `toggle:shadows`, ...) so scenarios can press it
 //! with `Click`. A scenario with `menu: true` starts here instead of in a match.
 
+mod browser;
 mod input;
 mod levels;
 mod loading;
@@ -46,10 +47,10 @@ use crate::{
     deploy::DeployScreen,
     net::{self, ActiveMatch, LocalPlayer, LocalSoldier, MatchNotice, MatchSetup},
     scenario::{ScenarioInput, ScenarioSystems},
-    settings::{Action, Binding, DisplayMode, Settings},
+    settings::{Action, Binding, DisplayMode, Settings, ViewDistance},
 };
 
-use self::{input::*, levels::*, loading::*, pages::*, widgets::*};
+use self::{browser::*, input::*, levels::*, loading::*, pages::*, widgets::*};
 
 pub struct MenuPlugin {
     /// Where the client starts: the main menu, or loading a match from the command line.
@@ -70,8 +71,10 @@ impl Plugin for MenuPlugin {
             .init_resource::<Menu>()
             .init_resource::<LevelCatalog>()
             .init_resource::<LoadingProgress>()
+            .init_resource::<ServerBrowser>()
+            .add_observer(level_changed)
             .add_systems(Startup, scan_levels)
-            .add_systems(PreUpdate, menu_keys.after(InputSystems))
+            .add_systems(PreUpdate, menu_keys.in_set(MenuKeys).after(InputSystems))
             .add_systems(OnEnter(Screen::Menu), spawn_main_menu)
             .add_systems(OnEnter(Screen::Loading), spawn_loading_screen)
             .add_systems(OnExit(Screen::InGame), |mut menu: ResMut<Menu>| {
@@ -80,9 +83,9 @@ impl Plugin for MenuPlugin {
             .add_systems(
                 Update,
                 (
-                    collect_levels,
+                    (collect_levels, open_browser, poll_browser),
                     (press_buttons, drag_sliders, sync_text_fields),
-                    (sync_pause_overlay, build_pages, build_level_details),
+                    (sync_pause_overlay, build_pages, build_level_details, build_server_list),
                     (
                         paint_buttons,
                         paint_switches,
@@ -103,6 +106,10 @@ impl Plugin for MenuPlugin {
             .add_systems(Update, pause_time.run_if(in_state(Screen::InGame)));
     }
 }
+
+/// Where the menus take the keyboard (Esc, Enter); the chat box goes first.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuKeys;
 
 /// What the client is doing.
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -215,8 +222,17 @@ enum MenuButton {
     Step(Slider, i8),
     Display(DisplayMode),
     WindowSize(u32, u32),
+    ViewDistance(ViewDistance),
     Rebind(Action),
     ResetBindings,
+    /// Join page: ask for servers again.
+    Refresh,
+    /// Join page: pick the listed server at this address and game port.
+    Server(String, u16),
+    /// Join page: star or unstar the listed server at this address and game port.
+    Favourite(String, u16),
+    /// Join page: star the address typed in.
+    AddFavourite,
 }
 
 impl MenuButton {
@@ -241,8 +257,13 @@ impl MenuButton {
             }
             MenuButton::Display(mode) => format!("display:{}", mode.label().to_lowercase()),
             MenuButton::WindowSize(w, h) => format!("size:{w}x{h}"),
+            MenuButton::ViewDistance(distance) => format!("view:{}", distance.label().to_lowercase()),
             MenuButton::Rebind(action) => format!("bind:{}", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
+            MenuButton::Refresh => "browser:refresh".into(),
+            MenuButton::Server(address, port) => format!("server:{address}:{port}"),
+            MenuButton::Favourite(address, port) => format!("favourite:{address}:{port}"),
+            MenuButton::AddFavourite => "favourite:add".into(),
         }
     }
 }
@@ -313,6 +334,8 @@ enum Slider {
     Sensitivity,
     FieldOfView,
     Volume,
+    EffectsVolume,
+    AmbienceVolume,
     Bots,
 }
 
@@ -322,6 +345,8 @@ impl Slider {
             Slider::Sensitivity => "sensitivity",
             Slider::FieldOfView => "fov",
             Slider::Volume => "volume",
+            Slider::EffectsVolume => "effects_volume",
+            Slider::AmbienceVolume => "ambience_volume",
             Slider::Bots => "bots",
         }
     }
@@ -331,7 +356,7 @@ impl Slider {
         match self {
             Slider::Sensitivity => (0.1, 4.0, 0.05),
             Slider::FieldOfView => (60.0, 100.0, 1.0),
-            Slider::Volume => (0.0, 1.0, 0.05),
+            Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => (0.0, 1.0, 0.05),
             Slider::Bots => (0.0, 63.0, 1.0),
         }
     }
@@ -341,6 +366,8 @@ impl Slider {
             Slider::Sensitivity => settings.mouse_sensitivity,
             Slider::FieldOfView => settings.field_of_view,
             Slider::Volume => settings.master_volume,
+            Slider::EffectsVolume => settings.effects_volume,
+            Slider::AmbienceVolume => settings.ambience_volume,
             Slider::Bots => settings.last_match.bots as f32,
         }
     }
@@ -359,6 +386,8 @@ impl Slider {
             Slider::Sensitivity => settings.mouse_sensitivity = value,
             Slider::FieldOfView => settings.field_of_view = value,
             Slider::Volume => settings.master_volume = value,
+            Slider::EffectsVolume => settings.effects_volume = value,
+            Slider::AmbienceVolume => settings.ambience_volume = value,
             Slider::Bots => settings.last_match.bots = value as u32,
         }
     }
@@ -373,7 +402,7 @@ impl Slider {
         match self {
             Slider::Sensitivity => format!("{value:.2}"),
             Slider::FieldOfView => format!("{value:.0} deg"),
-            Slider::Volume => format!("{:.0}%", value * 100.0),
+            Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => format!("{:.0}%", value * 100.0),
             Slider::Bots => format!("{value:.0}"),
         }
     }

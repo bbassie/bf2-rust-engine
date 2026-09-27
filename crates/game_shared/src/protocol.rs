@@ -41,12 +41,22 @@ impl Plugin for ProtocolPlugin {
             .replicate::<crate::projectile::Projectile>()
             .replicate::<crate::projectile::ProjectileMotion>()
             .replicate::<crate::projectile::SmokeCloud>()
+            .replicate::<crate::rope::Rope>()
             .replicate::<Vehicle>()
             .replicate::<VehicleMotion>()
             .replicate::<VehicleState>()
             .replicate::<Seated>()
             .replicate::<VehicleHealth>()
             .replicate::<VehicleWeapons>()
+            .replicate::<crate::revive::Downed>()
+            .replicate::<crate::radio::Spotted>()
+            .replicate::<crate::commander::Commander>()
+            .replicate::<crate::commander::SquadOrder>()
+            .replicate::<crate::commander::TeamAssets>()
+            .replicate::<crate::commander::AssetEffect>()
+            .replicate::<crate::gear::SoldierGear>()
+            .replicate::<crate::gear::TearGas>()
+            .add_client_message::<crate::gear::GearRequest>(Channel::Ordered)
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
             .add_client_message::<DeployRequest>(Channel::Ordered)
@@ -56,7 +66,20 @@ impl Plugin for ProtocolPlugin {
             .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
             .add_mapped_server_message::<KillFeed>(Channel::Ordered)
             .add_mapped_server_message::<VehicleShot>(Channel::Unreliable)
-            .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered);
+            .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered)
+            .add_client_message::<crate::chat::ChatRequest>(Channel::Ordered)
+            .add_server_message::<crate::chat::ChatLine>(Channel::Ordered)
+            .add_server_message::<crate::chat::Kicked>(Channel::Ordered)
+            // No entities in them: sent right away rather than with the next replication
+            // tick, so a kick's reason arrives before the disconnect.
+            .make_message_independent::<crate::chat::ChatLine>()
+            .make_message_independent::<crate::chat::Kicked>()
+            .add_server_message::<crate::summary::RoundSummary>(Channel::Ordered)
+            .add_client_message::<crate::revive::GiveUp>(Channel::Ordered)
+            .add_client_message::<crate::radio::RadioRequest>(Channel::Ordered)
+            .add_client_message::<crate::commander::CommanderRequest>(Channel::Ordered)
+            .add_mapped_server_message::<crate::radio::RadioMessage>(Channel::Ordered)
+            .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered);
     }
 }
 

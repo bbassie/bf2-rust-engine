@@ -104,6 +104,13 @@ impl Cache<'_> {
 }
 
 pub fn spawn_statics(commands: &mut Commands, statics: &[StaticInstance], paths: &GamePaths) {
+    spawn_objects(commands, statics, 0, paths);
+}
+
+/// Spawns objects like [`spawn_statics`], numbering them from `first_instance` (for
+/// [`DestroyedStatics`]): objects outside the level's statics, such as the commander's
+/// assets, use numbers above the statics'.
+pub fn spawn_objects(commands: &mut Commands, statics: &[StaticInstance], first_instance: u32, paths: &GamePaths) {
     let root: PathBuf = paths.imported.clone();
     let mut cache = Cache {
         root: &root,
@@ -112,6 +119,7 @@ pub fn spawn_statics(commands: &mut Commands, statics: &[StaticInstance], paths:
     };
     let (mut spawned, mut destroyable) = (0, 0);
     for (instance, placed) in statics.iter().enumerate() {
+        let instance = first_instance as usize + instance;
         let Some(object) = cache.template(&placed.template).cloned() else {
             continue;
         };

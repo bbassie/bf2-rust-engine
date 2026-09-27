@@ -187,6 +187,46 @@ pub struct AmbientSound {
     pub radius: f32,
 }
 
+/// A team language's radio voice (`radio/<language>.ron`): BF2's radio messages (the commo
+/// rose, spotting, soldiers' automatic call-outs) by message id, e.g. `medic`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct RadioVoice {
+    #[serde(default)]
+    pub messages: BTreeMap<String, RadioLine>,
+}
+
+/// One radio message: what it says and the recordings, per speaker rank.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct RadioLine {
+    /// What the chat shows (localized). Empty for lines that are only shouted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// Over the radio (a filtered recording), for a grunt, a squad leader and the commander.
+    /// One is picked at random. Empty: never over the radio.
+    #[serde(default)]
+    pub radio: [Vec<String>; 3],
+    /// Heard in person near the speaker, by either team (unfiltered, positional).
+    #[serde(default)]
+    pub local: [Vec<String>; 3],
+}
+
+/// Speaker ranks of [`RadioLine`]'s recordings.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioRank {
+    Grunt,
+    SquadLeader,
+    Commander,
+}
+
+impl RadioLine {
+    /// The recordings for `rank`, or a lower rank's when it has none.
+    pub fn files(&self, rank: RadioRank, local: bool) -> &[String] {
+        let sets = if local { &self.local } else { &self.radio };
+        let rank = rank as usize;
+        (0..=rank).rev().map(|r| &sets[r]).find(|s| !s.is_empty()).map_or(&[], |s| s)
+    }
+}
+
 /// What a vehicle's engine sounds like (in `vehicles/<name>.ron`).
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VehicleSounds {

@@ -1,0 +1,18 @@
+// Man down over the network, the joining side: wounded by the host (abilities_net_host.ron),
+// the overlay and the man-down camera show, the give-up key reaches the server.
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(14.0),
+        Screenshot("remote_1"),
+        Wait(3.0),
+        Screenshot("remote_2"),
+        Vitals("remote_down"),
+        Key(KeyX),
+        Wait(1.5),
+        Screenshot("remote_gave_up"),
+        Wait(3.0),
+        Quit,
+    ],
+)

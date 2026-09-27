@@ -52,9 +52,9 @@ const CHUNK_SIZE: f32 = 16.0;
 /// Plants are drawn this much further than the level asks for (BF2's 30..75 m were tuned
 /// for 2005 hardware).
 const DISTANCE_SCALE: f32 = 1.25;
-const MAX_DISTANCE: f32 = 80.0;
+const MAX_DISTANCE: f32 = 60.0;
 /// Fraction of the plants still drawn where they start to fade out.
-const KEEP_AT_FADE: f32 = 0.45;
+const KEEP_AT_FADE: f32 = 0.35;
 /// Chunk builds started per frame.
 const BUILDS_PER_FRAME: usize = 4;
 

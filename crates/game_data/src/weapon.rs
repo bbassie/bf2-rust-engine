@@ -13,6 +13,10 @@ pub struct KitDesc {
     pub kind: String,
     /// Weapon names, in the order the kit lists them.
     pub weapons: Vec<String>,
+    /// How fast the kit's ability charge (what thrown bags and shocks use up) refills, as
+    /// a share per second (BF2 `abilityRestoreRate`). 0 without replenishing gadgets.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ability_restore: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +76,9 @@ pub struct WeaponDesc {
     /// How the weapon launches its projectiles: guns, throwing, placing charges.
     #[serde(default)]
     pub fire: FireDesc,
+    /// C4: the detonator the hands hold instead while it is out (BF2 `fire.detonatorObject`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detonator: Option<DetonatorDesc>,
     pub projectile: ProjectileDesc,
     pub deviation: DeviationDesc,
     pub recoil: RecoilDesc,
@@ -82,6 +89,59 @@ pub struct WeaponDesc {
     pub zoom: ZoomDesc,
     #[serde(default)]
     pub sounds: WeaponSounds,
+    /// Medic bags, shock paddles, ammo bags and the wrench: what they heal, resupply,
+    /// repair or revive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replenish: Option<ReplenishDesc>,
+}
+
+/// Healing, resupplying, repairing and reviving (BF2 `ReplenishingAmmoComp` on the weapon,
+/// `ReplenishDetonationComp` on thrown bags, `ResurrectCollisionComp` on the shock
+/// paddles' projectile). Rates are percent of the target's maximum (hit points, or the
+/// ammo it carries when full) per second, times the damage table factor of `material`
+/// against the target's armor material, which is also what decides what can be healed
+/// (soldiers) or repaired (vehicles, objects).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct ReplenishDesc {
+    pub kind: ReplenishKind,
+    /// Damage table row (`ammo.abilityMaterial`).
+    pub material: u32,
+    /// In hand: what is within `radius` meters gets `strength` percent per second
+    /// (`ammo.abilityRadius`, `ammo.abilityStrength`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub radius: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub strength: f32,
+    /// Only while the trigger is held (`ammo.onlyActiveWhileFiring`: the wrench).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub while_firing: bool,
+    /// Share of the kit's ability charge one use takes (a thrown bag, a shock:
+    /// `ammo.abilityCost`), and one second of replenishing in hand (`ammo.abilityDrain`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cost: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub drain: f32,
+    /// Thrown bags: a soldier within `pickup_radius` meters picks one up and gets
+    /// `pickup_strength` percent at once (`detonation.triggerRadius`,
+    /// `detonation.replenishingStrength`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pickup_radius: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pickup_strength: f32,
+    /// Shock paddles: hit points a critically wounded teammate gets back
+    /// (`collision.restoreHP`). 0 for everything else.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revive_health: f32,
+}
+
+/// What a [`ReplenishDesc`] gives (BF2 `replenishingType`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReplenishKind {
+    /// Hit points: healing soldiers, repairing vehicles and objects (`RTHeal`).
+    #[default]
+    Health,
+    /// Magazines, grenades and explosives (`RTAmmo`).
+    Ammo,
 }
 
 /// How zooming looks (BF2 `DefaultZoomComp`).
@@ -175,6 +235,31 @@ pub struct ProjectileDesc {
     /// Smoke grenades: the cloud they leave when they go off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke: Option<SmokeDesc>,
+    /// Where it sticks, a rope is strung (grappling hooks and ziplines).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope: Option<RopeDesc>,
+}
+
+/// A rope soldiers climb or ride, strung by a projectile (BF2 SF's `GrapplingHookRope` and
+/// `Zipline` templates).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct RopeDesc {
+    pub kind: RopeKind,
+    /// Meters: grappling ropes hang at most this far down, ziplines reach at most this far.
+    pub max_length: f32,
+    /// Seconds until the rope is gone.
+    pub lifetime: f32,
+    /// Climbing speed on it, m/s (grappling ropes).
+    #[serde(default)]
+    pub climb_speed: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RopeKind {
+    /// Hangs down from the hook: climbed up and down.
+    Grapple,
+    /// Stretched from the shooter to where it hit: slid down.
+    Zipline,
 }
 
 impl ProjectileDesc {
@@ -239,6 +324,15 @@ pub struct SmokeDesc {
     pub radius: f32,
     /// Seconds from the grenade going off until the cloud is gone.
     pub duration: f32,
+}
+
+/// The model and first-person animations of a C4 detonator.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DetonatorDesc {
+    #[serde(default)]
+    pub mesh_1p: Option<String>,
+    #[serde(default)]
+    pub animations_1p: Option<String>,
 }
 
 /// How a weapon launches its projectiles (BF2 fire and target components).

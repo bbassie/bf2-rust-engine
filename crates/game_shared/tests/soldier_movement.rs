@@ -2,11 +2,13 @@
 //! Runs `step_soldier` headless with avian's spatial queries, no level needed.
 
 use avian3d::prelude::*;
+use game_data::RopeKind;
 use bevy::{ecs::system::RunSystemOnce, prelude::*, time::TimeUpdateStrategy};
 use game_shared::{
     input::{Buttons, InputFrame},
     ladder::LadderPart,
     physics::GameLayer,
+    rope::{self, Rope},
     soldier::{SoldierMotion, SoldierPlugin, SoldierShapes, SoldierTuning, Stance, step_soldier},
 };
 
@@ -650,7 +652,11 @@ fn walls_stop_and_slide() {
         last.position.y < 0.02 && last.position.z > -2.0 && last.position.z < -1.7,
         "{last:?}"
     );
-    assert_eq!(trace[100], trace[119], "jitters against a wall");
+    assert_eq!(
+        (trace[100].position, trace[100].velocity),
+        (trace[119].position, trace[119].velocity),
+        "jitters against a wall"
+    );
     // At 45°: slides along it.
     let trace = simulate(&mut app, m, vec![input(0.7, 0.7, Buttons::empty()); 120]);
     let last = trace.last().unwrap();
@@ -708,7 +714,7 @@ fn climbs_ladders() {
     let m = settled(&mut app, Vec3::new(0.1, 0.0, 0.0));
 
     // Walk into the ladder and keep pushing forward: up and over onto the roof.
-    let trace = walk(&mut app, m, 200, Buttons::empty());
+    let trace = walk(&mut app, m, 300, Buttons::empty());
     let mounted = trace
         .iter()
         .position(|t| t.climbing)
@@ -882,4 +888,201 @@ fn rests_on_karkand_barrack_ledge() {
         .filter(|t| t.position != last.position)
         .count();
     assert_eq!(moving, 0, "jitters on the ledge: {last:?}");
+}
+
+#[test]
+fn sprint_uses_stamina() {
+    let tuning = SoldierTuning::default();
+    let mut app = world(&[], true);
+    let m = settled(&mut app, Vec3::ZERO);
+    let ticks = |seconds: f32| (seconds / DT).round() as usize;
+
+    // A light soldier sprints for its 10 s, then runs, and sprints again once a little has
+    // recovered: 0.05 of a 17 s recovery.
+    let trace = walk(&mut app, m, ticks(14.0), Buttons::SPRINT);
+    let stopped = trace
+        .iter()
+        .position(|t| !t.sprinting && t.stamina < 0.5)
+        .expect("never ran out");
+    let seconds = stopped as f32 * DT;
+    println!("light: out of stamina after {seconds:.2} s");
+    assert!(
+        (seconds - tuning.light.sprint_time).abs() < 0.1,
+        "{seconds}"
+    );
+    assert!((horizontal_speed(&trace[stopped + 30]) - tuning.run_speed).abs() < 0.3);
+    let again = stopped
+        + trace[stopped..]
+            .iter()
+            .position(|t| t.sprinting)
+            .expect("never sprinted again");
+    let wait = (again - stopped) as f32 * DT;
+    println!("sprinting again after {wait:.2} s");
+    assert!(
+        (wait - tuning.sprint_min_stamina * tuning.light.recover_time).abs() < 0.1,
+        "{wait}"
+    );
+
+    // Heavy kits run out sooner.
+    let heavy = SoldierMotion { heavy: true, ..m };
+    let trace = walk(&mut app, heavy, ticks(10.0), Buttons::SPRINT);
+    let stopped = trace
+        .iter()
+        .position(|t| !t.sprinting && t.stamina < 0.5)
+        .expect("never ran out");
+    assert!((stopped as f32 * DT - tuning.heavy.sprint_time).abs() < 0.1);
+
+    // Standing still recovers, but not right after a jump; jumping costs stamina.
+    let tired = SoldierMotion { stamina: 0.5, ..m };
+    let mut frames = vec![input(0.0, 0.0, Buttons::JUMP)];
+    frames.extend(vec![input(0.0, 0.0, Buttons::empty()); ticks(2.0)]);
+    let trace = simulate(&mut app, tired, frames);
+    let cost = 0.5 - trace[0].stamina;
+    // Less the stamina recovered in that tick before the jump.
+    assert!(
+        (cost - tuning.light.jump_cost).abs() < 2e-3,
+        "jump cost {cost}"
+    );
+    let paused = ticks(tuning.stamina_delay_after_jump) - 2;
+    assert_eq!(
+        trace[paused].stamina, trace[0].stamina,
+        "recovered during the jump delay"
+    );
+    assert!(trace.last().unwrap().stamina > trace[0].stamina);
+}
+
+#[test]
+fn stance_and_fire_delays() {
+    let tuning = SoldierTuning::default();
+    let mut app = world(&[], true);
+    let m = settled(&mut app, Vec3::ZERO);
+    let ticks = |seconds: f32| (seconds / DT).round() as usize;
+
+    // Tap prone and let go: stays down for the switch delay, then stands up and can't
+    // fire for a moment.
+    let mut frames = vec![input(0.0, 0.0, Buttons::PRONE)];
+    frames.extend(vec![input(0.0, 0.0, Buttons::empty()); ticks(2.0)]);
+    let trace = simulate(&mut app, m, frames);
+    let up = trace
+        .iter()
+        .position(|t| t.stance != Stance::Prone)
+        .unwrap();
+    println!("got up after {:.2} s", up as f32 * DT);
+    assert!((up as f32 * DT - tuning.prone_switch_delay).abs() < 0.05);
+    assert!(!trace[up].can_fire() && trace.last().unwrap().can_fire());
+
+    // Right after getting up, prone is blocked for the switch delay too.
+    let got_up = trace[up];
+    let trace = simulate(
+        &mut app,
+        got_up,
+        vec![input(0.0, 0.0, Buttons::PRONE); ticks(1.5)],
+    );
+    let down = trace
+        .iter()
+        .position(|t| t.stance == Stance::Prone)
+        .unwrap();
+    assert!((down as f32 * DT - tuning.prone_switch_delay).abs() < 0.05);
+
+    // Jumping: no firing for 0.7 s.
+    let trace = simulate(
+        &mut app,
+        m,
+        vec![input(0.0, 0.0, Buttons::JUMP); ticks(1.0)],
+    );
+    let ready = trace.iter().position(|t| t.can_fire()).unwrap();
+    assert!((ready as f32 * DT - tuning.fire_delay_after_jump).abs() < 0.05);
+}
+
+/// The 4 m building of [`ladder_world`], without its ladder, and `rope` strung.
+fn rope_world(rope: Rope) -> App {
+    let mut app = world(&[block([-5.0, 0.0, -10.0], [10.0, 4.0, 8.0])], true);
+    app.world_mut().spawn(rope);
+    ready(app)
+}
+
+#[test]
+fn strings_grappling_ropes_over_ledges() {
+    let mut app = world(&[block([-5.0, 0.0, -10.0], [10.0, 4.0, 8.0])], true);
+    let ropes = app
+        .world_mut()
+        .run_system_once(|spatial: SpatialQuery| {
+            (
+                // On the roof, thrown from the street in front: over the front edge.
+                rope::grapple(&spatial, Vec3::new(0.5, 4.0, -5.0), Vec3::new(0.0, 0.0, 6.0), 14.0),
+                // On the street itself: nothing to climb.
+                rope::grapple(&spatial, Vec3::new(0.5, 0.0, 3.0), Vec3::new(0.0, 0.0, 6.0), 14.0),
+            )
+        })
+        .unwrap();
+    println!("{ropes:?}");
+    let rope = ropes.0.expect("no rope over the ledge");
+    assert!((rope.top.z - -1.65).abs() < 0.15 && (rope.top.y - 4.0).abs() < 0.05, "{rope:?}");
+    assert!(rope.end.y.abs() < 0.05, "{rope:?}");
+    assert!(ropes.1.is_none());
+}
+
+#[test]
+fn climbs_grappling_ropes() {
+    let tuning = SoldierTuning::default();
+    let rope = Rope {
+        kind: RopeKind::Grapple,
+        anchor: Vec3::new(0.0, 4.0, -5.0),
+        top: Vec3::new(0.0, 4.0, -1.65),
+        end: Vec3::new(0.0, 0.0, -1.65),
+    };
+    let mut app = rope_world(rope);
+    let m = settled(&mut app, Vec3::new(0.2, 0.0, 1.0));
+    let trace = walk(&mut app, m, 240, Buttons::empty());
+    let on = trace.iter().position(|t| t.climbing).expect("never got on the rope");
+    assert!(trace[on].on_rope && !trace[on].can_fire());
+    let off = on + trace[on..].iter().position(|t| !t.climbing).expect("never got off");
+    let seconds = (off - on) as f32 * DT;
+    println!("on the rope for {seconds:.2} s");
+    assert!((seconds - 4.0 / tuning.rope_climb_speed).abs() < 0.4, "{seconds}");
+    let last = trace.last().unwrap();
+    assert!(last.grounded && (last.position.y - 4.01).abs() < 0.01 && last.position.z < -2.0, "{last:?}");
+}
+
+#[test]
+fn rides_ziplines() {
+    let tuning = SoldierTuning::default();
+    // From the roof's front edge (the shooter's stand) down to the street 30 m away.
+    let start = Vec3::new(0.0, 4.0 + rope::ZIPLINE_STAND, -2.5);
+    let rope = Rope {
+        kind: RopeKind::Zipline,
+        anchor: start,
+        top: start,
+        end: Vec3::new(0.0, 1.0, 27.5),
+    };
+    let mut app = rope_world(rope);
+    let mut m = settled(&mut app, Vec3::new(0.0, 4.5, -4.0));
+    m.yaw = std::f32::consts::PI;
+    let mut frames = vec![input(0.0, 1.0, Buttons::empty()); 600];
+    for f in &mut frames {
+        f.yaw = std::f32::consts::PI;
+    }
+    let trace = simulate(&mut app, m, frames);
+    let on = trace.iter().position(|t| t.riding).expect("never grabbed the wire");
+    let off = on + trace[on..].iter().position(|t| !t.riding).expect("never got off");
+    let top_speed = trace[on..off].iter().map(|t| t.velocity.length()).fold(0.0, f32::max);
+    println!("rode {:.2} s, top speed {top_speed:.1} m/s, off at {:?}", (off - on) as f32 * DT, trace[off]);
+    assert!(!trace[on].can_fire());
+    assert!(top_speed > tuning.zipline_min_speed && top_speed <= tuning.zipline_max_speed);
+    // Hung under the wire until the feet reach the ground, never below it.
+    assert!(trace[off].position.z > 15.0 && trace[off].grounded, "{:?}", trace[off]);
+    assert!(trace.iter().all(|t| t.position.y > -0.01));
+    let landed = trace.last().unwrap();
+    assert!(landed.grounded, "{landed:?}");
+
+    // Jumping off halfway.
+    let mut frames = vec![input(0.0, 1.0, Buttons::empty()); on + 60];
+    frames.push(input(0.0, 1.0, Buttons::JUMP));
+    frames.extend(vec![input(0.0, 0.0, Buttons::empty()); 60]);
+    for f in &mut frames {
+        f.yaw = std::f32::consts::PI;
+    }
+    let trace = simulate(&mut app, m, frames);
+    let jumped = trace[on + 61];
+    assert!(!jumped.riding && jumped.velocity.z > 1.0, "{jumped:?}");
 }

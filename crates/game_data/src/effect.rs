@@ -1,7 +1,7 @@
 //! Particle effects (`effects/<name>.ron`) and the tables that pick them: bullet impacts per
 //! surface (`effects/impacts.ron`), muzzle flashes and detonations per weapon
-//! (`effects/weapons.ron`) and what a level's surfaces are made of
-//! (`levels/<name>/surfaces.ron`).
+//! (`effects/weapons.ron`), marks left on surfaces (`effects/decals.ron`) and what a level's
+//! surfaces are made of (`levels/<name>/surfaces.ron`).
 //!
 //! An effect is a set of sprite emitters, light flashes, flash meshes, debris and sounds, all
 //! placed in the effect's frame: +Y is up (impacts turn it along the surface normal), -Z is
@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::DebrisPiece;
+use crate::{DebrisPiece, Falloff};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct EffectDesc {
@@ -27,6 +27,20 @@ pub struct EffectDesc {
     pub debris: Vec<DebrisPiece>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sounds: Vec<EffectSound>,
+    /// The cloud is gas that hurts those who breathe it without a mask (tear gas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gas: Option<GasDesc>,
+}
+
+/// A gas cloud (BF2 `gasCloudType` on an effect's particle systems).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct GasDesc {
+    /// Hit points per second to those inside without a gas mask (BF2 `gasCloudDamage`;
+    /// the unit is inferred).
+    pub damage: f32,
+    /// The cloud grows from `radius[0]` to `radius[1]` meters over `spread_time` seconds.
+    pub radius: [f32; 2],
+    pub spread_time: f32,
 }
 
 /// Which views show a part of an effect: the shooter's own muzzle flash has a first-person
@@ -269,8 +283,65 @@ pub struct EffectSound {
     pub files: Vec<String>,
     #[serde(default = "one")]
     pub volume: f32,
+    /// Random playback speed factor, `[min, max]`.
+    #[serde(default = "unit_range")]
+    pub pitch: [f32; 2],
+    /// How it fades with distance; `None`: a default for effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub falloff: Option<Falloff>,
     #[serde(default, skip_serializing_if = "Views::is_both")]
     pub views: Views,
+}
+
+fn unit_range() -> [f32; 2] {
+    [1.0, 1.0]
+}
+
+/// An effect placed in the frame of the object it belongs to.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EffectPlacement {
+    /// `effects/<name>.ron`.
+    pub name: String,
+    pub position: [f32; 3],
+    /// Quaternion xyzw.
+    pub rotation: [f32; 4],
+}
+
+/// `effects/decals.ron`: marks left on surfaces. Bullet holes by (projectile material,
+/// surface material), scorch marks by (explosion material, surface material).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DecalTable {
+    pub cells: BTreeMap<(u32, u32), String>,
+    pub decals: BTreeMap<String, DecalDesc>,
+}
+
+impl DecalTable {
+    pub fn decal(&self, attacker: u32, surface: u32) -> Option<(&str, &DecalDesc)> {
+        let name = self.cells.get(&(attacker, surface))?;
+        Some((name, self.decals.get(name)?))
+    }
+}
+
+/// A mark laid onto a surface.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DecalDesc {
+    /// `.dds` relative to the imported root.
+    pub texture: String,
+    /// Variations in the texture: one is picked at random (`fps` unused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Frames>,
+    /// Width in meters, `[min, max]`.
+    pub size: [f32; 2],
+    /// Random turn `±rotation` degrees.
+    #[serde(default)]
+    pub rotation: f32,
+    /// Linear RGB tint.
+    #[serde(default = "white")]
+    pub color: [f32; 3],
+}
+
+fn white() -> [f32; 3] {
+    [1.0; 3]
 }
 
 /// `effects/impacts.ron`: the effect for a projectile of material `a` hitting a surface of
@@ -303,6 +374,90 @@ pub struct WeaponEffects {
     /// Effect where the projectile detonates (grenades, rockets); replaces the impact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detonation: Option<String>,
+    /// Night vision goggles (BF2 `isNightVision`): an item that is switched on, not fired.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub night_vision: bool,
+    /// A gas mask (BF2 `isGasMask`): put on to breathe in gas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gas_mask: bool,
+    /// The projectile is a flashbang: how it blinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flashbang: Option<FlashbangDesc>,
+}
+
+/// How a flashbang blinds (BF2 `detonation.flashbang*`, `explosionSoldierLineOfSight*`).
+/// Its strength `s` (0..1) falls off from `inner_radius` to `radius` and is cut to
+/// `unseen_strength` for those not facing it; each layer ramps up to `alpha` at `s`, holds,
+/// then heals.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct FlashbangDesc {
+    pub radius: f32,
+    /// With night vision on, it reaches this far.
+    pub night_vision_radius: f32,
+    /// Full strength within.
+    pub inner_radius: f32,
+    /// Degrees of the view cone that counts as facing it.
+    pub view_cone: f32,
+    pub unseen_strength: f32,
+    /// A white sheet over the view.
+    pub white: FlashLayer,
+    /// A glow added on top.
+    pub glow: FlashLayer,
+    /// The image burnt in at the moment of the flash, fading out.
+    pub afterimage: FlashLayer,
+}
+
+/// One layer of a flashbang's effect; each pair is `[at s = 0, at s = 1]`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct FlashLayer {
+    pub alpha: [f32; 2],
+    /// Seconds to reach full alpha.
+    pub ramp: f32,
+    pub hold: [f32; 2],
+    pub heal: [f32; 2],
+}
+
+impl FlashLayer {
+    /// Alpha `age` seconds after a flash of strength `strength`: ramping up, holding, healing.
+    pub fn alpha_at(&self, strength: f32, age: f32) -> f32 {
+        let lerp = |[a, b]: [f32; 2]| a + (b - a) * strength;
+        let (alpha, hold, heal) = (lerp(self.alpha), lerp(self.hold), lerp(self.heal));
+        if age < self.ramp {
+            alpha * age / self.ramp.max(1e-3)
+        } else if age < self.ramp + hold {
+            alpha
+        } else {
+            alpha * (1.0 - (age - self.ramp - hold) / heal.max(1e-3)).max(0.0)
+        }
+    }
+
+    /// Seconds until it is gone.
+    pub fn length(&self, strength: f32) -> f32 {
+        let lerp = |[a, b]: [f32; 2]| a + (b - a) * strength;
+        self.ramp + lerp(self.hold) + lerp(self.heal)
+    }
+}
+
+/// `effects/gadgets.ron`: files of the Special Forces gadgets' look and sound.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GadgetAssets {
+    /// Brightness → color ramp of night vision (a 1D texture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_vision_gradient: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_vision_on: Option<String>,
+    /// The ring in the ears after a blast or flashbang.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tinnitus: Option<String>,
+    /// Coughing in tear gas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coughs: Vec<String>,
+    /// Breathing through the gas mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_breathing: Option<String>,
+    /// Putting the gas mask on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_on: Option<String>,
 }
 
 /// `levels/<name>/surfaces.ron`: materials of the level's surfaces, for impact effects.

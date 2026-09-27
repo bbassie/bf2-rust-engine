@@ -8,8 +8,9 @@
 //!    a cell.
 //! 3. Cells link to the best cell in each neighbouring column that is within step, slope or
 //!    jump height and leaves head room along the way.
-//! 4. A distance field (to walls and ledges) lets paths keep off walls; connected regions
-//!    let path requests reject unreachable goals quickly.
+//! 4. A distance field (to walls and ledges) lets paths keep off walls.
+//! 5. Ladders link the cell at their foot to the one behind their top.
+//! 6. Connected regions let path requests reject unreachable goals quickly.
 
 use std::{
     collections::HashMap,
@@ -20,13 +21,13 @@ use std::{
 };
 
 use avian3d::parry::shape::{SharedShape, TypedShape};
-use bevy::{math::Affine3A, prelude::*};
-use game_shared::level::Heightmap;
+use bevy::{math::Affine3A, platform::collections::HashMap as Map, prelude::*};
+use game_shared::{ladder::Ladder, level::Heightmap};
 
-use super::{NavCell, NavGrid, NavParams, SLOPE_SCALE};
+use super::{NavCell, NavGrid, NavLadder, NavParams, SLOPE_SCALE};
 
 /// Bump when the build changes, to invalidate cached grids.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 7;
 
 /// Columns per side of the tiles rasterized in parallel.
 const TILE: u32 = 64;
@@ -43,6 +44,7 @@ const MAX_LAYERS: u16 = 250;
 pub struct LevelGeometry {
     pub terrain: Option<Arc<Heightmap>>,
     pub meshes: Vec<MeshInstance>,
+    pub ladders: Vec<Ladder>,
     /// XZ area to cover, clamped to the terrain. The whole level if `None`.
     pub bounds: Option<(Vec2, Vec2)>,
 }
@@ -100,6 +102,8 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
             depth: 0,
             columns: vec![0],
             cells: Vec::new(),
+            ladders: Vec::new(),
+            ladder_ends: Map::default(),
         };
     }
     // Huge areas get coarser cells to bound memory (about 16 bytes per column).
@@ -236,9 +240,12 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
                 slope: c.slope,
             })
             .collect(),
+        ladders: Vec::new(),
+        ladder_ends: Map::default(),
     };
     link(&mut grid, &raw);
     distance_field(&mut grid);
+    place_ladders(&mut grid, &geometry.ladders);
     regions(&mut grid);
     grid
 }
@@ -337,7 +344,72 @@ fn distance_field(grid: &mut NavGrid) {
     }
 }
 
-/// Connected regions (ignoring which way drops go); tiny ones get region 0.
+/// Links the cell in front of every ladder's foot with the one behind its top.
+fn place_ladders(grid: &mut NavGrid, ladders: &[Ladder]) {
+    for ladder in ladders {
+        // Where soldiers get on in front, and land getting off over the top (see
+        // `game_shared::soldier`).
+        let hold = ladder.half.z + 0.35;
+        let foot = ladder.world(Vec3::new(0.0, -ladder.top(), hold + 0.3));
+        let head = ladder.world(Vec3::new(0.0, ladder.top(), -(hold + 0.4)));
+        let (Some(bottom), Some(top)) = (nearest_cell(grid, foot, 1.2), nearest_cell(grid, head, 1.2)) else {
+            continue;
+        };
+        let (low, high) = (grid.position(bottom), grid.position(top));
+        // Soldiers get on from the ground only near the ladder's foot, and from the roof
+        // only near its top (see `game_shared::soldier::mount`).
+        if high.y - low.y < 1.5 || low.y < foot.y - 0.4 || high.y > head.y + 0.5 {
+            continue;
+        }
+        let down = high.y > head.y - 0.6;
+        let index = grid.ladders.len() as u16;
+        grid.ladders.push(NavLadder {
+            bottom,
+            top,
+            foot: Vec3::new(foot.x, low.y, foot.z),
+            head: Vec3::new(head.x, high.y, head.z),
+            front: ladder.front,
+            down,
+        });
+        grid.ladder_ends.entry(bottom.index).or_default().push(index);
+        grid.ladder_ends.entry(top.index).or_default().push(index);
+    }
+}
+
+/// Like [`NavGrid::locate`], before there are regions.
+fn nearest_cell(grid: &NavGrid, pos: Vec3, radius: f32) -> Option<super::CellRef> {
+    let (lo, hi) = (pos.xz() - radius, pos.xz() + radius);
+    let (Some((x0, z0)), Some((x1, z1))) = (
+        grid.column_at(lo.x.max(grid.origin.x), lo.y.max(grid.origin.y)),
+        grid.column_at(
+            hi.x.min(grid.origin.x + grid.width as f32 * grid.params.cell - 0.01),
+            hi.y.min(grid.origin.y + grid.depth as f32 * grid.params.cell - 0.01),
+        ),
+    ) else {
+        return None;
+    };
+    let mut best: Option<(f32, super::CellRef)> = None;
+    for z in z0..=z1 {
+        for x in x0..=x1 {
+            for index in grid.column(x, z) {
+                let c = super::CellRef { x, z, index };
+                let p = grid.position(c);
+                let dy = p.y - pos.y;
+                if !(-3.0..=1.0).contains(&dy) || p.xz().distance(pos.xz()) > radius + grid.params.cell {
+                    continue;
+                }
+                let score = p.xz().distance_squared(pos.xz()) + 4.0 * dy * dy;
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, c));
+                }
+            }
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// Connected regions (ignoring which way drops go, and joined by ladders); tiny ones get
+/// region 0.
 fn regions(grid: &mut NavGrid) {
     let mut parent: Vec<u32> = (0..grid.cells.len() as u32).collect();
     fn root(parent: &mut [u32], mut i: u32) -> u32 {
@@ -359,6 +431,10 @@ fn regions(grid: &mut NavGrid) {
                 }
             }
         }
+    }
+    for ladder in &grid.ladders {
+        let (a, b) = (root(&mut parent, ladder.bottom.index), root(&mut parent, ladder.top.index));
+        parent[a.max(b) as usize] = a.min(b);
     }
     let mut sizes = vec![0usize; grid.cells.len()];
     for i in 0..grid.cells.len() as u32 {
@@ -773,6 +849,11 @@ pub fn geometry_key(geometry: &LevelGeometry, params: &NavParams) -> u64 {
     }
     if let Some((lo, hi)) = geometry.bounds {
         [lo.x, lo.y, hi.x, hi.y].into_iter().for_each(|v| h.f32(v));
+    }
+    for ladder in &geometry.ladders {
+        for v in [ladder.center, ladder.up, ladder.front, ladder.half] {
+            v.to_array().into_iter().for_each(|v| h.f32(v));
+        }
     }
     if let Some(t) = &geometry.terrain {
         h.bytes(&t.resolution.to_le_bytes());

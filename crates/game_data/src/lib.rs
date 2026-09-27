@@ -10,6 +10,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub mod ai;
+pub mod commander;
 pub mod effect;
 pub mod level;
 pub mod material;
@@ -21,6 +22,7 @@ pub mod vehicle;
 pub mod weapon;
 
 pub use ai::*;
+pub use commander::*;
 pub use effect::*;
 pub use level::*;
 pub use material::*;

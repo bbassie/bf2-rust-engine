@@ -44,6 +44,8 @@ pub struct TeamStats {
     pub grenades: u32,
     /// Times a bot hurt by someone it didn't see turned to find him.
     pub reactions: u32,
+    /// Medics going to revive someone.
+    pub revives: u32,
     pub spawns: u32,
     /// Spawns on the squad leader.
     pub leader_spawns: u32,
@@ -62,6 +64,7 @@ impl TeamStats {
         self.flanks += other.flanks;
         self.grenades += other.grenades;
         self.reactions += other.reactions;
+        self.revives += other.revives;
         self.spawns += other.spawns;
         self.leader_spawns += other.leader_spawns;
     }
@@ -163,7 +166,7 @@ pub fn log_stats(
         info!(
             "ai team {}: {} captured, {} neutralized, {} kills, {} deaths in the last minute \
              ({} / {} / {} / {} in {} min); {:.0}% of bot time at objectives, {:.0}% fighting; \
-             {} covers, {} flanks, {} grenades, {} reactions; {} of {} spawns on the squad leader; \
+             {} covers, {} flanks, {} grenades, {} reactions, {} revives; {} of {} spawns on the squad leader; \
              kits {}; {:?}, {} squads attacking, {} defending: {}",
             t + 1,
             minute.captures,
@@ -181,6 +184,7 @@ pub fn log_stats(
             minute.flanks,
             minute.grenades,
             minute.reactions,
+            minute.revives,
             minute.leader_spawns,
             minute.spawns,
             kits.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "),

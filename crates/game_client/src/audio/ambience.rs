@@ -1,6 +1,7 @@
 //! Level ambience: looping background sounds (`levels/<name>/sounds.ron`), not positional
 //! but heard around their area: at full volume within half their radius, fading out to the
-//! edge. Areas playing the same file share one voice at the loudest area's volume.
+//! edge. Areas playing the same file share one voice at the loudest area's volume. They
+//! duck under announcements like everything else.
 
 use bevy::{
     audio::{AudioSinkPlayback, PlaybackMode, Volume},
@@ -11,7 +12,7 @@ use game_shared::level::{LevelEntity, LoadedLevel};
 
 use super::{
     AudioSystems,
-    voices::{AudioMix, SoundCache},
+    voices::{AudioMix, Ducking, SoundCache},
 };
 
 pub struct AmbiencePlugin;
@@ -95,6 +96,7 @@ fn update_ambience(
     mut commands: Commands,
     mut ambience: ResMut<Ambience>,
     mix: Res<AudioMix>,
+    ducking: Res<Ducking>,
     global: Res<GlobalVolume>,
     mut cache: ResMut<SoundCache>,
     asset_server: Res<AssetServer>,
@@ -130,7 +132,7 @@ fn update_ambience(
                 debug!(target: "audio", "ambience {} stops", ambient.file);
             }
             Some(voice) => match sinks.get_mut(voice) {
-                Ok(Some(mut sink)) => sink.set_volume(Volume::Linear(gain * master)),
+                Ok(Some(mut sink)) => sink.set_volume(Volume::Linear(gain * ducking.0 * master)),
                 // Still loading.
                 Ok(None) => {}
                 // Gone with the level.

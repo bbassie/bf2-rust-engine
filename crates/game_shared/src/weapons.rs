@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use bevy::prelude::*;
 use game_data::{
-    DeviationDesc, FireKind, FireMode, Impact, KitDesc, LevelDesc, ProjectileDesc, RecoilDesc,
-    WeaponDesc, WeaponSounds,
+    DeviationDesc, FireKind, FireMode, HitZone, Impact, KitDesc, LevelDesc, ProjectileDesc,
+    RecoilDesc, SoldierDesc, WeaponDesc, WeaponSounds,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,11 +30,18 @@ pub struct Armory {
     pub weapons: HashMap<String, Arc<WeaponDesc>>,
     /// Kit names of team 1 and team 2, by slot.
     pub team_kits: [Vec<String>; 2],
+    /// Hit zones of the soldier body each kit wears, by kit name.
+    pub hit_zones: HashMap<String, Arc<[HitZone]>>,
 }
 
 impl Armory {
     pub fn weapon(&self, name: &str) -> Option<&Arc<WeaponDesc>> {
         self.weapons.get(name)
+    }
+
+    /// Where a soldier wearing `kit` can be hit (rough zones if its body has none).
+    pub fn hit_zones(&self, kit: &str) -> &[HitZone] {
+        self.hit_zones.get(kit).map_or(crate::hitzones::fallback(), |zones| zones)
     }
 
     /// The kit a team's slot uses, falling back to the first kit, then the test kit.
@@ -59,6 +66,16 @@ fn build_armory(level: &LevelDesc, paths: &GamePaths) -> Armory {
     for (team, desc) in level.teams.iter().take(2).enumerate() {
         for slot in &desc.kits {
             armory.team_kits[team].push(slot.kit.clone());
+            if !armory.hit_zones.contains_key(&slot.kit) {
+                let path = paths.imported.join("soldiers").join(format!("{}.ron", slot.soldier));
+                match game_data::read_ron::<SoldierDesc>(&path) {
+                    Ok(body) if !body.hit_zones.is_empty() => {
+                        armory.hit_zones.insert(slot.kit.clone(), body.hit_zones.into());
+                    }
+                    Ok(_) => {}
+                    Err(err) => warn!("{err}"),
+                }
+            }
             if armory.kits.contains_key(&slot.kit) {
                 continue;
             }
@@ -90,6 +107,7 @@ fn build_armory(level: &LevelDesc, paths: &GamePaths) -> Armory {
             name: "test_kit".into(),
             kind: "Assault".into(),
             weapons: vec![rifle.name.clone()],
+            ability_restore: 0.0,
         };
         armory.weapons.insert(rifle.name.clone(), Arc::new(rifle));
         armory.team_kits = [vec![kit.name.clone()], vec![kit.name.clone()]];
@@ -118,6 +136,7 @@ fn test_rifle() -> WeaponDesc {
         shift_delay: 0.0,
         reload_amount: 0,
         fire: Default::default(),
+        detonator: None,
         projectile: ProjectileDesc {
             velocity: 900.0,
             damage: 30.0,
@@ -147,6 +166,7 @@ fn test_rifle() -> WeaponDesc {
         zoom_factors: vec![0.0, 0.6],
         zoom: Default::default(),
         sounds: WeaponSounds::default(),
+        replenish: None,
     }
 }
 

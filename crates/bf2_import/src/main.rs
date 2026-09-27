@@ -22,11 +22,13 @@ use rayon::prelude::*;
 
 mod ai;
 mod audio;
+mod commander;
 mod coords;
 mod dds;
 mod destruction;
 mod effects;
 mod glb;
+mod hitzones;
 mod level;
 mod meshes;
 mod roads;

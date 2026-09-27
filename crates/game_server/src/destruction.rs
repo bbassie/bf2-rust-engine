@@ -41,9 +41,10 @@ impl Plugin for DestructionPlugin {
 #[derive(Resource, Default)]
 pub struct Materials(pub MaterialTable);
 
-/// Hit points left per damaged object, by level statics index.
+/// Hit points left per damaged object, by level statics index (engineers repair them, see
+/// `abilities`).
 #[derive(Resource, Default)]
-struct ObjectHealth(HashMap<u32, f32>);
+pub(crate) struct ObjectHealth(pub(crate) HashMap<u32, f32>);
 
 fn load_materials(mut commands: Commands, paths: Res<GamePaths>) {
     let path = paths.imported.join("materials.ron");

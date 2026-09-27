@@ -164,6 +164,7 @@ fn update_big_map(
     image: Single<Entity, With<BigMapImage>>,
     mut icons: Query<(Entity, &BigMapIcon, &mut Node, &mut BackgroundColor), Without<BigMapHeading>>,
     mut heading: Single<(&mut Node, &mut UiTransform), With<BigMapHeading>>,
+    markers: Res<crate::map_markers::MapMarkers>,
 ) {
     let Some(level) = level else {
         return;
@@ -193,6 +194,11 @@ fn update_big_map(
             let squad_mate = local_squad.zip(squad).is_some_and(|(a, b)| a.squad == b.squad);
             wanted.insert(entity, (render.position, if squad_mate { SQUAD } else { FRIENDLY }, 8.0, None));
         }
+    }
+
+    // Spotted enemies, orders, the commander's assets.
+    for marker in &markers.0 {
+        wanted.insert(marker.key, (marker.position, marker.color, marker.size + 2.0, marker.label.clone()));
     }
 
     for (icon_entity, icon, mut node, mut background) in &mut icons {

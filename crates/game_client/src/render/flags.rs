@@ -3,7 +3,7 @@
 //! otherwise.
 
 use bevy::{
-    audio::Volume, gltf::GltfAssetLabel, platform::collections::HashMap, prelude::*,
+    gltf::GltfAssetLabel, platform::collections::HashMap, prelude::*,
     world_serialization::WorldInstanceReady,
 };
 use game_shared::{
@@ -66,10 +66,7 @@ fn add_poles(
     for (entity, cp) in &control_points {
         if let Some(sound) = &models.sound {
             commands.spawn((
-                AudioPlayer::new(asset_server.load(format!("imported://{sound}"))),
-                PlaybackSettings::LOOP
-                    .with_spatial(true)
-                    .with_volume(Volume::Linear(0.75)),
+                crate::audio::SoundEmitter::new(sound.clone()).channel(crate::audio::Channel::Ambience),
                 Transform::from_xyz(0.0, models.pole_height * 0.8, 0.0),
                 ChildOf(entity),
             ));

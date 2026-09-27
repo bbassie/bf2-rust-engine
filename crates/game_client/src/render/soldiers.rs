@@ -74,6 +74,9 @@ mod clips {
     pub const CROUCH: &str = "3p_crouchstill";
     pub const PRONE: &str = "3p_pronestill";
     pub const SPRINT: &str = "3p_sprint";
+    /// Getting up from lying on the back after a revive. Its first frame, held, is how a
+    /// critically wounded soldier lies.
+    pub const REVIVE: &str = "3p_reviveonback";
     /// Directional sets, BF2's movement bundles: forward, backward, left, right.
     pub const WALK: [&str; 4] = ["3p_walkforward", "3p_walkbackward", "3p_walkleft", "3p_walkright"];
     pub const RUN: [&str; 4] = ["3p_runforward", "3p_runbackward", "3p_strafeleft", "3p_straferight"];
@@ -100,8 +103,12 @@ mod clips {
         WALK.into_iter().chain(RUN).chain(CROUCH_MOVE).chain(PRONE_MOVE).chain([SPRINT])
     }
 
+    /// Climbing a ladder, and sliding down one (BF2's `objects/common/ladder` clips).
+    pub const CLIMB: &str = "3p_climbup";
+    pub const SLIDE: &str = "3p_climbdownfast";
+
     pub fn legs() -> impl Iterator<Item = &'static str> {
-        [STAND, CROUCH, PRONE]
+        [STAND, CROUCH, PRONE, CLIMB, SLIDE, REVIVE]
             .into_iter()
             .chain(cycles())
             .chain(STAND_TURN)
@@ -137,6 +144,8 @@ const RUN_SPEED: f32 = 3.9;
 const SPRINT_SPEED: f32 = 6.3;
 const CROUCH_SPEED: f32 = 1.7;
 const PRONE_SPEED: f32 = 0.7;
+/// Climbing speed the ladder clip is made for (its feet move about 1.25 m/s).
+const CLIMB_SPEED: f32 = 1.25;
 
 /// Crossfade times (seconds), roughly BF2's bundle fade times.
 const FADE: f32 = 0.2;
@@ -249,6 +258,8 @@ struct SoldierAnimator {
     /// Weapon model to show, when it isn't the active weapon yet: during a switch the old
     /// one stays in the hands until it has been lowered.
     hand: Option<Arc<WeaponDesc>>,
+    /// Hands busy (on a ladder, or down): no weapon shown.
+    stowed: bool,
     /// Our own soldier: shots fired so far (others' shots arrive as [`ShotFired`]).
     shots_seen: Option<u32>,
     was_reloading: bool,
@@ -292,12 +303,19 @@ enum Legs {
     /// Stepped off something: straight into the airborne loop.
     Fall(usize),
     Land(usize),
+    /// On a ladder: climbing, or sliding down it if `true`.
+    Climb(bool),
+    /// Critically wounded, lying where he fell.
+    Down,
+    /// Revived: getting up.
+    GetUp,
 }
 
 impl Legs {
     fn stance(self) -> Stance {
         match self {
             Legs::Still(stance) | Legs::Turn(stance, _) | Legs::Move(stance) => stance,
+            Legs::Down | Legs::GetUp => Stance::Prone,
             _ => Stance::Standing,
         }
     }
@@ -578,18 +596,20 @@ fn attach_weapons(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     mut materials: Bf2Materials,
-    soldiers: Query<(Option<&Loadout>, Option<&Inventory>, Has<Seated>)>,
+    soldiers: Query<(Option<&Loadout>, Option<&Inventory>)>,
     mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&SoldierAnimator>, Option<&mut HeldWeapon>)>,
 ) {
     for (entity, visual, rig, animator, held) in &mut visuals {
-        let Ok((loadout, inventory, seated)) = soldiers.get(visual.soldier) else {
+        let Ok((loadout, inventory)) = soldiers.get(visual.soldier) else {
             continue;
         };
-        // Hands on the vehicle's controls.
-        let weapon = animator
-            .and_then(|a| a.hand.as_ref())
-            .or_else(|| active_weapon(&armory, loadout, inventory))
-            .filter(|_| !seated);
+        let weapon = if animator.is_some_and(|a| a.stowed) {
+            None
+        } else {
+            animator
+                .and_then(|a| a.hand.as_ref())
+                .or_else(|| active_weapon(&armory, loadout, inventory))
+        };
         let name = weapon.map_or(String::new(), |w| w.name.clone());
         let mut held = match held {
             Some(held) if held.name == name => held,
@@ -654,12 +674,12 @@ fn attach_weapons(
 
 fn update_visuals(
     third_person: Res<crate::camera::ThirdPerson>,
-    soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Option<&Seated>)>,
+    soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Option<&Seated>, Has<game_shared::revive::Downed>)>,
     vehicles: Query<(&VehicleView, &VehicleData)>,
     mut visuals: Query<(&SoldierVisual, &mut Transform, &mut Visibility)>,
 ) {
     for (visual, mut transform, mut visibility) in &mut visuals {
-        let Ok((render, local, seated)) = soldiers.get(visual.soldier) else {
+        let Ok((render, local, seated, downed)) = soldiers.get(visual.soldier) else {
             continue;
         };
         // In a vehicle: at the seat where the vehicle is drawn; not at all inside a closed
@@ -671,8 +691,9 @@ fn update_visuals(
             let transforms = model.part_transforms(&view.joints);
             Some(view.transform * model.seat_transform(&transforms, s.seat as usize))
         });
-        // First person: don't draw our own body inside the camera.
-        let hidden = (local && !third_person.0) || (seated.is_some() && seat.is_none());
+        // First person: don't draw our own body inside the camera (unless we're down: the
+        // camera looks at it then).
+        let hidden = (local && !third_person.0 && !downed) || (seated.is_some() && seat.is_none());
         visibility.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
         *transform = seat.unwrap_or_else(|| {
             Transform::from_translation(render.position).with_rotation(Quat::from_rotation_y(render.yaw))
@@ -714,6 +735,9 @@ fn jump_direction(velocity: Vec2) -> usize {
 fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, render: &SoldierRender) -> Legs {
     let velocity = local_velocity(render);
     let speed = velocity.length();
+    if render.climbing {
+        return Legs::Climb(render.velocity.y < -CLIMB_SPEED * 1.5);
+    }
     match state {
         // A blip off the ground (a step or slope edge) is no jump worth landing from.
         Some(Legs::Jump(dir) | Legs::Fall(dir)) if render.grounded => {
@@ -750,7 +774,8 @@ fn fade_time(from: Option<Legs>, to: Legs) -> f32 {
         return 0.0;
     };
     match (from, to) {
-        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_)) => FADE_JUMP,
+        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_) | Legs::Climb(_) | Legs::Down | Legs::GetUp)
+        | (Legs::Climb(_), _) => FADE_JUMP,
         _ if from.stance() != to.stance() => {
             if from.stance() == Stance::Prone || to.stance() == Stance::Prone {
                 FADE_PRONE
@@ -773,6 +798,8 @@ struct Cues<'a> {
     set: &'a str,
     fired: bool,
     reloading: bool,
+    /// Critically wounded.
+    downed: bool,
     /// Seated in a vehicle: the seat's pose.
     seat_pose: Option<&'a str>,
 }
@@ -782,7 +809,7 @@ impl SoldierAnimator {
     fn update(&mut self, player: &mut AnimationPlayer, animations: &ModelAnimations, cues: &Cues, dt: f32) {
         let render = cues.render;
         if let Some(pose) = cues.seat_pose {
-            // The whole body sits, hands off the weapon.
+            // The whole body sits, hands on the vehicle's controls.
             if self.state.is_some() {
                 self.state = None;
                 self.action = None;
@@ -798,6 +825,7 @@ impl SoldierAnimator {
             self.upper.update(player, dt);
             self.set.clear();
             self.hand = None;
+            self.stowed = true;
             return;
         }
         self.airborne = if render.grounded { 0.0 } else { self.airborne + dt };
@@ -806,7 +834,13 @@ impl SoldierAnimator {
             self.yaw_rate += (turned / dt - self.yaw_rate) * (1.0 - (-TURN_SMOOTHING * dt).exp());
         }
         self.yaw = Some(render.yaw);
-        let state = next_legs(self.state, self.state_time, self.airborne, self.yaw_rate, render);
+        let get_up_time = animations.legs.get(clips::REVIVE).map_or(0.0, |c| c.duration);
+        let state = match self.state {
+            _ if cues.downed => Legs::Down,
+            Some(Legs::Down) => Legs::GetUp,
+            Some(Legs::GetUp) if self.state_time < get_up_time => Legs::GetUp,
+            _ => next_legs(self.state, self.state_time, self.airborne, self.yaw_rate, render),
+        };
         let entered = self.state != Some(state);
         if entered {
             let fade = fade_time(self.state, state);
@@ -878,6 +912,18 @@ impl SoldierAnimator {
                 targets[0] = (clips::JUMP[dir][2], 1.0);
                 once = Some(entered);
             }
+            // Holding still on the rungs pauses the climb.
+            Legs::Climb(false) => {
+                targets[0] = (clips::CLIMB, 1.0);
+                speed = (render.velocity.y / CLIMB_SPEED).clamp(-2.0, 2.0);
+            }
+            Legs::Climb(true) => targets[0] = (clips::SLIDE, 1.0),
+            Legs::Down | Legs::GetUp if animations.legs.contains_key(clips::REVIVE) => {
+                targets[0] = (clips::REVIVE, 1.0);
+                once = Some(entered);
+                speed = if state == Legs::Down { 0.0 } else { 1.0 };
+            }
+            Legs::Down | Legs::GetUp => targets[0] = (clips::PRONE, 1.0),
         }
         let targets = targets.iter().filter(|(_, weight)| *weight > 0.02);
 
@@ -893,7 +939,7 @@ impl SoldierAnimator {
                 continue;
             };
             let play = match once {
-                Some(restart) => Play::once(restart),
+                Some(restart) => Play::once(restart).speed(speed),
                 None if animations.cycles.contains(&clip.node) => {
                     Play::looping(weight).speed(speed).phase(cycle_phase)
                 }
@@ -902,6 +948,17 @@ impl SoldierAnimator {
             self.legs.play(player, clip, play);
         }
         self.legs.update(player, dt);
+
+        // Both hands on the rungs: no weapon, and the ladder clip moves the arms too. Down,
+        // the weapon is dropped.
+        self.stowed = matches!(state, Legs::Climb(_) | Legs::Down | Legs::GetUp);
+        if self.stowed {
+            self.action = None;
+            self.upper.begin();
+            self.upper.update(player, dt);
+            self.hand = None;
+            return;
+        }
 
         // Upper body: a one-shot (weapon switch, shot, reload) or else the weapon set's
         // clips paired with the legs clips, in step with them.
@@ -978,14 +1035,22 @@ fn animate(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     feedback: Res<CombatFeedback>,
     mut shots: MessageReader<ShotFired>,
-    soldiers: Query<(&SoldierRender, Option<Ref<Loadout>>, Option<&Inventory>, Has<LocalSoldier>, Option<&Seated>)>,
+    soldiers: Query<(
+        &SoldierRender,
+        Option<Ref<Loadout>>,
+        Option<&Inventory>,
+        Has<LocalSoldier>,
+        Has<game_shared::revive::Downed>,
+        Option<&Seated>,
+    )>,
     vehicles: Query<&VehicleData>,
     mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
     let fired: Vec<Entity> = shots.read().map(|shot| shot.soldier).collect();
     for (visual, body, rig, mut animator) in &mut visuals {
-        let (Ok((render, loadout, inventory, local, seated)), Some(team)) = (soldiers.get(visual.soldier), body.0)
+        let (Ok((render, loadout, inventory, local, downed, seated)), Some(team)) =
+            (soldiers.get(visual.soldier), body.0)
         else {
             continue;
         };
@@ -1031,6 +1096,7 @@ fn animate(
             set,
             fired,
             reloading,
+            downed,
             seat_pose: seat_pose.as_deref(),
         };
         animator.update(&mut player, animations, &cues, time.delta_secs());

@@ -27,6 +27,12 @@ const MAX_LOOKAHEAD: usize = 120;
 const CLEARANCE: u8 = 2;
 /// How close to a cell's middle a straight line must pass to cross an edge cell, in cells.
 const CENTER_TOLERANCE: f32 = 0.2;
+/// Cost of getting on and off a ladder (and waiting for whoever is on it), in meters of
+/// walking; climbing a meter costs [`LADDER_UP_COST`] going up and [`LADDER_DOWN_COST`]
+/// going down. Ladders only take one soldier at a time: stairs are better when close.
+const LADDER_COST: f32 = 8.0;
+const LADDER_UP_COST: f32 = 2.0;
+const LADDER_DOWN_COST: f32 = 1.5;
 
 /// A path for a soldier to walk.
 #[derive(Clone, Debug)]
@@ -43,6 +49,17 @@ pub struct Waypoint {
     pub position: Vec3,
     /// Reaching this waypoint needs a jump up a ledge.
     pub jump: bool,
+    /// Reaching this waypoint takes a ladder, from the previous one: that one is where to
+    /// get on (in front of its foot going up, behind its top going down).
+    pub ladder: Option<LadderStep>,
+}
+
+/// Climbing a ladder on a path.
+#[derive(Clone, Copy, Debug)]
+pub struct LadderStep {
+    /// Horizontal, out of the wall: the side the ladder is climbed from.
+    pub front: Vec3,
+    pub up: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -187,16 +204,24 @@ impl NavGrid {
                     }
                 }
             }
-            for (to, length) in moves {
-                let Some(to) = to else {
-                    continue;
-                };
+            let ladders = self.ladders_at(index).filter_map(|ladder| {
+                let height = self.cell(ladder.top).y - self.cell(ladder.bottom).y;
+                match ladder.bottom.index == index {
+                    true => Some((ladder.top, LADDER_COST + height * LADDER_UP_COST)),
+                    false => ladder.down.then_some((ladder.bottom, LADDER_COST + height * LADDER_DOWN_COST)),
+                }
+            });
+            let walks = moves.into_iter().filter_map(|(to, length)| {
+                let to = to?;
                 let b = self.cell(to);
                 let mut cost = length * cell * wall_penalty(b);
                 let dy = b.y - a.y;
                 if dy.abs() > self.walk_climb(&a, b) {
                     cost += if dy > 0.0 { JUMP_COST } else { DROP_COST };
                 }
+                Some((to, cost))
+            });
+            for (to, cost) in walks.chain(ladders) {
                 let g = node.g + cost;
                 let better = nodes.get(&to.index).is_none_or(|n| !n.closed && g < n.g);
                 if better {
@@ -240,6 +265,7 @@ impl NavGrid {
         let mut waypoints = vec![Waypoint {
             position: self.position(cells[0]),
             jump: false,
+            ladder: None,
         }];
         let walkable = |a: CellRef, b: CellRef| {
             let (a, b) = (self.cell(a), self.cell(b));
@@ -258,13 +284,36 @@ impl NavGrid {
                 }
             }
             let (from, to) = (self.cell(cells[best - 1]), self.cell(cells[best]));
-            waypoints.push(Waypoint {
-                position: self.position(cells[best]),
-                jump: self.needs_jump(from, to),
-            });
+            let ladder = (best == i + 1)
+                .then(|| self.ladder_between(cells[i], cells[i + 1]))
+                .flatten();
+            match ladder {
+                Some(ladder) => {
+                    // Get on where movement mounts it; getting off lands at the other end.
+                    let up = ladder.bottom == cells[i];
+                    let (on, off) = if up { (ladder.foot, ladder.head) } else { (ladder.head, ladder.foot) };
+                    waypoints.last_mut().unwrap().position = on;
+                    waypoints.push(Waypoint {
+                        position: off,
+                        jump: false,
+                        ladder: Some(LadderStep { front: ladder.front, up }),
+                    });
+                }
+                None => waypoints.push(Waypoint {
+                    position: self.position(cells[best]),
+                    jump: self.needs_jump(from, to),
+                    ladder: None,
+                }),
+            }
             i = best;
         }
         waypoints
+    }
+
+    /// The ladder from `a` to `b`, if they are its two ends.
+    fn ladder_between(&self, a: CellRef, b: CellRef) -> Option<&super::NavLadder> {
+        self.ladders_at(a.index)
+            .find(|l| (l.bottom == a && l.top == b) || (l.top == a && l.bottom == b))
     }
 
     /// Whether a soldier walking the straight line between the centers of `a` and `b`

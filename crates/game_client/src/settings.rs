@@ -11,7 +11,7 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use bevy::{
-    audio::{AudioSinkPlayback, GlobalVolume, SpatialAudioSink, Volume},
+    audio::{GlobalVolume, Volume},
     ecs::system::SystemParam,
     pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Cli,
+    audio::AudioMix,
     camera::PlayerCamera,
     local_input::{BASE_SENSITIVITY, LookState},
     render::environment::Sun,
@@ -108,15 +109,25 @@ pub struct Settings {
     pub field_of_view: f32,
     /// 0..1.
     pub master_volume: f32,
+    /// On top of the master volume, 0..1: weapons, footsteps, voices, vehicles...
+    pub effects_volume: f32,
+    /// Level ambience.
+    pub ambience_volume: f32,
     pub window_mode: DisplayMode,
     /// Window size in windowed mode (logical pixels). Fullscreen uses the monitor's.
     pub window_size: (u32, u32),
     pub vsync: bool,
     pub shadows: bool,
     pub ambient_occlusion: bool,
+    /// How far the world fades into the fog.
+    pub view_distance: ViewDistance,
     pub bindings: BTreeMap<Action, Binding>,
     /// What the menu last started, to offer it again.
     pub last_match: LastMatch,
+    /// Servers starred in the server browser.
+    pub favourite_servers: Vec<SavedServer>,
+    /// Servers joined lately, newest first.
+    pub recent_servers: Vec<SavedServer>,
 }
 
 impl Default for Settings {
@@ -127,16 +138,21 @@ impl Default for Settings {
             invert_mouse_y: false,
             field_of_view: 75.0,
             master_volume: 1.0,
+            effects_volume: 1.0,
+            ambience_volume: 1.0,
             window_mode: DisplayMode::Windowed,
             window_size: (1280, 720),
             vsync: false,
             shadows: true,
             ambient_occlusion: true,
+            view_distance: ViewDistance::default(),
             bindings: Action::ALL
                 .iter()
                 .map(|a| (*a, a.default_binding()))
                 .collect(),
             last_match: LastMatch::default(),
+            favourite_servers: Vec::new(),
+            recent_servers: Vec::new(),
         }
     }
 }
@@ -232,6 +248,43 @@ impl DisplayMode {
     }
 }
 
+/// View distance presets: multipliers on the level's fog distance (BF2's, stretched).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ViewDistance {
+    Short,
+    #[default]
+    Normal,
+    Far,
+    Extreme,
+}
+
+impl ViewDistance {
+    pub const ALL: [ViewDistance; 4] = [
+        ViewDistance::Short,
+        ViewDistance::Normal,
+        ViewDistance::Far,
+        ViewDistance::Extreme,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewDistance::Short => "Short",
+            ViewDistance::Normal => "Normal",
+            ViewDistance::Far => "Far",
+            ViewDistance::Extreme => "Extreme",
+        }
+    }
+
+    pub fn scale(self) -> f32 {
+        match self {
+            ViewDistance::Short => 0.6,
+            ViewDistance::Normal => 1.0,
+            ViewDistance::Far => 1.6,
+            ViewDistance::Extreme => 2.5,
+        }
+    }
+}
+
 /// The menu's last choices.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -265,6 +318,36 @@ impl Default for LastMatch {
     }
 }
 
+/// A server remembered by the browser.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct SavedServer {
+    /// IP or host name.
+    pub address: String,
+    pub port: u16,
+    /// Its name when we last heard from it.
+    pub name: String,
+}
+
+impl Default for SavedServer {
+    fn default() -> Self {
+        Self {
+            address: String::new(),
+            port: game_shared::DEFAULT_PORT,
+            name: String::new(),
+        }
+    }
+}
+
+impl SavedServer {
+    pub fn is(&self, address: &str, port: u16) -> bool {
+        self.address.eq_ignore_ascii_case(address.trim()) && self.port == port
+    }
+}
+
+/// Recent servers kept.
+pub const MAX_RECENT_SERVERS: usize = 8;
+
 /// Something a key or mouse button does.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
@@ -289,6 +372,20 @@ pub enum Action {
     /// Full-screen map while held.
     Map,
     MinimapRotation,
+    /// Type a chat message to everyone.
+    ChatAll,
+    ChatTeam,
+    ChatSquad,
+    /// Critically wounded: stop waiting for a medic and go to the deploy screen.
+    GiveUp,
+    /// BF2's commo rose while held: radio messages, spotting.
+    CommoRose,
+    /// The commander screen (toggles).
+    CommanderScreen,
+    /// Special Forces night vision goggles on or off.
+    NightVision,
+    /// Special Forces gas mask on or off.
+    GasMask,
     /// Flying: the stick on the keyboard (the mouse also moves it).
     PitchUp,
     PitchDown,
@@ -299,7 +396,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 40] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -318,6 +415,14 @@ impl Action {
         Action::Scoreboard,
         Action::Map,
         Action::MinimapRotation,
+        Action::ChatAll,
+        Action::ChatTeam,
+        Action::ChatSquad,
+        Action::GiveUp,
+        Action::CommoRose,
+        Action::CommanderScreen,
+        Action::NightVision,
+        Action::GasMask,
         Action::PitchUp,
         Action::PitchDown,
         Action::RollLeft,
@@ -355,6 +460,14 @@ impl Action {
             Action::Scoreboard => "Scoreboard".into(),
             Action::Map => "Map".into(),
             Action::MinimapRotation => "Minimap rotation".into(),
+            Action::ChatAll => "Chat to everyone".into(),
+            Action::ChatTeam => "Chat to team".into(),
+            Action::ChatSquad => "Chat to squad".into(),
+            Action::GiveUp => "Give up when wounded".into(),
+            Action::CommoRose => "Commo rose (radio)".into(),
+            Action::CommanderScreen => "Commander screen".into(),
+            Action::NightVision => "Night vision".into(),
+            Action::GasMask => "Gas mask".into(),
             Action::PitchUp => "Pitch up (flying)".into(),
             Action::PitchDown => "Pitch down (flying)".into(),
             Action::RollLeft => "Roll left (flying)".into(),
@@ -403,6 +516,14 @@ impl Action {
             Action::Scoreboard => Key(KeyCode::Tab),
             Action::Map => Key(KeyCode::KeyM),
             Action::MinimapRotation => Key(KeyCode::KeyN),
+            Action::ChatAll => Key(KeyCode::KeyT),
+            Action::ChatTeam => Key(KeyCode::KeyY),
+            Action::ChatSquad => Key(KeyCode::KeyU),
+            Action::GiveUp => Key(KeyCode::KeyX),
+            Action::CommoRose => Key(KeyCode::KeyQ),
+            Action::CommanderScreen => Key(KeyCode::CapsLock),
+            Action::NightVision => Key(KeyCode::KeyL),
+            Action::GasMask => Key(KeyCode::KeyK),
             Action::PitchUp => Key(KeyCode::ArrowDown),
             Action::PitchDown => Key(KeyCode::ArrowUp),
             Action::RollLeft => Key(KeyCode::ArrowLeft),
@@ -500,24 +621,12 @@ fn apply_look(settings: Res<Settings>, mut look: ResMut<LookState>) {
     look.invert_y = settings.invert_mouse_y;
 }
 
-/// Sets the global volume for new sounds and adjusts the ones already playing.
-fn apply_volume(
-    settings: Res<Settings>,
-    mut global: ResMut<GlobalVolume>,
-    mut sinks: Query<(&PlaybackSettings, &mut AudioSink)>,
-    mut spatial_sinks: Query<(&PlaybackSettings, &mut SpatialAudioSink)>,
-) {
-    let volume = Volume::Linear(settings.master_volume.clamp(0.0, 1.0));
-    if global.volume == volume {
-        return;
-    }
-    global.volume = volume;
-    for (playback, mut sink) in &mut sinks {
-        sink.set_volume(playback.volume * volume);
-    }
-    for (playback, mut sink) in &mut spatial_sinks {
-        sink.set_volume(playback.volume * volume);
-    }
+/// Master volume as Bevy's global volume, the others as the audio mix (`audio` applies both
+/// to what's playing).
+fn apply_volume(settings: Res<Settings>, mut global: ResMut<GlobalVolume>, mut mix: ResMut<AudioMix>) {
+    global.volume = Volume::Linear(settings.master_volume.clamp(0.0, 1.0));
+    mix.effects = settings.effects_volume.clamp(0.0, 1.0);
+    mix.ambience = settings.ambience_volume.clamp(0.0, 1.0);
 }
 
 /// Changes only what changed in the settings, so a window resized by hand stays that size.

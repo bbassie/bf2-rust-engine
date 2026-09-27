@@ -30,13 +30,15 @@ use game_shared::{
     level::LoadedLevel,
     projectile::{GRAVITY, Smoke},
     protocol::{ControlledBy, Player, Team},
+    revive::Downed,
     soldier::{Health, Soldier, SoldierMotion, Stance},
     squad::SquadMember,
-    vehicle::Seated,
+    vehicle::{Seated, Vehicle, VehicleMotion},
     weapons::{Armory, Inventory, Loadout, cooks},
 };
 
 use crate::{
+    abilities::{Gadget, PADDLES_REACH, Wounded, gadget},
     AppliedInput, Controls, InputBuffer, ServerSettings, ServerSimSystems, balanced_team,
     ai::{
         self, AiData,
@@ -46,7 +48,7 @@ use crate::{
         strategy::{self, OrderKind, StrategicMap, Strategy, TeamIntel, hash01},
         tactics,
     },
-    nav::{NavGrid, NavPath, Navigation, Waypoint},
+    nav::{LadderStep, NavGrid, NavPath, Navigation, Waypoint},
 };
 
 pub struct BotPlugin;
@@ -107,12 +109,29 @@ const DECIDE_INTERVAL: f32 = 0.25;
 const APPROACH_DISTANCE: f32 = 60.0;
 /// How far a grenade may land from friends, meters.
 const GRENADE_SAFETY: f32 = 9.0;
+/// Bots keep this far from teammates while moving, meters.
+const CROWD_DISTANCE: f32 = 1.2;
+/// Stamina bots keep for fights and escapes when sprinting.
+const SPRINT_RESERVE: f32 = 0.35;
+/// Vehicles faster than this run soldiers over, m/s (see `roadkill`).
+const DANGEROUS_SPEED: f32 = 3.5;
+/// How far medics go to revive someone, meters, and how much they want to (BF2's revive
+/// behaviour weight is 3, fire 7.5).
+const REVIVE_DISTANCE: f32 = 35.0;
+const REVIVE_UTILITY: f32 = 4.5;
+/// How close teammates must be for a held bag to reach them, meters.
+const BAG_REACH: f32 = 4.0;
 
 /// Per-minute movement statistics, logged to see how well bots get around.
 #[derive(Resource, Default)]
 pub struct BotStats {
     elapsed: f32,
     stuck_events: u32,
+    /// Stuck events while carrying out orders, advancing under fire, and taking cover or
+    /// flanking.
+    stuck_by_activity: [u32; 3],
+    /// Stuck events by 10 m square, to find the places bots get stuck at.
+    stuck_spots: bevy::platform::collections::HashMap<(i32, i32), u32>,
     stuck_seconds: f32,
     /// Bot-seconds spent alive and trying to move (the time stuck events can happen in).
     moving_seconds: f32,
@@ -125,6 +144,8 @@ pub struct BotStats {
     failed_paths: u32,
     path_seconds: f32,
     max_path_seconds: f32,
+    /// Ladders bots got on.
+    climbs: u32,
     /// Milliseconds spent in `think`.
     think_ms: f32,
     max_think_ms: f32,
@@ -152,6 +173,9 @@ enum Activity {
     Search { at: Vec3, time: f32 },
     /// Throwing a grenade at `at`, `time` seconds into it.
     Throw { at: Vec3, time: f32, weapon: u8 },
+    /// Medics: to a critically wounded teammate and shocking him back to life, for at most
+    /// `time` more seconds.
+    Revive { soldier: Entity, time: f32 },
 }
 
 /// How a bot stands while shooting.
@@ -172,6 +196,13 @@ pub struct BotBrain {
     /// Loadout indices of the main weapon and of a frag grenade.
     primary: u8,
     grenade: Option<u8>,
+    /// Medics: the loadout index of the shock paddles.
+    paddles: Option<u8>,
+    /// Medics' and support soldiers' bags.
+    medic_bag: Option<u8>,
+    ammo_bag: Option<u8>,
+    /// The bag to hold out now (see `decide`).
+    bag: Option<u8>,
 
     /// Enemy soldier being engaged.
     target: Option<Entity>,
@@ -216,12 +247,20 @@ pub struct BotBrain {
     via: Option<Vec3>,
     /// Squad leaders: seconds spent waiting for the squad.
     regroup: f32,
+    /// Squad leaders: the squad gathered before the assault.
+    staged: bool,
     /// Phase of looking around while holding a position.
     sweep: f32,
     /// Kit and spawn were chosen for this death.
     deployed: bool,
     /// It chose to spawn on its squad leader.
     spawn_on_leader: bool,
+    /// Jump was pressed last tick.
+    jump_held: bool,
+    /// On a ladder last tick.
+    climbing: bool,
+    /// Sprinting while stamina lasts (see `act`).
+    sprinting: bool,
 
     goal: Option<Vec3>,
     /// Walking straight to the goal without a path; and the goal that was checked for.
@@ -257,6 +296,10 @@ impl Default for BotBrain {
             soldier: None,
             primary: 0,
             grenade: None,
+            paddles: None,
+            medic_bag: None,
+            ammo_bag: None,
+            bag: None,
             target: None,
             last_seen: None,
             scan_timer: fastrand::f32() * SCAN_INTERVAL,
@@ -283,9 +326,13 @@ impl Default for BotBrain {
             spot_timer: 0.0,
             via: None,
             regroup: 0.0,
+            staged: false,
             sweep: fastrand::f32() * TAU,
             deployed: false,
             spawn_on_leader: false,
+            jump_held: false,
+            climbing: false,
+            sprinting: true,
             goal: None,
             direct: false,
             direct_goal: None,
@@ -308,7 +355,8 @@ impl Default for BotBrain {
 
 /// Where path following wants to go this tick.
 enum Steer {
-    Toward { target: Vec3, jump: bool },
+    /// `ladder`: the waypoint is reached by climbing.
+    Toward { target: Vec3, jump: bool, ladder: Option<LadderStep> },
     /// At the end of the path.
     Arrived,
 }
@@ -374,10 +422,13 @@ struct Senses<'w, 's> {
             Option<&'static AppliedInput>,
             Option<&'static Loadout>,
             Has<Seated>,
+            Has<Downed>,
         ),
         With<Soldier>,
     >,
     teams: Query<'w, 's, &'static Team>,
+    wounded: Wounded<'w, 's>,
+    vehicles: Query<'w, 's, &'static VehicleMotion, With<Vehicle>>,
 }
 
 impl Senses<'_, '_> {
@@ -443,6 +494,10 @@ impl BotBrain {
     fn new_life(&mut self, w: &Senses, me: &Me) {
         self.soldier = Some(me.soldier);
         self.primary = me.inventory.map_or(0, |i| i.active);
+        self.paddles = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Paddles));
+        self.medic_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::MedicBag));
+        self.ammo_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::AmmoBag));
+        self.bag = None;
         self.grenade = me.loadout.and_then(|l| {
             (0..l.weapons.len() as u8).find(|&i| {
                 // Frag grenades: thrown, on a fuse, no trigger (unlike mines).
@@ -554,7 +609,11 @@ impl BotBrain {
                 self.activity = Activity::Search { at, time: time - dt };
             }
             Activity::Throw { at, time, weapon } => self.throw(w, me, at, time, weapon, &mut intent, dt),
-            Activity::Objective => self.objective(w, me, &mut intent, dt),
+            Activity::Revive { soldier, time } => self.revive(w, me, soldier, time, &mut intent, dt),
+            Activity::Objective => {
+                self.objective(w, me, &mut intent, dt);
+                intent.weapon = intent.weapon.or(self.bag);
+            }
         }
 
         team_stats.alive += dt;
@@ -606,9 +665,10 @@ impl BotBrain {
         let view = skill.view_angle();
         let mut candidates: Vec<(Entity, f32, Vec3, bool)> = Vec::new();
         let mut heard: Option<(f32, Vec3)> = None;
-        for (entity, motion, controlled_by, _, _, applied, _, seated) in &w.soldiers {
-            // TODO: fight vehicles and their crews; for now bots leave them alone.
-            if entity == me.soldier || seated || !w.is_enemy(controlled_by.0, me.team) {
+        for (entity, motion, controlled_by, _, _, applied, _, seated, downed) in &w.soldiers {
+            // TODO: fight vehicles and their crews; for now bots leave them alone. Nor do
+            // they shoot the critically wounded.
+            if entity == me.soldier || seated || downed || !w.is_enemy(controlled_by.0, me.team) {
                 continue;
             }
             let to = motion.position - position;
@@ -716,6 +776,13 @@ impl BotBrain {
     /// Weighs the options (utility) and switches activity when another is worth more.
     /// `covers`: cover searches left this tick (they cast rays).
     fn decide(&mut self, w: &Senses, me: &Me, team_stats: &mut TeamStats, covers: &mut u32) {
+        if me.motion.climbing {
+            // Hands on the rungs: nothing to do but climb on.
+            if matches!(self.activity, Activity::Engage | Activity::Throw { .. } | Activity::Search { .. }) {
+                self.activity = Activity::Objective;
+            }
+            return;
+        }
         if matches!(self.activity, Activity::Throw { .. }) {
             return;
         }
@@ -737,6 +804,7 @@ impl BotBrain {
             Activity::Cover { time, .. } if time > 0.0 => best = (6.0, self.activity),
             Activity::Flank { time, .. } if time > 0.0 => best = (3.0, self.activity),
             Activity::Search { time, .. } if time > 0.0 => best = (2.5, self.activity),
+            Activity::Revive { time, .. } if time > 0.0 => best = (REVIVE_UTILITY, self.activity),
             _ => {}
         }
         let consider = |best: &mut (f32, Activity), utility: f32, activity: Activity| {
@@ -761,17 +829,49 @@ impl BotBrain {
         if cover > best.0
             && !matches!(self.activity, Activity::Cover { .. })
             && *covers > 0
-            && {
-                *covers -= 1;
-                true
-            }
             && let (Some(nav), Some(threat)) = (w.nav(), target.map(|t| t.eye_position()).or(self.threat_point()))
-            && let Some(spot) = tactics::find_cover(nav, &w.spatial, position, threat)
         {
-            // TODO: with medics and resupply, go to one when badly hurt or out of ammo.
-            // Getting there counts against the time too.
-            let time = 2.5 + 3.0 * (1.0 - courage) + spot.distance(position) / 4.0;
-            consider(&mut best, cover, Activity::Cover { spot, time });
+            *covers -= 1;
+            if let Some(spot) = tactics::find_cover(nav, &w.spatial, position, threat) {
+                // Getting there counts against the time too.
+                let time = 2.5 + 3.0 * (1.0 - courage) + spot.distance(position) / 4.0;
+                consider(&mut best, cover, Activity::Cover { spot, time });
+            }
+        }
+
+        // Medics revive teammates down nearby, unless in a fight.
+        if self.paddles.is_some()
+            && REVIVE_UTILITY > best.0
+            && !matches!(self.activity, Activity::Revive { .. })
+            && let Some((soldier, _, _)) = w
+                .wounded
+                .downed_near(me.team, position, REVIVE_DISTANCE)
+                .into_iter()
+                .find(|(_, _, left)| *left > 3.0)
+        {
+            consider(&mut best, REVIVE_UTILITY, Activity::Revive { soldier, time: 20.0 });
+        }
+        // Out of a fight, medics and support soldiers hold their bags out while someone
+        // close by is hurt or low on ammo (held, a bag heals or resupplies everyone within a
+        // few meters).
+        // TODO: throw bags to teammates further away; badly hurt bots go to medics; engineers
+        // repair friendly vehicles (`Gadget::Wrench`) once bots use vehicles.
+        self.bag = None;
+        if target.is_none() && self.hurt_ago > 3.0 {
+            let team = me.team;
+            let hurt = || !w.wounded.hurt_near(team, position, BAG_REACH, 0.7).is_empty();
+            let empty = || {
+                w.soldiers.iter().any(|(_, motion, controlled_by, inventory, _, _, loadout, ..)| {
+                    motion.position.distance(position) < BAG_REACH
+                        && w.teams.get(controlled_by.0).is_ok_and(|t| *t == team)
+                        && inventory.zip(loadout).is_some_and(|(i, l)| low_on_ammo(i, l, &w.armory))
+                })
+            };
+            self.bag = match (self.medic_bag, self.ammo_bag) {
+                (Some(bag), _) if hurt() => Some(bag),
+                (_, Some(bag)) if empty() => Some(bag),
+                _ => None,
+            };
         }
 
         // A grenade at enemies behind cover, or at one it can't get.
@@ -799,7 +899,14 @@ impl BotBrain {
                     true => 0.0,
                     false => 5.0 * (0.5 + aggression),
                 };
-                if (12.0..=40.0).contains(&d) && friends_clear && utility > 0.0 {
+                // Nothing right in front to bounce it back: the start of the arc is clear.
+                let eye = me.motion.eye_position();
+                let early = eye + flat(at - eye).normalize_or_zero() * 5.0 + Vec3::Y * 1.5;
+                if (12.0..=40.0).contains(&d)
+                    && friends_clear
+                    && utility > best.0
+                    && tactics::line_of_sight(&w.spatial, eye, early)
+                {
                     consider(&mut best, utility, Activity::Throw { at, time: 0.0, weapon: grenade });
                 }
             }
@@ -840,6 +947,7 @@ impl BotBrain {
                     self.flank_cooldown = 20.0;
                 }
                 Activity::Throw { .. } => team_stats.grenades += 1,
+                Activity::Revive { .. } => team_stats.revives += 1,
                 _ => {}
             }
             self.activity = next;
@@ -993,6 +1101,57 @@ impl BotBrain {
         self.activity = Activity::Throw { at, time, weapon };
     }
 
+    /// Which way to step out of the path of a vehicle about to run it over, if one is.
+    fn dodge_vehicles(&self, w: &Senses, me: &Me) -> Option<Vec3> {
+        let position = me.motion.position;
+        w.vehicles.iter().find_map(|vehicle| {
+            let velocity = flat(vehicle.velocity);
+            let speed = velocity.length();
+            let offset = flat(position - vehicle.position);
+            if speed < DANGEROUS_SPEED || offset.length() > 40.0 || (vehicle.position.y - position.y).abs() > 3.0 {
+                return None;
+            }
+            // When it passes closest, and how close.
+            let t = offset.dot(velocity) / (speed * speed);
+            let miss = offset - velocity * t;
+            ((0.0..2.5).contains(&t) && miss.length() < 4.0).then(|| {
+                let side = Vec3::new(-velocity.z, 0.0, velocity.x) / speed;
+                if miss.dot(side) >= 0.0 { side } else { -side }
+            })
+        })
+    }
+
+    /// Walks to a downed teammate with the paddles out and shocks him until he is back up
+    /// (or gone).
+    fn revive(&mut self, w: &Senses, me: &Me, soldier: Entity, time: f32, intent: &mut Intent, dt: f32) {
+        let body = w.soldiers.get(soldier).ok().filter(|s| s.8).map(|s| s.1.position);
+        let (Some(body), Some(paddles), true) = (body, self.paddles, time > 0.0) else {
+            self.activity = Activity::Objective;
+            return;
+        };
+        let distance = flat(body - me.motion.position).length();
+        if distance > 1.2 {
+            intent.goal = Some(Goal {
+                position: body,
+                tolerance: 1.0,
+                sprint: distance > 10.0,
+            });
+        }
+        if distance < 8.0 {
+            intent.weapon = Some(paddles);
+        }
+        if distance < PADDLES_REACH - 0.8 {
+            intent.look = Look::At(body + Vec3::Y * 0.2);
+            // A fresh press for every shock.
+            self.burst -= dt;
+            if self.burst <= 0.0 {
+                intent.buttons |= Buttons::FIRE;
+                self.burst = 0.6;
+            }
+        }
+        self.activity = Activity::Revive { soldier, time: time - dt };
+    }
+
     /// The order this bot works on: its squad's, the flag its human leader is at, or the
     /// best for itself.
     fn current_order(&self, w: &Senses, me: &Me) -> Option<(OrderKind, usize)> {
@@ -1038,9 +1197,10 @@ impl BotBrain {
             self.order = order;
             self.spot = None;
             self.regroup = 0.0;
+            self.staged = false;
             self.via = order
                 .filter(|(_, area)| w.map.areas[*area].position.distance(position) > 120.0)
-                .and_then(|(_, area)| w.map.route_waypoint(position, area));
+                .and_then(|(_, area)| w.map.route_waypoint(position, area).or_else(|| self.flank_via(w, me, area)));
         }
         let area = order.map(|(_, a)| (a, &w.map.areas[a]));
 
@@ -1075,18 +1235,33 @@ impl BotBrain {
         };
         let distance = area.position.distance(position);
 
-        // Leaders wait for a squad that fell behind, a while.
+        // Leaders wait for a squad that fell behind, a while, and gather it before an
+        // assault so it arrives together rather than one by one.
         if is_leader
-            && let Some(spread) = squad.and_then(|s| s.spread())
+            && let Some(squad) = squad
+            && let Some(spread) = squad.spread()
         {
-            if spread < 15.0 {
+            let others = squad.alive.len().saturating_sub(1);
+            let close = squad
+                .alive
+                .iter()
+                .filter(|m| m.player != me.player && m.position.distance(position) < 25.0)
+                .count();
+            let assault = order.is_some_and(|(k, _)| k == OrderKind::Attack)
+                && distance < 2.0 * APPROACH_DISTANCE
+                && self.target.is_none();
+            let gathering = assault && !self.staged && close * 10 < others * 6 && self.regroup < 20.0;
+            if assault && !gathering {
+                self.staged = true;
+            }
+            if spread < 15.0 && !gathering {
                 self.regroup = 0.0;
-            } else if spread > 30.0 && distance > APPROACH_DISTANCE && self.regroup < 10.0 {
+            } else if distance > APPROACH_DISTANCE && (gathering || (spread > 30.0 && self.regroup < 10.0)) {
                 self.regroup += dt;
-                if let Some(center) = squad.and_then(|s| {
-                    let others: Vec<Vec3> = s.alive.iter().filter(|m| m.player != me.player).map(|m| m.position).collect();
-                    (!others.is_empty()).then(|| others.iter().sum::<Vec3>() / others.len() as f32)
-                }) {
+                let others: Vec<Vec3> =
+                    squad.alive.iter().filter(|m| m.player != me.player).map(|m| m.position).collect();
+                if !others.is_empty() {
+                    let center = others.iter().sum::<Vec3>() / others.len() as f32;
                     intent.look = Look::At(center + Vec3::Y * 1.5);
                 }
                 intent.buttons |= Buttons::CROUCH;
@@ -1135,6 +1310,23 @@ impl BotBrain {
                 intent.buttons |= Buttons::CROUCH;
             }
         }
+    }
+
+    /// For squads without a route laid out by the level: a waypoint off to one side of the
+    /// straight line to the objective, so squads attacking the same flag come at it from
+    /// several directions.
+    fn flank_via(&self, w: &Senses, me: &Me, area: usize) -> Option<Vec3> {
+        let squad = me.member?.squad;
+        let angle = [0.0f32, 45.0, -45.0][squad as usize % 3];
+        if angle == 0.0 {
+            return None;
+        }
+        let target = w.map.areas[area].position;
+        let from = (me.motion.position - target).with_y(0.0).normalize_or_zero();
+        let via = target + Quat::from_rotation_y(angle.to_radians()) * from * 80.0;
+        let nav = w.nav()?;
+        let region = nav.cell(nav.locate(me.motion.position, 2.0, None)?).region;
+        nav.locate(via, 12.0, Some(region)).map(|cell| nav.position(cell))
     }
 
     /// A spot in or around an area for this bot: inside the capture radius to attack, in a
@@ -1217,6 +1409,7 @@ impl BotBrain {
         let position = me.motion.position;
         let mut direction = Vec3::ZERO;
         let mut jump = false;
+        let mut ladder = None;
         self.goal = intent.goal.map(|g| g.position);
         if let Some(goal) = intent.goal {
             // Short, clear moves need no path.
@@ -1225,13 +1418,14 @@ impl BotBrain {
                 self.direct = flat(goal.position - position).length() < 15.0
                     && w.nav().is_none_or(|nav| nav.walkable_line(position, goal.position));
             }
-            let (target, j) = match (w.nav.as_deref(), self.direct) {
+            let (target, j, step) = match (w.nav.as_deref(), self.direct) {
                 (Some(nav), false) => match self.follow_path(nav, goal.position, goal.tolerance, me.motion, dt, stats) {
-                    Steer::Toward { target, jump } => (target, jump),
-                    Steer::Arrived => (goal.position, false),
+                    Steer::Toward { target, jump, ladder } => (target, jump, ladder),
+                    Steer::Arrived => (goal.position, false, None),
                 },
-                _ => (goal.position, false),
+                _ => (goal.position, false, None),
             };
+            ladder = step;
             let to = flat(target - position);
             if to.length() > 0.3 {
                 direction = to.normalize();
@@ -1240,7 +1434,39 @@ impl BotBrain {
         } else {
             direction = intent.step;
         }
+        // Out of the way of vehicles coming at speed, friend or foe.
+        let dodging = !me.motion.climbing
+            && match self.dodge_vehicles(w, me) {
+                Some(away) => {
+                    direction = away;
+                    true
+                }
+                None => false,
+            };
+
+        // Keep a little apart from teammates: crowds jam doorways, stairs and ladders. Being
+        // held up by one isn't being stuck on the level.
+        let mut queued = false;
+        if direction.length_squared() > 0.01
+            && ladder.is_none()
+            && let Some(t) = me.team_index()
+        {
+            let mut push = Vec3::ZERO;
+            for other in w.snapshot.soldiers[t].iter().filter(|s| s.player != me.player) {
+                let away = flat(position - other.position);
+                let d = away.length();
+                if d > 0.01 && d < CROWD_DISTANCE && (other.position.y - position.y).abs() < 1.5 {
+                    push += away / d * (CROWD_DISTANCE - d);
+                    queued |= d < 1.0 && direction.dot(-away / d) > 0.5;
+                }
+            }
+            direction = (direction + push.clamp_length_max(0.6)).normalize_or(direction);
+        }
         let wants_move = direction.length_squared() > 0.01;
+        if me.motion.climbing && !self.climbing {
+            stats.climbs += 1;
+        }
+        self.climbing = me.motion.climbing;
 
         // Detect being stuck on geometry: wiggle free, then find a new path from there.
         let moved = flat(position - self.last_position).length();
@@ -1248,10 +1474,10 @@ impl BotBrain {
         let moved = if moved > 1.0 { 0.0 } else { moved };
         self.last_position = position;
         self.stuck_strikes = (self.stuck_strikes - dt / 10.0).max(0.0);
-        if intent.goal.is_some() && wants_move {
+        if intent.goal.is_some() && wants_move && !me.motion.climbing {
             stats.moving_seconds += dt;
             stats.moved += moved;
-            if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && me.motion.grounded {
+            if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && me.motion.grounded && !queued {
                 self.stuck_time += dt;
                 stats.stuck_seconds += dt;
             } else {
@@ -1259,6 +1485,13 @@ impl BotBrain {
             }
             if self.stuck_time > 0.75 {
                 stats.stuck_events += 1;
+                let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
+                *stats.stuck_spots.entry(square).or_default() += 1;
+                stats.stuck_by_activity[match self.activity {
+                    Activity::Engage => 1,
+                    Activity::Cover { .. } | Activity::Flank { .. } => 2,
+                    _ => 0,
+                }] += 1;
                 self.stuck_time = 0.0;
                 self.unstuck_timer = 0.6 + fastrand::f32() * 0.8;
                 // First try jumping ahead (a ledge the grid thinks is lower), then sideways.
@@ -1325,7 +1558,19 @@ impl BotBrain {
             if jump {
                 frame.buttons |= Buttons::JUMP;
             }
-            let sprint = intent.goal.is_some_and(|g| g.sprint) && movement.y > 0.7 && self.target.is_none();
+            // Sprint in bursts: start rested, stop with some stamina left for a fight or an
+            // escape (all of it may go running for cover or out of a vehicle's way).
+            let urgent = dodging || matches!(self.activity, Activity::Cover { .. });
+            let reserve = if urgent { 0.0 } else { SPRINT_RESERVE };
+            if me.motion.stamina <= reserve {
+                self.sprinting = false;
+            } else if me.motion.stamina > 0.8 || urgent {
+                self.sprinting = true;
+            }
+            let sprint = (intent.goal.is_some_and(|g| g.sprint) || dodging)
+                && movement.y > 0.7
+                && self.target.is_none()
+                && self.sprinting;
             if sprint && !frame.buttons.intersects(Buttons::CROUCH | Buttons::PRONE | Buttons::FIRE) {
                 frame.buttons |= Buttons::SPRINT;
             }
@@ -1340,6 +1585,25 @@ impl BotBrain {
         {
             frame.buttons |= Buttons::RELOAD;
         }
+        if me.motion.climbing {
+            match ladder.filter(|_| intent.goal.is_some()) {
+                // Forward climbs; looking down, forward climbs down.
+                Some(step) => {
+                    movement = Vec2::Y;
+                    self.yaw = turn_towards(self.yaw, yaw_to(-step.front), 5.0 * dt);
+                    self.pitch = if step.up { 0.1 } else { -0.9 };
+                    frame.yaw = self.yaw;
+                    frame.pitch = self.pitch;
+                    frame.buttons.remove(Buttons::JUMP | Buttons::CROUCH | Buttons::PRONE | Buttons::SPRINT);
+                }
+                // On a ladder it didn't mean to take: jump off.
+                None => frame.buttons |= Buttons::JUMP,
+            }
+        }
+        // Jumping takes a fresh press: holding the button would jump once.
+        let jump = frame.buttons.contains(Buttons::JUMP) && !self.jump_held;
+        frame.buttons.set(Buttons::JUMP, jump);
+        self.jump_held = jump;
         frame.set_movement(movement);
         frame
     }
@@ -1404,11 +1668,19 @@ impl BotBrain {
             return Steer::Toward {
                 target: goal,
                 jump: false,
+                ladder: None,
             };
         };
         while let Some(waypoint) = path.waypoints.get(self.waypoint) {
             let last = self.waypoint + 1 == path.waypoints.len();
-            let close = flat(waypoint.position - position).length() < if last { 0.6 } else { 0.8 };
+            // Ladders are narrow: get to where they are climbed from exactly.
+            let before_ladder = path.waypoints.get(self.waypoint + 1).is_some_and(|w| w.ladder.is_some());
+            let reach = match (before_ladder, last) {
+                (true, _) => 0.35,
+                (_, true) => 0.6,
+                _ => 0.8,
+            };
+            let close = flat(waypoint.position - position).length() < reach;
             if close && (waypoint.position.y - position.y).abs() < 1.5 {
                 self.waypoint += 1;
                 self.waypoint_best = f32::MAX;
@@ -1420,6 +1692,15 @@ impl BotBrain {
             self.path = None;
             return Steer::Arrived;
         };
+        if motion.climbing {
+            // Height changes and no progress along the ground are what climbing is.
+            self.waypoint_timer = 0.0;
+            return Steer::Toward {
+                target: waypoint.position,
+                jump: false,
+                ladder: waypoint.ladder,
+            };
+        }
         // Pushed off the path (by fighting, say) or fell off a ledge: find a new one.
         let previous = path.waypoints[self.waypoint.saturating_sub(1)].position;
         let (off_path, t) = segment_offset(flat(position), flat(previous), flat(waypoint.position));
@@ -1443,9 +1724,15 @@ impl BotBrain {
                 self.waypoint_timer = 0.0;
             }
         }
+        // Onto a ladder: straight along its middle, into it going up, over its top going down.
+        let target = match waypoint.ladder {
+            Some(step) => previous + if step.up { -step.front } else { step.front },
+            None => waypoint.position,
+        };
         Steer::Toward {
-            target: waypoint.position,
+            target,
             jump: waypoint.jump && motion.grounded && flat(waypoint.position - position).length() < 1.2,
+            ladder: waypoint.ladder,
         }
     }
 
@@ -1559,11 +1846,12 @@ fn think(
     let mut covers = 3;
     for (player, mut brain, mut buffer, team, controls, member, mut deployment) in &mut bots {
         let soldier = controls.and_then(|c| w.soldiers.get(c.0).ok());
-        let Some((own, motion, _, inventory, health, _, loadout, seated)) = soldier else {
+        let Some((own, motion, _, inventory, health, _, loadout, seated, downed)) = soldier else {
             brain.while_dead(&w, player, *team, member.copied(), &mut deployment);
             continue;
         };
-        if seated {
+        // Down, the server ignores its input; in a vehicle, bots do nothing yet.
+        if seated || downed {
             // TODO: bots driving and gunning vehicles. They never get in by themselves.
             brain.seq = brain.seq.wrapping_add(1);
             buffer.push(InputFrame {
@@ -1603,10 +1891,15 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
     }
     if !bots.is_empty() {
         info!(
-            "bots: {} stuck events in the last minute ({:.0} s stuck of {:.0} bot-seconds moving, \
+            "bots: {} stuck events in the last minute ({} on orders, {} advancing, {} to cover or \
+             flanking; {:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
-             {:.1} ms avg, {:.1} ms max; thinking {:.2} ms per tick, {:.1} ms max",
+             {:.1} ms avg, {:.1} ms max; {} ladders climbed; thinking {:.2} ms per tick, {:.1} ms max; \
+             stuck most at {}",
             stats.stuck_events,
+            stats.stuck_by_activity[0],
+            stats.stuck_by_activity[1],
+            stats.stuck_by_activity[2],
             stats.stuck_seconds,
             stats.moving_seconds,
             stats.moved / stats.moving_seconds.max(1.0),
@@ -1617,11 +1910,25 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.no_progress,
             stats.path_seconds * 1000.0 / stats.paths.max(1) as f32,
             stats.max_path_seconds * 1000.0,
+            stats.climbs,
             stats.think_ms / stats.ticks.max(1) as f32,
             stats.max_think_ms,
+            hotspots(&stats.stuck_spots),
         );
     }
     *stats = BotStats::default();
+}
+
+/// The three 10 m squares with the most stuck events, as `x z (count)`.
+fn hotspots(spots: &bevy::platform::collections::HashMap<(i32, i32), u32>) -> String {
+    let mut spots: Vec<_> = spots.iter().collect();
+    spots.sort_by(|a, b| b.1.cmp(a.1));
+    let list: Vec<String> = spots
+        .iter()
+        .take(3)
+        .map(|((x, z), n)| format!("{} {} ({n})", x * 10 + 5, z * 10 + 5))
+        .collect();
+    if list.is_empty() { "-".into() } else { list.join(", ") }
 }
 
 /// A random spot on the level, for levels without control points.
@@ -1632,6 +1939,15 @@ fn random_spot(level: &LoadedLevel, from: Vec3) -> Vec3 {
     let half = heightmap.world_size() * 0.4;
     let center = heightmap.center();
     center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half
+}
+
+/// Whether a soldier's main weapons are down to their last magazine.
+fn low_on_ammo(inventory: &Inventory, loadout: &Loadout, armory: &Armory) -> bool {
+    loadout.weapons.iter().zip(&inventory.ammo).any(|(name, [_, spare])| {
+        armory
+            .weapon(name)
+            .is_some_and(|w| w.slot == 3 && w.magazine_size > 0 && (*spare as u32) < w.magazine_size)
+    })
 }
 
 /// Roughly normally distributed, mean 0, standard deviation 1.

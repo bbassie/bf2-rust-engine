@@ -84,6 +84,20 @@ pub struct SurfaceQuery<'w, 's> {
 }
 
 impl SurfaceQuery<'_, '_> {
+    /// Whether marks stick to what a ray hit: the terrain and static objects (`Some(None)`),
+    /// destroyable parts (`Some(Some(part))`: the mark goes with the part), not soldiers or
+    /// vehicles (`None`).
+    pub fn decal_surface(&self, entity: Entity) -> Option<Option<Entity>> {
+        if self.terrain.contains(entity) {
+            return Some(None);
+        }
+        match self.parts.get(entity) {
+            Ok((_, Some(_))) => Some(Some(entity)),
+            Ok((Some(_), None)) => Some(None),
+            _ => None,
+        }
+    }
+
     pub fn material(&self, entity: Entity, point: Vec3) -> u32 {
         if self
             .layers

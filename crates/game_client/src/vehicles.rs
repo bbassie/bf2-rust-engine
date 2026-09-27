@@ -510,7 +510,7 @@ fn receive_shots(
         };
         // Shells and missiles are replicated projectiles; bullets are tracers.
         if !weapon.projectile.is_object() {
-            spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle), library.as_deref());
+            spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon, Some(shot.vehicle));
         }
         if let Some((muzzle, _)) = library.as_deref().and_then(|l| l.muzzle(&weapon.name)) {
             effects.write(SpawnEffect::new(muzzle, shot.origin).with_forward(shot.direction));

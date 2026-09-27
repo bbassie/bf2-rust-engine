@@ -18,19 +18,21 @@ use std::{ops::Range, sync::Arc, time::Instant};
 
 use avian3d::prelude::*;
 use bevy::{
+    platform::collections::HashMap,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 use bytemuck::{Pod, Zeroable};
 use game_data::GameModeDesc;
 use game_shared::{
+    ladder::{Ladder, LadderPart},
     level::{LevelEntity, LoadedLevel, Terrain},
     physics::GameLayer,
     protocol::MatchInfo,
     soldier::{SOLDIER_HEIGHT, SoldierTuning},
 };
 
-pub use path::{NavPath, Waypoint};
+pub use path::{LadderStep, NavPath, Waypoint};
 
 pub struct NavPlugin;
 
@@ -144,12 +146,44 @@ pub struct NavGrid {
     /// to top.
     columns: Vec<u32>,
     cells: Vec<NavCell>,
+    ladders: Vec<NavLadder>,
+    /// Ladders by the cells at their ends.
+    ladder_ends: HashMap<u32, Vec<u16>>,
+}
+
+/// A ladder soldiers climb between two cells.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavLadder {
+    /// The cell in front of its foot, and the one behind its top.
+    pub bottom: CellRef,
+    pub top: CellRef,
+    /// Where to stand to get on at the bottom (in front of it), and where getting off at
+    /// the top lands (behind it).
+    pub foot: Vec3,
+    pub head: Vec3,
+    /// Horizontal, out of the wall: the side it is climbed from.
+    pub front: Vec3,
+    /// It can be climbed down too (its top is level with the floor behind it).
+    pub down: bool,
 }
 
 impl NavGrid {
     pub const NONE: u8 = u8::MAX;
     /// Column offsets of the link directions: +X, +Z, -X, -Z.
     pub const DIRS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+
+    pub fn ladders(&self) -> &[NavLadder] {
+        &self.ladders
+    }
+
+    /// The ladders with an end at a cell (by index).
+    pub fn ladders_at(&self, cell: u32) -> impl Iterator<Item = &NavLadder> + '_ {
+        self.ladder_ends
+            .get(&cell)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.ladders[i as usize])
+    }
 
     pub fn cell_count(&self) -> usize {
         self.cells.len()
@@ -279,6 +313,7 @@ fn start_build(
         (&Collider, &Transform, &CollisionLayers),
         (With<LevelEntity>, Without<ColliderDisabled>),
     >,
+    ladder_parts: Query<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>,
 ) {
     commands.remove_resource::<Navigation>();
     let params = NavParams::from_tuning(&tuning);
@@ -296,9 +331,19 @@ fn start_build(
         .iter()
         .next()
         .and_then(|info| level.game_mode(&info.mode, info.size));
+    // The boxes movement climbs (see `game_shared::ladder`).
+    let ladders = ladder_parts
+        .iter()
+        .map(|(collider, transform)| {
+            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+            let half = aabb.size() * 0.5 * transform.scale.abs();
+            Ladder::from_box(transform.transform_point(aabb.center()), transform.rotation, half)
+        })
+        .collect();
     let geometry = build::LevelGeometry {
         terrain: terrain.iter().next().map(|t| t.0.clone()),
         meshes,
+        ladders,
         bounds: layout.and_then(gameplay_bounds),
     };
     let cache_path = level.dir.as_ref().map(|dir| {
@@ -315,20 +360,22 @@ fn start_build(
             && let Some(grid) = cache::load(path, key, params)
         {
             info!(
-                "nav: loaded {} ({} cells) in {:.2} s",
+                "nav: loaded {} ({} cells, {} ladders) in {:.2} s",
                 path.display(),
                 grid.cell_count(),
+                grid.ladders().len(),
                 started.elapsed().as_secs_f32()
             );
             return grid;
         }
         let grid = build::build(&geometry, params);
         info!(
-            "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {:.1} MB",
+            "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {} ladders, {:.1} MB",
             grid.width,
             grid.depth,
             started.elapsed().as_secs_f32(),
             grid.cell_count(),
+            grid.ladders().len(),
             grid.memory_bytes() as f32 / 1e6
         );
         if let Some(path) = &cache_path
@@ -399,6 +446,7 @@ mod tests {
         let geometry = LevelGeometry {
             terrain: Some(Arc::new(terrain)),
             meshes,
+            ladders: Vec::new(),
             bounds: None,
         };
         build::build(&geometry, NavParams::from_tuning(&SoldierTuning::default()))
@@ -454,6 +502,49 @@ mod tests {
         assert!(grid.walkable_line(y + Vec3::new(-10.0, 0.0, -5.0), y + Vec3::new(-2.0, 0.0, -3.0)));
         // Through the wall: the other side is reachable, but only through the door.
         assert!(!grid.walkable_line(y + Vec3::new(-10.0, 0.0, -5.0), y + Vec3::new(-10.0, 0.0, 5.0)));
+    }
+
+    #[test]
+    fn climbs_ladders() {
+        // A 4 m platform from z = 0 to 10 with a ladder up its south face (at z = 0), and
+        // one that ends high above it (up only) and one starting in the air (useless).
+        let platform = cuboid(Vec3::new(0.0, 2.0, 5.0), Vec3::new(8.0, 4.0, 10.0));
+        let ladder = |x: f32, bottom: f32, top: f32| {
+            game_shared::ladder::Ladder::from_box(
+                Vec3::new(x, (bottom + top) / 2.0, -0.1),
+                Quat::from_rotation_y(std::f32::consts::PI),
+                Vec3::new(0.3, (top - bottom) / 2.0, 0.1),
+            )
+        };
+        let terrain = Heightmap {
+            resolution: 33,
+            spacing: 2.0,
+            origin: Vec3::new(-32.0, 0.0, -32.0),
+            heights: vec![0.0; 33 * 33],
+        };
+        let geometry = LevelGeometry {
+            terrain: Some(Arc::new(terrain)),
+            meshes: vec![platform],
+            ladders: vec![ladder(0.0, 0.0, 4.3), ladder(-3.0, 0.0, 6.0), ladder(3.0, 1.5, 4.3)],
+            bounds: None,
+        };
+        let grid = build::build(&geometry, NavParams::from_tuning(&SoldierTuning::default()));
+        let downs: Vec<bool> = grid.ladders().iter().map(|l| l.down).collect();
+        assert_eq!(downs, [true, false], "{:?}", grid.ladders());
+        let (ground, top) = (Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 4.0, 6.0));
+        let up = grid.find_path(ground, top).unwrap();
+        assert!(up.complete, "{up:?}");
+        let steps: Vec<_> = up.waypoints.iter().filter_map(|w| w.ladder).collect();
+        assert_eq!(steps.len(), 1, "{up:?}");
+        assert!(steps[0].up && steps[0].front.z < -0.9, "{steps:?}");
+        let down = grid.find_path(top, ground).unwrap();
+        assert!(down.complete && down.waypoints.iter().any(|w| w.ladder.is_some_and(|s| !s.up)), "{down:?}");
+
+        let path = std::env::temp_dir().join(format!("navgrid_ladder_{}.bin", std::process::id()));
+        super::cache::save(&path, 7, &grid).unwrap();
+        let loaded = super::cache::load(&path, 7, grid.params).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.ladders(), grid.ladders());
     }
 
     #[test]

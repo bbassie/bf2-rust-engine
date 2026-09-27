@@ -467,7 +467,7 @@ Karkand's detail textures (VFS path + `.dds`, in `Common_client.zip` or the leve
 | file | format | meaning |
 |---|---|---|
 | `Colormaps/txXXxZZ.dds` | 512² DXT1, 10 mips | Albedo per patch. XX = column (+X), ZZ = row (+Z), `patch = patchSize·sx` m (256 m). Patches fully under water have no file (Dalian 51 of 64, Wake 22). |
-| `Colormaps/tx_s0..7.dds` | 512² DXT1 | Colormaps of the 8 surrounding cells. **The order is unverified**; correlation tests were inconclusive. **[I]** Probably the `addHeightmap` order. |
+| `Colormaps/tx_s0..7.dds` | 512² DXT1 | Colormaps of the 8 surrounding cells. **[V]** They go clockwise from the north-west cell, each image turned a further quarter turn (confirmed by correlating with the secondary heightmaps' slopes on Karkand, Kubra Dam and Gulf of Oman; see `crates/bf2_import/src/terrain.rs`). |
 | `Lightmaps/txXXxZZ.dds` | 512² DXT1 | Static terrain light. **G = sun visibility** (static shadows, compared against the dynamic shadow map). **B = sky/GI factor** (×`terrain.GIColor`). R is unused by the game terrain shaders. |
 | `Detailmaps/txXXxZZ_1.dds`, `_2.dds` | 256² R5G6B5 (131,200 B) or DXT1 (32,896 B), no mips | Weights of detail textures 0–2 and 3–5 (channels B,G,R). `_2` is absent when the patch uses only textures 0–2. |
 | `LowDetailmaps/txXXxZZ.dds`, `tx_s*.dds` | 256² DXT1 | Per-patch weights for the level-wide low-detail texture: R = top-plane term, B = "mountain" (side) term. |
@@ -533,7 +533,7 @@ All grids below have the heightmap orientation (row = +Z). **[V]** Undergrowth i
 | `HeightmapPrimary.mat` (server) | N² u8 | Terrain material id per sample (`heightmap.loadMaterialData`), used for physics/effects. Karkand values: 12, 3, 4, 5, 0. |
 | `Undergrowth.raw` (client) | N² u8 | Undergrowth material id per sample. Matches `Material <name> <id>` in `Undergrowth.cfg`. Ids 1..6 equal detail texture index+1 on Karkand (rock 1, defaultgrass 2, gravel 3, tarmac 4, stones 5, cobble 6); extra ids are 7 flowers, 13 erase, 14 desertbush. |
 | `Undergrowth.cfg` (client) | text | Globals (`ViewDistance 30`, `PatchSubdivide 15`, `SwayScale`, `LightingScale`, `AlphaRef`), then `Material name id { GeneralHeight; Type name { Mesh / CrossSize w h; Texture; RandomSizeScale a b; Density; Variation; TerrainColorScale; TypeSwayScale; Skew } }`. |
-| `Undergrowth.dat` (client) | binary | Compiled cfg including grass mesh vertices/indices (length-prefixed strings, float blocks). The cfg is sufficient. |
+| `Undergrowth.dat` (client) | binary | Compiled cfg including the plant meshes BF2 generated (UVs already in the atlas). **[V]** Parses exactly on all 30 levels; the layout is documented in `crates/bf2_import/src/vegetation.rs`, which reads it instead of the cfg. |
 | `UndergrowthAtlas.tai` + `UndergrowthAtlas0.dds` (2048×512 DXT5) | text atlas | Grass textures. |
 | `Overgrowth/Overgrowth.con` (server) | script | `Overgrowth.addMaterial name id`, `addType`, `OvergrowthType.geometry <template>`, density, normalScale, rotationScale, minRadiusToSame/Others, `Overgrowth.path`, `preLoad`. |
 | `Overgrowth/Overgrowth.raw` | N² u8 | Overgrowth (tree) material id per sample. Karkand: 0, 1 (tree1), 2 (pinebushes). The engine scatters trees procedurally. |

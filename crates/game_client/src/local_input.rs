@@ -94,10 +94,11 @@ fn grab_cursor(
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
     deploy: Res<crate::deploy::DeployScreen>,
+    commander: Res<crate::commander::CommanderScreen>,
     screen: Res<State<Screen>>,
     menu: Res<Menu>,
 ) {
-    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open;
+    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open;
     if !playing || !window.focused {
         if cursor_locked(&cursor) {
             cursor.visible = true;
@@ -140,8 +141,10 @@ pub fn build_input(
     selection: Res<crate::combat::WeaponSelection>,
     seat: Res<crate::vehicles::SeatRequest>,
     flight: Res<crate::vehicles::FlightStick>,
+    view: Res<crate::combat::ViewTick>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
     active: Res<crate::net::ActiveMatch>,
+    downed: Query<&game_shared::revive::Downed, With<crate::net::LocalSoldier>>,
     real: Res<Time<Real>>,
     mut delayed: Local<VecDeque<(f64, InputPacket)>>,
 ) {
@@ -157,6 +160,7 @@ pub fn build_input(
         pitch: look.pitch,
         weapon: selection.index,
         seat: seat.0,
+        view_tick: view.tick,
         ..default()
     };
     history.next_seq = history.next_seq.wrapping_add(1);
@@ -197,6 +201,10 @@ pub fn build_input(
         }
     }
     look.jump_latched = false;
+    // Critically wounded: the server lies us still whatever we press; predict the same.
+    if let Ok(downed) = downed.single() {
+        frame = game_shared::revive::downed_input(frame, downed);
+    }
 
     history.frames.push_back(frame);
     while history.frames.len() > InputHistory::MAX {

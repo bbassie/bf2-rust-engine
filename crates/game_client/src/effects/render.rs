@@ -196,10 +196,10 @@ pub fn upload(
         if count == 0 && batch.shown == 0 {
             continue;
         }
-        // Room for twice the particles; shrinks when far too big (the whole buffer is
-        // uploaded every frame).
-        let wanted = (count * 2).next_power_of_two().max(MIN_CAPACITY);
-        if count > batch.capacity || (wanted * 2 < batch.capacity && batch.capacity > MIN_CAPACITY) {
+        // Grows in powers of two and shrinks when far too big: the whole buffer is uploaded
+        // every frame.
+        let wanted = count.next_power_of_two().max(MIN_CAPACITY);
+        if count > batch.capacity || wanted * 4 <= batch.capacity {
             batch.capacity = wanted;
             let buffer = buffers.add(ShaderBuffer::new(&vec![0; batch.capacity * STRIDE], RenderAssetUsages::default()));
             match &batch.material {

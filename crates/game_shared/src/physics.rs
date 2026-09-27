@@ -14,6 +14,10 @@ pub enum GameLayer {
     Projectile,
     /// Boxes around ladders, only found by movement queries (see [`crate::ladder`]).
     Ladder,
+    /// Grappling ropes (climbed like ladders) and zipline wires, only found by movement
+    /// queries (see [`crate::rope`]).
+    Rope,
+    Zipline,
 }
 
 impl GameLayer {

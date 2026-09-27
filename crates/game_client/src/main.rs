@@ -29,22 +29,29 @@ mod announcer;
 mod audio;
 mod bigmap;
 mod camera;
+mod chat;
 mod combat;
+mod commander;
 mod conquest_hud;
 mod deploy;
 mod effects;
+mod gadgets;
 mod hud;
 mod local_input;
+mod map_markers;
 mod menu;
 mod minimap;
 mod nav_debug;
 mod net;
 mod prediction;
+mod radio;
 mod render;
 mod scenario;
 mod settings;
+mod summary;
 mod vehicle_prediction;
 mod vehicles;
+mod wounded;
 
 #[derive(Parser, Debug, Clone, Resource)]
 #[command(version, about = "Game client")]
@@ -230,6 +237,12 @@ fn main() -> AppExit {
         announcer::AnnouncerPlugin,
         bigmap::BigMapPlugin,
         audio::AudioPlugin,
+        chat::ChatPlugin,
+        summary::SummaryPlugin,
+        wounded::WoundedPlugin,
+        radio::RadioPlugin,
+        map_markers::MapMarkersPlugin,
+        commander::ClientCommanderPlugin,
         vehicle_prediction::VehiclePredictionPlugin,
     ))
     .add_plugins((
@@ -237,6 +250,7 @@ fn main() -> AppExit {
         GameServerPlugin { settings: None },
         settings::SettingsPlugin,
         effects::EffectsPlugin,
+        gadgets::GadgetsPlugin,
         menu::MenuPlugin {
             start: if start.is_some() { Screen::Loading } else { Screen::Menu },
         },

@@ -16,6 +16,9 @@ pub struct PlayEffect {
     pub up: Vec3,
     /// Seconds to keep emitting (smoke grenades); 0 for the effect's own length.
     pub duration: f32,
+    /// Detonations: the explosion material (damage table row), which picks the scorch mark
+    /// left on the ground. 0: worked out from the weapon whose detonation effect this is.
+    pub material: u32,
 }
 
 impl PlayEffect {
@@ -25,6 +28,7 @@ impl PlayEffect {
             position,
             up: Vec3::Y,
             duration: 0.0,
+            material: 0,
         }
     }
 }

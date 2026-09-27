@@ -8,19 +8,28 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
+pub mod chat;
+pub mod commander;
 pub mod config;
 pub mod conquest;
+pub mod discovery;
 pub mod effects;
 pub mod flight;
+pub mod gear;
+pub mod hitzones;
 pub mod input;
 pub mod ladder;
 pub mod level;
 pub mod physics;
 pub mod projectile;
 pub mod protocol;
+pub mod radio;
+pub mod revive;
+pub mod rope;
 pub mod soldier;
 pub mod squad;
 pub mod statics;
+pub mod summary;
 pub mod vehicle;
 pub mod weapons;
 
@@ -48,6 +57,7 @@ impl Plugin for SharedPlugin {
                 level::LevelPlugin,
                 weapons::WeaponsPlugin,
                 vehicle::VehiclePlugin,
+                commander::CommanderPlugin,
             ));
     }
 }

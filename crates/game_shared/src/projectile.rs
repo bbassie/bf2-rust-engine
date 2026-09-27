@@ -57,6 +57,8 @@ pub struct Contact {
     pub entity: Entity,
     pub point: Vec3,
     pub normal: Vec3,
+    /// A soldier's body part: its damage table column (see [`crate::hitzones`]).
+    pub body_part: Option<u32>,
 }
 
 /// What happened during one [`step`].
@@ -84,17 +86,16 @@ const REST_SPEED: f32 = 0.6;
 /// Distance kept from surfaces so the next ray starts outside.
 const SKIN: f32 = 0.02;
 
-/// Layers a projectile runs into. Grenades and charges only bounce off the world and
-/// vehicles; what can hurt soldiers directly also hits soldiers.
-pub fn collision_layers(desc: &ProjectileDesc) -> LayerMask {
-    match desc.impact {
-        Impact::Stop => [GameLayer::World, GameLayer::Soldier, GameLayer::Vehicle].into(),
-        _ => [GameLayer::World, GameLayer::Vehicle].into(),
-    }
+/// Layers a projectile runs into: the world and vehicles. Soldiers are found by their hit
+/// zones instead (the `soldiers` of [`step`]).
+pub fn collision_layers(_desc: &ProjectileDesc) -> LayerMask {
+    [GameLayer::World, GameLayer::Vehicle].into()
 }
 
 /// Advances a projectile by `dt`: its rocket motor, gravity, and what it runs into.
 /// `age` is the seconds since launch (arming and motor delays count from it).
+/// `soldiers(origin, direction, length)` finds the nearest soldier along a stretch of the
+/// flight; only what can hurt soldiers directly (bullets, rockets, armed shells) asks.
 pub fn step(
     spatial: &SpatialQuery,
     filter: &SpatialQueryFilter,
@@ -102,6 +103,7 @@ pub fn step(
     motion: &mut ProjectileMotion,
     age: f32,
     dt: f32,
+    mut soldiers: impl FnMut(Vec3, Dir3, f32) -> Option<(f32, Contact)>,
 ) -> Step {
     let mut result = Step::default();
     if motion.resting {
@@ -110,7 +112,10 @@ pub fn step(
             return result;
         }
         let support = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
-        if spatial.cast_ray(motion.position + Vec3::Y * 0.05, Dir3::NEG_Y, 0.2, true, &support).is_some() {
+        if spatial
+            .cast_ray(motion.position + Vec3::Y * 0.05, Dir3::NEG_Y, 0.2, true, &support)
+            .is_some()
+        {
             return result;
         }
         motion.resting = false;
@@ -121,7 +126,8 @@ pub fn step(
         let speed = motion.velocity.length();
         if speed < desc.max_speed {
             let forward = motion.rotation * Vec3::NEG_Z;
-            motion.velocity = motion.velocity.normalize_or(forward) * (speed + desc.acceleration * dt).min(desc.max_speed);
+            motion.velocity =
+                motion.velocity.normalize_or(forward) * (speed + desc.acceleration * dt).min(desc.max_speed);
         }
     }
     let start_velocity = motion.velocity;
@@ -133,17 +139,35 @@ pub fn step(
         let Ok(direction) = Dir3::new(travel) else {
             break;
         };
-        let Some(hit) = spatial.cast_ray(motion.position, direction, length, true, filter) else {
-            motion.position += travel;
-            result.distance += length;
-            break;
+        let world = spatial.cast_ray(motion.position, direction, length, true, filter);
+        let reach = world.map_or(length, |hit| hit.distance);
+        let soldier = match desc.impact {
+            Impact::Stop if armed => soldiers(motion.position, direction, reach),
+            _ => None,
         };
-        let point = motion.position + direction * hit.distance;
-        result.distance += hit.distance;
-        let contact = Contact {
-            entity: hit.entity,
-            point,
-            normal: hit.normal,
+        let (distance, contact) = match (soldier, world) {
+            (Some(soldier), _) => soldier,
+            (None, Some(hit)) => (
+                hit.distance,
+                Contact {
+                    entity: hit.entity,
+                    point: motion.position + direction * hit.distance,
+                    normal: hit.normal,
+                    body_part: None,
+                },
+            ),
+            (None, None) => {
+                motion.position += travel;
+                result.distance += length;
+                break;
+            }
+        };
+        let point = contact.point;
+        result.distance += distance;
+        let hit = RayHitData {
+            entity: contact.entity,
+            distance,
+            normal: contact.normal,
         };
         match desc.impact {
             Impact::Stop if armed => {
@@ -204,7 +228,11 @@ pub const SOFT_THROW: f32 = 0.5;
 /// keeps the thrower's momentum.
 pub fn launch_velocity(weapon: &WeaponDesc, direction: Vec3, soft: bool, thrower: Vec3) -> Vec3 {
     let speed = weapon.projectile.velocity * if soft { SOFT_THROW } else { 1.0 };
-    let carried = if weapon.fire.kind == FireKind::Gun { Vec3::ZERO } else { thrower };
+    let carried = if weapon.fire.kind == FireKind::Gun {
+        Vec3::ZERO
+    } else {
+        thrower
+    };
     direction * speed + carried
 }
 
@@ -301,7 +329,10 @@ impl Smoke<'_, '_> {
 
     /// How thick the smoke is at `point`, 0..1.
     pub fn density_at(&self, point: Vec3) -> f32 {
-        self.clouds.iter().map(|cloud| cloud.density_at(point)).fold(0.0, f32::max)
+        self.clouds
+            .iter()
+            .map(|cloud| cloud.density_at(point))
+            .fold(0.0, f32::max)
     }
 }
 
@@ -332,7 +363,10 @@ mod tests {
         assert!(in_trigger(&trigger, &mine, ahead, 3.0));
         assert!(!in_trigger(&trigger, &mine, ahead, 0.5), "sneaking past");
         assert!(!in_trigger(&trigger, &mine, Vec3::new(0.0, 0.9, -8.0), 3.0), "too far");
-        assert!(!in_trigger(&trigger, &mine, Vec3::new(4.0, 0.9, -2.0), 3.0), "off to the side");
+        assert!(
+            !in_trigger(&trigger, &mine, Vec3::new(4.0, 0.9, -2.0), 3.0),
+            "off to the side"
+        );
         assert!(!in_trigger(&trigger, &mine, Vec3::new(0.0, 0.9, 3.0), 3.0), "behind");
         // Turned to face +X.
         let mine = ProjectileMotion::new(Vec3::ZERO, Vec3::ZERO, -std::f32::consts::FRAC_PI_2);
@@ -351,8 +385,14 @@ mod tests {
         assert!(!cloud.blocks(from, to), "not spread yet");
         cloud.age = 5.0;
         assert!(cloud.blocks(from, to));
-        assert!(!cloud.blocks(from + Vec3::Z * 10.0, to + Vec3::Z * 10.0), "passes beside it");
-        assert!(!cloud.blocks(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)), "too close");
+        assert!(
+            !cloud.blocks(from + Vec3::Z * 10.0, to + Vec3::Z * 10.0),
+            "passes beside it"
+        );
+        assert!(
+            !cloud.blocks(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+            "too close"
+        );
         cloud.age = 11.5;
         assert!(!cloud.blocks(from, to), "thinned out");
     }

@@ -1,0 +1,26 @@
+// Audio settings page: master, effects and ambience volume sliders. The screenshot shows the
+// three sliders; the saved settings file has the new values.
+// client --scenario scenarios/audio_settings.ron --out target/scenarios/audio/settings
+//     --settings target/scenarios/audio/settings/settings.ron
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:settings"),
+        Wait(0.3),
+        Click("tab:audio"),
+        Wait(0.3),
+        Click("step:effects_volume:-"),
+        Frames(1),
+        Click("step:effects_volume:-"),
+        Frames(1),
+        Click("step:ambience_volume:-"),
+        Frames(1),
+        Click("step:ambience_volume:-"),
+        Frames(1),
+        Click("step:ambience_volume:-"),
+        Wait(1.0),
+        Screenshot("audio"),
+        Quit,
+    ],
+)

@@ -7,6 +7,7 @@ mod destruction;
 pub mod environment;
 mod flags;
 pub mod materials;
+mod hitzones;
 mod projectiles;
 mod props;
 pub mod scope;
@@ -34,7 +35,7 @@ impl Plugin for RenderPlugin {
             vehicles::VehicleRenderPlugin,
             scope::ScopePlugin,
         ))
-        .add_plugins((destruction::DestructionRenderPlugin, projectiles::ProjectileRenderPlugin))
+        .add_plugins((destruction::DestructionRenderPlugin, projectiles::ProjectileRenderPlugin, hitzones::HitZoneDebugPlugin))
         .add_plugins((vegetation::VegetationRenderPlugin, water::WaterPlugin));
     }
 }

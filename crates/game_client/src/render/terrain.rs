@@ -243,6 +243,9 @@ struct Surrounding {
 /// Samples between surrounding terrain vertices (it is only seen from afar).
 const SURROUNDING_STEP: usize = 2;
 
+/// How far (m) the outer edges of the surrounding terrain, and the water, reach out.
+pub const WORLD_EXTENSION: f32 = 20_000.0;
+
 impl Surrounding {
     fn load(dir: &std::path::Path, desc: &game_data::SurroundingTerrainDesc) -> anyhow::Result<Self> {
         let bytes = std::fs::read(dir.join(&desc.heightmap))?;
@@ -316,6 +319,37 @@ impl Surrounding {
                 }
                 let (a, b) = (pair[0] as u32, pair[1] as u32);
                 indices.extend_from_slice(&[a, base, b, b, base, base + 1]);
+            }
+        }
+        // Outer edges continue flat to the horizon, away from the centre (so neighbouring
+        // cells' extensions meet), for view distances beyond the surrounding terrain.
+        let center = Vec2::splat(1.5 * per_cell as f32 * self.spacing);
+        let mut outer: Vec<Vec<usize>> = Vec::new();
+        if cell_row == 0 {
+            outer.push((0..width).collect());
+        }
+        if cell_row == 2 {
+            outer.push(((steps * width)..(width * width)).collect());
+        }
+        if cell_col == 0 {
+            outer.push((0..width).map(|j| j * width).collect());
+        }
+        if cell_col == 2 {
+            outer.push((0..width).map(|j| j * width + steps).collect());
+        }
+        for edge in outer {
+            let base = positions.len() as u32;
+            for &v in &edge {
+                let [x, y, z] = positions[v];
+                let out = (Vec2::new(x, z) - center).normalize_or_zero() * WORLD_EXTENSION;
+                positions.push([x + out.x, y, z + out.y]);
+                normals.push([0.0, 1.0, 0.0]);
+                uvs.push(uvs[v]);
+            }
+            for k in 0..edge.len() - 1 {
+                let (a, b) = (edge[k] as u32, edge[k + 1] as u32);
+                let (a_far, b_far) = (base + k as u32, base + k as u32 + 1);
+                indices.extend_from_slice(&[a, a_far, b, b, a_far, b_far]);
             }
         }
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)

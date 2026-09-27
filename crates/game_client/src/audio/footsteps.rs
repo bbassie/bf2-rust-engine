@@ -5,7 +5,8 @@
 //! footsteps). The surface is whatever a ray straight down from the feet hits: the terrain's
 //! material map or a static mesh's material (`levels/<name>/surfaces.ron`), water below the
 //! water line. Steps come every stride of the soldier's gait; landing from a jump plays a
-//! step too (BF2's `sound:0_first` event at the end of its jump animations).
+//! step too (BF2's `sound:0_first` event at the end of its jump animations). Our soldier
+//! pants when sprinting has used up its stamina.
 
 use std::collections::HashMap;
 
@@ -19,13 +20,13 @@ use game_shared::{
 };
 
 use super::{AudioSystems, Sounds, voices::{PlaySound, Sound}};
-use crate::{effects::SurfaceQuery, prediction::SoldierRender};
+use crate::{effects::SurfaceQuery, net::LocalSoldier, prediction::SoldierRender};
 
 pub struct FootstepPlugin;
 
 impl Plugin for FootstepPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostUpdate, footsteps.in_set(AudioSystems::Trigger));
+        app.add_systems(PostUpdate, (footsteps, breath).in_set(AudioSystems::Trigger));
     }
 }
 
@@ -44,6 +45,10 @@ const RUNG: f32 = 0.45;
 const LANDING_AIRTIME: f32 = 0.3;
 /// Steps farther away than this would be inaudible anyway (their falloff gives about 3 %).
 const HEARING_RANGE: f32 = 60.0;
+/// Our soldier pants (BF2's kit `pantingSound`) once sprinting takes the stamina below
+/// `OUT_OF_BREATH`, and again only after it recovered above `CAUGHT_BREATH` [our choice].
+const OUT_OF_BREATH: f32 = 0.15;
+const CAUGHT_BREATH: f32 = 0.5;
 /// Material ids (`materials.ron`).
 const WATER: u32 = 1;
 const DIRT: u32 = 8;
@@ -189,4 +194,25 @@ fn footsteps(
         }
     }
     steps.retain(|entity, _| soldiers.contains(*entity));
+}
+
+/// Our soldier out of breath after sprinting.
+fn breath(
+    library: Res<Sounds>,
+    soldier: Query<(Entity, &SoldierMotion), With<LocalSoldier>>,
+    mut panting: Local<bool>,
+    mut sounds: MessageWriter<PlaySound>,
+) {
+    let Ok((entity, motion)) = soldier.single() else {
+        *panting = false;
+        return;
+    };
+    if *panting {
+        *panting = motion.stamina < CAUGHT_BREATH;
+    } else if motion.stamina < OUT_OF_BREATH {
+        *panting = true;
+        if let Some(breath) = &library.0.soldier.sprint_breath {
+            sounds.write(PlaySound::local(Sound::Named(breath.clone())).emitter(entity).reason("out of breath"));
+        }
+    }
 }

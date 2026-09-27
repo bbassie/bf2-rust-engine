@@ -22,6 +22,7 @@ use bevy_replicon_renet::{
 use game_server::ServerSettings;
 use game_shared::{
     PROTOCOL_ID,
+    chat::Kicked,
     level::{LevelEntity, LoadedLevel},
     protocol::{ClientHello, ControlledBy, Player, PlayerNetId},
     soldier::{Soldier, SoldierMotion},
@@ -33,6 +34,7 @@ use crate::{
     deploy::DeployScreen,
     local_input::{InputHistory, LookState},
     menu::Screen,
+    settings::{MAX_RECENT_SERVERS, SavedServer, Settings, SettingsFile},
 };
 
 pub struct NetPlugin;
@@ -41,13 +43,17 @@ impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveMatch>()
             .init_resource::<MatchNotice>()
+            .init_resource::<KickReason>()
             .add_systems(
                 OnEnter(ClientState::Connected),
                 (send_hello, || info!("connected")),
             )
             .add_systems(OnExit(ClientState::Connected), || warn!("disconnected"))
             .add_systems(OnEnter(ClientState::Disconnected), connection_lost)
-            .add_systems(PreUpdate, tag_local_entities.after(ClientSystems::Receive));
+            .add_systems(
+                PreUpdate,
+                (tag_local_entities, receive_kick).after(ClientSystems::Receive),
+            );
     }
 }
 
@@ -93,6 +99,10 @@ impl ActiveMatch {
 #[derive(Resource, Default)]
 pub struct MatchNotice(pub Option<String>);
 
+/// Why the server is about to disconnect us, if it said.
+#[derive(Resource, Default)]
+struct KickReason(Option<String>);
+
 /// Our network id; matches [`PlayerNetId`] of our player.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct LocalClientId(pub u64);
@@ -114,7 +124,14 @@ pub fn start_match(world: &mut World, setup: MatchSetup) {
     let result = match &setup {
         MatchSetup::Local(settings) => {
             world.insert_resource(LocalClientId(PlayerNetId::LOCAL_HOST.0));
-            game_server::start_server(world, settings.clone())
+            let mut settings = settings.clone();
+            // Stats and bans of our own games next to the settings (none in scripted runs).
+            if let Some(dir) = world.resource::<SettingsFile>().0.as_ref().and_then(|f| f.parent()) {
+                let admin = &mut settings.admin;
+                admin.stats_file.get_or_insert_with(|| dir.join("stats.ron"));
+                admin.ban_file.get_or_insert_with(|| dir.join("bans.ron"));
+            }
+            game_server::start_server(world, settings)
         }
         MatchSetup::Join { server, .. } => connect(world, *server),
     };
@@ -159,6 +176,7 @@ pub fn leave_match(world: &mut World) {
     world.insert_resource(DeployScreen::default());
     world.insert_resource(ActiveMatch::default());
     world.insert_resource(MatchNotice::default());
+    world.insert_resource(KickReason::default());
     world.resource_mut::<Time<Virtual>>().unpause();
     let mut look = world.resource_mut::<LookState>();
     look.pitch = 0.0;
@@ -210,21 +228,42 @@ fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-fn send_hello(mut hello: MessageWriter<ClientHello>, mut active: ResMut<ActiveMatch>) {
+fn send_hello(
+    mut hello: MessageWriter<ClientHello>,
+    mut active: ResMut<ActiveMatch>,
+    mut settings: ResMut<Settings>,
+) {
     active.connected = true;
-    if let Some(MatchSetup::Join { name, .. }) = &active.setup {
+    if let Some(MatchSetup::Join { name, server, .. }) = &active.setup {
         hello.write(ClientHello { name: name.clone() });
+        // Newest first in the browser's recent servers.
+        let address = server.ip().to_string();
+        let recent = &mut settings.recent_servers;
+        let old = recent.iter().position(|s| s.is(&address, server.port()));
+        let name = old.map(|i| recent.remove(i).name).unwrap_or_default();
+        recent.insert(0, SavedServer { address, port: server.port(), name });
+        recent.truncate(MAX_RECENT_SERVERS);
+    }
+}
+
+fn receive_kick(mut kicks: MessageReader<Kicked>, mut reason: ResMut<KickReason>) {
+    for kick in kicks.read() {
+        warn!("kicked: {}", kick.reason);
+        reason.0 = Some(kick.reason.clone());
     }
 }
 
 /// The server went away or never answered: back to the menu, saying so. Leaving on
 /// purpose clears the active match first, so that ends here quietly.
 fn connection_lost(world: &mut World) {
+    let kicked = world.resource_mut::<KickReason>().0.take();
     let active = world.resource::<ActiveMatch>();
     let Some(MatchSetup::Join { server, .. }) = &active.setup else {
         return;
     };
-    let notice = if active.connected {
+    let notice = if let Some(reason) = kicked {
+        format!("Kicked from {server}: {reason}")
+    } else if active.connected {
         let reason = world
             .get_resource::<RenetClient>()
             .and_then(|client| client.disconnect_reason())

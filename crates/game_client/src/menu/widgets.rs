@@ -300,6 +300,9 @@ pub(super) fn map_preview(
 fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
     let last = &settings.last_match;
     match button {
+        MenuButton::Server(address, port) => {
+            *port == last.port && address.eq_ignore_ascii_case(last.address.trim())
+        }
         MenuButton::Page(page) => menu.page == *page,
         MenuButton::Level(name) => last.level == *name,
         MenuButton::Layout(mode, size) => last.mode == *mode && last.size == *size,
@@ -307,6 +310,7 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
         MenuButton::Tab(tab) => menu.tab == *tab,
         MenuButton::Display(mode) => settings.window_mode == *mode,
         MenuButton::WindowSize(w, h) => settings.window_size == (*w, *h),
+        MenuButton::ViewDistance(distance) => settings.view_distance == *distance,
         MenuButton::Rebind(action) => menu.rebinding == Some(*action),
         _ => false,
     }

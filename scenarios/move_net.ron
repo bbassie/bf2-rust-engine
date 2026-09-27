@@ -1,5 +1,6 @@
 // Movement prediction against a dedicated server: walk, sprint, jump, crouch and prone
-// from the spawn point and trace the prediction corrections (should stay ~0).
+// from the spawn point (until stamina runs out) and trace the prediction corrections
+// (should stay ~0).
 // server --level strike_at_karkand --bots 0
 // client --connect 127.0.0.1 --scenario scenarios/move_net.ron --out target/scenarios/move/net
 (
@@ -11,6 +12,7 @@
         Trace("walk", 3.0),
         Hold([Sprint]),
         Trace("sprint", 3.0),
+        Trace("sprint_long", 8.0),
         Hold([Jump]),
         Trace("sprint_jump", 1.5),
         Release([Jump, Sprint]),

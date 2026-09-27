@@ -9,9 +9,9 @@ use bf2_formats::{
     localization::Localization,
 };
 use game_data::{
-    DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, LockDesc, OverheatDesc,
-    ProjectileDesc, RecoilDesc, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds,
-    ZoomDesc,
+    DetonatorDesc, DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, LockDesc,
+    OverheatDesc, ProjectileDesc, RecoilDesc, ReplenishDesc, ReplenishKind, RopeDesc, RopeKind, SmokeDesc,
+    SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds, ZoomDesc,
 };
 
 use crate::{meshes::MeshConverter, sounds::SoundConverter};
@@ -49,6 +49,7 @@ pub fn import(
             name: kit_name.to_ascii_lowercase(),
             kind: kit.get_str("kittype").unwrap_or_default().to_string(),
             weapons: items,
+            ability_restore: kit.get_f32("abilityrestorerate").unwrap_or(0.0).max(0.0),
         };
         game_data::write_ron(out.join("kits").join(format!("{}.ron", desc.name)), &desc)?;
         kit_count += 1;
@@ -158,7 +159,10 @@ pub(crate) fn weapon_desc(
         fov_delay: f("zoom.changefovdelay", 0.0),
         out_after_fire: f("zoom.zoomoutafterfire", 0.0) != 0.0,
     };
-    let projectile = projectile_desc(interp, converter, t, projectile_template.as_ref(), mesh_3p.as_deref());
+    let mut projectile = projectile_desc(interp, converter, t, projectile_template.as_ref(), mesh_3p.as_deref());
+    if let Some(rope) = rope_desc(interp, t) {
+        rope_projectile(&mut projectile, rope);
+    }
 
     // Third-person animations were exported per weapon folder by the soldier import.
     let dir = t.source.split(':').next().unwrap_or_default();
@@ -235,6 +239,7 @@ pub(crate) fn weapon_desc(
         shift_delay: if f("animation.useshiftanimation", 0.0) != 0.0 { f("animation.shiftdelay", 0.0) } else { 0.0 },
         reload_amount: f("ammo.reloadamount", 0.0) as u32,
         fire: fire_desc(t),
+        detonator: detonator_desc(interp, converter, t, out),
         projectile,
         deviation,
         recoil,
@@ -244,7 +249,37 @@ pub(crate) fn weapon_desc(
             .collect(),
         zoom,
         sounds,
+        replenish: replenish_desc(t, projectile_template.as_ref()),
     }
+}
+
+/// Medic and ammo bags, shock paddles and the wrench: `ReplenishingAmmoComp` on the weapon,
+/// with what its thrown bags (`ReplenishDetonationComp`) or its projectile
+/// (`ResurrectCollisionComp`) do.
+fn replenish_desc(t: &Template, projectile: Option<&Template>) -> Option<ReplenishDesc> {
+    if !has_component(t, "ReplenishingAmmoComp") {
+        return None;
+    }
+    let f = |method: &str| t.get_f32(method).unwrap_or(0.0).max(0.0);
+    let p = |method: &str| projectile.and_then(|p| p.get_f32(method)).unwrap_or(0.0).max(0.0);
+    let kind = match t.get_str("ammo.replenishingtype").map(str::to_ascii_lowercase).as_deref() {
+        Some("rtammo") => ReplenishKind::Ammo,
+        _ => ReplenishKind::Health,
+    };
+    let bag = projectile.is_some_and(|p| has_component(p, "ReplenishDetonationComp"));
+    let reviver = projectile.is_some_and(|p| has_component(p, "ResurrectCollisionComp"));
+    Some(ReplenishDesc {
+        kind,
+        material: f("ammo.abilitymaterial") as u32,
+        radius: f("ammo.abilityradius"),
+        strength: f("ammo.abilitystrength"),
+        while_firing: f("ammo.onlyactivewhilefiring") != 0.0,
+        cost: f("ammo.abilitycost"),
+        drain: f("ammo.abilitydrain"),
+        pickup_radius: if bag { p("detonation.triggerradius") } else { 0.0 },
+        pickup_strength: if bag { p("detonation.replenishingstrength") } else { 0.0 },
+        revive_health: if reviver { p("collision.restorehp") } else { 0.0 },
+    })
 }
 
 fn has_component(t: &Template, component: &str) -> bool {
@@ -294,6 +329,30 @@ fn fire_desc(t: &Template) -> FireDesc {
             penalty: f("overheatpenalty"),
         }),
     }
+}
+
+/// C4's detonator (`fire.detonatorObject`): its first-person model and animation set.
+fn detonator_desc(interp: &mut Interpreter, converter: &MeshConverter, t: &Template, out: &Path) -> Option<DetonatorDesc> {
+    let name = t.get_str("fire.detonatorobject")?.to_ascii_lowercase();
+    interp.ensure_template(&name);
+    let detonator = interp.world.template(&name)?.clone();
+    let mesh_1p = detonator
+        .geometry
+        .as_deref()
+        .and_then(|g| interp.world.geometry(g))
+        .and_then(|g| g.mesh_path())
+        .and_then(|path| {
+            converter
+                .convert_mesh_lod(&path, 0, 0, "_1p")
+                .map_err(|e| log::debug!("detonator {name}: {e:#}"))
+                .ok()
+        });
+    let dir = detonator.source.split(':').next().unwrap_or_default();
+    let animations_1p = dir
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/animations/1p.glb"))
+        .filter(|path| out.join(path).exists());
+    Some(DetonatorDesc { mesh_1p, animations_1p })
 }
 
 /// Smoke clouds look about this big once spread (the effect's particles fly out a few
@@ -400,7 +459,56 @@ fn projectile_desc(
         guidance_min_distance: f("follow.mindist"),
         trigger,
         smoke,
+        rope: None,
     }
+}
+
+/// BF2 SF's grappling hook throws a `GrapplingHookRope`; the zipline crossbow's shell leaves
+/// a `Zipline` (its `secondaryProjectileTemplate`) where it hits.
+fn rope_desc(interp: &mut Interpreter, weapon: &Template) -> Option<RopeDesc> {
+    let template = |interp: &mut Interpreter, method: &str| {
+        let name = weapon.get_str(method)?.trim_matches('"').to_string();
+        interp.ensure_template(&name);
+        let template = interp.world.template(&name).cloned();
+        Some((name.to_ascii_lowercase(), template))
+    };
+    if let Some((name, rope)) = template(interp, "projectiletemplate")
+        && (name == "grapplinghookrope" || rope.as_ref().is_some_and(|t| t.ty.eq_ignore_ascii_case("GrapplingHookRope")))
+    {
+        // The template is in the xpack's DummyObjectsXpack.con; its values as defaults.
+        let f = |method: &str, default: f32| rope.as_ref().and_then(|t| t.get_f32(method)).unwrap_or(default);
+        return Some(RopeDesc {
+            kind: RopeKind::Grapple,
+            max_length: f("setmaxropelength", 14.0),
+            lifetime: f("timeout", 25.0),
+            climb_speed: f("climbingspeed", 2.3),
+        });
+    }
+    let (_, zipline) = template(interp, "secondaryprojectiletemplate")?;
+    let zipline = zipline.filter(|t| t.ty.eq_ignore_ascii_case("Zipline"))?;
+    Some(RopeDesc {
+        kind: RopeKind::Zipline,
+        max_length: zipline.get_f32("setmaxziplinelength").unwrap_or(75.0),
+        lifetime: zipline.get_f32("timeout").unwrap_or(25.0),
+        climb_speed: 0.0,
+    })
+}
+
+/// How the rope's projectile flies: BF2 simulates the hook's rope as links thrown from the
+/// hand; here it is a thrown hook that catches on ledges (`minYNormal 0.5`). The zipline
+/// shell sticks wherever it hits.
+fn rope_projectile(projectile: &mut ProjectileDesc, rope: RopeDesc) {
+    match rope.kind {
+        RopeKind::Grapple => {
+            projectile.velocity = 20.0;
+            projectile.gravity = 1.0;
+            projectile.impact = Impact::Stick { max_angle: 60.0 };
+        }
+        RopeKind::Zipline => projectile.impact = Impact::Stick { max_angle: 180.0 },
+    }
+    // Long enough to land; it becomes the rope where it sticks.
+    projectile.time_to_live = 5.0;
+    projectile.rope = Some(rope);
 }
 
 /// Seconds until the last particle of an effect bundle is gone: the longest particle life

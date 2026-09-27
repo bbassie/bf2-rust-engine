@@ -10,7 +10,7 @@
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     mesh_view_bindings::{globals, view},
     pbr_functions::{apply_pbr_lighting, calculate_view, main_pass_post_lighting_processing},
-    pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT},
+    pbr_types::pbr_input_new,
     view_transformations::position_world_to_clip,
 }
 #ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
@@ -110,7 +110,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.material.base_color = vec4(albedo, 1.0);
     pbr_input.material.perceptual_roughness = 0.9;
     pbr_input.material.reflectance = vec3(0.2);
-    pbr_input.material.flags = STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
+    // No fog: plants end well before fog starts (and fog's light scattering would sample the
+    // shadow maps a second time for every grass fragment).
+    pbr_input.material.flags = 0u;
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     pbr_input.frag_coord = in.position;
     pbr_input.world_position = vec4(in.world_position, 1.0);

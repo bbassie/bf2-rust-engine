@@ -38,6 +38,7 @@ impl Plugin for SoldierPlugin {
             .init_resource::<SoldierShapes>()
             .add_observer(add_soldier_physics)
             .add_observer(add_ladder_volume)
+            .add_plugins(crate::rope::RopePlugin)
             .add_systems(FixedPostUpdate, fit_hitboxes_to_stance);
     }
 }
@@ -84,7 +85,7 @@ impl Stance {
 /// Everything [`step_soldier`] depends on is in here, so a client can replay inputs from
 /// any received state. Timers count down to zero and then stay put, so a soldier standing
 /// still stops changing (and replicating).
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct SoldierMotion {
     /// Feet position.
     pub position: Vec3,
@@ -105,6 +106,47 @@ pub struct SoldierMotion {
     pub jump_held: bool,
     /// On a ladder. Which one is found again from the position every tick.
     pub climbing: bool,
+    /// Sprint stamina, 1 full, 0 empty.
+    pub stamina: f32,
+    pub sprinting: bool,
+    /// Seconds until stamina recovers again after a jump.
+    pub stamina_delay: f32,
+    /// Heavy kit (BF2's `*_heavy_soldier`): less stamina, see [`SoldierTuning::heavy`].
+    pub heavy: bool,
+    /// Seconds until the weapon may fire again (after jumping or getting up from prone).
+    pub fire_lock: f32,
+    /// Seconds until a prone soldier may get up, or a soldier who got up may go prone.
+    pub stance_lock: f32,
+    /// What is climbed (see `climbing`) is a grappling rope rather than a ladder.
+    pub on_rope: bool,
+    /// Sliding down a zipline, hanging from the wire at [`SoldierTuning::zipline_hang`].
+    pub riding: bool,
+}
+
+impl Default for SoldierMotion {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            grounded: false,
+            stance: Stance::Standing,
+            air_control: 0.0,
+            recovery: 0.0,
+            prone_lock: 0.0,
+            jump_held: false,
+            climbing: false,
+            stamina: 1.0,
+            sprinting: false,
+            stamina_delay: 0.0,
+            heavy: false,
+            fire_lock: 0.0,
+            stance_lock: 0.0,
+            on_rope: false,
+            riding: false,
+        }
+    }
 }
 
 impl SoldierMotion {
@@ -114,6 +156,13 @@ impl SoldierMotion {
             yaw,
             ..default()
         }
+    }
+
+    /// Whether the soldier's hands are free to fire: not on a ladder, and not just after
+    /// jumping or getting up from prone (BF2's `fire-delay-after-jump` and
+    /// `fire-delay-from-prone`).
+    pub fn can_fire(&self) -> bool {
+        !self.climbing && !self.riding && self.fire_lock <= 0.0
     }
 
     pub fn eye_position(&self) -> Vec3 {
@@ -191,12 +240,66 @@ pub struct SoldierTuning {
     pub step_height: f32,
     /// How far the soldier snaps down to stay on the ground walking down slopes and steps.
     pub snap_distance: f32,
-    /// Ladder speeds, m/s. Going down, BF2 soldiers slide (its `3p_climb_skid` animation
-    /// is made for 3 m/s).
+    /// Ladder speeds, m/s: up at the pace of BF2's climbing animation (`3p_climbup` moves
+    /// the feet about 1.25 m/s). Going down, BF2 soldiers slide (its `3p_climb_skid`
+    /// animation is made for 3 m/s).
     pub climb_speed: f32,
     pub climb_down_speed: f32,
     /// Speed away from the ladder when jumping off it.
     pub ladder_jump_speed: f32,
+    /// Climbing speed on a grappling rope, up and down (BF2 `GrapplingHookRope.climbingSpeed`).
+    pub rope_climb_speed: f32,
+    /// Ziplines: the feet hang this far below the wire (BF2's hanging animation holds the
+    /// handle 1.2 m above the hips).
+    pub zipline_hang: f32,
+    /// Not getting on closer than this to the wire's low end (`distanceCannotEnter`).
+    pub zipline_no_entry: f32,
+    /// Sliding down: gravity along the wire (BF2's world gravity), less a drag in 1/s,
+    /// between a crawl on nearly level wires and a top speed, m/s.
+    pub zipline_gravity: f32,
+    pub zipline_drag: f32,
+    pub zipline_min_speed: f32,
+    pub zipline_max_speed: f32,
+    /// Sprint stamina of light and heavy kits.
+    pub light: StaminaTuning,
+    pub heavy: StaminaTuning,
+    /// Stamina needed to start sprinting (soldier template `SprintLimit`). Running out
+    /// stops the sprint until it has recovered this far.
+    pub sprint_min_stamina: f32,
+    /// Seconds stamina doesn't recover after a jump (`sprint-recharge-delay-after-jump`).
+    pub stamina_delay_after_jump: f32,
+    /// Seconds the weapon can't fire after jumping (`fire-delay-after-jump`) and after
+    /// getting up from prone (`fire-delay-from-prone`).
+    pub fire_delay_after_jump: f32,
+    pub fire_delay_after_prone: f32,
+    /// Seconds a soldier who went prone stays down (`stand-delay-from-prone`), and a soldier
+    /// who got up can't go prone again (`prone-delay-from-stand`).
+    pub prone_switch_delay: f32,
+    /// Seconds after a jump before going prone (`prone-delay-after-jump`).
+    pub prone_delay_after_jump: f32,
+}
+
+/// Sprint stamina, from BF2's soldier templates (`us_light_soldier.tweak` and friends).
+#[derive(Clone, Copy, Debug)]
+pub struct StaminaTuning {
+    /// Seconds of sprinting on a full stamina (`SprintDissipationTime`).
+    pub sprint_time: f32,
+    /// Seconds from empty to full (`SprintRecoverTime`).
+    pub recover_time: f32,
+    /// Stamina a jump costs (`SprintLossAtJump`).
+    pub jump_cost: f32,
+}
+
+impl SoldierTuning {
+    pub fn stamina(&self, heavy: bool) -> &StaminaTuning {
+        if heavy { &self.heavy } else { &self.light }
+    }
+}
+
+/// Whether a kit class carries BF2's heavy soldier (body armour, less stamina): the level
+/// scripts give it to Assault, Support and AT.
+pub fn heavy_kit(kind: &str) -> bool {
+    matches!(kind, "Assault" | "Support" | "AT")
 }
 
 impl Default for SoldierTuning {
@@ -221,9 +324,32 @@ impl Default for SoldierTuning {
             max_slope: 55f32.to_radians(),
             step_height: 0.45,
             snap_distance: 0.45,
-            climb_speed: 2.0,
+            climb_speed: 1.25,
             climb_down_speed: 3.0,
             ladder_jump_speed: 3.0,
+            rope_climb_speed: 2.3,
+            zipline_hang: 2.2,
+            zipline_no_entry: 3.5,
+            zipline_gravity: 10.0,
+            zipline_drag: 0.3,
+            zipline_min_speed: 2.0,
+            zipline_max_speed: 15.0,
+            light: StaminaTuning {
+                sprint_time: 10.0,
+                recover_time: 17.0,
+                jump_cost: 0.15,
+            },
+            heavy: StaminaTuning {
+                sprint_time: 8.0,
+                recover_time: 20.0,
+                jump_cost: 0.2,
+            },
+            sprint_min_stamina: 0.05,
+            stamina_delay_after_jump: 0.7,
+            fire_delay_after_jump: 0.7,
+            fire_delay_after_prone: 0.6,
+            prone_switch_delay: 0.8,
+            prone_delay_after_jump: 0.3,
         }
     }
 }
@@ -236,6 +362,8 @@ pub struct SoldierShapes {
     prone: Collider,
     /// A standing soldier grown by the reach to ladders.
     ladder_probe: Collider,
+    /// Around the hands: how far from a zipline's wire a soldier can grab it.
+    zipline_probe: Collider,
 }
 
 impl SoldierShapes {
@@ -262,6 +390,7 @@ impl Default for SoldierShapes {
             standing: capsule(Stance::Standing),
             crouching: capsule(Stance::Crouching),
             prone: capsule(Stance::Prone),
+            zipline_probe: Collider::sphere(ZIPLINE_REACH),
             ladder_probe: Collider::capsule(
                 SOLDIER_RADIUS + LADDER_REACH,
                 SOLDIER_HEIGHT - 2.0 * SOLDIER_RADIUS,
@@ -356,21 +485,49 @@ pub fn step_soldier(
 
     m.yaw = input.yaw;
     m.pitch = input.pitch.clamp(-1.55, 1.55);
-    m.air_control = (m.air_control - dt).max(0.0);
-    m.recovery = (m.recovery - dt).max(0.0);
-    m.prone_lock = (m.prone_lock - dt).max(0.0);
+    for timer in [
+        &mut m.air_control,
+        &mut m.recovery,
+        &mut m.prone_lock,
+        &mut m.stamina_delay,
+        &mut m.fire_lock,
+        &mut m.stance_lock,
+    ] {
+        *timer = (*timer - dt).max(0.0);
+    }
     let jump_pressed = input.pressed(Buttons::JUMP);
     let fresh_jump = jump_pressed && !m.jump_held;
     m.jump_held = jump_pressed;
 
     if m.climbing {
+        m.sprinting = false;
+        update_stamina(m, tuning, false, dt);
         climb(m, &world, tuning, shapes, input, fresh_jump, dt);
         return;
     }
+    if m.riding {
+        m.sprinting = false;
+        update_stamina(m, tuning, false, dt);
+        ride(m, &world, tuning, shapes, fresh_jump, dt);
+        return;
+    }
 
-    // Stance follows the buttons while on the ground, if there is room to stand up.
+    // Stance follows the buttons while on the ground, if there is room to stand up, and
+    // not straight back after going prone or getting up.
     if m.grounded {
-        m.stance = world.fit_stance(m.position, m.stance, wanted_stance(input), shapes);
+        let mut wanted = wanted_stance(input);
+        let prone = m.stance == Stance::Prone;
+        if m.stance_lock > 0.0 && prone != (wanted == Stance::Prone) {
+            wanted = m.stance;
+        }
+        let stance = world.fit_stance(m.position, m.stance, wanted, shapes);
+        if (stance == Stance::Prone) != prone {
+            m.stance_lock = tuning.prone_switch_delay;
+            if prone {
+                m.fire_lock = m.fire_lock.max(tuning.fire_delay_after_prone);
+            }
+        }
+        m.stance = stance;
     }
     if m.stance == Stance::Prone {
         m.prone_lock = tuning.jump_delay_after_prone;
@@ -391,10 +548,11 @@ pub fn step_soldier(
     // Wanted horizontal velocity.
     let intent = input.movement_vec();
     let wish = Quat::from_rotation_y(m.yaw) * Vec3::new(intent.x, 0.0, -intent.y);
-    let sprinting =
+    let wants_sprint =
         input.pressed(Buttons::SPRINT) && intent.y > 0.5 && m.stance == Stance::Standing;
+    update_stamina(m, tuning, wants_sprint, dt);
     let mut speed = match m.stance {
-        Stance::Standing if sprinting => tuning.sprint_speed,
+        Stance::Standing if m.sprinting => tuning.sprint_speed,
         Stance::Standing => tuning.run_speed,
         Stance::Crouching => tuning.crouch_speed,
         Stance::Prone => tuning.prone_speed,
@@ -405,7 +563,8 @@ pub fn step_soldier(
     }
     let mut horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
 
-    // Walking into a ladder (or over the edge onto one from the top) gets on it.
+    // Walking into a ladder or a grappling rope (or over the edge onto one from the top)
+    // gets on it.
     if wish != Vec3::ZERO
         && let Some(ladder) = world.ladder(m.position, shapes)
         && let Some(feet) = mount(m, &ladder, wish)
@@ -415,6 +574,19 @@ pub fn step_soldier(
         m.stance = Stance::Standing;
         m.grounded = false;
         m.climbing = true;
+        m.on_rope = ladder.rope;
+        return;
+    }
+    // Walking along under a zipline's wire, downhill, grabs it.
+    if wish != Vec3::ZERO
+        && m.stance == Stance::Standing
+        && let Some(wire) = world.zipline(m.position + Vec3::Y * tuning.zipline_hang, shapes)
+        && let Some(feet) = grab_wire(m, &wire, wish, tuning)
+    {
+        m.position = feet;
+        m.velocity = wire.down * tuning.zipline_min_speed;
+        m.grounded = false;
+        m.riding = true;
         return;
     }
 
@@ -433,6 +605,10 @@ pub fn step_soldier(
             m.velocity = horizontal * tuning.jump_momentum + Vec3::Y * tuning.jump_speed;
             m.air_control = tuning.air_control_time;
             m.grounded = false;
+            m.stamina = (m.stamina - tuning.stamina(m.heavy).jump_cost).max(0.0);
+            m.stamina_delay = tuning.stamina_delay_after_jump;
+            m.fire_lock = m.fire_lock.max(tuning.fire_delay_after_jump);
+            m.stance_lock = m.stance_lock.max(tuning.prone_delay_after_jump);
         } else {
             walk(
                 m,
@@ -588,7 +764,13 @@ fn climb(
     } else {
         forward
     };
-    let speed = dir * climb_speed(tuning, dir);
+    m.on_rope = ladder.rope;
+    let speed = dir
+        * if ladder.rope {
+            tuning.rope_climb_speed
+        } else {
+            climb_speed(tuning, dir)
+        };
 
     // Down to the ground: off at the bottom.
     if speed < 0.0 {
@@ -630,6 +812,90 @@ fn climb_speed(tuning: &SoldierTuning, dir: f32) -> f32 {
     }
 }
 
+/// How far from a zipline's wire the hands can grab it.
+const ZIPLINE_REACH: f32 = 1.0;
+
+/// A zipline's wire in world space.
+#[derive(Clone, Copy, Debug)]
+struct Wire {
+    /// The high end.
+    high: Vec3,
+    length: f32,
+    /// Unit vector from the high end to the low end.
+    down: Vec3,
+}
+
+impl Wire {
+    /// How far along from the high end the point of the wire closest to `point` is.
+    fn along(&self, point: Vec3) -> f32 {
+        (point - self.high).dot(self.down).clamp(0.0, self.length)
+    }
+
+    fn at(&self, along: f32) -> Vec3 {
+        self.high + self.down * along
+    }
+}
+
+/// Getting on a zipline: close enough to the wire, not at its low end, heading down it.
+fn grab_wire(m: &SoldierMotion, wire: &Wire, wish: Vec3, tuning: &SoldierTuning) -> Option<Vec3> {
+    let hands = m.position + Vec3::Y * tuning.zipline_hang;
+    let along = wire.along(hands);
+    let flat = Vec3::new(wire.down.x, 0.0, wire.down.z).normalize_or_zero();
+    let heading = wish.normalize_or_zero().dot(flat) > 0.3;
+    (heading
+        && wire.at(along).distance(hands) <= ZIPLINE_REACH
+        && wire.length - along >= tuning.zipline_no_entry)
+        .then(|| wire.at(along) - Vec3::Y * tuning.zipline_hang)
+}
+
+/// One tick on a zipline: sliding down the wire, faster the steeper it is, until its end or
+/// a jump lets go. Collisions are ignored on the way, like BF2's zipline "seat".
+fn ride(
+    m: &mut SoldierMotion,
+    world: &Surroundings,
+    tuning: &SoldierTuning,
+    shapes: &SoldierShapes,
+    fresh_jump: bool,
+    dt: f32,
+) {
+    m.stance = Stance::Standing;
+    m.grounded = false;
+    let hands = m.position + Vec3::Y * tuning.zipline_hang;
+    let Some(wire) = world.zipline(hands, shapes) else {
+        m.riding = false;
+        return;
+    };
+    if fresh_jump {
+        m.riding = false;
+        m.velocity += Vec3::Y * 2.0;
+        return;
+    }
+    let slope = -wire.down.y;
+    let mut speed = m.velocity.dot(wire.down).max(0.0);
+    speed += (tuning.zipline_gravity * slope - tuning.zipline_drag * speed) * dt;
+    let speed = speed.clamp(tuning.zipline_min_speed, tuning.zipline_max_speed);
+    // Off at the end, a little short of where the bolt went in.
+    let end = (wire.length - 0.5).max(0.0);
+    let along = (wire.along(hands) + speed * dt).min(end);
+    let hands = wire.at(along);
+    m.position = hands - Vec3::Y * tuning.zipline_hang;
+    m.velocity = wire.down * speed;
+    if along >= end {
+        m.riding = false;
+    }
+    // Feet on the ground (the wire's low end is often low): standing there.
+    let shape = shapes.movement(Stance::Standing);
+    let center = Stance::Standing.collision_center();
+    if let Some(floor) = world.cast(shape, hands + center, Dir3::NEG_Y, tuning.zipline_hang + SKIN)
+        && floor.distance < tuning.zipline_hang
+    {
+        m.position.y = hands.y - floor.distance + SKIN;
+        m.velocity.y = 0.0;
+        m.riding = false;
+        m.grounded = true;
+    }
+}
+
 /// Distance of a climbing soldier's axis from the ladder's center plane.
 fn ladder_hold(ladder: &Ladder) -> f32 {
     ladder.half.z + SOLDIER_RADIUS + 0.05
@@ -656,6 +922,23 @@ fn mount(m: &SoldierMotion, ladder: &Ladder, wish: Vec3) -> Option<Vec3> {
             && (local.y - ladder.top()).abs() < 0.7;
         (on_top && wish.dot(ladder.front) > 0.5)
             .then(|| ladder.world(Vec3::new(0.0, ladder.top() - 1.2, hold)))
+    }
+}
+
+/// BF2's sprint: stamina drains while sprinting and recovers otherwise (not right after a
+/// jump). Starting needs a little stamina; running out stops the sprint.
+fn update_stamina(m: &mut SoldierMotion, tuning: &SoldierTuning, wants_sprint: bool, dt: f32) {
+    let stamina = tuning.stamina(m.heavy);
+    if m.sprinting {
+        m.stamina = (m.stamina - dt / stamina.sprint_time).max(0.0);
+        if !wants_sprint || m.stamina <= 0.0 {
+            m.sprinting = false;
+        }
+    } else {
+        if m.stamina_delay <= 0.0 {
+            m.stamina = (m.stamina + dt / stamina.recover_time).min(1.0);
+        }
+        m.sprinting = wants_sprint && m.stamina >= tuning.sprint_min_stamina;
     }
 }
 
@@ -897,24 +1180,52 @@ impl Surroundings<'_, '_, '_> {
         )
     }
 
-    /// The closest ladder within reach.
+    /// The closest ladder (or grappling rope) within reach.
     fn ladder(&self, feet: Vec3, shapes: &SoldierShapes) -> Option<Ladder> {
-        let filter = SpatialQueryFilter::from_mask(GameLayer::Ladder);
+        let filter = SpatialQueryFilter::from_mask([GameLayer::Ladder, GameLayer::Rope]);
         let center = feet + SOLDIER_CENTER;
         self.mover
             .spatial_query
             .shape_intersections(&shapes.ladder_probe, center, Quat::IDENTITY, &filter)
             .into_iter()
             .filter_map(|entity| {
-                let (collider, position, rotation, _) = self.mover.colliders.get(entity).ok()?;
+                let (collider, position, rotation, layers) = self.mover.colliders.get(entity).ok()?;
                 let half = collider.aabb(Vec3::ZERO, Quat::IDENTITY).size() * 0.5;
-                Some(Ladder::from_box(position.0, rotation.0, half))
+                let rope = layers.is_some_and(|l| l.memberships.has_all(GameLayer::Rope));
+                Some(Ladder {
+                    rope,
+                    ..Ladder::from_box(position.0, rotation.0, half)
+                })
             })
             // Query order differs between client and server; distance doesn't.
             .min_by(|a, b| {
                 a.center
                     .distance_squared(center)
                     .total_cmp(&b.center.distance_squared(center))
+            })
+    }
+
+    /// The closest zipline wire within reach of the hands.
+    fn zipline(&self, hands: Vec3, shapes: &SoldierShapes) -> Option<Wire> {
+        let filter = SpatialQueryFilter::from_mask(GameLayer::Zipline);
+        self.mover
+            .spatial_query
+            .shape_intersections(&shapes.zipline_probe, hands, Quat::IDENTITY, &filter)
+            .into_iter()
+            .filter_map(|entity| {
+                let (collider, position, rotation, _) = self.mover.colliders.get(entity).ok()?;
+                let capsule = collider.shape().as_capsule()?;
+                let a = position.0 + rotation.0 * capsule.segment.a;
+                let b = position.0 + rotation.0 * capsule.segment.b;
+                let (high, low) = if a.y >= b.y { (a, b) } else { (b, a) };
+                let length = high.distance(low);
+                let down = (low - high).normalize_or_zero();
+                (length > 0.1).then_some(Wire { high, length, down })
+            })
+            // Query order differs between client and server; distance doesn't.
+            .min_by(|a, b| {
+                let d = |w: &Wire| w.at(w.along(hands)).distance_squared(hands);
+                d(a).total_cmp(&d(b))
             })
     }
 
