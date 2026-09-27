@@ -66,6 +66,7 @@ pub struct Plan {
     /// Files we have locally (our own import or mods) with the right hash, to copy or link
     /// into the store.
     pub adopt: Vec<(FileEntry, PathBuf)>,
+    /// Bytes of the needed files, once per hash.
     pub needed_bytes: u64,
     pub download_bytes: u64,
 }
@@ -117,7 +118,7 @@ pub fn plan(
     }
     let mut plan = Plan {
         levels: levels.to_vec(),
-        needed_bytes: needed.iter().map(|(_, f)| f.size).sum(),
+        needed_bytes: unique.iter().map(|f| f.size).sum(),
         ..Default::default()
     };
     for (entry, mine) in unique.iter().zip(&of_entry) {
@@ -186,9 +187,11 @@ pub fn download_file(
                 counted = 0;
                 offset = 0;
             }
+            // Hashed while it arrives: opening a file just written costs a virus scan on Windows.
+            let mut streamed = None;
             if offset < entry.size || entry.size == 0 && !partial.exists() {
                 match fetch_into(fetch, &url, entry, offset, &partial, progress, &mut counted) {
-                    Ok(()) => {}
+                    Ok(hash) => streamed = hash,
                     Err(FetchError::Retry(err)) => {
                         last_error = format!("{url}: {err}");
                         std::thread::sleep(Duration::from_millis(250 * attempt as u64));
@@ -205,13 +208,17 @@ pub fn download_file(
                     continue;
                 }
             }
-            let verified = super::hash_file(&partial, None, Some(&progress.cancel))
+            let hashed = match streamed {
+                Some(hash) => Ok((partial_len(), hash)),
+                None => super::hash_file(&partial, None, Some(&progress.cancel)),
+            };
+            let verified = hashed
                 .map_err(|err| err.to_string())
                 .and_then(|(size, hash)| {
                     if size == entry.size && hash == entry.hash {
                         Ok(())
                     } else {
-                        Err(format!("{url}: wrong content (hash mismatch)"))
+                        Err(format!("{url}: not the file the manifest lists (did the server's files change?)"))
                     }
                 })
                 .and_then(|()| validate(entry, &partial));
@@ -242,6 +249,7 @@ enum FetchError {
     NextSource(String),
 }
 
+/// Fetches (the rest of) a file into `partial`. Returns its hash if it is complete.
 fn fetch_into(
     fetch: &dyn Fetch,
     url: &str,
@@ -250,7 +258,7 @@ fn fetch_into(
     partial: &Path,
     progress: &Progress,
     counted: &mut u64,
-) -> Result<(), FetchError> {
+) -> Result<Option<String>, FetchError> {
     let response = fetch.get(url, offset, entry.size).map_err(FetchError::Retry)?;
     let append = match response.status {
         206 if response.range_start == Some(offset) => true,
@@ -275,6 +283,17 @@ fn fetch_into(
         std::fs::File::create(partial).map_err(io)?
     };
     let start = if append { offset } else { 0 };
+    let mut hasher = super::ContentHasher::new();
+    if append {
+        let mut existing = std::fs::File::open(partial).map_err(io)?.take(start);
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            match existing.read(&mut buffer).map_err(io)? {
+                0 => break,
+                read => hasher.update(&buffer[..read]),
+            }
+        }
+    }
     let mut written = start;
     let mut body = response.body;
     let mut buffer = vec![0u8; 128 * 1024];
@@ -299,12 +318,13 @@ fn fetch_into(
             return Err(FetchError::NextSource("sent more than the file's size".into()));
         }
         file.write_all(&buffer[..read]).map_err(io)?;
+        hasher.update(&buffer[..read]);
         written += read as u64;
         *counted += read as u64;
         progress.bytes_done.fetch_add(read as u64, Ordering::Relaxed);
     }
     file.flush().map_err(io)?;
-    Ok(())
+    Ok((written == entry.size).then(|| hasher.finish()))
 }
 
 /// Downloads `files` with `workers` at a time. Stops at the first file that can't be had

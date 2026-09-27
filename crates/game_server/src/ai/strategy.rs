@@ -69,6 +69,11 @@ pub struct StrategicMap {
     /// map mean nothing.
     pub generation: u32,
     built_for: Vec<Entity>,
+    /// Per area, the walkable region of the navigation grid it lies in (areas in different
+    /// regions can't be walked between: a carrier and the island), once the grid is built.
+    pub walk_regions: Vec<Option<u16>>,
+    /// The grid those regions are of.
+    regions_of: Option<usize>,
 }
 
 /// Generations of maps ever built, so they differ even when the resource is replaced.
@@ -167,7 +172,34 @@ pub fn update_map(
         control_points: by_index,
         generation: GENERATION.fetch_add(1, Ordering::Relaxed) + 1,
         built_for: entities,
+        walk_regions: Vec::new(),
+        regions_of: None,
     };
+}
+
+/// Finds the walkable region of every area once the navigation grid is there.
+pub fn update_regions(mut map: ResMut<StrategicMap>, nav: Option<Res<crate::nav::Navigation>>) {
+    let Some(nav) = nav else {
+        return;
+    };
+    let grid: &crate::nav::NavGrid = &nav.0;
+    let id = grid as *const _ as usize;
+    if map.regions_of == Some(id) && map.walk_regions.len() == map.areas.len() {
+        return;
+    }
+    let regions = map.areas.iter().map(|a| walk_region(grid, a.position)).collect();
+    map.walk_regions = regions;
+    map.regions_of = Some(id);
+}
+
+/// The region of the walkable surface nearest to `position` (above or below it: flags sit
+/// on poles and towers), within 30 m.
+pub fn walk_region(grid: &crate::nav::NavGrid, position: Vec3) -> Option<u16> {
+    grid.cells_near(position.xz(), 30.0)
+        .filter(|c| (c.x + c.z) % 2 == 0)
+        .map(|c| (grid.position(c).distance_squared(position), grid.cell(c).region))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, region)| region)
 }
 
 /// Areas from the level's strategic areas, plus one per control point they miss, linked

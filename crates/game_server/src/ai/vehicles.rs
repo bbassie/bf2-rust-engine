@@ -408,31 +408,28 @@ pub fn angles(v: Vec3) -> (f32, f32) {
     ((-v.x).atan2(-v.z), v.y.atan2(Vec2::new(v.x, v.z).length()))
 }
 
-/// Everything about one vehicle a bot riding it needs, gathered from the model.
+/// Where a vehicle's seats look from and its guns point.
 pub struct Mounted<'a> {
     pub model: &'a VehicleModel,
     pub transform: Transform,
-    /// Part transforms in hull space at the current joint angles.
-    pub parts: Vec<Transform>,
 }
 
 impl<'a> Mounted<'a> {
-    pub fn new(model: &'a VehicleModel, transform: Transform, joints: &[[f32; 3]]) -> Self {
-        Self {
-            model,
-            transform,
-            parts: model.part_transforms(joints),
-        }
+    pub fn new(model: &'a VehicleModel, transform: Transform) -> Self {
+        Self { model, transform }
     }
 
-    /// Where a seat looks from, world space.
+    /// Where a seat looks from, world space (with turrets at rest: close enough to look
+    /// around from).
     pub fn eye(&self, seat: usize) -> Vec3 {
-        self.transform.transform_point(self.model.eye(&self.parts, seat))
+        self.transform.transform_point(self.model.eye(&self.model.rest_hull, seat))
     }
 
-    /// A gun's muzzle, world space, facing where it fires (-Z).
-    pub fn muzzle(&self, gun: usize) -> Transform {
-        self.transform * self.model.muzzle(&self.parts, gun)
+    /// A gun's muzzle, world space, facing where it fires (-Z), at the current joint
+    /// angles.
+    pub fn muzzle(&self, joints: &[[f32; 3]], gun: usize) -> Transform {
+        let parts = self.model.part_transforms(joints);
+        self.transform * self.model.muzzle(&parts, gun)
     }
 }
 

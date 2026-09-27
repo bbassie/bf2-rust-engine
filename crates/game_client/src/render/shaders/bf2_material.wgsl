@@ -663,8 +663,11 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * layers.light_sun.rgb, pbr_input.material.base_color.a);
     pbr_input.diffuse_occlusion *= layers.light_ambient.rgb;
     let tag = mesh[in.instance_index].tag;
+    // The baked and measured occlusion alone, for BF2_MATERIAL_DEBUG=sky.
+    var sky_debug = vec3(1.0);
     if (layers.flags & DYNAMIC) != 0u && (tag & SKY_TAG) != 0u {
         let visibility = f32(tag & 0xffu) / 255.0;
+        sky_debug = vec3(visibility, visibility, 1.0);
         pbr_input.diffuse_occlusion *= visibility;
         pbr_input.specular_occlusion *= visibility;
     }
@@ -673,12 +676,23 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
         let layer = (tag >> 24u) & 63u;
         let scale = vec2(exp2(-f32((tag >> 20u) & 15u)), exp2(-f32((tag >> 16u) & 15u)));
         let cell = vec2(f32((tag >> 8u) & 255u), f32(tag & 255u));
-        let sky = sample_lightmap(slot, (cell + lightmap_uv) * scale, layer, lightmap_dx * scale, lightmap_dy * scale);
+        let atlas_uv = (cell + lightmap_uv) * scale;
+        let sky = sample_lightmap(slot, atlas_uv, layer, lightmap_dx * scale, lightmap_dy * scale);
         let facing = normalize(pbr_input.world_normal).y * 0.5 + 0.5;
         let open = mix(OPEN_SKY_DOWN, OPEN_SKY_UP, facing);
         let occlusion = mix(1.0, clamp(sky / open, SKY_FLOOR, 1.0), layers.baked_sky);
         pbr_input.diffuse_occlusion *= occlusion;
         pbr_input.specular_occlusion *= occlusion;
+        sky_debug = vec3(occlusion);
+#ifdef BF2_DEBUG_LIGHTMAP
+        // Atlas position (red, green) and the baked sky visibility (blue).
+        sky_debug = vec3(fract(atlas_uv * 8.0), sky);
+#endif
+    }
+#else
+    if (tag & (LIGHTMAP_TAG | SKY_TAG)) == LIGHTMAP_TAG {
+        // A lightmap placement but no lightmap UVs in the mesh.
+        sky_debug = vec3(1.0, 0.0, 1.0);
     }
 #endif
 #ifdef BF2_DEBUG_LIGHTING
@@ -690,6 +704,14 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     out.color = pbr_functions::main_pass_post_lighting_processing(pbr_input, out.color);
 #ifdef BF2_DEBUG_NORMALS
     out.color = vec4(pbr_input.N * 0.5 + vec3(0.5), 1.0);
+#endif
+#ifdef BF2_DEBUG_LIGHTMAP
+    out.color = vec4(sky_debug, 1.0);
+#endif
+#ifdef BF2_DEBUG_SKY
+    // White: open; grey: baked occlusion (statics); blue tint: measured (soldiers, vehicles);
+    // magenta: lightmap placement without lightmap UVs.
+    out.color = vec4(sky_debug, 1.0);
 #endif
 #ifdef BF2_DEBUG_GLOSS
     out.color = vec4(vec3(surface.gloss), 1.0);

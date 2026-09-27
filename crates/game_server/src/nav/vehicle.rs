@@ -127,6 +127,8 @@ pub struct VehiclePath {
     pub points: Vec<Vec3>,
     /// Whether it reaches the goal; otherwise it gets as close as it could.
     pub complete: bool,
+    /// Nodes the search expanded.
+    pub expanded: usize,
 }
 
 /// Where boats float: a coarse grid over the level's water.
@@ -159,7 +161,26 @@ pub struct VehicleNavGrid {
     pub water_height: Option<f32>,
     pub water: Option<WaterGrid>,
     pub air: Option<AirMap>,
+    /// Cell costs and connected areas per kind of vehicle (see [`Self::class_costs`]), made
+    /// when first needed.
+    classes: std::sync::Mutex<HashMap<(NavClass, u16, u16), Arc<ClassCosts>>>,
 }
+
+/// What a kind of vehicle (a [`DriveSpec`]) makes of every land cell.
+struct ClassCosts {
+    /// Cost factor times [`FACTOR_SCALE`] (0: it can't go there).
+    factors: Vec<u8>,
+    /// Connected area it can drive around in, [`NO_REGION`] for none.
+    regions: Vec<u16>,
+}
+
+/// Fixed point scale of [`ClassCosts::factors`].
+const FACTOR_SCALE: f32 = 24.0;
+
+/// Cells in no area a vehicle can drive around in.
+const NO_REGION: u16 = u16::MAX;
+/// Areas of fewer cells (square meters) don't count.
+const MIN_DRIVE_REGION: u32 = 200;
 
 /// The vehicle navigation of the loaded level, once built.
 #[derive(Resource, Clone)]
@@ -186,6 +207,7 @@ pub fn build_all(input: &VehicleGeometry, land: Option<NavGrid>) -> VehicleNavGr
         water_height: input.water,
         water,
         air,
+        classes: default(),
     }
 }
 
@@ -444,7 +466,7 @@ impl WaterGrid {
             2..=3 => 1.4,
             _ => 1.0,
         };
-        let (cells, complete) = astar(
+        let (cells, complete, expanded) = astar(
             start,
             goal,
             heuristic,
@@ -485,7 +507,7 @@ impl WaterGrid {
             points.push(self.position(cells[best]));
             i = best;
         }
-        Some(VehiclePath { points, complete })
+        Some(VehiclePath { points, complete, expanded })
     }
 }
 
@@ -513,7 +535,7 @@ fn astar<K: Copy + Eq + std::hash::Hash>(
     heuristic: impl Fn(K) -> f32,
     mut neighbours: impl FnMut(K, &mut Vec<(K, f32)>),
     budget: usize,
-) -> (Vec<K>, bool) {
+) -> (Vec<K>, bool, usize) {
     struct Open<K>(f32, K);
     impl<K> PartialEq for Open<K> {
         fn eq(&self, other: &Self) -> bool {
@@ -576,7 +598,7 @@ fn astar<K: Copy + Eq + std::hash::Hash>(
         key = nodes[&k].1;
     }
     out.reverse();
-    (out, complete)
+    (out, complete, expanded)
 }
 
 impl VehicleNavGrid {
@@ -670,18 +692,104 @@ impl VehicleNavGrid {
         self.land.locate(feet, 3.0, None).or_else(|| self.land.locate(feet, 8.0, None))
     }
 
+    /// Cell costs and connected areas for a kind of vehicle: cells it fits on, joined where
+    /// it can drive from one to the other (either way); areas too small to matter get
+    /// [`NO_REGION`]. Made once per kind of vehicle (a few hundred ms), then path requests
+    /// only snap to goals they can reach and read costs from a byte per cell.
+    fn class_costs(&self, spec: &DriveSpec) -> Arc<ClassCosts> {
+        let key = (spec.class, (spec.half_width * 10.0).round() as u16, (spec.depth * 10.0).round() as u16);
+        if let Some(costs) = self.classes.lock().unwrap().get(&key) {
+            return costs.clone();
+        }
+        let grid = &self.land;
+        let count = grid.cells.len();
+        let mut factors = vec![0u8; count];
+        for z in 0..grid.depth {
+            for x in 0..grid.width {
+                for index in grid.column(x, z) {
+                    if let Some(f) = self.factor(spec, &[], CellRef { x, z, index }) {
+                        factors[index as usize] = (f * FACTOR_SCALE).round().clamp(1.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+        let mut parent: Vec<u32> = (0..count as u32).collect();
+        fn root(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                parent[i as usize] = parent[parent[i as usize] as usize];
+                i = parent[i as usize];
+            }
+            i
+        }
+        for z in 0..grid.depth {
+            for x in 0..grid.width {
+                for index in grid.column(x, z) {
+                    if factors[index as usize] == 0 {
+                        continue;
+                    }
+                    let c = CellRef { x, z, index };
+                    // +X and +Z: every pair once.
+                    for dir in 0..2 {
+                        if let Some(n) = grid.neighbour(c, dir)
+                            && factors[n.index as usize] != 0
+                        {
+                            let (a, b) = (root(&mut parent, index), root(&mut parent, n.index));
+                            parent[a.max(b) as usize] = a.min(b);
+                        }
+                    }
+                }
+            }
+        }
+        let mut sizes = vec![0u32; count];
+        for i in 0..count as u32 {
+            if factors[i as usize] != 0 {
+                sizes[root(&mut parent, i) as usize] += 1;
+            }
+        }
+        let mut ids: HashMap<u32, u16> = HashMap::default();
+        let mut regions = vec![NO_REGION; count];
+        for i in 0..count as u32 {
+            if factors[i as usize] == 0 {
+                continue;
+            }
+            let r = root(&mut parent, i);
+            if sizes[r as usize] < MIN_DRIVE_REGION {
+                continue;
+            }
+            let next = ids.len().min(NO_REGION as usize - 1) as u16;
+            regions[i as usize] = *ids.entry(r).or_insert(next);
+        }
+        let costs = Arc::new(ClassCosts { factors, regions });
+        self.classes.lock().unwrap().insert(key, costs.clone());
+        costs
+    }
+
+    /// A cell's cost factor from the class costs, `None` where it can't go or an obstacle is.
+    fn cost(&self, costs: &ClassCosts, obstacles: &[Obstacle], c: CellRef) -> Option<f32> {
+        let q = costs.factors[c.index as usize];
+        if q == 0 {
+            return None;
+        }
+        if !obstacles.is_empty() {
+            let at = self.land.position(c).xz();
+            if obstacles.iter().any(|o| o.contains(at)) {
+                return None;
+            }
+        }
+        Some(q as f32 / FACTOR_SCALE)
+    }
+
     /// The passable cell nearest to `p` within `radius`, in `region`.
-    fn locate_passable(&self, spec: &DriveSpec, obstacles: &[Obstacle], p: Vec3, radius: f32, region: u16) -> Option<CellRef> {
+    fn locate_passable(&self, costs: &ClassCosts, obstacles: &[Obstacle], p: Vec3, radius: f32, region: u16) -> Option<CellRef> {
         let mut best: Option<(f32, CellRef)> = None;
         for c in self.land.cells_near(p.xz(), radius) {
-            let cell = self.land.cell(c);
-            if cell.region != region {
+            if costs.regions[c.index as usize] != region {
                 continue;
             }
             let at = self.land.position(c);
             let dy = at.y - p.y;
             let score = at.xz().distance_squared(p.xz()) + 2.0 * dy * dy;
-            if best.is_some_and(|(b, _)| score >= b) || self.factor(spec, obstacles, c).is_none() {
+            if best.is_some_and(|(b, _)| score >= b) || self.cost(costs, obstacles, c).is_none() {
                 continue;
             }
             best = Some((score, c));
@@ -690,8 +798,8 @@ impl VehicleNavGrid {
     }
 
     /// A path for a vehicle from `from` (its hull origin) towards `to`. The goal snaps to the
-    /// nearest place the vehicle fits within `snap` meters; beyond that the path gets as
-    /// close as it can. `obstacles` (circles in XZ: other vehicles) are driven around, unless
+    /// nearest place the vehicle can get to within `snap` meters (looking further out if there
+    /// is none: as close as it gets). `obstacles` (other vehicles) are driven around, unless
     /// the vehicle is in one already. `None` if the vehicle isn't anywhere on the grid.
     pub fn find_path(
         &self,
@@ -707,88 +815,200 @@ impl VehicleNavGrid {
         let obstacles: Vec<Obstacle> = obstacles.iter().copied().filter(|o| !o.contains(from.xz())).collect();
         let obstacles = &obstacles[..];
         let start = self.locate_vehicle(from)?;
-        let region = self.land.cell(start).region;
-        let goal = self.locate_passable(spec, obstacles, to, snap, region);
+        let costs = self.class_costs(spec);
+        // The area it can drive around in: the start's, or (wedged somewhere it doesn't fit)
+        // the nearest one around it.
+        let region = match costs.regions[start.index as usize] {
+            NO_REGION => self
+                .land
+                .cells_near(from.xz(), 6.0)
+                .filter(|c| costs.regions[c.index as usize] != NO_REGION)
+                .min_by(|a, b| {
+                    let d = |c: &CellRef| self.land.position(*c).distance_squared(from);
+                    d(a).total_cmp(&d(b))
+                })
+                .map_or(NO_REGION, |c| costs.regions[c.index as usize]),
+            region => region,
+        };
+        let goal = (region != NO_REGION)
+            .then(|| {
+                [snap, snap * 2.5, snap * 6.0]
+                    .into_iter()
+                    .find_map(|radius| self.locate_passable(&costs, obstacles, to, radius, region))
+            })
+            .flatten();
         let target = goal.map_or(to, |g| self.land.position(g));
+        let budget = if goal.is_some() { MAX_EXPANDED } else { MAX_EXPANDED / 4 };
+        let (cells, reached, expanded) = self.search(spec, &costs, obstacles, start, goal, target, budget);
+        // Reaching a goal that stood in for an unreachable one is as good as it gets.
+        let complete = reached && goal.is_some_and(|g| self.land.position(g).xz().distance(to.xz()) <= snap + 1.0);
+        Some(VehiclePath {
+            points: self.smooth(&costs, obstacles, &cells),
+            complete,
+            expanded,
+        })
+    }
+
+    /// Weighted A* over the land grid with dense arrays (no hashing: the grids have millions
+    /// of cells, paths expand tens of thousands). Returns the cells from `start` to the goal
+    /// (or to the one closest to `target`), whether it got there, and the nodes expanded.
+    #[allow(clippy::too_many_arguments)]
+    fn search(
+        &self,
+        spec: &DriveSpec,
+        costs: &ClassCosts,
+        obstacles: &[Obstacle],
+        start: CellRef,
+        goal: Option<CellRef>,
+        target: Vec3,
+        budget: usize,
+    ) -> (Vec<CellRef>, bool, usize) {
+        #[derive(PartialEq)]
+        struct Open(f32, CellRef);
+        impl Eq for Open {}
+        impl Ord for Open {
+            fn cmp(&self, other: &Self) -> Ordering {
+                other.0.total_cmp(&self.0)
+            }
+        }
+        impl PartialOrd for Open {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
         let grid = &self.land;
         let cell = grid.params.cell;
+        let count = grid.cells.len();
         let (tx, tz) = grid
             .column_at(target.x, target.z)
             .map_or((-1.0, -1.0), |(x, z)| (x as f32, z as f32));
-        // Weighted A*: 1.5 times the cheapest possible cost (all road), so paths still find
-        // roads that are worth a detour without searching the whole map.
+        // 1.5 times the cheapest possible cost (all road), so paths still find roads that are
+        // worth a detour without searching the whole map.
         let weight = (spec.road_factor() * HEURISTIC_WEIGHT).min(1.0) * cell;
         let heuristic = |c: CellRef| {
             let (dx, dz) = ((c.x as f32 - tx).abs(), (c.z as f32 - tz).abs());
             (dx.max(dz) + (SQRT_2 - 1.0) * dx.min(dz)) * weight
         };
-        let (cells, complete) = astar(
-            start,
-            goal,
-            heuristic,
-            |here, out| {
-                let a = *grid.cell(here);
-                let straight: [Option<CellRef>; 4] = std::array::from_fn(|dir| grid.neighbour(here, dir));
-                let step = |from: &NavCell, to: CellRef| -> Option<f32> {
-                    let b = grid.cell(to);
-                    let dy = b.y - from.y;
-                    if dy > grid.walk_climb(from, b) {
-                        return None;
-                    }
-                    let factor = self.factor(spec, obstacles, to)?;
-                    let drop = if dy < -grid.walk_climb(from, b) {
-                        match spec.class {
-                            NavClass::Tracked => DROP_COST * 0.5,
-                            _ => DROP_COST,
-                        }
-                    } else {
-                        0.0
-                    };
-                    Some(factor + drop / cell)
+        // Zeroed allocations cost nothing until touched. `parent` is the parent's index plus
+        // one (0: not reached yet); `column` packs the cell's column (x, z).
+        let mut g = vec![0.0f32; count];
+        let mut parent = vec![0u32; count];
+        let mut column = vec![0u32; count];
+        let mut closed = vec![false; count];
+        let pack = |c: CellRef| c.x | (c.z << 16);
+        let unpack = |index: u32, packed: u32| CellRef {
+            x: packed & 0xFFFF,
+            z: packed >> 16,
+            index,
+        };
+        let drop_cost = match spec.class {
+            NavClass::Tracked => DROP_COST * 0.5,
+            _ => DROP_COST,
+        } / cell;
+        let step = |from: &NavCell, to: CellRef| -> Option<f32> {
+            let b = grid.cell(to);
+            let dy = b.y - from.y;
+            let climb = grid.walk_climb(from, b);
+            if dy > climb {
+                return None;
+            }
+            let factor = self.cost(costs, obstacles, to)?;
+            Some(if dy < -climb { factor + drop_cost } else { factor })
+        };
+        let s = start.index as usize;
+        parent[s] = u32::MAX;
+        column[s] = pack(start);
+        let mut open = BinaryHeap::new();
+        open.push(Open(heuristic(start), start));
+        let mut closest = (heuristic(start), start);
+        let mut end = None;
+        let mut expanded = 0;
+        let mut moves: Vec<(CellRef, f32)> = Vec::with_capacity(8);
+        while let Some(Open(_, here)) = open.pop() {
+            let i = here.index as usize;
+            if closed[i] {
+                continue;
+            }
+            closed[i] = true;
+            if goal == Some(here) {
+                end = Some(here);
+                break;
+            }
+            let h = heuristic(here);
+            if h < closest.0 {
+                closest = (h, here);
+            }
+            expanded += 1;
+            if expanded > budget {
+                break;
+            }
+            moves.clear();
+            let a = *grid.cell(here);
+            let straight: [Option<CellRef>; 4] = std::array::from_fn(|dir| grid.neighbour(here, dir));
+            for dir in 0..4 {
+                let Some(n) = straight[dir] else {
+                    continue;
                 };
-                for dir in 0..4 {
-                    let Some(n) = straight[dir] else {
-                        continue;
-                    };
-                    // The start may be somewhere the vehicle only just fits: it can always
-                    // leave.
-                    if let Some(f) = step(&a, n) {
-                        out.push((n, f * cell));
-                    }
-                    let next = (dir + 1) % 4;
-                    if let (Some(p), Some(q)) = (straight[dir], straight[next])
-                        && let (Some(d1), Some(d2)) = (grid.neighbour(p, next), grid.neighbour(q, dir))
-                        && d1.index == d2.index
-                        && step(&a, p).is_some()
-                        && step(&a, q).is_some()
-                        && let Some(f) = step(grid.cell(p), d1)
-                    {
-                        out.push((d1, f * cell * SQRT_2));
-                    }
+                let direct = step(&a, n);
+                if let Some(f) = direct {
+                    moves.push((n, f * cell));
                 }
-            },
-            MAX_EXPANDED,
-        );
-        Some(VehiclePath {
-            points: self.smooth(spec, obstacles, &cells),
-            complete,
-        })
+                let next = (dir + 1) % 4;
+                if let (Some(_), Some(p), Some(q)) = (direct, straight[dir], straight[next])
+                    && let (Some(d1), Some(d2)) = (grid.neighbour(p, next), grid.neighbour(q, dir))
+                    && d1.index == d2.index
+                    && step(&a, q).is_some()
+                    && let Some(f) = step(grid.cell(p), d1)
+                {
+                    moves.push((d1, f * cell * SQRT_2));
+                }
+            }
+            let base = g[i];
+            for &(to, cost) in &moves {
+                let j = to.index as usize;
+                if closed[j] {
+                    continue;
+                }
+                let next = base + cost;
+                if parent[j] == 0 || next < g[j] {
+                    g[j] = next;
+                    parent[j] = here.index + 1;
+                    column[j] = pack(to);
+                    open.push(Open(next + heuristic(to), to));
+                }
+            }
+        }
+        let reached = end.is_some();
+        let mut at = end.unwrap_or(closest.1);
+        let mut out = vec![at];
+        loop {
+            let p = parent[at.index as usize];
+            if p == u32::MAX || p == 0 {
+                break;
+            }
+            let index = p - 1;
+            at = unpack(index, column[index as usize]);
+            out.push(at);
+        }
+        out.reverse();
+        (out, reached, expanded)
     }
 
     /// String pulling: keeps the cells where the path has to turn, where a straight drive to
     /// a later cell would leave passable ground or cross worse ground than the path does.
-    fn smooth(&self, spec: &DriveSpec, obstacles: &[Obstacle], cells: &[CellRef]) -> Vec<Vec3> {
+    fn smooth(&self, costs: &ClassCosts, obstacles: &[Obstacle], cells: &[CellRef]) -> Vec<Vec3> {
         let mut points = vec![self.land.position(cells[0])];
-        let factors: Vec<f32> = cells.iter().map(|&c| self.factor(spec, obstacles, c).unwrap_or(4.0)).collect();
+        let factors: Vec<f32> = cells.iter().map(|&c| self.cost(costs, obstacles, c).unwrap_or(4.0)).collect();
         let mut i = 0;
         while i + 1 < cells.len() {
             let mut best = i + 1;
             let mut worst = factors[i + 1];
             for k in i + 2..cells.len().min(i + MAX_LOOKAHEAD) {
                 worst = worst.max(factors[k]);
-                if self.straight_drive(spec, obstacles, cells[i], cells[k], worst * 1.05) {
-                    best = k;
+                if !self.straight_drive(costs, obstacles, cells[i], cells[k], worst * 1.05) {
+                    break;
                 }
+                best = k;
             }
             points.push(self.land.position(cells[best]));
             i = best;
@@ -798,7 +1018,7 @@ impl VehicleNavGrid {
 
     /// Whether driving the straight line between the middles of `a` and `b` stays on linked
     /// cells the vehicle fits on without a drop, none costlier than `max_factor`.
-    fn straight_drive(&self, spec: &DriveSpec, obstacles: &[Obstacle], a: CellRef, b: CellRef, max_factor: f32) -> bool {
+    fn straight_drive(&self, costs: &ClassCosts, obstacles: &[Obstacle], a: CellRef, b: CellRef, max_factor: f32) -> bool {
         let grid = &self.land;
         let (dx, dz) = (b.x as f32 - a.x as f32, b.z as f32 - a.z as f32);
         let (step_x, step_z) = (if dx > 0.0 { 0 } else { 2 }, if dz > 0.0 { 1 } else { 3 });
@@ -809,7 +1029,7 @@ impl VehicleNavGrid {
             let n = grid.neighbour(c, dir)?;
             let (from, to) = (grid.cell(c), grid.cell(n));
             let ok = (to.y - from.y).abs() <= grid.walk_climb(from, to)
-                && self.factor(spec, obstacles, n).is_some_and(|f| f <= max_factor);
+                && self.cost(costs, obstacles, n).is_some_and(|f| f <= max_factor);
             ok.then_some(n)
         };
         let mut c = a;
@@ -1043,6 +1263,88 @@ mod tests {
         assert!(!water.navigable(Vec3::new(30.0, 0.0, 0.0), 1.0));
         let sail = nav.find_path(&boat, Vec3::new(0.0, 0.0, -50.0), Vec3::new(0.0, 0.0, 30.0), 5.0, &[]).unwrap();
         assert!(sail.complete, "{sail:?}");
+    }
+
+    /// Paths from the vehicle spawners to the flags of imported levels (their cached grids):
+    /// `cargo test -p game_server --lib vehicle_paths_on_levels -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn vehicle_paths_on_levels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../imported");
+        for level in ["strike_at_karkand", "dalian_plant", "gulf_of_oman", "wake_island_2007"] {
+            let dir = root.join("levels").join(level);
+            let Ok(desc) = game_data::read_ron::<game_data::LevelDesc>(&dir.join("level.ron")) else {
+                println!("{level}: not imported");
+                continue;
+            };
+            let Some(layout) = desc.game_modes.iter().find(|l| l.mode == "gpm_cq" && l.size == 64) else {
+                continue;
+            };
+            let Some(land) = super::super::cache::load_unchecked(&dir.join("navgrid_vehicle_gpm_cq_64.bin"), land_params())
+            else {
+                println!("{level}: no cached vehicle grid");
+                continue;
+            };
+            let nav = VehicleNavGrid {
+                roads: rasterize_roads(&land, &[]),
+                land,
+                water_height: desc.water.as_ref().map(|w| w.height),
+                water: None,
+                air: None,
+                classes: default(),
+            };
+            let land_vehicle = |t: &str| {
+                ["jep", "jeep", "apc", "tnk", "aav", "usaav"].iter().any(|k| t.starts_with(k))
+            };
+            let (mut total, mut complete, mut ms, mut max_ms) = (0, 0, 0.0f32, 0.0f32);
+            let mut complete_ms = 0.0f32;
+            let mut expanded = 0usize;
+            let mut misses = Vec::new();
+            for spawner in &layout.vehicle_spawners {
+                let Some(template) = spawner.templates.iter().flatten().find(|t| land_vehicle(t)) else {
+                    continue;
+                };
+                let spec = DriveSpec {
+                    class: if template.contains("tnk") { NavClass::Tracked } else { NavClass::Wheeled },
+                    half_width: if template.contains("tnk") { 1.9 } else { 1.25 },
+                    depth: 0.7,
+                };
+                let from = Vec3::from_array(spawner.placement.position) + Vec3::Y;
+                for cp in &layout.control_points {
+                    let to = Vec3::from_array(cp.position);
+                    let started = std::time::Instant::now();
+                    let path = nav.find_path(&spec, from, to, 30.0, &[]);
+                    let took = started.elapsed().as_secs_f32() * 1000.0;
+                    total += 1;
+                    ms += took;
+                    max_ms = max_ms.max(took);
+                    match path {
+                        Some(p) if p.complete => {
+                            complete += 1;
+                            complete_ms += took;
+                            expanded += p.expanded;
+                        }
+                        Some(p) => misses.push(format!(
+                            "{template} {from:.0} -> {} ({:.0} m): ends {:.0} m short at {:.0}",
+                            cp.name,
+                            from.distance(to),
+                            p.points.last().unwrap().xz().distance(to.xz()),
+                            p.points.last().unwrap()
+                        )),
+                        None => misses.push(format!("{template} {from:.0}: not on the grid")),
+                    }
+                }
+            }
+            println!(
+                "{level}: {complete} of {total} paths complete, {:.1} ms avg ({:.1} ms, {} nodes for complete ones), {max_ms:.0} ms max",
+                ms / total.max(1) as f32,
+                complete_ms / complete.max(1) as f32,
+                expanded / complete.max(1),
+            );
+            for miss in misses.iter().take(12) {
+                println!("  {miss}");
+            }
+        }
     }
 
     #[test]

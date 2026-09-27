@@ -66,15 +66,23 @@ struct LightmapIndex {
 }
 
 impl LightmapIndex {
-    /// The tag of the lightmap closest to `position` (within 2 m).
+    /// The tag of the object's lightmap: BF2 names them after the position truncated to whole
+    /// meters (towards zero, so the same in engine coordinates); else the closest within 2 m.
     fn find(&self, name: &str, geometry: u32, lod: u32, position: Vec3) -> Option<u32> {
-        self.entries
-            .get(&(name.to_string(), geometry, lod))?
+        let entries = self.entries.get(&(name.to_string(), geometry, lod))?;
+        let truncated = position.trunc();
+        entries
             .iter()
-            .map(|(p, tag)| (p.distance_squared(position), *tag))
-            .filter(|(d, _)| *d < 4.0)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, tag)| tag)
+            .find(|(p, _)| p.distance_squared(truncated) < 0.01)
+            .map(|(_, tag)| *tag)
+            .or_else(|| {
+                entries
+                    .iter()
+                    .map(|(p, tag)| (p.distance_squared(position), *tag))
+                    .filter(|(d, _)| *d < 4.0)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, tag)| tag)
+            })
     }
 }
 
@@ -157,6 +165,13 @@ fn tag_static_meshes(
         let tag = index
             .find(&name, u32::from(wreck), lod, position)
             .or_else(|| index.find(&name, 0, lod, position));
+        // `BF2_LIGHTMAP_LOG=<part of a name>` logs the lookups of matching objects.
+        static LOG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(filter) = LOG.get_or_init(|| std::env::var("BF2_LIGHTMAP_LOG").ok())
+            && name.contains(filter.as_str())
+        {
+            info!("lightmap {name} lod {lod} wreck {wreck} at {position:?} ({mesh_path}): {tag:08x?}");
+        }
         if let Some(tag) = tag {
             checked.insert(MeshTag(tag));
         }

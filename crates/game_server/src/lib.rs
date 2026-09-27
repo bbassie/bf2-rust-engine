@@ -213,7 +213,8 @@ pub struct InputBuffer {
 }
 
 impl InputBuffer {
-    /// Frames beyond this are dropped to keep input latency bounded.
+    /// Frames queued beyond this (plus the ticks about to run) are dropped to keep input
+    /// latency bounded.
     const MAX_QUEUED: usize = 6;
 
     pub fn push(&mut self, frame: InputFrame) {
@@ -223,11 +224,17 @@ impl InputBuffer {
         }
     }
 
-    /// The input to apply this tick. Repeats the previous input if nothing new arrived.
-    pub fn next(&mut self) -> InputFrame {
-        while self.queue.len() > Self::MAX_QUEUED {
+    /// Drops the oldest frames the coming `ticks` and [`Self::MAX_QUEUED`] won't use. Once per
+    /// frame, not per tick: after a stall the catch-up ticks need the whole backlog, which the
+    /// client already predicted with.
+    pub fn trim(&mut self, ticks: usize) {
+        while self.queue.len() > Self::MAX_QUEUED + ticks {
             self.queue.pop_front();
         }
+    }
+
+    /// The input to apply this tick. Repeats the previous input if nothing new arrived.
+    pub fn next(&mut self) -> InputFrame {
         if let Some(frame) = self.queue.pop_front() {
             self.current = frame;
         }
@@ -443,6 +450,8 @@ fn receive_inputs(
     mut packets: MessageReader<FromClient<InputPacket>>,
     clients: Query<&ClientPlayer>,
     host: Option<Res<HostPlayer>>,
+    virtual_time: Res<Time<Virtual>>,
+    fixed_time: Res<Time<Fixed>>,
     mut buffers: Query<&mut InputBuffer>,
 ) {
     for packet in packets.read() {
@@ -454,6 +463,12 @@ fn receive_inputs(
                 buffer.push(*frame);
             }
         }
+    }
+    // The fixed ticks this frame will run to catch up with the virtual clock.
+    let ticks = ((fixed_time.overstep() + virtual_time.delta()).as_secs_f64()
+        / fixed_time.timestep().as_secs_f64()) as usize;
+    for mut buffer in &mut buffers {
+        buffer.trim(ticks);
     }
 }
 

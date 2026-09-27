@@ -156,6 +156,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Modding workflow: mods authored directly in glTF + RON (`mods/`, see docs/MODDING.md)
 - [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
   map changes; server config file; persistent player stats
-- Content download (in progress): clients download a server's mods (and, if its admin opts in,
-  the converted BF2 assets) on join, cached by hash, so modded servers need no install step
+- [x] Content download: clients download a server's mods (and, if its admin opts in, the
+  converted BF2 assets) for the maps being played, cached by hash, so modded servers need no
+  install step and clients without BF2 can join `all` servers
 - [x] Master server: servers register and heartbeat, the browser lists internet servers

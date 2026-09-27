@@ -1,0 +1,30 @@
+// Lighting diagnosis on Devil's Perch: the plaza with the sky light and the baked occlusion
+// toggled separately.
+// client --scenario scenarios/light_diag_devils_perch.ron --out target/scenarios/light/diag/devils_perch
+(
+    level: "devils_perch",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        Teleport((-368.0, 14.0, 168.0), 34.0, -4.0),
+        Wait(1.5),
+        Setting("sky_light", "off"),
+        Setting("baked_ao", "off"),
+        Wait(0.5),
+        Screenshot("none"),
+        Setting("sky_light", "on"),
+        Wait(0.5),
+        Screenshot("sky"),
+        Setting("sky_light", "off"),
+        Setting("baked_ao", "on"),
+        Wait(0.5),
+        Screenshot("ao"),
+        Setting("sky_light", "on"),
+        Wait(0.5),
+        Screenshot("both"),
+        Quit,
+    ],
+)

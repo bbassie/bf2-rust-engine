@@ -11,18 +11,21 @@
 //! What is shared is the admin's choice ([`ContentSettings::mode`]): nothing, the mods
 //! (default: content made for this engine) or everything including the imported BF2 assets
 //! (EA's copyrighted content: never the default). Only files listed in the manifest are
-//! served, looked up by hash, never by a path from the request.
+//! served, looked up by hash, never by a path from the request. A file that changed on disk
+//! since it was hashed isn't served: the manifest is built again (only changed files are
+//! hashed again), and clients fetch the new one.
 
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Read, Seek, SeekFrom},
     net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use bevy::prelude::*;
@@ -73,15 +76,28 @@ pub struct ContentServer {
 
 struct Shared {
     /// `None` while the manifest is being built.
-    built: RwLock<Option<Arc<BuiltManifest>>>,
+    built: RwLock<Option<Arc<Served>>>,
     failed: RwLock<Option<String>>,
     progress: BuildProgress,
+    /// What the manifest is built from.
+    input: Mutex<(GamePaths, BuildOptions)>,
+    building: AtomicBool,
     /// The current level first, then the rotation.
     playing: RwLock<Vec<String>>,
     /// What a client without anything needs for `playing`.
     advert_files: AtomicU32,
     advert_bytes: AtomicU64,
     stop: AtomicBool,
+}
+
+/// A built manifest, and the size and time of each served file when it was hashed.
+struct Served {
+    built: BuiltManifest,
+    stamps: HashMap<String, (u64, Option<SystemTime>)>,
+}
+
+fn stamp(meta: &std::fs::Metadata) -> (u64, Option<SystemTime>) {
+    (meta.len(), meta.modified().ok())
 }
 
 impl Shared {
@@ -91,9 +107,54 @@ impl Shared {
             .read()
             .unwrap()
             .as_ref()
-            .map_or((0, 0), |b| b.manifest.needed_size(&self.playing.read().unwrap()));
+            .map_or((0, 0), |s| s.built.manifest.needed_size(&self.playing.read().unwrap()));
         self.advert_files.store(files as u32, Ordering::Relaxed);
         self.advert_bytes.store(bytes, Ordering::Relaxed);
+    }
+}
+
+/// Builds the manifest on a thread (unless that is already happening). Until it is done the
+/// endpoint answers 503.
+fn spawn_build(shared: &Arc<Shared>) {
+    if shared.building.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    *shared.built.write().unwrap() = None;
+    shared.progress.bytes_done.store(0, Ordering::Relaxed);
+    let (paths, options) = shared.input.lock().unwrap().clone();
+    let builder = shared.clone();
+    let spawned = std::thread::Builder::new().name("content manifest".into()).spawn(move || {
+        let started = std::time::Instant::now();
+        match content::build_manifest(&paths, &options, &builder.progress) {
+            Ok(built) => {
+                let manifest = &built.manifest;
+                info!(
+                    "content: sharing {} files ({}) in {} layers, {} levels, ready after {:.1} s",
+                    manifest.files().count(),
+                    content::format_bytes(manifest.total_bytes()),
+                    manifest.layers.len(),
+                    manifest.levels.len(),
+                    started.elapsed().as_secs_f32()
+                );
+                let stamps = built
+                    .files
+                    .iter()
+                    .filter_map(|(hash, path)| Some((hash.clone(), stamp(&std::fs::metadata(path).ok()?))))
+                    .collect();
+                *builder.built.write().unwrap() = Some(Arc::new(Served { built, stamps }));
+                *builder.failed.write().unwrap() = None;
+                builder.update_advert();
+            }
+            Err(err) => {
+                error!("content: {err:#}");
+                *builder.failed.write().unwrap() = Some(format!("{err:#}"));
+            }
+        }
+        builder.building.store(false, Ordering::Release);
+    });
+    if let Err(err) = spawned {
+        warn!("content: {err}");
+        shared.building.store(false, Ordering::Release);
     }
 }
 
@@ -167,15 +228,6 @@ pub fn start(world: &mut World) {
             false
         }
     });
-    let shared = Arc::new(Shared {
-        built: RwLock::new(None),
-        failed: RwLock::new(None),
-        progress: BuildProgress::default(),
-        playing: RwLock::new(playing_levels(settings, world.get_resource::<MapRotation>())),
-        advert_files: AtomicU32::new(0),
-        advert_bytes: AtomicU64::new(0),
-        stop: AtomicBool::new(false),
-    });
     let dir = cache_dir(&content);
     let options = BuildOptions {
         mode: content.mode,
@@ -185,34 +237,18 @@ pub fn start(world: &mut World) {
         index_file: dir.as_ref().map(|d| d.join("content-index.txt")),
         deps_cache: dir.as_ref().map(|d| d.join("content-levels.txt")),
     };
-    let paths = world.resource::<GamePaths>().clone();
-    let builder = shared.clone();
-    let spawned = std::thread::Builder::new().name("content manifest".into()).spawn(move || {
-        let started = std::time::Instant::now();
-        match content::build_manifest(&paths, &options, &builder.progress) {
-            Ok(built) => {
-                let manifest = &built.manifest;
-                info!(
-                    "content: sharing {} files ({}) in {} layers, {} levels, ready after {:.1} s",
-                    manifest.files().count(),
-                    content::format_bytes(manifest.total_bytes()),
-                    manifest.layers.len(),
-                    manifest.levels.len(),
-                    started.elapsed().as_secs_f32()
-                );
-                *builder.built.write().unwrap() = Some(Arc::new(built));
-                builder.update_advert();
-            }
-            Err(err) => {
-                error!("content: {err:#}");
-                *builder.failed.write().unwrap() = Some(format!("{err:#}"));
-            }
-        }
+    let shared = Arc::new(Shared {
+        built: RwLock::new(None),
+        failed: RwLock::new(None),
+        progress: BuildProgress::default(),
+        input: Mutex::new((world.resource::<GamePaths>().clone(), options)),
+        building: AtomicBool::new(false),
+        playing: RwLock::new(playing_levels(settings, world.get_resource::<MapRotation>())),
+        advert_files: AtomicU32::new(0),
+        advert_bytes: AtomicU64::new(0),
+        stop: AtomicBool::new(false),
     });
-    if let Err(err) = spawned {
-        warn!("content: {err}");
-        return;
-    }
+    spawn_build(&shared);
     for i in 0..WORKERS {
         let (server, shared) = (server.clone(), shared.clone());
         let _ = std::thread::Builder::new().name(format!("content http {i}")).spawn(move || {
@@ -263,7 +299,7 @@ fn text(status: u16, body: impl Into<String>) -> Response<std::io::Cursor<Vec<u8
         .with_header(header("Content-Type", "text/plain; charset=utf-8"))
 }
 
-fn handle(request: Request, shared: &Shared) {
+fn handle(request: Request, shared: &Arc<Shared>) {
     if !matches!(request.method(), Method::Get | Method::Head) {
         let _ = request.respond(text(405, "only GET"));
         return;
@@ -293,7 +329,7 @@ fn serve_manifest(request: Request, shared: &Shared) {
         let _ = request.respond(response);
         return;
     };
-    let mut manifest = built.manifest.clone();
+    let mut manifest = built.built.manifest.clone();
     manifest.playing = shared.playing.read().unwrap().clone();
     if let Some(from) = request.remote_addr() {
         info!("content: {from} fetched the manifest");
@@ -321,10 +357,15 @@ fn parse_range(value: &str, len: u64) -> Option<Option<(u64, u64)>> {
     Some(range)
 }
 
-fn serve_file(request: Request, shared: &Shared, hash: &str) {
-    let path = shared.built.read().unwrap().as_ref().and_then(|b| b.files.get(hash).cloned());
-    let Some(path) = path else {
-        let _ = request.respond(text(404, "not shared"));
+fn serve_file(request: Request, shared: &Arc<Shared>, hash: &str) {
+    let served = shared.built.read().unwrap().clone();
+    let Some((path, hashed)) = served.as_ref().and_then(|s| Some((s.built.files.get(hash)?.clone(), *s.stamps.get(hash)?)))
+    else {
+        let response = match served {
+            Some(_) => text(404, "not shared"),
+            None => text(503, "preparing").with_header(header("Retry-After", "2")),
+        };
+        let _ = request.respond(response);
         return;
     };
     let mut file = match File::open(&path) {
@@ -335,7 +376,14 @@ fn serve_file(request: Request, shared: &Shared, hash: &str) {
             return;
         }
     };
-    let len = file.metadata().map_or(0, |m| m.len());
+    let meta = file.metadata().ok();
+    if meta.as_ref().map(stamp) != Some(hashed) {
+        warn!("content: {} changed since it was hashed; building the manifest again", path.display());
+        spawn_build(shared);
+        let _ = request.respond(text(503, "content changed, preparing").with_header(header("Retry-After", "2")));
+        return;
+    }
+    let len = meta.map_or(0, |m| m.len());
     let range = request
         .headers()
         .iter()
@@ -482,6 +530,22 @@ mod tests {
         assert_eq!(get(port, "/content/levels/x/level.ron", None).0, 404);
         assert_eq!(get(port, "/content/../../secret.txt", None).0, 404);
         assert_eq!(get(port, &format!("{FILE_URL_PREFIX}{}", content::hash_bytes(b"not shared")), None).0, 404);
+        // A file changed on disk: not served; the manifest is built again with its new hash.
+        std::fs::write(mod_dir.join("levels/x/level.ron"), "(name: \"x2\")").unwrap();
+        assert_eq!(get(port, &format!("{FILE_URL_PREFIX}{}", level.hash), None).0, 503);
+        let mut rebuilt = None;
+        for _ in 0..100 {
+            let (status, body) = get(port, MANIFEST_URL_PATH, None);
+            if status == 200 {
+                rebuilt = Some(content::Manifest::parse(&body).unwrap());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let rebuilt = rebuilt.expect("manifest built again");
+        let new = rebuilt.files().find(|(_, f)| f.path == "levels/x/level.ron").unwrap().1.clone();
+        assert_eq!(new.hash, content::hash_bytes(b"(name: \"x2\")"));
+        assert_eq!(get(port, &format!("{FILE_URL_PREFIX}{}", new.hash), None).1, b"(name: \"x2\")");
         let advert = app.world().resource::<ContentServer>().advert();
         assert!(advert.ready);
         assert_eq!(advert.mode, ContentMode::Mods);

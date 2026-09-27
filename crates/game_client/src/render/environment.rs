@@ -13,7 +13,10 @@
 //!   visibility of open surfaces in the lightmaps) x `static_sky`.
 //! - Terrain and undergrowth scale both by their own factors ([`LightScale`]): BF2 lit them
 //!   with `terrain_gi` (x 0.85 sky visibility) and `2 x terrain_sun`, on a colour map
-//!   without the statics' `x 2`.
+//!   without the statics' `x 2` (`TerrainShader_Hi.fx`: `colormap x detail x 2 x (2 x
+//!   lightmap.g x sun + lightmap.b x GI)`). BF2 clamped these bright colours; the part of
+//!   the difference to the statics beyond the albedos is compressed ([`CLASS_CONTRAST`],
+//!   [`CLASS_SUN_CONTRAST`]).
 //! - Trees (and their distant stand-ins) scale them by BF2's tree colours relative to the
 //!   static ones (`tree_ambient / 2` and `tree_sun`; within 0.5..2 of them in gamma space).
 //! - Soldiers and vehicles use the global light as they are: BF2 lit them about as much
@@ -29,6 +32,15 @@
 //!   brightness, casting shadows. The colours are the faked-HDR "dark-adapted" ones BF2
 //!   showed while the player looked at dark surroundings.
 //!
+//! # Direction and occlusion of the ambient light
+//!
+//! - The ambient is a sky around the camera ([`SkyLight`], an environment map made from
+//!   [`LevelLight::sky_gradient`]): surfaces facing up get [`SKY_UP`] times the ambient,
+//!   walls less and undersides the light the lit ground throws back. Setting `sky_light`.
+//! - Baked occlusion (setting `baked_ao`) takes BF2's sky visibility, never its baked sun:
+//!   the terrain and undergrowth from the terrain lightmaps (`materials::BakedSky`), static
+//!   objects from their object lightmaps (`static_lightmaps`), soldiers, vehicles and props
+//!   from rays into the collision around them (`sky_occlusion`).
 //! Levels without [`game_data::WorldLighting`] (made without BF2's `sky.con`) are lit from
 //! the dynamic `ambient_color` and `sun_color` alone. `BF2_LIGHT=ambient=9,sun=1.2,...`
 //! overrides the constants for tuning (keys: ambient, sun, adapt, night_adapt, contrast,
@@ -83,6 +95,11 @@ impl Plugin for EnvironmentPlugin {
 const SUN_ILLUMINANCE: f32 = 4_000.0;
 /// Luminance (cd/m2) of linear light 1: a white surface shows white at the default exposure.
 const LIGHT_UNIT: f32 = 1_000.0;
+/// Bevy's uniform ambient light reflects `EnvBRDFApprox(albedo, F_AB(1, n.v))`, about 0.45 x
+/// the albedo, where its environment maps reflect about 0.96 x: the environment map's
+/// intensity that lights a surface as the ambient light of the same colour did (the light
+/// constants were tuned with the ambient light).
+const ENVIRONMENT_PER_AMBIENT: f32 = 0.452 / 0.96;
 
 /// Linear ambient light per unit of BF2 light^2.2 (see the module docs).
 pub const AMBIENT_EXPOSURE: f32 = 9.2;
@@ -109,7 +126,7 @@ pub const MOON: f32 = 0.6;
 /// matches the statics').
 pub const TERRAIN_MOON: f32 = 0.35;
 /// [`ADAPTATION`] on night levels: they are meant to be darker.
-pub const NIGHT_ADAPTATION: f32 = 0.1;
+pub const NIGHT_ADAPTATION: f32 = 0.15;
 /// Strength of the levels' light tints (1: BF2's; 0: grey light).
 pub const TINT: f32 = 1.0;
 /// Sky light on surfaces facing straight up, relative to the uniform ambient it replaces;
@@ -121,7 +138,9 @@ pub const HORIZON: f32 = 1.3;
 const HORIZON_FOG_TINT: f32 = 0.35;
 /// Share of the light on the ground that it throws back up (times its albedo).
 pub const BOUNCE: f32 = 1.0;
-/// The ground below the horizon is at most this bright relative to the sky light from above.
+/// The ground below the horizon is at least and at most this bright relative to the sky
+/// light from above (night levels paint their colour maps nearly black).
+const GROUND_MIN: f32 = 0.3;
 const GROUND_MAX: f32 = 0.5;
 /// Ground albedo where the level doesn't give one.
 const DEFAULT_GROUND_ALBEDO: f32 = 0.15;
@@ -368,9 +387,11 @@ impl LevelLight {
         let height = (-Vec3::from_array(env.sun_direction).normalize_or(Vec3::NEG_Y).y).max(0.0);
         let lit = up * self.terrain.ambient + self.sun * height * self.terrain.sun;
         let mut ground = albedo * lit * k.bounce;
-        let max = GROUND_MAX * lum(up);
+        let (min, max) = (GROUND_MIN * lum(up), GROUND_MAX * lum(up));
         if lum(ground) > max {
             ground *= max / lum(ground);
+        } else if lum(ground) < min {
+            ground = ground.lerp(chroma(ground.max(Vec3::splat(1e-6))) * min, 1.0 - lum(ground) / min);
         }
         sky.ground = ground;
         sky
@@ -416,7 +437,7 @@ fn attach_sky_light(
                     EnvironmentMapLight {
                         diffuse_map: sky.diffuse.clone(),
                         specular_map: sky.specular.clone(),
-                        intensity: LIGHT_UNIT,
+                        intensity: LIGHT_UNIT * ENVIRONMENT_PER_AMBIENT,
                         ..default()
                     },
                     // The environment map replaces the uniform ambient.

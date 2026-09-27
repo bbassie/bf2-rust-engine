@@ -17,6 +17,13 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
 - Don't wrap builds in `timeout`: the first build of the client takes 20+ minutes.
 - Build per package (`-p game_client`, `-p game_server`); a `--workspace` build unifies Bevy
   features and rebuilds Bevy.
+- Iterate on compile errors with `rustup run stable cargo check -p <package>`: no codegen and
+  no link, so it takes seconds where a build takes minutes. Build only to run something.
+  Build only the packages you run (`game_client` already contains the server library).
+- The target dir is shared by everyone working in this tree and cargo serializes builds
+  ("Blocking waiting for file lock"). Batch edits so each build is worth it.
+- Changing `[profile.*]` settings, Bevy features or rustflags rebuilds every dependency
+  (about 20 minutes for everyone); avoid it unless it's the point of the change.
 
 ## Checking changes
 

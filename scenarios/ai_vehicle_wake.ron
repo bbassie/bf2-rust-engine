@@ -1,0 +1,35 @@
+// Bots on Wake Island (64): the US spawn on the carrier and take its boats and helicopters to the
+// island (walking can't get them there), the PLA drive and fly from the airfield. The camera
+// looks at the carrier's boats, then chases bot-driven boats and aircraft.
+// client --scenario scenarios/ai_vehicle_wake.ron
+(
+    level: "wake_island_2007",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-800.0, 110.0, -560.0), 220.0, -18.0),
+        Wait(20.0),
+        Screenshot("carrier_boats_20s"),
+        ChaseDriven("sea", 18.0, 6.0),
+        Screenshot("boat_1"),
+        Wait(15.0),
+        ChaseDriven("sea", 18.0, 6.0),
+        Screenshot("boat_2"),
+        ChaseDriven("helicopter", 25.0, 8.0),
+        Screenshot("heli_1"),
+        Wait(20.0),
+        ChaseDriven("sea", 20.0, 7.0),
+        Screenshot("boat_3"),
+        ChaseDriven("land", 16.0, 7.0),
+        Screenshot("land_1"),
+        LogVehicles("after 60 s"),
+        Wait(30.0),
+        ChaseDriven("sea", 20.0, 7.0),
+        Screenshot("boat_4"),
+        ChaseDriven("", 25.0, 8.0),
+        Screenshot("any_1"),
+        Quit,
+    ],
+)

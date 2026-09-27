@@ -44,7 +44,7 @@ const RANGE: f32 = 250.0;
 /// Rays longer than this count as reaching the sky.
 const RAY_LENGTH: f32 = 60.0;
 /// Visibility with no sky at all (light still bounces in through doors and windows).
-const FLOOR: f32 = 0.3;
+const FLOOR: f32 = 0.4;
 /// How quickly a mesh's visibility follows a change (1/s).
 const RATE: f32 = 5.0;
 
