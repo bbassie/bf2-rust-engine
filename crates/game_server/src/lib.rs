@@ -26,6 +26,7 @@ use game_shared::{
     level::{LevelEntity, LoadedLevel},
     protocol::{ClientHello, ControlledBy, MatchInfo, Player, PlayerNetId, Team},
     soldier::{InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, step_soldier},
+    vehicle::Seated,
     weapons::{Armory, Inventory, Loadout, WeaponState},
 };
 
@@ -35,6 +36,7 @@ pub mod conquest;
 pub mod squads;
 pub mod destruction;
 pub mod nav;
+pub mod vehicles;
 
 /// How the server was configured to run.
 #[derive(Resource, Clone, Debug)]
@@ -92,7 +94,7 @@ impl Plugin for GameServerPlugin {
             app.add_systems(Startup, move |world: &mut World| start_server(world, settings.clone()));
         }
         app.insert_resource(self.settings.clone().unwrap_or_default())
-            .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin, nav::NavPlugin, squads::SquadPlugin))
+            .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin, nav::NavPlugin, squads::SquadPlugin, vehicles::VehiclesPlugin))
             .add_plugins(destruction::DestructionPlugin)
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
@@ -402,7 +404,8 @@ fn apply_inputs(
             &mut Transform,
             &mut AppliedInput,
         ),
-        With<Soldier>,
+        // Seated soldiers ride along; `vehicles` takes their input.
+        (With<Soldier>, Without<Seated>),
     >,
     mut buffers: Query<&mut InputBuffer>,
 ) {

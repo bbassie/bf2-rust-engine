@@ -125,7 +125,7 @@ pub(crate) struct LocalLaunch {
 }
 
 #[derive(Resource)]
-struct EffectAssets {
+pub(crate) struct EffectAssets {
     tracer: Handle<Mesh>,
     tracer_material: Handle<StandardMaterial>,
     impact: Handle<Mesh>,
@@ -241,7 +241,10 @@ fn predict_local_shots(
     spatial: SpatialQuery,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
-    mut soldier: Query<(&SoldierMotion, &Loadout, Ref<Inventory>, &mut LocalWeapon), With<LocalSoldier>>,
+    mut soldier: Query<
+        (&SoldierMotion, &Loadout, Ref<Inventory>, &mut LocalWeapon),
+        (With<LocalSoldier>, Without<game_shared::vehicle::Seated>),
+    >,
     mut shots: MessageWriter<LocalShot>,
     mut launches: MessageWriter<LocalLaunch>,
 ) {
@@ -329,7 +332,7 @@ fn predict_local_shots(
     look.yaw -= range(recoil.left_right).to_radians() * scale;
 }
 
-fn spawn_tracer(
+pub(crate) fn spawn_tracer(
     commands: &mut Commands,
     assets: &EffectAssets,
     origin: Vec3,
@@ -559,7 +562,7 @@ pub(crate) fn apply_zoom(
     time: Res<Time>,
     zoom: Res<Zoom>,
     armory: Res<Armory>,
-    soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, With<SoldierRender>)>,
+    soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, With<SoldierRender>, Without<game_shared::vehicle::Seated>)>,
     mut was_scoped: Local<bool>,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,

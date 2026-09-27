@@ -43,6 +43,7 @@ mod prediction;
 mod render;
 mod scenario;
 mod settings;
+mod vehicles;
 
 #[derive(Parser, Debug, Clone, Resource)]
 #[command(version, about = "Game client")]
@@ -215,6 +216,7 @@ fn main() -> AppExit {
         deploy::DeployPlugin,
         minimap::MinimapPlugin,
         nav_debug::NavDebugPlugin,
+        vehicles::ClientVehiclesPlugin,
     ))
     .add_plugins((announcer::AnnouncerPlugin, bigmap::BigMapPlugin, audio::AudioPlugin))
     .add_plugins((

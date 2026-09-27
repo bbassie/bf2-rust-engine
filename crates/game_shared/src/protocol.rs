@@ -11,6 +11,7 @@ use crate::{
     conquest::{ControlPoint, DeployRequest, Deployment, FlagEvent, FlagState, RoundState, Tickets},
     input::InputPacket,
     soldier::{Health, InputAck, Soldier, SoldierMotion},
+    vehicle::{Seated, Vehicle, VehicleHealth, VehicleMotion, VehicleShot, VehicleState},
     weapons::{Inventory, Loadout},
 };
 
@@ -40,6 +41,11 @@ impl Plugin for ProtocolPlugin {
             .replicate::<crate::projectile::Projectile>()
             .replicate::<crate::projectile::ProjectileMotion>()
             .replicate::<crate::projectile::SmokeCloud>()
+            .replicate::<Vehicle>()
+            .replicate::<VehicleMotion>()
+            .replicate::<VehicleState>()
+            .replicate::<Seated>()
+            .replicate::<VehicleHealth>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
             .add_client_message::<DeployRequest>(Channel::Ordered)
@@ -48,6 +54,7 @@ impl Plugin for ProtocolPlugin {
             .add_mapped_server_message::<ShotFired>(Channel::Unreliable)
             .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
             .add_mapped_server_message::<KillFeed>(Channel::Ordered)
+            .add_mapped_server_message::<VehicleShot>(Channel::Unreliable)
             .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered);
     }
 }

@@ -2,7 +2,10 @@
 
 use bevy::{pbr::ScreenSpaceAmbientOcclusion, prelude::*, window::CursorOptions};
 
-use game_shared::level::LoadedLevel;
+use game_shared::{
+    level::LoadedLevel,
+    vehicle::{Seated, VehicleData},
+};
 
 use crate::{
     local_input::{LookState, cursor_locked},
@@ -116,13 +119,47 @@ fn update_camera(
     third_person: Res<ThirdPerson>,
     cli: Res<crate::Cli>,
     spatial: avian3d::prelude::SpatialQuery,
-    soldier: Query<&SoldierRender, With<LocalSoldier>>,
+    soldier: Query<(&SoldierRender, Option<&Seated>), With<LocalSoldier>>,
+    vehicles: Query<(&crate::vehicles::VehicleView, &VehicleData)>,
     camera: Single<(&mut Transform, &mut Spectator), With<PlayerCamera>>,
 ) {
     let (mut transform, mut spectator) = camera.into_inner();
     let rotation = look.rotation();
 
-    if let Ok(render) = soldier.single() {
+    // In a vehicle: through the seat's camera, or chasing the vehicle (V).
+    if let Some(view) = soldier
+        .single()
+        .ok()
+        .and_then(|(_, seated)| seated)
+        .and_then(|seated| crate::vehicles::seat_view(seated, &vehicles))
+    {
+        transform.translation = if third_person.0 {
+            let pivot = view.vehicle.translation + Vec3::Y * 1.5;
+            let offset = rotation * Vec3::new(0.0, 0.0, view.chase_distance * 0.7) + Vec3::Y * view.chase_height;
+            let distance = Dir3::new(offset)
+                .ok()
+                .and_then(|dir| {
+                    spatial.cast_ray(
+                        pivot,
+                        dir,
+                        offset.length(),
+                        true,
+                        &avian3d::prelude::SpatialQueryFilter::from_mask(
+                            game_shared::physics::GameLayer::World,
+                        ),
+                    )
+                })
+                .map_or(offset.length(), |hit| (hit.distance - 0.3).max(1.0));
+            pivot + offset.normalize_or_zero() * distance
+        } else {
+            view.eye
+        };
+        transform.rotation = rotation;
+        spectator.position = transform.translation;
+        return;
+    }
+
+    if let Ok((render, _)) = soldier.single() {
         let eye = render.eye_position();
         transform.translation = if third_person.0 {
             // Over the shoulder, pulled in if a wall is in the way.

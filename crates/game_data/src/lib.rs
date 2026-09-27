@@ -16,6 +16,7 @@ pub mod object;
 pub mod soldier;
 pub mod sound;
 pub mod vegetation;
+pub mod vehicle;
 pub mod weapon;
 
 pub use effect::*;
@@ -25,6 +26,7 @@ pub use object::*;
 pub use soldier::*;
 pub use sound::*;
 pub use vegetation::*;
+pub use vehicle::*;
 pub use weapon::*;
 
 #[derive(Debug, thiserror::Error)]

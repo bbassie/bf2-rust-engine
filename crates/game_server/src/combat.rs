@@ -772,6 +772,35 @@ fn damage_soldiers(
     }
 }
 
+/// A projectile fired by something other than a soldier's own weapon handling (vehicle guns).
+/// `ignore` is the collider it starts inside and must not hit (the firing vehicle).
+pub fn spawn_projectile(
+    commands: &mut Commands,
+    weapon: Arc<WeaponDesc>,
+    shooter: Entity,
+    shooter_player: Entity,
+    ignore: Option<Entity>,
+    origin: Vec3,
+    direction: Vec3,
+) {
+    let fuse = weapon.projectile.time_to_live;
+    let velocity = direction * weapon.projectile.velocity;
+    commands.spawn((
+        Live {
+            weapon,
+            weapon_index: u8::MAX,
+            shooter,
+            shooter_player,
+            hitbox: ignore,
+            travelled: 0.0,
+            age: 0.0,
+            fuse,
+            guided: false,
+        },
+        ProjectileMotion::new(origin, velocity, 0.0),
+    ));
+}
+
 /// Soldiers whose health ran out some other way (scripts, and later falls and crashes).
 fn kill_the_dead(
     mut commands: Commands,

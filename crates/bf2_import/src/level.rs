@@ -20,13 +20,14 @@ use game_data::{
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{audio, coords, destruction, meshes::MeshConverter, roads, terrain, weapons};
+use crate::{audio, coords, destruction, meshes::MeshConverter, roads, terrain, vehicles, weapons};
 
 pub struct LevelReport {
     pub statics: usize,
     pub roads: usize,
     pub kits: usize,
     pub weapons: usize,
+    pub vehicles: usize,
     pub templates: usize,
     pub meshes: usize,
     pub failed_meshes: Vec<String>,
@@ -175,15 +176,28 @@ pub fn import_level(
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
 
+    // Vehicles the spawners of any layout create.
+    let mut vehicle_names: Vec<String> = desc
+        .game_modes
+        .iter()
+        .flat_map(|g| &g.vehicle_spawners)
+        .flat_map(|s| s.templates.iter().flatten().cloned())
+        .collect();
+    vehicle_names.sort();
+    vehicle_names.dedup();
+    let missing_templates = interp.missing_templates.keys().cloned().collect();
+    let vehicles = vehicles::import(&mut interp, &converter, localization, &vehicle_names, out)?;
+
     Ok(LevelReport {
         statics: desc.statics.len(),
         roads: desc.roads.len(),
         kits: kit_count,
         weapons: weapon_count,
+        vehicles: vehicles.len(),
         templates: objects.values().filter(|o| !o.parts.is_empty()).count(),
         meshes: *mesh_count.lock().unwrap(),
         failed_meshes: failed.into_inner().unwrap(),
-        missing_templates: interp.missing_templates.keys().cloned().collect(),
+        missing_templates,
         game_modes: desc
             .game_modes
             .iter()

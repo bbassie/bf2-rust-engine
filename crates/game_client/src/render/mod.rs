@@ -13,6 +13,7 @@ pub mod scope;
 mod soldiers;
 mod statics;
 mod terrain;
+mod vehicles;
 pub mod viewmodel;
 
 pub struct RenderPlugin;
@@ -28,6 +29,7 @@ impl Plugin for RenderPlugin {
             soldiers::SoldierRenderPlugin,
             statics::StaticRenderPlugin,
             viewmodel::ViewModelPlugin,
+            vehicles::VehicleRenderPlugin,
             scope::ScopePlugin,
         ))
         .add_plugins((destruction::DestructionRenderPlugin, projectiles::ProjectileRenderPlugin));

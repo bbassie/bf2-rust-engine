@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod soldier;
 pub mod squad;
 pub mod statics;
+pub mod vehicle;
 pub mod weapons;
 
 /// Simulation rate for gameplay and physics.
@@ -45,6 +46,7 @@ impl Plugin for SharedPlugin {
                 soldier::SoldierPlugin,
                 level::LevelPlugin,
                 weapons::WeaponsPlugin,
+                vehicle::VehiclePlugin,
             ));
     }
 }

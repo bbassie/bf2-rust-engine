@@ -83,6 +83,35 @@ is deterministic enough that corrections are normally exactly zero.
 Rendering never touches simulated entities: soldier visuals are separate entities placed
 from `SoldierRender` each frame, so smoothing never moves hitboxes.
 
+### Vehicles
+
+`bf2-import` turns every vehicle a level's spawners use into `vehicles/<name>.ron`
+(`game_data::VehicleDesc`): a part tree (hull, turret, barrel, wheels, ...) with rest
+placements and meshes, joints (which input turns which axis within which limits), wheels
+(radius measured from the mesh, BF2 spring strength/damping), seats (where the occupant sits,
+looks from and gets out), entry points, guns and physics values in our own units (mass,
+top speed, drive and brake force, grip). Only land vehicles so far.
+
+- **Server** (`game_server::vehicles`): spawners create vehicles for the team holding their
+  control point and respawn them when they are gone or abandoned. The use button near an
+  entry point takes the first free seat, F1..F8 change seats, use again gets out beside the
+  vehicle. A seated soldier stays alive but `apply_inputs` skips it: its `InputFrame` goes to
+  the vehicle's `SeatInputs`, and it is carried along at its seat every tick.
+- **Simulation** (`game_shared::vehicle`, server only): each vehicle is an avian dynamic body
+  (compound of convex hulls of the hull and turret collision). Per wheel a raycast spring
+  holds it up; tyres cancel sideways sliding up to their grip and push with the engine force
+  (falling off towards top speed) or brake. Tracked vehicles instead hold both tracks to a
+  commanded speed and turn rate (skid steering). Turrets and barrels turn towards the
+  gunner's aim (the world direction of their view) at their BF2 speeds within their limits.
+- **Replication**: `Vehicle` (template name), `VehicleMotion` (pose and velocity),
+  `VehicleState` (joint angles, suspension) and `Seated` (on the soldier). Clients show
+  vehicles 100 ms in the past, interpolated; there is **no vehicle prediction yet**, so a
+  driver on a remote server sees the vehicle respond one round trip plus 100 ms after the
+  input (hosting: immediately, avian interpolates between ticks).
+- **Client**: parts are drawn with the static mesh pipeline and posed from the replicated
+  joints and wheels; the camera uses the seat's camera point (first person) or chases the
+  vehicle (V). In seats that don't aim, the view turns with the vehicle.
+
 ### Bots
 
 Bots are `Player`s whose `InputBuffer` is filled by a `BotBrain` instead of the network.

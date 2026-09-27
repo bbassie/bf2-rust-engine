@@ -85,7 +85,7 @@ fn floats<const N: usize>(template: &Template, method: &str) -> Option<[f32; N]>
     (values.len() >= N).then(|| std::array::from_fn(|i| values[i]))
 }
 
-fn weapon_desc(
+pub(crate) fn weapon_desc(
     interp: &mut Interpreter,
     converter: &MeshConverter,
     sound_converter: &SoundConverter,

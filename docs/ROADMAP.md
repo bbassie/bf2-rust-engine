@@ -70,12 +70,26 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Squads: create/join/leave, squad leader spawning, bots in squads
 - Commander: orders to squads, commander assets
 
-## M3: Vehicles
+## M3: Vehicles (in progress)
 
-- Vehicle template trees: rigid body root, rotational bundles (turrets), seats, entry points
-- Engines, gearboxes and springs for land vehicles; wings for jets; rotors for helicopters;
-  floating for boats. Tune against the original game's behaviour.
-- Vehicle weapons, cameras, damage, wrecks, vehicle spawners
+- [x] Vehicle template trees imported (`vehicles/<name>.ron`): part tree, joints (turrets,
+  barrels, steering), wheels, seats with soldier/camera/exit points, entry points, guns
+- [x] Land vehicles as avian rigid bodies: raycast suspension, tyre grip, engine and brakes;
+  skid-steered tracks. HMMWV/Vodnik, LAV-25/BTR-90/WZ551, M1A2/T-90/Type 98 and the rest of
+  the land vehicles drive (14 types over Karkand, Dalian Plant and Gulf of Oman)
+- [x] Vehicle spawners per control point owner, respawn after destruction or abandonment
+- [x] Entering (E), seat switching (F1..F8), exiting beside the vehicle; seated soldiers ride
+  along and capture flags
+- [x] Seat cameras (first person) and chase camera (V); turrets follow the gunner's aim
+- [x] Vehicle guns (main guns, coaxial and pintle MGs, firing ports), hit points through an
+  excerpt of the material damage table, wrecks
+- Vehicle prediction on clients (vehicles are interpolated 100 ms in the past for now)
+- Engine/gearbox/tyre model fitted to the original (`newCar2.*`, gear ratios); per-face armour
+  materials (front/side/rear/tracks) for direct hits
+- Wings for jets, rotors for helicopters, floating for boats and amphibious APCs
+- Seated soldier poses, first-person cockpit models (geom 0), track texture scrolling,
+  guided missiles (TOW/HJ8), smoke launchers, vehicle HUD (weapon, ammo, heat)
+- Stationary weapons (TOW, bipods, artillery) and commander assets
 
 ## M4: BF2-style bots
 

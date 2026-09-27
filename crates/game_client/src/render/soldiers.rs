@@ -639,15 +639,16 @@ fn attach_weapons(
 
 fn update_visuals(
     third_person: Res<crate::camera::ThirdPerson>,
-    soldiers: Query<(&SoldierRender, Has<LocalSoldier>)>,
+    soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Has<game_shared::vehicle::Seated>)>,
     mut visuals: Query<(&SoldierVisual, &mut Transform, &mut Visibility)>,
 ) {
     for (visual, mut transform, mut visibility) in &mut visuals {
-        let Ok((render, local)) = soldiers.get(visual.soldier) else {
+        let Ok((render, local, seated)) = soldiers.get(visual.soldier) else {
             continue;
         };
-        // First person: don't draw our own body inside the camera.
-        visibility.set_if_neq(if local && !third_person.0 {
+        // First person: don't draw our own body inside the camera. Seated soldiers have no
+        // seated poses yet.
+        visibility.set_if_neq(if (local && !third_person.0) || seated {
             Visibility::Hidden
         } else {
             Visibility::Inherited
