@@ -364,10 +364,10 @@ fn fire_weapons(
         let local = Quat::from_rotation_y(-motion.yaw) * motion.velocity;
         state.tick(&weapon.deviation, dt, -local.z, local.x, !motion.grounded);
 
-        // Hands are on the rungs while climbing.
+        // Not on ladders, nor just after a jump or getting up.
         let trigger = Trigger {
-            fire: input.pressed(Buttons::FIRE) && !motion.climbing,
-            alt: input.pressed(Buttons::AIM) && !motion.climbing,
+            fire: input.pressed(Buttons::FIRE) && motion.can_fire(),
+            alt: input.pressed(Buttons::AIM) && motion.can_fire(),
             reload: input.pressed(Buttons::RELOAD),
             lowered: input.pressed(Buttons::SPRINT) && input.movement[1] > 64,
         };

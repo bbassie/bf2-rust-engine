@@ -34,8 +34,8 @@ use bf2_formats::{
 };
 use game_data::{
     Blend, Curve, DebrisPiece, DecalDesc, DecalTable, EffectDesc, EffectSound, EmitShape,
-    EmitterDesc, Facing, FlashMeshDesc, Frames, ImpactTable, LightDesc, ObjectDesc, Spread,
-    SurfaceMap, Views, WeaponEffectTable, WeaponEffects,
+    EmitterDesc, Facing, FlashLayer, FlashMeshDesc, FlashbangDesc, Frames, GadgetAssets, GasDesc,
+    ImpactTable, LightDesc, ObjectDesc, Spread, SurfaceMap, Views, WeaponEffectTable, WeaponEffects,
 };
 use glam::{Affine3A, Vec3};
 
@@ -110,6 +110,7 @@ pub fn import(
     if let Err(err) = merge_weapon_effects(out, weapons) {
         log::warn!("weapons.ron: {err:#}");
     }
+    import_gadget_assets(converter, out);
     let decals = decal_table(interp, converter, decal_cells);
     if let Err(err) = game_data::write_ron(out.join("effects/decals.ron"), &decals) {
         log::warn!("decals.ron: {err}");
@@ -196,12 +197,72 @@ fn weapon_entry(world: &World, weapon: &Template) -> Option<WeaponEffects> {
         effects.muzzle = Some(muzzle.template.to_ascii_lowercase());
         effects.muzzle_offset = coords::position(muzzle.position.unwrap_or_default());
     }
-    effects.detonation = weapon
-        .get_str("projectiletemplate")
-        .and_then(|p| world.template(p))
+    let projectile = weapon.get_str("projectiletemplate").and_then(|p| world.template(p));
+    effects.detonation = projectile
         .and_then(|p| p.get_str("detonation.endeffecttemplate"))
         .map(str::to_ascii_lowercase);
+    effects.flashbang = projectile.and_then(flashbang);
+    effects.night_vision = flag(weapon, "isnightvision");
+    effects.gas_mask = flag(weapon, "isgasmask");
     Some(effects)
+}
+
+/// A flashbang projectile's `detonation.flashbang*` settings.
+fn flashbang(projectile: &Template) -> Option<FlashbangDesc> {
+    let get = |name: &str| projectile.get_f32(&format!("detonation.{name}"));
+    get("flashbangbillboardmaxalpha")?;
+    let layer = |kind: &str| {
+        let pair = |a: &str, b: &str, default: f32| {
+            let key = |part: &str| format!("flashbang{kind}{part}");
+            [get(&key(a)).unwrap_or(default), get(&key(b)).unwrap_or(default)]
+        };
+        FlashLayer {
+            alpha: pair("minalpha", "maxalpha", 1.0),
+            ramp: get(&format!("flashbang{kind}maxramptime")).unwrap_or(0.05),
+            hold: pair("minholdtime", "maxholdtime", 1.0),
+            heal: pair("minhealtime", "maxhealtime", 1.0),
+        }
+    };
+    let radius = get("explosionradius").unwrap_or(20.0);
+    Some(FlashbangDesc {
+        radius,
+        night_vision_radius: get("flashbangradiuswithnightvision").unwrap_or(radius),
+        inner_radius: get("explosioninnerconeradius").unwrap_or(0.0),
+        view_cone: get("explosionsoldierlineofsight").unwrap_or(180.0),
+        unseen_strength: get("explosionlineofsightminimumdamage").unwrap_or(0.0),
+        white: layer("billboard"),
+        glow: layer("additiveglow"),
+        afterimage: layer("motionblur"),
+    })
+}
+
+/// The night vision ramp and the gadgets' sounds, wherever this mod has them (most are
+/// Special Forces'). Merged with what earlier levels found.
+fn import_gadget_assets(converter: &MeshConverter, out: &Path) {
+    let path = out.join("effects/gadgets.ron");
+    let mut assets: GadgetAssets = game_data::read_ron(&path).unwrap_or_default();
+    let vfs = converter.vfs;
+    let sound = |file: &str| crate::audio::sound(vfs, file, &converter.out);
+    let found = |current: &mut Option<String>, new: Option<String>| {
+        if new.is_some() {
+            *current = new;
+        }
+    };
+    found(&mut assets.night_vision_gradient, converter.texture("common/textures/night_vision_gradient"));
+    found(&mut assets.night_vision_on, sound("common/sound/nightvision_activate.wav"));
+    found(&mut assets.tinnitus, sound("common/sound/tinnitus.wav"));
+    found(&mut assets.mask_breathing, sound("common/sound/gasmask.wav"));
+    found(&mut assets.mask_on, sound("common/sound/cough_mask_transition.wav"));
+    let mut coughs = vec!["common/sound/cough_1.wav".to_string()];
+    coughs.extend((1..=4).map(|i| format!("objects/soldiers/common/sound/cough/cough_0{i}.wav")));
+    for cough in coughs.iter().filter_map(|c| sound(c)) {
+        if !assets.coughs.contains(&cough) {
+            assets.coughs.push(cough);
+        }
+    }
+    if let Err(err) = game_data::write_ron(&path, &assets) {
+        log::warn!("gadgets.ron: {err}");
+    }
 }
 
 fn merge_weapon_effects(out: &Path, table: WeaponEffectTable) -> Result<()> {
@@ -388,7 +449,15 @@ impl EffectBuilder<'_> {
             let transform = transform * local;
             match child_template.ty.to_ascii_lowercase().as_str() {
                 "effectbundle" => self.collect(child_template, transform, effect, depth + 1),
-                "spriteparticlesystem" => effect.emitters.extend(self.sprites(child_template, transform, Facing::Camera)),
+                "spriteparticlesystem" => {
+                    effect.emitters.extend(self.sprites(child_template, transform, Facing::Camera));
+                    if let Some(gas) = gas_cloud(child_template) {
+                        let widest = effect.gas.is_none_or(|g| gas.radius[1] > g.radius[1]);
+                        if widest {
+                            effect.gas = Some(gas);
+                        }
+                    }
+                }
                 "nonscreenalignedparticlesystem" => {
                     effect.emitters.extend(self.sprites(child_template, transform, Facing::Horizontal))
                 }
@@ -655,6 +724,16 @@ fn flash_mesh(converter: &MeshConverter, path: &str) -> Option<FlashMeshDesc> {
         life: 0.02,
         intensity: 1.0,
         views: Views::Both,
+    })
+}
+
+/// `gasCloudType TearGas` and its damage and spread on a particle system.
+fn gas_cloud(t: &Template) -> Option<GasDesc> {
+    t.get_str("gascloudtype").filter(|kind| kind.eq_ignore_ascii_case("teargas"))?;
+    Some(GasDesc {
+        damage: f(t, "gasclouddamage", 0.0),
+        radius: [f(t, "mingascloudradius", 1.0), f(t, "maxgascloudradius", 5.0)],
+        spread_time: f(t, "gascloudradiustime", 1.0),
     })
 }
 

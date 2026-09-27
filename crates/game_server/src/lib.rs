@@ -37,6 +37,7 @@ pub mod admin;
 pub mod ai;
 pub mod bots;
 pub mod chat;
+pub mod commander;
 pub mod combat;
 pub mod conquest;
 pub mod discovery;
@@ -127,6 +128,7 @@ impl Plugin for GameServerPlugin {
                 admin::AdminPlugin,
                 chat::ChatPlugin,
                 radio::RadioPlugin,
+                commander::CommanderPlugin,
                 discovery::DiscoveryPlugin,
                 rotation::RotationPlugin,
                 stats::StatsPlugin,

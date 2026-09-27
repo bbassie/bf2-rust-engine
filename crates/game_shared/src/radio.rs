@@ -43,6 +43,20 @@ pub enum RadioCommand {
     SpottedTank,
     SpottedAntiAir,
     SpottedHelicopter,
+    /// The commander's lines: orders to a squad, assets called in, the post changing hands,
+    /// assets lost.
+    OrderAttack,
+    OrderDefend,
+    OrderMove,
+    ArtilleryStrike,
+    UavOnline,
+    ScanInitiated,
+    SupplyDrop,
+    NewCommander,
+    CommanderResigned,
+    ArtilleryDestroyed,
+    UavDestroyed,
+    RadarDestroyed,
 }
 
 impl RadioCommand {
@@ -81,6 +95,18 @@ impl RadioCommand {
             RadioCommand::SpottedTank => "tank_spotted",
             RadioCommand::SpottedAntiAir => "aa_spotted",
             RadioCommand::SpottedHelicopter => "heli_spotted",
+            RadioCommand::OrderAttack => "attack_position",
+            RadioCommand::OrderDefend => "defend",
+            RadioCommand::OrderMove => "move",
+            RadioCommand::ArtilleryStrike => "artillery_fire",
+            RadioCommand::UavOnline => "uav_online",
+            RadioCommand::ScanInitiated => "satellite_scan_initiated",
+            RadioCommand::SupplyDrop => "supplies_dropinitiated",
+            RadioCommand::NewCommander => "new_commander",
+            RadioCommand::CommanderResigned => "commander_resign",
+            RadioCommand::ArtilleryDestroyed => "artillery_destroyed",
+            RadioCommand::UavDestroyed => "uav_destroyed",
+            RadioCommand::RadarDestroyed => "satellite_destroyed",
         }
     }
 
@@ -105,7 +131,38 @@ impl RadioCommand {
             RadioCommand::SpottedTank => "Enemy tank",
             RadioCommand::SpottedAntiAir => "Enemy AA",
             RadioCommand::SpottedHelicopter => "Enemy helicopter",
+            RadioCommand::OrderAttack => "Attack this position",
+            RadioCommand::OrderDefend => "Defend this position",
+            RadioCommand::OrderMove => "Move to this position",
+            RadioCommand::ArtilleryStrike => "Artillery inbound",
+            RadioCommand::UavOnline => "UAV online",
+            RadioCommand::ScanInitiated => "Satellite scan initiated",
+            RadioCommand::SupplyDrop => "Supplies incoming",
+            RadioCommand::NewCommander => "We have a new commander",
+            RadioCommand::CommanderResigned => "The commander post is available",
+            RadioCommand::ArtilleryDestroyed => "Our artillery is down",
+            RadioCommand::UavDestroyed => "Our UAV trailer is down",
+            RadioCommand::RadarDestroyed => "Our radar is down",
         }
+    }
+
+    /// Said by the commander (his recordings, over the radio only).
+    pub fn is_commander(self) -> bool {
+        matches!(
+            self,
+            RadioCommand::OrderAttack
+                | RadioCommand::OrderDefend
+                | RadioCommand::OrderMove
+                | RadioCommand::ArtilleryStrike
+                | RadioCommand::UavOnline
+                | RadioCommand::ScanInitiated
+                | RadioCommand::SupplyDrop
+                | RadioCommand::NewCommander
+                | RadioCommand::CommanderResigned
+                | RadioCommand::ArtilleryDestroyed
+                | RadioCommand::UavDestroyed
+                | RadioCommand::RadarDestroyed
+        )
     }
 
     /// Reports an enemy: heard by the whole team, not just the squad.
@@ -159,6 +216,9 @@ pub struct RadioMessage {
     /// What was spotted.
     #[entities]
     pub target: Option<Entity>,
+    /// Only for this squad of the speaker's team (orders).
+    #[serde(default)]
+    pub squad: Option<u8>,
 }
 
 /// On a soldier or vehicle a team spotted. Replicated (to everyone: clients show it to the

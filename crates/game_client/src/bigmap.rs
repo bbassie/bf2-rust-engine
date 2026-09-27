@@ -12,7 +12,7 @@ use game_shared::{
 
 use crate::{
     camera::PlayerCamera,
-    conquest_hud::{ENEMY, FRIENDLY, SQUAD, team_color},
+    conquest_hud::{FRIENDLY, SQUAD, team_color},
     deploy::DeployScreen,
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
@@ -164,7 +164,7 @@ fn update_big_map(
     image: Single<Entity, With<BigMapImage>>,
     mut icons: Query<(Entity, &BigMapIcon, &mut Node, &mut BackgroundColor), Without<BigMapHeading>>,
     mut heading: Single<(&mut Node, &mut UiTransform), With<BigMapHeading>>,
-    spotted: Res<crate::radio::SpottedTargets>,
+    markers: Res<crate::map_markers::MapMarkers>,
 ) {
     let Some(level) = level else {
         return;
@@ -196,9 +196,9 @@ fn update_big_map(
         }
     }
 
-    // Enemies our team spotted.
-    for &(entity, position) in &spotted.0 {
-        wanted.insert(entity, (position, ENEMY, 9.0, None));
+    // Spotted enemies, orders, the commander's assets.
+    for marker in &markers.0 {
+        wanted.insert(marker.key, (marker.position, marker.color, marker.size + 2.0, marker.label.clone()));
     }
 
     for (icon_entity, icon, mut node, mut background) in &mut icons {

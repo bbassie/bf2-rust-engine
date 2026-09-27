@@ -73,7 +73,7 @@ fn spawn_summary(mut commands: Commands) {
                 border_radius: BorderRadius::all(px(10)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.04, 0.05, 0.07, 0.85)),
+            BackgroundColor(Color::srgba(0.04, 0.05, 0.07, 0.95)),
         ));
 }
 

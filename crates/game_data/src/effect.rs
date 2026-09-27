@@ -27,6 +27,20 @@ pub struct EffectDesc {
     pub debris: Vec<DebrisPiece>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sounds: Vec<EffectSound>,
+    /// The cloud is gas that hurts those who breathe it without a mask (tear gas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gas: Option<GasDesc>,
+}
+
+/// A gas cloud (BF2 `gasCloudType` on an effect's particle systems).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct GasDesc {
+    /// Hit points per second to those inside without a gas mask (BF2 `gasCloudDamage`;
+    /// the unit is inferred).
+    pub damage: f32,
+    /// The cloud grows from `radius[0]` to `radius[1]` meters over `spread_time` seconds.
+    pub radius: [f32; 2],
+    pub spread_time: f32,
 }
 
 /// Which views show a part of an effect: the shooter's own muzzle flash has a first-person
@@ -360,6 +374,69 @@ pub struct WeaponEffects {
     /// Effect where the projectile detonates (grenades, rockets); replaces the impact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detonation: Option<String>,
+    /// Night vision goggles (BF2 `isNightVision`): an item that is switched on, not fired.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub night_vision: bool,
+    /// A gas mask (BF2 `isGasMask`): put on to breathe in gas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gas_mask: bool,
+    /// The projectile is a flashbang: how it blinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flashbang: Option<FlashbangDesc>,
+}
+
+/// How a flashbang blinds (BF2 `detonation.flashbang*`, `explosionSoldierLineOfSight*`).
+/// Its strength `s` (0..1) falls off from `inner_radius` to `radius` and is cut to
+/// `unseen_strength` for those not facing it; each layer ramps up to `alpha` at `s`, holds,
+/// then heals.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct FlashbangDesc {
+    pub radius: f32,
+    /// With night vision on, it reaches this far.
+    pub night_vision_radius: f32,
+    /// Full strength within.
+    pub inner_radius: f32,
+    /// Degrees of the view cone that counts as facing it.
+    pub view_cone: f32,
+    pub unseen_strength: f32,
+    /// A white sheet over the view.
+    pub white: FlashLayer,
+    /// A glow added on top.
+    pub glow: FlashLayer,
+    /// The image burnt in at the moment of the flash, fading out.
+    pub afterimage: FlashLayer,
+}
+
+/// One layer of a flashbang's effect; each pair is `[at s = 0, at s = 1]`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct FlashLayer {
+    pub alpha: [f32; 2],
+    /// Seconds to reach full alpha.
+    pub ramp: f32,
+    pub hold: [f32; 2],
+    pub heal: [f32; 2],
+}
+
+/// `effects/gadgets.ron`: files of the Special Forces gadgets' look and sound.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GadgetAssets {
+    /// Brightness → color ramp of night vision (a 1D texture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_vision_gradient: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_vision_on: Option<String>,
+    /// The ring in the ears after a blast or flashbang.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tinnitus: Option<String>,
+    /// Coughing in tear gas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coughs: Vec<String>,
+    /// Breathing through the gas mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_breathing: Option<String>,
+    /// Putting the gas mask on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_on: Option<String>,
 }
 
 /// `levels/<name>/surfaces.ron`: materials of the level's surfaces, for impact effects.

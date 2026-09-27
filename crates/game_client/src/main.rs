@@ -31,11 +31,13 @@ mod bigmap;
 mod camera;
 mod chat;
 mod combat;
+mod commander;
 mod conquest_hud;
 mod deploy;
 mod effects;
 mod hud;
 mod local_input;
+mod map_markers;
 mod menu;
 mod minimap;
 mod nav_debug;
@@ -230,6 +232,8 @@ fn main() -> AppExit {
         summary::SummaryPlugin,
         wounded::WoundedPlugin,
         radio::RadioPlugin,
+        map_markers::MapMarkersPlugin,
+        commander::ClientCommanderPlugin,
     ))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).

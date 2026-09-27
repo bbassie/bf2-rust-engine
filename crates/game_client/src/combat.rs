@@ -25,7 +25,7 @@ use crate::{
     effects::{EffectLibrary, SpawnDecal, SpawnEffect, SurfaceQuery, decals::Decals},
     local_input::{InputHistory, LocalInputSystems, LookState},
     net::{LocalPlayer, LocalSoldier},
-    prediction::{INTERPOLATION_DELAY, SoldierRender},
+    prediction::{INTERPOLATION_DELAY, Predicted, SoldierRender},
     render::scope::{WeaponPart, Zoom},
 };
 
@@ -331,13 +331,14 @@ fn predict_local_shots(
     mut feedback: ResMut<CombatFeedback>,
     mut selection: ResMut<WeaponSelection>,
     mut soldier: Query<
-        (&SoldierMotion, &Loadout, Ref<Inventory>, &mut LocalWeapon),
+        (&SoldierMotion, &Loadout, Ref<Inventory>, &mut LocalWeapon, Option<&Predicted>),
         (With<LocalSoldier>, Without<game_shared::vehicle::Seated>),
     >,
     mut shots: MessageWriter<LocalShot>,
     mut launches: MessageWriter<LocalLaunch>,
 ) {
-    let (Some(input), Ok((motion, loadout, inventory, mut local))) = (history.latest(), soldier.single_mut()) else {
+    let (Some(input), Ok((motion, loadout, inventory, mut local, predicted))) = (history.latest(), soldier.single_mut())
+    else {
         return;
     };
     let dt = time.delta_secs();
@@ -360,10 +361,11 @@ fn predict_local_shots(
     let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
     feedback.spread = cone;
 
-    // Hands are on the rungs while climbing.
+    // Not on ladders, nor just after a jump or getting up (as predicted).
+    let can_fire = predicted.map_or(motion, |p| p.motion()).can_fire();
     let trigger = Trigger {
-        fire: input.pressed(Buttons::FIRE) && !motion.climbing,
-        alt: input.pressed(Buttons::AIM) && !motion.climbing,
+        fire: input.pressed(Buttons::FIRE) && can_fire,
+        alt: input.pressed(Buttons::AIM) && can_fire,
         reload: input.pressed(Buttons::RELOAD),
         lowered: input.pressed(Buttons::SPRINT) && input.movement[1] > 64,
     };

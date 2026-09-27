@@ -30,13 +30,15 @@ use game_shared::{
     level::LoadedLevel,
     projectile::{GRAVITY, Smoke},
     protocol::{ControlledBy, Player, Team},
+    revive::Downed,
     soldier::{Health, Soldier, SoldierMotion, Stance},
     squad::SquadMember,
-    vehicle::Seated,
+    vehicle::{Seated, Vehicle, VehicleMotion},
     weapons::{Armory, Inventory, Loadout, cooks},
 };
 
 use crate::{
+    abilities::{Gadget, PADDLES_REACH, Wounded, gadget},
     AppliedInput, Controls, InputBuffer, ServerSettings, ServerSimSystems, balanced_team,
     ai::{
         self, AiData,
@@ -109,6 +111,14 @@ const APPROACH_DISTANCE: f32 = 60.0;
 const GRENADE_SAFETY: f32 = 9.0;
 /// Bots keep this far from teammates while moving, meters.
 const CROWD_DISTANCE: f32 = 1.2;
+/// Stamina bots keep for fights and escapes when sprinting.
+const SPRINT_RESERVE: f32 = 0.35;
+/// Vehicles faster than this run soldiers over, m/s (see `roadkill`).
+const DANGEROUS_SPEED: f32 = 3.5;
+/// How far medics go to revive someone, meters, and how much they want to (BF2's revive
+/// behaviour weight is 3, fire 7.5).
+const REVIVE_DISTANCE: f32 = 35.0;
+const REVIVE_UTILITY: f32 = 4.5;
 
 /// Per-minute movement statistics, logged to see how well bots get around.
 #[derive(Resource, Default)]
@@ -161,6 +171,9 @@ enum Activity {
     Search { at: Vec3, time: f32 },
     /// Throwing a grenade at `at`, `time` seconds into it.
     Throw { at: Vec3, time: f32, weapon: u8 },
+    /// Medics: to a critically wounded teammate and shocking him back to life, for at most
+    /// `time` more seconds.
+    Revive { soldier: Entity, time: f32 },
 }
 
 /// How a bot stands while shooting.
@@ -181,6 +194,8 @@ pub struct BotBrain {
     /// Loadout indices of the main weapon and of a frag grenade.
     primary: u8,
     grenade: Option<u8>,
+    /// Medics: the loadout index of the shock paddles.
+    paddles: Option<u8>,
 
     /// Enemy soldier being engaged.
     target: Option<Entity>,
@@ -237,6 +252,8 @@ pub struct BotBrain {
     jump_held: bool,
     /// On a ladder last tick.
     climbing: bool,
+    /// Sprinting while stamina lasts (see `act`).
+    sprinting: bool,
 
     goal: Option<Vec3>,
     /// Walking straight to the goal without a path; and the goal that was checked for.
@@ -272,6 +289,7 @@ impl Default for BotBrain {
             soldier: None,
             primary: 0,
             grenade: None,
+            paddles: None,
             target: None,
             last_seen: None,
             scan_timer: fastrand::f32() * SCAN_INTERVAL,
@@ -304,6 +322,7 @@ impl Default for BotBrain {
             spawn_on_leader: false,
             jump_held: false,
             climbing: false,
+            sprinting: true,
             goal: None,
             direct: false,
             direct_goal: None,
@@ -393,10 +412,13 @@ struct Senses<'w, 's> {
             Option<&'static AppliedInput>,
             Option<&'static Loadout>,
             Has<Seated>,
+            Has<Downed>,
         ),
         With<Soldier>,
     >,
     teams: Query<'w, 's, &'static Team>,
+    wounded: Wounded<'w, 's>,
+    vehicles: Query<'w, 's, &'static VehicleMotion, With<Vehicle>>,
 }
 
 impl Senses<'_, '_> {
@@ -462,6 +484,7 @@ impl BotBrain {
     fn new_life(&mut self, w: &Senses, me: &Me) {
         self.soldier = Some(me.soldier);
         self.primary = me.inventory.map_or(0, |i| i.active);
+        self.paddles = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Paddles));
         self.grenade = me.loadout.and_then(|l| {
             (0..l.weapons.len() as u8).find(|&i| {
                 // Frag grenades: thrown, on a fuse, no trigger (unlike mines).
@@ -573,6 +596,7 @@ impl BotBrain {
                 self.activity = Activity::Search { at, time: time - dt };
             }
             Activity::Throw { at, time, weapon } => self.throw(w, me, at, time, weapon, &mut intent, dt),
+            Activity::Revive { soldier, time } => self.revive(w, me, soldier, time, &mut intent, dt),
             Activity::Objective => self.objective(w, me, &mut intent, dt),
         }
 
@@ -625,9 +649,10 @@ impl BotBrain {
         let view = skill.view_angle();
         let mut candidates: Vec<(Entity, f32, Vec3, bool)> = Vec::new();
         let mut heard: Option<(f32, Vec3)> = None;
-        for (entity, motion, controlled_by, _, _, applied, _, seated) in &w.soldiers {
-            // TODO: fight vehicles and their crews; for now bots leave them alone.
-            if entity == me.soldier || seated || !w.is_enemy(controlled_by.0, me.team) {
+        for (entity, motion, controlled_by, _, _, applied, _, seated, downed) in &w.soldiers {
+            // TODO: fight vehicles and their crews; for now bots leave them alone. Nor do
+            // they shoot the critically wounded.
+            if entity == me.soldier || seated || downed || !w.is_enemy(controlled_by.0, me.team) {
                 continue;
             }
             let to = motion.position - position;
@@ -763,6 +788,7 @@ impl BotBrain {
             Activity::Cover { time, .. } if time > 0.0 => best = (6.0, self.activity),
             Activity::Flank { time, .. } if time > 0.0 => best = (3.0, self.activity),
             Activity::Search { time, .. } if time > 0.0 => best = (2.5, self.activity),
+            Activity::Revive { time, .. } if time > 0.0 => best = (REVIVE_UTILITY, self.activity),
             _ => {}
         }
         let consider = |best: &mut (f32, Activity), utility: f32, activity: Activity| {
@@ -797,9 +823,20 @@ impl BotBrain {
             }
         }
 
-        // TODO: kit abilities, once they exist: medics revive downed teammates nearby (BF2's
-        // revive weight is 3, like its medic assist) and drop medic bags for hurt ones;
-        // support bots drop ammo bags; badly hurt or empty bots go to them.
+        // Medics revive teammates down nearby, unless in a fight.
+        if self.paddles.is_some()
+            && REVIVE_UTILITY > best.0
+            && !matches!(self.activity, Activity::Revive { .. })
+            && let Some((soldier, _, _)) = w
+                .wounded
+                .downed_near(me.team, position, REVIVE_DISTANCE)
+                .into_iter()
+                .find(|(_, _, left)| *left > 3.0)
+        {
+            consider(&mut best, REVIVE_UTILITY, Activity::Revive { soldier, time: 20.0 });
+        }
+        // TODO: medics drop medic bags for hurt teammates and support bots ammo bags
+        // (`abilities::Wounded::hurt_near`, `abilities::gadget`); badly hurt bots go to them.
 
         // A grenade at enemies behind cover, or at one it can't get.
         if let Some(grenade) = self.grenade
@@ -874,6 +911,7 @@ impl BotBrain {
                     self.flank_cooldown = 20.0;
                 }
                 Activity::Throw { .. } => team_stats.grenades += 1,
+                Activity::Revive { .. } => team_stats.revives += 1,
                 _ => {}
             }
             self.activity = next;
@@ -1025,6 +1063,57 @@ impl BotBrain {
             return;
         }
         self.activity = Activity::Throw { at, time, weapon };
+    }
+
+    /// Which way to step out of the path of a vehicle about to run it over, if one is.
+    fn dodge_vehicles(&self, w: &Senses, me: &Me) -> Option<Vec3> {
+        let position = me.motion.position;
+        w.vehicles.iter().find_map(|vehicle| {
+            let velocity = flat(vehicle.velocity);
+            let speed = velocity.length();
+            let offset = flat(position - vehicle.position);
+            if speed < DANGEROUS_SPEED || offset.length() > 40.0 || (vehicle.position.y - position.y).abs() > 3.0 {
+                return None;
+            }
+            // When it passes closest, and how close.
+            let t = offset.dot(velocity) / (speed * speed);
+            let miss = offset - velocity * t;
+            ((0.0..2.5).contains(&t) && miss.length() < 4.0).then(|| {
+                let side = Vec3::new(-velocity.z, 0.0, velocity.x) / speed;
+                if miss.dot(side) >= 0.0 { side } else { -side }
+            })
+        })
+    }
+
+    /// Walks to a downed teammate with the paddles out and shocks him until he is back up
+    /// (or gone).
+    fn revive(&mut self, w: &Senses, me: &Me, soldier: Entity, time: f32, intent: &mut Intent, dt: f32) {
+        let body = w.soldiers.get(soldier).ok().filter(|s| s.8).map(|s| s.1.position);
+        let (Some(body), Some(paddles), true) = (body, self.paddles, time > 0.0) else {
+            self.activity = Activity::Objective;
+            return;
+        };
+        let distance = flat(body - me.motion.position).length();
+        if distance > 1.2 {
+            intent.goal = Some(Goal {
+                position: body,
+                tolerance: 1.0,
+                sprint: distance > 10.0,
+            });
+        }
+        if distance < 8.0 {
+            intent.weapon = Some(paddles);
+        }
+        if distance < PADDLES_REACH - 0.8 {
+            intent.look = Look::At(body + Vec3::Y * 0.2);
+            // A fresh press for every shock.
+            self.burst -= dt;
+            if self.burst <= 0.0 {
+                intent.buttons |= Buttons::FIRE;
+                self.burst = 0.6;
+            }
+        }
+        self.activity = Activity::Revive { soldier, time: time - dt };
     }
 
     /// The order this bot works on: its squad's, the flag its human leader is at, or the
@@ -1309,6 +1398,16 @@ impl BotBrain {
         } else {
             direction = intent.step;
         }
+        // Out of the way of vehicles coming at speed, friend or foe.
+        let dodging = !me.motion.climbing
+            && match self.dodge_vehicles(w, me) {
+                Some(away) => {
+                    direction = away;
+                    true
+                }
+                None => false,
+            };
+
         // Keep a little apart from teammates: crowds jam doorways, stairs and ladders. Being
         // held up by one isn't being stuck on the level.
         let mut queued = false;
@@ -1423,7 +1522,19 @@ impl BotBrain {
             if jump {
                 frame.buttons |= Buttons::JUMP;
             }
-            let sprint = intent.goal.is_some_and(|g| g.sprint) && movement.y > 0.7 && self.target.is_none();
+            // Sprint in bursts: start rested, stop with some stamina left for a fight or an
+            // escape (all of it may go running for cover or out of a vehicle's way).
+            let urgent = dodging || matches!(self.activity, Activity::Cover { .. });
+            let reserve = if urgent { 0.0 } else { SPRINT_RESERVE };
+            if me.motion.stamina <= reserve {
+                self.sprinting = false;
+            } else if me.motion.stamina > 0.8 || urgent {
+                self.sprinting = true;
+            }
+            let sprint = (intent.goal.is_some_and(|g| g.sprint) || dodging)
+                && movement.y > 0.7
+                && self.target.is_none()
+                && self.sprinting;
             if sprint && !frame.buttons.intersects(Buttons::CROUCH | Buttons::PRONE | Buttons::FIRE) {
                 frame.buttons |= Buttons::SPRINT;
             }
@@ -1699,11 +1810,12 @@ fn think(
     let mut covers = 3;
     for (player, mut brain, mut buffer, team, controls, member, mut deployment) in &mut bots {
         let soldier = controls.and_then(|c| w.soldiers.get(c.0).ok());
-        let Some((own, motion, _, inventory, health, _, loadout, seated)) = soldier else {
+        let Some((own, motion, _, inventory, health, _, loadout, seated, downed)) = soldier else {
             brain.while_dead(&w, player, *team, member.copied(), &mut deployment);
             continue;
         };
-        if seated {
+        // Down, the server ignores its input; in a vehicle, bots do nothing yet.
+        if seated || downed {
             // TODO: bots driving and gunning vehicles. They never get in by themselves.
             brain.seq = brain.seq.wrapping_add(1);
             buffer.push(InputFrame {

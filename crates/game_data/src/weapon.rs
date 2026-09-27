@@ -235,6 +235,31 @@ pub struct ProjectileDesc {
     /// Smoke grenades: the cloud they leave when they go off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke: Option<SmokeDesc>,
+    /// Where it sticks, a rope is strung (grappling hooks and ziplines).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope: Option<RopeDesc>,
+}
+
+/// A rope soldiers climb or ride, strung by a projectile (BF2 SF's `GrapplingHookRope` and
+/// `Zipline` templates).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct RopeDesc {
+    pub kind: RopeKind,
+    /// Meters: grappling ropes hang at most this far down, ziplines reach at most this far.
+    pub max_length: f32,
+    /// Seconds until the rope is gone.
+    pub lifetime: f32,
+    /// Climbing speed on it, m/s (grappling ropes).
+    #[serde(default)]
+    pub climb_speed: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RopeKind {
+    /// Hangs down from the hook: climbed up and down.
+    Grapple,
+    /// Stretched from the shooter to where it hit: slid down.
+    Zipline,
 }
 
 impl ProjectileDesc {

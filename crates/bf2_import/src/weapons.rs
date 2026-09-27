@@ -10,8 +10,8 @@ use bf2_formats::{
 };
 use game_data::{
     DetonatorDesc, DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, ProjectileDesc,
-    RecoilDesc, ReplenishDesc, ReplenishKind, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc, WeaponDesc,
-    WeaponSounds, ZoomDesc,
+    RecoilDesc, ReplenishDesc, ReplenishKind, RopeDesc, RopeKind, SmokeDesc, SoundDesc, TriggerBy, TriggerDesc,
+    WeaponDesc, WeaponSounds, ZoomDesc,
 };
 
 use crate::{meshes::MeshConverter, sounds::SoundConverter};
@@ -159,7 +159,10 @@ pub(crate) fn weapon_desc(
         fov_delay: f("zoom.changefovdelay", 0.0),
         out_after_fire: f("zoom.zoomoutafterfire", 0.0) != 0.0,
     };
-    let projectile = projectile_desc(interp, converter, t, projectile_template.as_ref(), mesh_3p.as_deref());
+    let mut projectile = projectile_desc(interp, converter, t, projectile_template.as_ref(), mesh_3p.as_deref());
+    if let Some(rope) = rope_desc(interp, t) {
+        rope_projectile(&mut projectile, rope);
+    }
 
     // Third-person animations were exported per weapon folder by the soldier import.
     let dir = t.source.split(':').next().unwrap_or_default();
@@ -440,7 +443,56 @@ fn projectile_desc(
         guidance_min_distance: f("follow.mindist"),
         trigger,
         smoke,
+        rope: None,
     }
+}
+
+/// BF2 SF's grappling hook throws a `GrapplingHookRope`; the zipline crossbow's shell leaves
+/// a `Zipline` (its `secondaryProjectileTemplate`) where it hits.
+fn rope_desc(interp: &mut Interpreter, weapon: &Template) -> Option<RopeDesc> {
+    let template = |interp: &mut Interpreter, method: &str| {
+        let name = weapon.get_str(method)?.trim_matches('"').to_string();
+        interp.ensure_template(&name);
+        let template = interp.world.template(&name).cloned();
+        Some((name.to_ascii_lowercase(), template))
+    };
+    if let Some((name, rope)) = template(interp, "projectiletemplate")
+        && (name == "grapplinghookrope" || rope.as_ref().is_some_and(|t| t.ty.eq_ignore_ascii_case("GrapplingHookRope")))
+    {
+        // The template is in the xpack's DummyObjectsXpack.con; its values as defaults.
+        let f = |method: &str, default: f32| rope.as_ref().and_then(|t| t.get_f32(method)).unwrap_or(default);
+        return Some(RopeDesc {
+            kind: RopeKind::Grapple,
+            max_length: f("setmaxropelength", 14.0),
+            lifetime: f("timeout", 25.0),
+            climb_speed: f("climbingspeed", 2.3),
+        });
+    }
+    let (_, zipline) = template(interp, "secondaryprojectiletemplate")?;
+    let zipline = zipline.filter(|t| t.ty.eq_ignore_ascii_case("Zipline"))?;
+    Some(RopeDesc {
+        kind: RopeKind::Zipline,
+        max_length: zipline.get_f32("setmaxziplinelength").unwrap_or(75.0),
+        lifetime: zipline.get_f32("timeout").unwrap_or(25.0),
+        climb_speed: 0.0,
+    })
+}
+
+/// How the rope's projectile flies: BF2 simulates the hook's rope as links thrown from the
+/// hand; here it is a thrown hook that catches on ledges (`minYNormal 0.5`). The zipline
+/// shell sticks wherever it hits.
+fn rope_projectile(projectile: &mut ProjectileDesc, rope: RopeDesc) {
+    match rope.kind {
+        RopeKind::Grapple => {
+            projectile.velocity = 20.0;
+            projectile.gravity = 1.0;
+            projectile.impact = Impact::Stick { max_angle: 60.0 };
+        }
+        RopeKind::Zipline => projectile.impact = Impact::Stick { max_angle: 180.0 },
+    }
+    // Long enough to land; it becomes the rope where it sticks.
+    projectile.time_to_live = 5.0;
+    projectile.rope = Some(rope);
 }
 
 /// Seconds until the last particle of an effect bundle is gone: the longest particle life

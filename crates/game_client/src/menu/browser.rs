@@ -294,7 +294,7 @@ pub(super) fn build_server_list(
 }
 
 /// Column widths of the server list.
-const COLUMNS: [f32; 4] = [210.0, 90.0, 90.0, 56.0];
+const COLUMNS: [f32; 4] = [190.0, 130.0, 90.0, 50.0];
 
 /// A server (or, without one, the header): a favourite star and a row that selects it.
 fn server_row(list: &mut ChildSpawnerCommands, entry: Option<&BrowserEntry>) {

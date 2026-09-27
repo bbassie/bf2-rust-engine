@@ -7,6 +7,7 @@ use bevy::{platform::collections::HashMap, prelude::*};
 use game_shared::{
     conquest::{Deployment, team_index},
     protocol::{Player, Team},
+    revive::Downed,
     soldier::{Health, SoldierMotion},
     squad::SquadMember,
     weapons::Armory,
@@ -33,11 +34,11 @@ pub struct SoldierInfo {
 pub struct SquadInfo {
     pub leader: Option<Entity>,
     pub leader_is_bot: bool,
-    /// The leader's soldier while he is alive.
+    /// The leader's soldier while he is alive and not down.
     pub leader_soldier: Option<SoldierInfo>,
     /// Members other than the leader, in a stable order: their places in the formation.
     pub members: Vec<Entity>,
-    /// Living soldiers of the squad, the leader's included.
+    /// Soldiers of the squad on their feet, the leader's included.
     pub alive: Vec<SoldierInfo>,
 }
 
@@ -76,7 +77,7 @@ pub struct SquadSnapshot {
     pub squads: HashMap<(Team, u8), SquadInfo>,
     /// Kit slot of every player, per team.
     pub kits: [Vec<(Entity, u8)>; 2],
-    /// Living soldiers, per team.
+    /// Soldiers on their feet, per team.
     pub soldiers: [Vec<SoldierInfo>; 2],
 }
 
@@ -86,7 +87,7 @@ pub fn snapshot(
         (Entity, &Team, Option<&SquadMember>, Option<&Controls>, Option<&BotBrain>, &Deployment),
         With<Player>,
     >,
-    soldiers: Query<(&SoldierMotion, Option<&Health>)>,
+    soldiers: Query<(&SoldierMotion, Option<&Health>), Without<Downed>>,
 ) {
     let snapshot = &mut *snapshot;
     snapshot.squads.clear();

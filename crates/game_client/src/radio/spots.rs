@@ -1,15 +1,17 @@
-//! Enemies our team spotted: a red marker over each on the HUD, with its distance, and
-//! [`SpottedTargets`] for the minimap and the big map. The server marks and unmarks them
+//! Enemies our team spotted: a red marker over each on the HUD, with its distance, and on
+//! the minimap and the big map ([`MapMarkers`]). The server marks and unmarks them
 //! (`Spotted`, replicated to everyone; only the spotting team's are shown).
 
 use bevy::prelude::*;
 use game_shared::{protocol::Team, radio::Spotted};
 
 use crate::{
-    camera::{CameraSystems, PlayerCamera},
+    camera::PlayerCamera,
+    conquest_hud::ENEMY,
+    map_markers::{MapMarker, MapMarkers, MarkerSystems},
     net::LocalPlayer,
-    prediction::{RenderStateSystems, SoldierRender},
-    vehicles::{VehicleView, VehicleViewSystems},
+    prediction::SoldierRender,
+    vehicles::VehicleView,
 };
 
 pub struct SpotsPlugin;
@@ -18,18 +20,11 @@ impl Plugin for SpotsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpottedTargets>()
             .add_systems(Startup, spawn_root)
-            .add_systems(
-                PostUpdate,
-                (find_targets, update_markers)
-                    .chain()
-                    .after(RenderStateSystems)
-                    .after(VehicleViewSystems)
-                    .after(CameraSystems),
-            );
+            .add_systems(PostUpdate, (find_targets, update_markers).chain().in_set(MarkerSystems));
     }
 }
 
-/// Where the enemies our team spotted are (feet or hull), for maps.
+/// Where the enemies our team spotted are (feet or hull).
 #[derive(Resource, Default)]
 pub struct SpottedTargets(pub Vec<(Entity, Vec3)>);
 
@@ -65,6 +60,7 @@ fn find_targets(
     local: Query<&Team, With<LocalPlayer>>,
     spotted: Query<(Entity, &Spotted, Option<&SoldierRender>, Option<&VehicleView>)>,
     mut targets: ResMut<SpottedTargets>,
+    mut markers: ResMut<MapMarkers>,
 ) {
     targets.0.clear();
     let Ok(&team) = local.single() else {
@@ -80,6 +76,13 @@ fn find_targets(
             _ => continue,
         };
         targets.0.push((entity, position));
+        markers.0.push(MapMarker {
+            key: entity,
+            position,
+            color: ENEMY,
+            size: 7.0,
+            label: None,
+        });
     }
 }
 

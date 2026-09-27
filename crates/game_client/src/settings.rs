@@ -340,10 +340,12 @@ pub enum Action {
     GiveUp,
     /// BF2's commo rose while held: radio messages, spotting.
     CommoRose,
+    /// The commander screen (toggles).
+    CommanderScreen,
 }
 
 impl Action {
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 33] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -367,6 +369,7 @@ impl Action {
         Action::ChatSquad,
         Action::GiveUp,
         Action::CommoRose,
+        Action::CommanderScreen,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
         Action::WeaponSlot(3),
@@ -404,6 +407,7 @@ impl Action {
             Action::ChatSquad => "Chat to squad".into(),
             Action::GiveUp => "Give up when wounded".into(),
             Action::CommoRose => "Commo rose (radio)".into(),
+            Action::CommanderScreen => "Commander screen".into(),
         }
     }
 
@@ -452,6 +456,7 @@ impl Action {
             Action::ChatSquad => Key(KeyCode::KeyU),
             Action::GiveUp => Key(KeyCode::KeyX),
             Action::CommoRose => Key(KeyCode::KeyQ),
+            Action::CommanderScreen => Key(KeyCode::CapsLock),
         }
     }
 }

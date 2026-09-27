@@ -48,6 +48,10 @@ impl Plugin for ProtocolPlugin {
             .replicate::<VehicleHealth>()
             .replicate::<crate::revive::Downed>()
             .replicate::<crate::radio::Spotted>()
+            .replicate::<crate::commander::Commander>()
+            .replicate::<crate::commander::SquadOrder>()
+            .replicate::<crate::commander::TeamAssets>()
+            .replicate::<crate::commander::AssetEffect>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
             .add_client_message::<DeployRequest>(Channel::Ordered)
@@ -68,6 +72,7 @@ impl Plugin for ProtocolPlugin {
             .add_server_message::<crate::summary::RoundSummary>(Channel::Ordered)
             .add_client_message::<crate::revive::GiveUp>(Channel::Ordered)
             .add_client_message::<crate::radio::RadioRequest>(Channel::Ordered)
+            .add_client_message::<crate::commander::CommanderRequest>(Channel::Ordered)
             .add_mapped_server_message::<crate::radio::RadioMessage>(Channel::Ordered)
             .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered);
     }

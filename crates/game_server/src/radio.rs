@@ -27,7 +27,8 @@ impl Plugin for RadioPlugin {
                 .after(ServerSystems::Receive)
                 .run_if(in_state(ClientState::Disconnected)),
         )
-        .add_systems(Update, expire_spots.run_if(in_state(ClientState::Disconnected)));
+        .add_message::<Spot>()
+        .add_systems(Update, (apply_spots, expire_spots).chain().run_if(in_state(ClientState::Disconnected)));
     }
 }
 
@@ -41,6 +42,28 @@ const BLOCKED_SECONDS: f32 = 30.0;
 /// Server-side: seconds until a [`Spotted`] mark goes.
 #[derive(Component)]
 struct SpotExpiry(f32);
+
+/// Server-side: mark `target` as spotted by `team` for `seconds`, or longer if it already
+/// is (the commander's UAV and scans).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct Spot {
+    pub target: Entity,
+    pub team: Team,
+    pub seconds: f32,
+}
+
+fn apply_spots(mut commands: Commands, mut spots: MessageReader<Spot>, mut marked: Query<(&Spotted, &mut SpotExpiry)>) {
+    for spot in spots.read() {
+        match marked.get_mut(spot.target) {
+            Ok((spotted, mut expiry)) if spotted.by == spot.team => expiry.0 = expiry.0.max(spot.seconds),
+            _ => {
+                commands
+                    .entity(spot.target)
+                    .try_insert((Spotted { by: spot.team }, SpotExpiry(spot.seconds)));
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 struct SpamState {
@@ -170,6 +193,7 @@ fn receive_radio(
                 command,
                 position: motion.position,
                 target,
+                squad: None,
             },
         });
     }

@@ -6,14 +6,16 @@
 //! own: "reloading", "grenade out" (frag or smoke), "incoming grenade" near a live
 //! grenade, "out of ammo", "check your fire" when a teammate hits them, and a scream when
 //! critically wounded that goes out over the radio too. BF2 has no recordings for taking
-//! fire or an enemy going down.
+//! fire or an enemy going down. The commander only talks over the radio, in his own voice:
+//! orders to the squad he orders, the rest to the whole team.
 
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*};
-use game_data::{Falloff, SoundDesc};
+use game_data::{Falloff, RadioRank, SoundDesc};
 use game_shared::{
     chat::{ChatChannel, ChatLine},
+    commander::Commander,
     config::GamePaths,
     level::LoadedLevel,
     projectile::{Projectile, ProjectileMotion},
@@ -63,6 +65,8 @@ enum Hearers {
     /// The speaker's squad, or his team when he has none.
     Squad,
     Team,
+    /// One squad of the speaker's team (the commander's orders).
+    OneSquad(u8),
 }
 
 /// When each soldier last spoke (key `""`) and last said each call-out.
@@ -74,6 +78,7 @@ struct Speaker {
     name: String,
     team: Team,
     squad: Option<SquadMember>,
+    commander: bool,
     /// Feet.
     position: Vec3,
 }
@@ -84,7 +89,7 @@ struct Voices<'w, 's> {
     level: Option<Res<'w, LoadedLevel>>,
     radio: ResMut<'w, RadioVoices>,
     time: Res<'w, Time<Real>>,
-    players: Query<'w, 's, (&'static Player, &'static Team, Option<&'static SquadMember>)>,
+    players: Query<'w, 's, (&'static Player, &'static Team, Option<&'static SquadMember>, Has<Commander>)>,
     local: Query<'w, 's, Entity, With<LocalPlayer>>,
     listener: Query<'w, 's, &'static Transform, With<SpatialListener>>,
     last: ResMut<'w, CallOuts>,
@@ -94,12 +99,13 @@ struct Voices<'w, 's> {
 
 impl Voices<'_, '_> {
     fn speaker(&self, player: Entity, position: Vec3) -> Option<Speaker> {
-        let (info, team, squad) = self.players.get(player).ok()?;
+        let (info, team, squad, commander) = self.players.get(player).ok()?;
         Some(Speaker {
             player,
             name: info.name.clone(),
             team: *team,
             squad: squad.copied(),
+            commander,
             position,
         })
     }
@@ -120,7 +126,7 @@ impl Voices<'_, '_> {
         let local = self.local.single().ok();
         let (local_team, local_squad) = local
             .and_then(|l| self.players.get(l).ok())
-            .map_or((Team::Spectator, None), |(_, t, s)| (*t, s.copied()));
+            .map_or((Team::Spectator, None), |(_, t, s, _)| (*t, s.copied()));
         let same_team = local_team == speaker.team && local_team != Team::Spectator;
         let same_squad = same_team && speaker.squad.zip(local_squad).is_some_and(|(a, b)| a.squad == b.squad);
         let over_radio = Some(speaker.player) == local
@@ -128,13 +134,15 @@ impl Voices<'_, '_> {
                 Hearers::Nobody => false,
                 Hearers::Team => same_team,
                 Hearers::Squad => same_squad || (same_team && speaker.squad.is_none()),
+                Hearers::OneSquad(squad) => same_team && local_squad.is_some_and(|s| s.squad == squad),
             };
-        let near = self
-            .listener
-            .iter()
-            .next()
-            .is_some_and(|ear| ear.translation.distance(speaker.position) <= IN_PERSON);
-        let rank = rank(speaker.squad.as_ref());
+        let near = !speaker.commander
+            && self
+                .listener
+                .iter()
+                .next()
+                .is_some_and(|ear| ear.translation.distance(speaker.position) <= IN_PERSON);
+        let rank = if speaker.commander { RadioRank::Commander } else { rank(speaker.squad.as_ref()) };
         let recording = |files: &[String]| SoundDesc {
             files: files.to_vec(),
             ..SoundDesc::file("")
@@ -153,7 +161,11 @@ impl Voices<'_, '_> {
         let text = if line.text.is_empty() { text } else { &line.text };
         if over_radio && hearers != Hearers::Nobody && !text.is_empty() {
             self.chat.write(ChatLine {
-                channel: if same_squad { ChatChannel::Squad } else { ChatChannel::Team },
+                channel: match hearers {
+                    Hearers::OneSquad(_) => ChatChannel::Squad,
+                    _ if same_squad => ChatChannel::Squad,
+                    _ => ChatChannel::Team,
+                },
                 sender: Some(speaker.name.clone()),
                 team: speaker.team,
                 text: text.to_string(),
@@ -182,7 +194,11 @@ fn receive_radio(mut messages: MessageReader<RadioMessage>, mut voices: Voices) 
             continue;
         };
         debug!(target: "audio", "radio: {} says {:?}", speaker.name, message.command);
-        let hearers = if message.command.is_spot() { Hearers::Team } else { Hearers::Squad };
+        let hearers = match message.squad {
+            Some(squad) => Hearers::OneSquad(squad),
+            None if message.command.is_spot() || message.command.is_commander() => Hearers::Team,
+            None => Hearers::Squad,
+        };
         voices.say(&speaker, message.command.message_id(), hearers, message.command.label());
     }
 }

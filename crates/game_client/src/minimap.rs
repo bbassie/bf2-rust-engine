@@ -19,7 +19,7 @@ use game_shared::{
 
 use crate::{
     camera::PlayerCamera,
-    conquest_hud::{ENEMY, FRIENDLY, SQUAD, team_color},
+    conquest_hud::{FRIENDLY, SQUAD, team_color},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -236,7 +236,7 @@ fn update_minimap(
     icons_root: Single<Entity, With<MinimapIcons>>,
     mut icons: Query<(Entity, &Icon, &mut Node, &mut BackgroundColor, &mut Visibility)>,
     mut heading: Single<&mut UiTransform, With<PlayerHeading>>,
-    spotted: Res<crate::radio::SpottedTargets>,
+    markers: Res<crate::map_markers::MapMarkers>,
 ) {
     let Some(level) = level else {
         return;
@@ -274,9 +274,9 @@ fn update_minimap(
         }
     }
 
-    // Enemies our team spotted.
-    for &(entity, position) in &spotted.0 {
-        wanted.insert(entity, (position, ENEMY, 7.0));
+    // Spotted enemies, orders, the commander's assets.
+    for marker in &markers.0 {
+        wanted.insert(marker.key, (marker.position, marker.color, marker.size));
     }
 
     // Map offsets to minimap pixels, turned the opposite way to the map.

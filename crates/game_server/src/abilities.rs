@@ -1,7 +1,7 @@
 //! Man down, and what medics, support soldiers and engineers do for their team, after BF2.
 //!
 //! - A soldier whose health runs out is critically wounded ([`Downed`]) unless the blow took
-//!   him more than [`WRECK_HIT_POINTS`] below zero (or he was in a vehicle): he lies where he
+//!   him more than `WRECK_HIT_POINTS` (320) below zero (or he was in a vehicle): he lies where he
 //!   fell for [`MAN_DOWN_SECONDS`] (`sv.manDownTime`), only blasts and enemy shock paddles
 //!   hurt him further, and a medic's shock paddles bring him back with `restoreHP` hit
 //!   points. He dies when the time runs out or he gives up, and only then does his team lose

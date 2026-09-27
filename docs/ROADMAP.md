@@ -45,7 +45,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Movement like BF2: stairs and ledges, slopes, jumping, stance capsules (values from
   the original executable)
 - [x] Ladders
-- Sprint stamina, stance/fire delays, soldiers vs vehicles (roadkill) (in progress)
+- [x] Sprint stamina, stance/fire delays, soldiers vs vehicles (pushes, roadkill, riding on
+  vehicles), step smoothing, ladder climbing animation
 - [x] Smooth animation blending, first and third person: crossfades, directional
   movement, speed-matched playback, jumps, turning in place, remote fire/reload
 - [x] Scopes: BF2's zoom models with reticles, bolt-action rifles leave the scope
@@ -120,6 +121,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 ## Later
 
-- Special Forces gadgets (zipline, grappling hook, night vision), co-op
+- Special Forces gadgets: night vision, gas masks, flashbangs, zipline, grappling hook (in
+  progress)
+- Co-op
 - Modding workflow: authoring new content directly in glTF + RON
 - Admin tools (RCON), map rotation, server config, stats (in progress); master server

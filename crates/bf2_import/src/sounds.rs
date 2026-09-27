@@ -493,6 +493,18 @@ pub const RADIO_MESSAGES: &[&str] = &[
     "AUTO_MOODGP_friendlyfire",
     "out_of_ammo",
     "revive",
+    "attack_position",
+    "defend",
+    "move",
+    "artillery_fire",
+    "uav_online",
+    "satellite_scan_initiated",
+    "supplies_dropinitiated",
+    "new_commander",
+    "commander_resign",
+    "artillery_destroyed",
+    "uav_destroyed",
+    "satellite_destroyed",
 ];
 
 /// Languages whose radio voice this run wrote.
