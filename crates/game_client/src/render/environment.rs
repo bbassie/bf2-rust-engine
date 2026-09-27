@@ -3,7 +3,7 @@
 use bevy::{
     asset::{LoadState, embedded_asset},
     gltf::{GltfAssetLabel, GltfMesh},
-    light::{CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver},
+    light::{CascadeShadowConfig, CascadeShadowConfigBuilder, NotShadowCaster, NotShadowReceiver},
     mesh::MeshVertexBufferLayoutRef,
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
@@ -30,7 +30,7 @@ impl Plugin for EnvironmentPlugin {
             )
             .add_systems(
                 PostUpdate,
-                follow_camera
+                (follow_camera, update_view_distance)
                     .after(crate::camera::CameraSystems)
                     .before(TransformSystems::Propagate),
             );
@@ -59,7 +59,7 @@ fn apply_environment(
     mut clear: ResMut<ClearColor>,
     mut ambient: ResMut<GlobalAmbientLight>,
     skies: Query<Entity, With<SkyDome>>,
-    mut cameras: Query<(&mut DistanceFog, &mut Projection), With<PlayerCamera>>,
+    mut cameras: Query<&mut DistanceFog, With<PlayerCamera>>,
     asset_server: Res<AssetServer>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
     cli: Res<crate::Cli>,
@@ -84,15 +84,7 @@ fn apply_environment(
             ..default()
         },
         Transform::default().looking_to(direction, Vec3::Y),
-        // Real-time shadows only near the player, like BF2 (distant shadows come from
-        // baked lightmaps there). Every cascade redraws all casters inside it.
-        CascadeShadowConfigBuilder {
-            num_cascades: 3,
-            first_cascade_far_bound: 15.0,
-            maximum_distance: 120.0,
-            ..default()
-        }
-        .build(),
+        shadow_cascades(0.0),
     ));
 
     clear.0 = rgb(env.sky_color);
@@ -101,23 +93,20 @@ fn apply_environment(
         brightness: 350.0,
         ..default()
     };
-    // BF2's view distances were tuned for 2005 hardware (Karkand: 140 m). Stretch them.
-    // TODO: make this a user setting.
+    // BF2's view distances were tuned for 2005 hardware (Karkand: 140 m). Stretch them;
+    // `update_view_distance` scales this by the setting and the camera's height.
     let fog_end = (env.fog_range[1] * 4.0).max(600.0);
-    let fog_start = fog_end * 0.3;
-    for (mut fog, mut projection) in &mut cameras {
+    commands.insert_resource(LevelFog { end: fog_end });
+    for mut fog in &mut cameras {
         *fog = DistanceFog {
             color: rgb(env.fog_color),
             directional_light_color: sun_color.with_alpha(0.3),
             directional_light_exponent: 20.0,
             falloff: FogFalloff::Linear {
-                start: fog_start,
+                start: fog_end * FOG_START,
                 end: fog_end,
             },
         };
-        if let Projection::Perspective(perspective) = projection.as_mut() {
-            perspective.far = fog_end + 100.0;
-        }
     }
 
     // Sky dome around the camera; its shader puts it behind everything, so its size only
@@ -189,6 +178,89 @@ impl Material for SkyMaterial {
         ])?];
         descriptor.primitive.cull_mode = None;
         Ok(())
+    }
+}
+
+/// Where fog starts, as a fraction of where it ends.
+const FOG_START: f32 = 0.3;
+/// The fog never ends further away than this (the world ends about there).
+const MAX_FOG_END: f32 = 15_000.0;
+/// Height above the ground (m) that adds the level's fog distance once more, up to
+/// `MAX_ALTITUDE_BOOST` times: pilots see the ground they fly over.
+const ALTITUDE_PER_BOOST: f32 = 150.0;
+const MAX_ALTITUDE_BOOST: f32 = 4.0;
+
+/// The level's fog end (m) at the normal view distance, on the ground.
+#[derive(Resource)]
+pub struct LevelFog {
+    pub end: f32,
+}
+
+/// Real-time sun shadows. Near the ground they only cover 120 m, like BF2 (it baked distant
+/// shadows into lightmaps); they reach further as the camera climbs, so the ground below
+/// an aircraft still has shadows. Every cascade redraws all casters inside it.
+fn shadow_cascades(height: f32) -> CascadeShadowConfig {
+    CascadeShadowConfigBuilder {
+        num_cascades: 3,
+        first_cascade_far_bound: 15.0 + height * 0.25,
+        maximum_distance: (120.0 + height * 1.5).min(700.0),
+        ..default()
+    }
+    .build()
+}
+
+/// Scales fog, far plane and shadow range with the view distance setting and the camera's
+/// height above the terrain (smoothed, so climbing opens the view gradually).
+fn update_view_distance(
+    time: Res<Time>,
+    settings: Res<crate::settings::Settings>,
+    level_fog: Option<Res<LevelFog>>,
+    level: Option<Res<LoadedLevel>>,
+    mut cameras: Query<(&Transform, &mut DistanceFog, &mut Projection), With<PlayerCamera>>,
+    mut suns: Query<(&mut CascadeShadowConfig, Ref<Sun>)>,
+    mut height: Local<Option<f32>>,
+    mut shadow_height: Local<f32>,
+) {
+    let Some(level_fog) = level_fog else {
+        return;
+    };
+    for (transform, mut fog, mut projection) in &mut cameras {
+        let eye = transform.translation;
+        let ground = level
+            .as_ref()
+            .and_then(|l| l.heightmap.as_ref())
+            .map_or(0.0, |h| h.height_at(eye.x, eye.z));
+        let target = (eye.y - ground).max(0.0);
+        let smoothed = match *height {
+            Some(h) => h + (target - h) * (1.0 - (-time.delta_secs() * 2.0).exp()),
+            None => target,
+        };
+        *height = Some(smoothed);
+
+        let boost = (1.0 + smoothed / ALTITUDE_PER_BOOST).min(MAX_ALTITUDE_BOOST);
+        let end = (level_fog.end * settings.view_distance.scale() * boost).min(MAX_FOG_END);
+        // Skip tiny changes: every write re-uploads the view.
+        let differs = |a: f32, b: f32| (a - b).abs() > b * 0.005;
+        if let FogFalloff::Linear { end: old_end, .. } = fog.falloff
+            && differs(end, old_end)
+        {
+            fog.falloff = FogFalloff::Linear {
+                start: end * FOG_START,
+                end,
+            };
+        }
+        if let Projection::Perspective(perspective) = projection.as_mut()
+            && differs(end + 100.0, perspective.far)
+        {
+            perspective.far = end + 100.0;
+        }
+        let new_sun = suns.iter().any(|(_, sun)| sun.is_added());
+        if new_sun || (smoothed - *shadow_height).abs() > 5.0 + *shadow_height * 0.1 {
+            *shadow_height = smoothed;
+            for (mut cascades, _) in &mut suns {
+                *cascades = shadow_cascades(smoothed);
+            }
+        }
     }
 }
 

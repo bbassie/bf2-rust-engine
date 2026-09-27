@@ -164,6 +164,11 @@ pub enum Step {
     SummonEnemy(f32),
     /// Says something on the radio, as the commo rose would, e.g. `Radio(Spotted)`.
     Radio(game_shared::radio::RadioCommand),
+    /// A commander request, as the deploy screen or the commander screen would send it,
+    /// e.g. `Commander(Apply)`, `Commander(Use(asset: Artillery, target: (-184.0, 157.0, -100.0)))`.
+    Commander(game_shared::commander::CommanderRequest),
+    /// Clicks the commander screen's map at this world position (height ignored).
+    CommanderClick((f32, f32, f32)),
     /// The nearest vehicle loses this many hit points (keeping at least 1).
     DamageVehicle(f32),
     /// Adds our health and ammo, the nearest teammate's health and the nearest vehicle's
@@ -364,6 +369,8 @@ struct PlayerControls<'w, 's> {
     buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
     effects: MessageWriter<'w, crate::effects::SpawnEffect>,
     radio: MessageWriter<'w, game_shared::radio::RadioRequest>,
+    commander: MessageWriter<'w, game_shared::commander::CommanderRequest>,
+    commander_screen: ResMut<'w, crate::commander::CommanderScreen>,
 }
 
 /// The vehicles around, for [`run_scenario`].
@@ -437,6 +444,8 @@ fn run_scenario(
         mut buttons,
         mut effects,
         mut radio,
+        mut commander,
+        mut commander_screen,
     } = player;
     let Soldiers {
         local: mut soldier,
@@ -866,6 +875,14 @@ fn run_scenario(
             }
             Step::Radio(command) => {
                 radio.write(game_shared::radio::RadioRequest { command: *command });
+                Progress::Done
+            }
+            Step::Commander(request) => {
+                commander.write(*request);
+                Progress::Done
+            }
+            Step::CommanderClick((x, y, z)) => {
+                commander_screen.click = Some(Vec3::new(*x, *y, *z));
                 Progress::Done
             }
             Step::Summon(health) => {

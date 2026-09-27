@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ClientPlayer, Controls, HostPlayer, ServerSettings,
     admin::bans::unix_now,
+    combat::Died,
     chat::{announce, client_of},
     rotation::{MapRotation, level_display_name, mode_label},
 };
@@ -46,7 +47,7 @@ impl Plugin for StatsPlugin {
             // replicon sends (and drains) those messages.
             .add_systems(
                 FixedPostUpdate,
-                (track_kills, track_captures).run_if(in_state(ClientState::Disconnected)),
+                (track_kills, track_deaths, track_captures).run_if(in_state(ClientState::Disconnected)),
             )
             .add_systems(Last, save_on_exit.run_if(on_message::<AppExit>));
     }
@@ -252,6 +253,7 @@ fn weapon_label(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
 }
 
+/// Kills as BF2 scores them: when the victim goes down (the kill feed).
 fn track_kills(
     mut feed: MessageReader<ToClients<KillFeed>>,
     mut db: ResMut<StatsDb>,
@@ -268,7 +270,13 @@ fn track_kills(
                 *career.weapon_kills.entry(weapon).or_default() += 1;
             }
         }
-        if let Ok((player, _, identified)) = players.get(kill.victim)
+    }
+}
+
+/// Deaths only when the soldier really dies: a revived soldier didn't.
+fn track_deaths(mut deaths: MessageReader<Died>, mut db: ResMut<StatsDb>, players: Query<(&Player, Has<Identified>)>) {
+    for death in deaths.read() {
+        if let Ok((player, identified)) = players.get(death.player)
             && let Some(career) = db.career(player, identified)
         {
             career.deaths += 1;

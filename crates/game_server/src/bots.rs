@@ -119,6 +119,8 @@ const DANGEROUS_SPEED: f32 = 3.5;
 /// behaviour weight is 3, fire 7.5).
 const REVIVE_DISTANCE: f32 = 35.0;
 const REVIVE_UTILITY: f32 = 4.5;
+/// How close teammates must be for a held bag to reach them, meters.
+const BAG_REACH: f32 = 4.0;
 
 /// Per-minute movement statistics, logged to see how well bots get around.
 #[derive(Resource, Default)]
@@ -196,6 +198,11 @@ pub struct BotBrain {
     grenade: Option<u8>,
     /// Medics: the loadout index of the shock paddles.
     paddles: Option<u8>,
+    /// Medics' and support soldiers' bags.
+    medic_bag: Option<u8>,
+    ammo_bag: Option<u8>,
+    /// The bag to hold out now (see `decide`).
+    bag: Option<u8>,
 
     /// Enemy soldier being engaged.
     target: Option<Entity>,
@@ -290,6 +297,9 @@ impl Default for BotBrain {
             primary: 0,
             grenade: None,
             paddles: None,
+            medic_bag: None,
+            ammo_bag: None,
+            bag: None,
             target: None,
             last_seen: None,
             scan_timer: fastrand::f32() * SCAN_INTERVAL,
@@ -485,6 +495,9 @@ impl BotBrain {
         self.soldier = Some(me.soldier);
         self.primary = me.inventory.map_or(0, |i| i.active);
         self.paddles = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Paddles));
+        self.medic_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::MedicBag));
+        self.ammo_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::AmmoBag));
+        self.bag = None;
         self.grenade = me.loadout.and_then(|l| {
             (0..l.weapons.len() as u8).find(|&i| {
                 // Frag grenades: thrown, on a fuse, no trigger (unlike mines).
@@ -597,7 +610,10 @@ impl BotBrain {
             }
             Activity::Throw { at, time, weapon } => self.throw(w, me, at, time, weapon, &mut intent, dt),
             Activity::Revive { soldier, time } => self.revive(w, me, soldier, time, &mut intent, dt),
-            Activity::Objective => self.objective(w, me, &mut intent, dt),
+            Activity::Objective => {
+                self.objective(w, me, &mut intent, dt);
+                intent.weapon = intent.weapon.or(self.bag);
+            }
         }
 
         team_stats.alive += dt;
@@ -835,8 +851,28 @@ impl BotBrain {
         {
             consider(&mut best, REVIVE_UTILITY, Activity::Revive { soldier, time: 20.0 });
         }
-        // TODO: medics drop medic bags for hurt teammates and support bots ammo bags
-        // (`abilities::Wounded::hurt_near`, `abilities::gadget`); badly hurt bots go to them.
+        // Out of a fight, medics and support soldiers hold their bags out while someone
+        // close by is hurt or low on ammo (held, a bag heals or resupplies everyone within a
+        // few meters).
+        // TODO: throw bags to teammates further away; badly hurt bots go to medics; engineers
+        // repair friendly vehicles (`Gadget::Wrench`) once bots use vehicles.
+        self.bag = None;
+        if target.is_none() && self.hurt_ago > 3.0 {
+            let team = me.team;
+            let hurt = || !w.wounded.hurt_near(team, position, BAG_REACH, 0.7).is_empty();
+            let empty = || {
+                w.soldiers.iter().any(|(_, motion, controlled_by, inventory, _, _, loadout, ..)| {
+                    motion.position.distance(position) < BAG_REACH
+                        && w.teams.get(controlled_by.0).is_ok_and(|t| *t == team)
+                        && inventory.zip(loadout).is_some_and(|(i, l)| low_on_ammo(i, l, &w.armory))
+                })
+            };
+            self.bag = match (self.medic_bag, self.ammo_bag) {
+                (Some(bag), _) if hurt() => Some(bag),
+                (_, Some(bag)) if empty() => Some(bag),
+                _ => None,
+            };
+        }
 
         // A grenade at enemies behind cover, or at one it can't get.
         if let Some(grenade) = self.grenade
@@ -1903,6 +1939,15 @@ fn random_spot(level: &LoadedLevel, from: Vec3) -> Vec3 {
     let half = heightmap.world_size() * 0.4;
     let center = heightmap.center();
     center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half
+}
+
+/// Whether a soldier's main weapons are down to their last magazine.
+fn low_on_ammo(inventory: &Inventory, loadout: &Loadout, armory: &Armory) -> bool {
+    loadout.weapons.iter().zip(&inventory.ammo).any(|(name, [_, spare])| {
+        armory
+            .weapon(name)
+            .is_some_and(|w| w.slot == 3 && w.magazine_size > 0 && (*spare as u32) < w.magazine_size)
+    })
 }
 
 /// Roughly normally distributed, mean 0, standard deviation 1.

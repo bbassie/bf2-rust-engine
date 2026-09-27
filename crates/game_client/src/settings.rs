@@ -119,6 +119,8 @@ pub struct Settings {
     pub vsync: bool,
     pub shadows: bool,
     pub ambient_occlusion: bool,
+    /// How far the world fades into the fog.
+    pub view_distance: ViewDistance,
     pub bindings: BTreeMap<Action, Binding>,
     /// What the menu last started, to offer it again.
     pub last_match: LastMatch,
@@ -143,6 +145,7 @@ impl Default for Settings {
             vsync: false,
             shadows: true,
             ambient_occlusion: true,
+            view_distance: ViewDistance::default(),
             bindings: Action::ALL
                 .iter()
                 .map(|a| (*a, a.default_binding()))
@@ -245,6 +248,43 @@ impl DisplayMode {
     }
 }
 
+/// View distance presets: multipliers on the level's fog distance (BF2's, stretched).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ViewDistance {
+    Short,
+    #[default]
+    Normal,
+    Far,
+    Extreme,
+}
+
+impl ViewDistance {
+    pub const ALL: [ViewDistance; 4] = [
+        ViewDistance::Short,
+        ViewDistance::Normal,
+        ViewDistance::Far,
+        ViewDistance::Extreme,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewDistance::Short => "Short",
+            ViewDistance::Normal => "Normal",
+            ViewDistance::Far => "Far",
+            ViewDistance::Extreme => "Extreme",
+        }
+    }
+
+    pub fn scale(self) -> f32 {
+        match self {
+            ViewDistance::Short => 0.6,
+            ViewDistance::Normal => 1.0,
+            ViewDistance::Far => 1.6,
+            ViewDistance::Extreme => 2.5,
+        }
+    }
+}
+
 /// The menu's last choices.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -342,10 +382,14 @@ pub enum Action {
     CommoRose,
     /// The commander screen (toggles).
     CommanderScreen,
+    /// Special Forces night vision goggles on or off.
+    NightVision,
+    /// Special Forces gas mask on or off.
+    GasMask,
 }
 
 impl Action {
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 35] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -370,6 +414,8 @@ impl Action {
         Action::GiveUp,
         Action::CommoRose,
         Action::CommanderScreen,
+        Action::NightVision,
+        Action::GasMask,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
         Action::WeaponSlot(3),
@@ -408,6 +454,8 @@ impl Action {
             Action::GiveUp => "Give up when wounded".into(),
             Action::CommoRose => "Commo rose (radio)".into(),
             Action::CommanderScreen => "Commander screen".into(),
+            Action::NightVision => "Night vision".into(),
+            Action::GasMask => "Gas mask".into(),
         }
     }
 
@@ -457,6 +505,8 @@ impl Action {
             Action::GiveUp => Key(KeyCode::KeyX),
             Action::CommoRose => Key(KeyCode::KeyQ),
             Action::CommanderScreen => Key(KeyCode::CapsLock),
+            Action::NightVision => Key(KeyCode::KeyL),
+            Action::GasMask => Key(KeyCode::KeyK),
         }
     }
 }

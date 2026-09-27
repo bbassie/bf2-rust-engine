@@ -156,12 +156,12 @@ fn spawn_water(
         depth_map: Some(depth_map),
     });
 
-    // Big enough to reach the horizon over the surrounding terrain.
-    let size = heightmap.world_size() * 3.0;
+    // Out to the horizon, as far as the surrounding terrain reaches.
+    let size = heightmap.world_size() * 3.0 + 2.0 * super::terrain::WORLD_EXTENSION;
     commands.spawn((
         WaterSurface,
         LevelEntity,
-        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(size * 0.5)).mesh().subdivisions(15))),
+        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(size * 0.5)).mesh().subdivisions(47))),
         MeshMaterial3d(material),
         Transform::from_translation(heightmap.center().with_y(water.height)),
         NotShadowCaster,

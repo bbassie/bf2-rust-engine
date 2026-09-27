@@ -35,6 +35,7 @@ mod commander;
 mod conquest_hud;
 mod deploy;
 mod effects;
+mod gadgets;
 mod hud;
 mod local_input;
 mod map_markers;
@@ -240,6 +241,7 @@ fn main() -> AppExit {
         GameServerPlugin { settings: None },
         settings::SettingsPlugin,
         effects::EffectsPlugin,
+        gadgets::GadgetsPlugin,
         menu::MenuPlugin {
             start: if start.is_some() { Screen::Loading } else { Screen::Menu },
         },

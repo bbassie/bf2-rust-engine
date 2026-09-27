@@ -8,8 +8,12 @@
 (
     steps: [
         WaitReady,
-        Wait(8.0),
-        TrackEnemy(45.0, 1.2),
+        Wait(3.0),
+        // A few shots anywhere, for the rewind the server logs.
+        Hold([Fire]),
+        Wait(1.0),
+        Release([Fire]),
+        TrackEnemy(90.0, 1.2),
         Quit,
     ],
 )

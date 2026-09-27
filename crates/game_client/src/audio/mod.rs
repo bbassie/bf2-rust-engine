@@ -37,7 +37,7 @@ mod weapons;
 #[allow(unused_imports)]
 pub use emitters::SoundEmitter;
 #[allow(unused_imports)]
-pub use voices::{AudioMix, Channel, PlaySound, Sound};
+pub use voices::{AudioMix, Channel, Muffle, PlaySound, Sound};
 
 pub struct AudioPlugin;
 

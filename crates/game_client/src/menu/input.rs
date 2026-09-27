@@ -182,6 +182,7 @@ pub(super) fn press_buttons(
             }
             MenuButton::Display(mode) => settings.window_mode = *mode,
             MenuButton::WindowSize(w, h) => settings.window_size = (*w, *h),
+            MenuButton::ViewDistance(distance) => settings.view_distance = *distance,
             MenuButton::Rebind(action) => menu.rebinding = Some(*action),
             MenuButton::ResetBindings => {
                 settings.bindings = Settings::default().bindings;

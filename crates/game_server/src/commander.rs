@@ -60,6 +60,7 @@ impl Plugin for CommanderPlugin {
                     run_uavs,
                     run_crates,
                     tidy_orders,
+                    leave_squads,
                 )
                     .chain()
                     .run_if(resource_exists::<LoadedLevel>)
@@ -230,7 +231,8 @@ fn handle_commands(
         let commander = players.iter().find(|p| *p.2 == team && p.4).map(|p| p.0);
         match command.request {
             CommanderRequest::Apply if commander.is_none() => {
-                commands.entity(player).insert(Commander);
+                // Like BF2, the commander leads no squad.
+                commands.entity(player).insert(Commander).remove::<SquadMember>();
                 team_state.mutiny.clear();
                 info!("{} is now {team:?}'s commander", info.name);
                 say(&mut radio, player, position, RadioCommand::NewCommander, None);
@@ -656,6 +658,21 @@ fn run_crates(
                 supply.stock -= given;
             }
         }
+    }
+}
+
+/// Commanders are in no squad (a squad joined or a bot squad filled up meanwhile), and a
+/// commander switching teams gives up the post.
+fn leave_squads(
+    mut commands: Commands,
+    in_squad: Query<Entity, (With<Commander>, With<SquadMember>)>,
+    switched: Query<Entity, (With<Commander>, Changed<Team>)>,
+) {
+    for player in &in_squad {
+        commands.entity(player).remove::<SquadMember>();
+    }
+    for player in &switched {
+        commands.entity(player).remove::<Commander>();
     }
 }
 

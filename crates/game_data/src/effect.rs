@@ -417,6 +417,27 @@ pub struct FlashLayer {
     pub heal: [f32; 2],
 }
 
+impl FlashLayer {
+    /// Alpha `age` seconds after a flash of strength `strength`: ramping up, holding, healing.
+    pub fn alpha_at(&self, strength: f32, age: f32) -> f32 {
+        let lerp = |[a, b]: [f32; 2]| a + (b - a) * strength;
+        let (alpha, hold, heal) = (lerp(self.alpha), lerp(self.hold), lerp(self.heal));
+        if age < self.ramp {
+            alpha * age / self.ramp.max(1e-3)
+        } else if age < self.ramp + hold {
+            alpha
+        } else {
+            alpha * (1.0 - (age - self.ramp - hold) / heal.max(1e-3)).max(0.0)
+        }
+    }
+
+    /// Seconds until it is gone.
+    pub fn length(&self, strength: f32) -> f32 {
+        let lerp = |[a, b]: [f32; 2]| a + (b - a) * strength;
+        self.ramp + lerp(self.hold) + lerp(self.heal)
+    }
+}
+
 /// `effects/gadgets.ron`: files of the Special Forces gadgets' look and sound.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GadgetAssets {

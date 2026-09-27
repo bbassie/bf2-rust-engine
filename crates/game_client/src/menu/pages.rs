@@ -552,6 +552,11 @@ fn settings_page(
                     );
                 }
             });
+            row(p, "View distance", |c| {
+                for distance in ViewDistance::ALL {
+                    button(c, MenuButton::ViewDistance(distance), Look::Plain, distance.label());
+                }
+            });
             row(p, "VSync", |c| switch(c, Toggle::VSync));
             row(p, "Sun shadows", |c| {
                 switch(c, Toggle::Shadows);

@@ -176,6 +176,15 @@ fn spawn_deploy_screen(mut commands: Commands) {
                                 ..default()
                             },
                         ));
+                        side.spawn((
+                            crate::commander::CommanderPanel,
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(4),
+                                margin: UiRect::bottom(px(6)),
+                                ..default()
+                            },
+                        ));
                         side.spawn((StatusText, Text::new(""), font(15.0), TextColor(TEXT)));
                     });
             });

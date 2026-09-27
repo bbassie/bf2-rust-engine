@@ -37,6 +37,7 @@ impl Plugin for VoicePlugin {
             .init_resource::<SoundCache>()
             .init_resource::<VoiceStats>()
             .init_resource::<Ducking>()
+            .init_resource::<Muffle>()
             .add_systems(
                 PostUpdate,
                 (start_sounds, update_voices, log_stats).chain().in_set(AudioSystems::Play),
@@ -98,6 +99,17 @@ pub enum Channel {
 /// How far everything but announcements is turned down right now (1 = not at all).
 #[derive(Resource)]
 pub struct Ducking(pub f32);
+
+/// Turns everything but announcements down on top of the ducking (1 = not at all): ringing
+/// ears after a blast or flashbang. Set by `gadgets` every frame; eased like the ducking.
+#[derive(Resource)]
+pub struct Muffle(pub f32);
+
+impl Default for Muffle {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
 
 impl Default for Ducking {
     fn default() -> Self {
@@ -472,6 +484,7 @@ fn update_voices(
     global: Res<GlobalVolume>,
     mix: Res<AudioMix>,
     mut ducking: ResMut<Ducking>,
+    muffle: Res<Muffle>,
     mut was_announcing: Local<bool>,
     listener: Query<&Transform, (With<SpatialListener>, Without<Voice>)>,
     mut voices: Query<(
@@ -487,7 +500,7 @@ fn update_voices(
     let listener = listener.iter().next();
     let master = global.volume.to_linear();
     let announcing = voices.iter().any(|(_, v, ..)| v.channel == Channel::Announcement && v.fade.is_none());
-    let target = if announcing { DUCKED } else { 1.0 };
+    let target = if announcing { DUCKED } else { 1.0 } * muffle.0;
     if announcing != *was_announcing {
         *was_announcing = announcing;
         debug!(target: "audio", "{}", if announcing { "ducking for an announcement" } else { "announcement over" });

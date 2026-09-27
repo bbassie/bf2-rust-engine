@@ -1,6 +1,6 @@
 //! BF2's radio on the client: the commo rose ([`rose`]), what soldiers say and who hears it
 //! ([`voices`]: radio messages, man down, automatic call-outs) and spotted enemies on the
-//! HUD ([`spots`]; the minimap and the big map read [`SpottedTargets`]). The rules are in
+//! HUD and the maps ([`spots`]). The rules are in
 //! `game_shared::radio` and `game_server::radio`.
 
 use std::{collections::HashMap, sync::Arc};
@@ -14,8 +14,6 @@ use game_shared::{
 mod rose;
 mod spots;
 mod voices;
-
-pub use spots::SpottedTargets;
 
 pub struct RadioPlugin;
 

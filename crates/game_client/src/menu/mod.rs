@@ -47,7 +47,7 @@ use crate::{
     deploy::DeployScreen,
     net::{self, ActiveMatch, LocalPlayer, LocalSoldier, MatchNotice, MatchSetup},
     scenario::{ScenarioInput, ScenarioSystems},
-    settings::{Action, Binding, DisplayMode, Settings},
+    settings::{Action, Binding, DisplayMode, Settings, ViewDistance},
 };
 
 use self::{browser::*, input::*, levels::*, loading::*, pages::*, widgets::*};
@@ -222,6 +222,7 @@ enum MenuButton {
     Step(Slider, i8),
     Display(DisplayMode),
     WindowSize(u32, u32),
+    ViewDistance(ViewDistance),
     Rebind(Action),
     ResetBindings,
     /// Join page: ask for servers again.
@@ -256,6 +257,7 @@ impl MenuButton {
             }
             MenuButton::Display(mode) => format!("display:{}", mode.label().to_lowercase()),
             MenuButton::WindowSize(w, h) => format!("size:{w}x{h}"),
+            MenuButton::ViewDistance(distance) => format!("view:{}", distance.label().to_lowercase()),
             MenuButton::Rebind(action) => format!("bind:{}", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
             MenuButton::Refresh => "browser:refresh".into(),

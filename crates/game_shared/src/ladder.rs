@@ -47,6 +47,8 @@ pub struct Ladder {
     pub side: Vec3,
     /// Half width, half height and half depth of the box.
     pub half: Vec3,
+    /// A grappling rope (see [`crate::rope`]) rather than a ladder.
+    pub rope: bool,
 }
 
 impl Ladder {
@@ -58,6 +60,7 @@ impl Ladder {
             front: Vec3::new(front.x, 0.0, front.z).normalize_or(Vec3::Z),
             side: rotation * Vec3::X,
             half: half_extents,
+            rope: false,
         }
     }
 

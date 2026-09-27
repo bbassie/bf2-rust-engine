@@ -90,10 +90,11 @@ fn grab_cursor(
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
     deploy: Res<crate::deploy::DeployScreen>,
+    commander: Res<crate::commander::CommanderScreen>,
     screen: Res<State<Screen>>,
     menu: Res<Menu>,
 ) {
-    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open;
+    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open;
     if !playing || !window.focused {
         if cursor_locked(&cursor) {
             cursor.visible = true;

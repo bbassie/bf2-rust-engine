@@ -57,8 +57,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   claymores, shotgun pellets
 - Lag compensation
 - Per-bone hit zones
-- Man-down/revive
-- Medic, support and engineer abilities (heal/resupply/repair all use the damage matrix)
+- [x] Man-down (BF2's 15 s, 320 HP wreck threshold) and revive with shock paddles
+- [x] Medic, support and engineer abilities: medic/ammo bags (held or thrown), wrench repairs
+  of vehicles and objects, kit ability charge, BF2 scoring
 
 ## M2: Conquest (in progress)
 

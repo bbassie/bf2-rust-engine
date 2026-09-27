@@ -499,9 +499,10 @@ fn fire_weapons(
                     });
                 }
                 debug!(
-                    "{name} fires {} ({} ticks back)",
+                    "{name} fires {} ({} ticks back, saw tick {} at {now})",
                     weapon.name,
-                    rewind_for(input.view_tick, now)
+                    rewind_for(input.view_tick, now),
+                    input.view_tick
                 );
                 if desc.is_object() {
                     let how = match (weapon.fire.kind, soft) {

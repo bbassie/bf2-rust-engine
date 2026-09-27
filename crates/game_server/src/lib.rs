@@ -41,6 +41,7 @@ pub mod commander;
 pub mod combat;
 pub mod conquest;
 pub mod discovery;
+pub mod gear;
 pub mod radio;
 pub mod rotation;
 pub mod server_config;
@@ -123,7 +124,7 @@ impl Plugin for GameServerPlugin {
         }
         app.insert_resource(self.settings.clone().unwrap_or_default())
             .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin, nav::NavPlugin, squads::SquadPlugin, vehicles::VehiclesPlugin))
-            .add_plugins((destruction::DestructionPlugin, roadkill::RoadkillPlugin, abilities::AbilitiesPlugin))
+            .add_plugins((destruction::DestructionPlugin, roadkill::RoadkillPlugin, abilities::AbilitiesPlugin, gear::GearPlugin))
             .add_plugins((
                 admin::AdminPlugin,
                 chat::ChatPlugin,

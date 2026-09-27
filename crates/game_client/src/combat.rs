@@ -85,9 +85,10 @@ fn track_view_tick(
         view.latest = latest;
         view.received = now;
     }
-    // States keep arriving about once a tick; the one on screen came in a moment ago.
-    let behind = ((INTERPOLATION_DELAY - (now - view.received)).max(0.0) * game_shared::TICK_HZ).round() as u32;
-    view.tick = latest.saturating_sub(behind).max(1);
+    // The server has gone on ticking since (it only sends what changed); what is on screen
+    // is from a moment before.
+    let seconds = now - view.received - INTERPOLATION_DELAY;
+    view.tick = (latest as i64 + (seconds * game_shared::TICK_HZ).round() as i64).max(1) as u32;
 }
 
 /// `BF2_SIM_INPUT_DELAY_MS`: our inputs are held back this long before they go to the
