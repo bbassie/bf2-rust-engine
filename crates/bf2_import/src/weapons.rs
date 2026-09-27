@@ -239,6 +239,7 @@ pub(crate) fn weapon_desc(
         shift_delay: if f("animation.useshiftanimation", 0.0) != 0.0 { f("animation.shiftdelay", 0.0) } else { 0.0 },
         reload_amount: f("ammo.reloadamount", 0.0) as u32,
         fire: fire_desc(t),
+        worn: f("isnightvision", 0.0) != 0.0 || f("isgasmask", 0.0) != 0.0,
         detonator: detonator_desc(interp, converter, t, out),
         projectile,
         deviation,
@@ -390,6 +391,7 @@ fn projectile_desc(
         .map(|effect| SmokeDesc {
             radius: SMOKE_RADIUS,
             duration: effect_length(interp, effect).unwrap_or(10.0),
+            gas_damage: gas_damage(interp, effect).unwrap_or(0.0),
         });
     // Rocket exhaust and grenade trails are effect bundles among the children.
     let trail_effect = p.children.iter().find_map(|child| {
@@ -493,6 +495,21 @@ fn rope_projectile(projectile: &mut ProjectileDesc, rope: RopeDesc) {
     // Long enough to land; it becomes the rope where it sticks.
     projectile.time_to_live = 5.0;
     projectile.rope = Some(rope);
+}
+
+/// Tear gas: the damage per second of the effect's gas cloud (`gasCloudType TearGas` and
+/// `gasCloudDamage` on one of its particle systems).
+fn gas_damage(interp: &mut Interpreter, effect: &str) -> Option<f32> {
+    interp.ensure_template(effect);
+    let children: Vec<String> = interp.world.template(effect)?.children.iter().map(|c| c.template.clone()).collect();
+    children.iter().find_map(|child| {
+        interp.ensure_template(child);
+        let emitter = interp.world.template(child)?;
+        emitter
+            .get_str("gascloudtype")
+            .filter(|kind| kind.eq_ignore_ascii_case("teargas"))
+            .map(|_| emitter.get_f32("gasclouddamage").unwrap_or(0.0).max(0.01))
+    })
 }
 
 /// Seconds until the last particle of an effect bundle is gone: the longest particle life

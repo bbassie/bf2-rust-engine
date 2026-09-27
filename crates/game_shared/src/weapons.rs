@@ -133,6 +133,7 @@ fn test_rifle() -> WeaponDesc {
         shift_delay: 0.0,
         reload_amount: 0,
         fire: Default::default(),
+        worn: false,
         detonator: None,
         projectile: ProjectileDesc {
             velocity: 900.0,

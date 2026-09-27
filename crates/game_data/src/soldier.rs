@@ -52,6 +52,9 @@ pub struct TeamDesc {
     pub language: String,
     #[serde(default)]
     pub voice: TeamVoice,
+    /// Flag icons for the interface.
+    #[serde(default)]
+    pub icons: crate::TeamIcons,
 }
 
 /// The commander's announcements for a team, in its language (`.wav` paths; one is picked

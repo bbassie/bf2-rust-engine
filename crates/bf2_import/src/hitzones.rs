@@ -35,7 +35,9 @@ struct StanceClips {
 }
 
 fn read_clip(vfs: &Vfs, path: &str) -> Option<Animation> {
-    Animation::parse(&vfs.read(path).ok()?).map_err(|e| log::warn!("{path}: {e}")).ok()
+    Animation::parse(&vfs.read(path).ok()?)
+        .map_err(|e| log::warn!("{path}: {e}"))
+        .ok()
 }
 
 /// The first rifle's third-person clip ending in `_{state}.baf`.
@@ -58,9 +60,11 @@ fn pose(skeleton: &Skeleton, clips: &StanceClips) -> Vec<(Quat, Vec3)> {
         .collect();
     for clip in [&clips.body, &clips.rifle].into_iter().flatten() {
         for track in &clip.tracks {
-            if let (Some(slot), Some(r), Some(t)) =
-                (local.get_mut(track.bone), track.rotations.first(), track.translations.first())
-            {
+            if let (Some(slot), Some(r), Some(t)) = (
+                local.get_mut(track.bone),
+                track.rotations.first(),
+                track.translations.first(),
+            ) {
                 *slot = (rotation(*r), translation(*t));
             }
         }

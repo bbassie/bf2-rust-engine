@@ -865,6 +865,7 @@ fn detonate(
                     radius: smoke.radius,
                     duration: smoke.duration + SMOKE_LINGER,
                     age: 0.0,
+                    gas_damage: smoke.gas_damage,
                 },
                 Replicated,
             ));

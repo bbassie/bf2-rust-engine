@@ -111,13 +111,7 @@ fn map_markers(
             continue;
         }
         let label = format!("{}: {}", squad_name(order.squad), order.kind.label());
-        markers.0.push(MapMarker {
-            key: entity,
-            position: order.position,
-            color: order_color(order.kind),
-            size: 10.0,
-            label: Some(label),
-        });
+        markers.0.push(MapMarker::dot(entity, order.position, order_color(order.kind), 10.0).label(label));
     }
     for (entity, effect) in &effects {
         if effect.team != team {
@@ -129,13 +123,7 @@ fn map_markers(
             Asset::Supply => "Supplies",
             Asset::Scan => continue,
         };
-        markers.0.push(MapMarker {
-            key: entity,
-            position: effect.position,
-            color: asset_color(effect.asset),
-            size: 9.0,
-            label: Some(label.into()),
-        });
+        markers.0.push(MapMarker::dot(entity, effect.position, asset_color(effect.asset), 9.0).label(label));
     }
     let destroyed = destroyed.single().ok();
     for (asset, key) in assets.instances.iter().zip(&keys.0) {
@@ -143,17 +131,17 @@ fn map_markers(
             continue;
         }
         let down = destroyed.is_some_and(|d| d.0.contains(&asset.instance));
-        markers.0.push(MapMarker {
-            key: *key,
-            position: Vec3::from_array(asset.placement.position),
-            color: if down { DESTROYED } else { GOLD },
-            size: 8.0,
-            label: Some(if down {
-                format!("{} (down)", short_name(asset.kind))
-            } else {
-                short_name(asset.kind).to_string()
-            }),
-        });
+        let label = if down {
+            format!("{} (down)", short_name(asset.kind))
+        } else {
+            short_name(asset.kind).to_string()
+        };
+        let color = if down { DESTROYED } else { GOLD };
+        markers.0.push(
+            MapMarker::dot(*key, Vec3::from_array(asset.placement.position), color, 8.0)
+                .label(label)
+                .layer(crate::map_markers::VEHICLE_LAYER),
+        );
     }
 }
 

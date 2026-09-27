@@ -90,6 +90,9 @@ pub fn import(
     let mut written = WRITTEN.lock().unwrap();
     let written = written.get_or_insert_with(HashSet::new);
     let (mut count, mut failed) = (0, 0);
+    // The particle systems carried by `ParticleSystemEmitter`s live in this shared bundle,
+    // not in files of their own name.
+    interp.ensure_template("e_ref_bundle");
     for name in &names {
         if written.contains(name) {
             continue;
@@ -136,6 +139,7 @@ fn load_effect(interp: &mut Interpreter, name: &str) {
         };
         pending.extend(template.children.iter().map(|c| c.template.to_ascii_lowercase()));
         pending.extend(template.get_str("template").map(str::to_ascii_lowercase));
+        pending.extend(template.get_str("particlesystemtemplate").map(str::to_ascii_lowercase));
         // Mesh particles name geometry templates, which live in files of the same name.
         let geometry = template.geometry.clone();
         if let Some(geometry) = geometry
@@ -462,6 +466,7 @@ impl EffectBuilder<'_> {
                     effect.emitters.extend(self.sprites(child_template, transform, Facing::Horizontal))
                 }
                 "meshparticlesystem" => effect.emitters.extend(self.mesh_sprites(child_template, transform)),
+                "particlesystememitter" => self.carrier(child_template, transform, effect),
                 "emitter" => self.mesh_emitter(child_template, transform, effect),
                 "lightsource" => effect.lights.extend(self.light(child_template, transform)),
                 "sound" if !self.muzzle => effect.sounds.extend(self.sound(child_template)),
@@ -601,7 +606,37 @@ impl EffectBuilder<'_> {
             rotation: f(t, "randomrotation", 0.0).abs(),
             spin: [spin - random_spin, spin + random_spin],
             spin_curve: curve(t, "rotationgraph"),
+            carries: None,
+            carried: false,
         })
+    }
+
+    /// A `ParticleSystemEmitter` throws particle systems: invisible particles that each run
+    /// the `particleSystemTemplate` (a trail of fire or smoke sprites) while they live.
+    fn carrier(&self, t: &Template, transform: Affine3A, effect: &mut EffectDesc) {
+        let Some(system) = t.get_str("particlesystemtemplate").and_then(|name| self.world.template(name)) else {
+            return;
+        };
+        let facing = match system.ty.to_ascii_lowercase().as_str() {
+            "spriteparticlesystem" => Facing::Camera,
+            "nonscreenalignedparticlesystem" => Facing::Horizontal,
+            _ => return,
+        };
+        // The carried system sits on its carrier, turned like the carrier emitter.
+        let turn = Affine3A {
+            translation: Default::default(),
+            ..transform
+        };
+        let (Some(mut carrier), Some(mut carried)) = (
+            self.emitter_base(t, transform, String::new(), [0.0; 4]),
+            self.sprites(system, turn, facing),
+        ) else {
+            return;
+        };
+        carrier.size = [0.0; 2];
+        carrier.carries = Some(effect.emitters.len() as u32 + 1);
+        carried.carried = true;
+        effect.emitters.extend([carrier, carried]);
     }
 
     /// An `Emitter` throws one `Particle`: a flash mesh if its geometry is a

@@ -36,6 +36,12 @@ pub struct LevelDesc {
     /// Models for control point flags.
     #[serde(default)]
     pub flag_models: FlagModels,
+    /// A neutral control point's map icon (the teams' icons are in [`TeamDesc::icons`]).
+    #[serde(default)]
+    pub neutral_icons: crate::TeamIcons,
+    /// How the layouts' vehicles show on the maps, by template (lowercase).
+    #[serde(default)]
+    pub vehicle_icons: std::collections::BTreeMap<String, crate::VehicleIcon>,
     /// Conquest: tickets per minute a team loses once it holds no control point and has
     /// nobody alive.
     #[serde(default = "default_ticket_loss_at_end")]
@@ -99,6 +105,9 @@ pub struct SurroundingTerrainDesc {
     /// the level folder; empty where a cell has none.
     #[serde(default)]
     pub color_maps: Vec<String>,
+    /// Linear colour multiplier that matches the colour maps to the terrain's at the seam.
+    #[serde(default = "no_tint")]
+    pub tint: [f32; 3],
 }
 
 /// One tiling ground texture.
@@ -314,6 +323,10 @@ fn one() -> u32 {
 
 fn default_water_color() -> [f32; 4] {
     [0.1, 0.25, 0.3, 0.8]
+}
+
+fn no_tint() -> [f32; 3] {
+    [1.0; 3]
 }
 
 fn default_water_opaque_depth() -> f32 {

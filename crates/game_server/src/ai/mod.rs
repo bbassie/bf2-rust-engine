@@ -3,14 +3,19 @@
 //!
 //! - [`strategy`]: a commander per team values the strategic areas around the flags and
 //!   gives every squad an order (attack or defend a flag).
+//! - [`commander`]: a bot takes the commander post nobody holds, passes the orders on and
+//!   calls in artillery, the UAV, scans and supply drops.
 //! - [`squad`]: leaders lead, members follow in formation; kits and spawns for dead bots.
 //! - [`tactics`]: cover, flanking spots, grenade arcs, safe strafing.
+//! - [`gadgets`]: flashbangs and tear gas against bots, gas masks.
 //! - [`skill`]: difficulty and per-bot personality.
 //! - [`stats`]: per-minute statistics.
 //!
 //! Level data comes from the importer ([`game_data::LevelAiDesc`], BF2's strategic areas,
 //! and [`game_data::AiWeaponsDesc`], BF2's weapon templates); both are optional.
 
+pub mod commander;
+pub mod gadgets;
 pub mod skill;
 pub mod squad;
 pub mod stats;
@@ -18,7 +23,7 @@ pub mod strategy;
 pub mod tactics;
 
 use bevy::prelude::*;
-use game_data::{AiWeaponDesc, AiWeaponsDesc, FireKind, FiringPose, LevelAiDesc, WeaponDesc};
+use game_data::{AiWeaponDesc, AiWeaponsDesc, FireKind, FiringPose, LevelAiDesc, WeaponDesc, WeaponEffectTable};
 use game_shared::{config::GamePaths, level::LoadedLevel};
 
 /// The AI hints of the loaded level.
@@ -26,6 +31,7 @@ use game_shared::{config::GamePaths, level::LoadedLevel};
 pub struct AiData {
     pub level: LevelAiDesc,
     pub weapons: AiWeaponsDesc,
+    pub gadgets: gadgets::GadgetData,
 }
 
 impl AiData {
@@ -68,13 +74,21 @@ pub fn load_ai_data(mut commands: Commands, level: Res<LoadedLevel>, paths: Opti
         .as_ref()
         .and_then(|paths| read(paths.imported.join("ai").join("weapons.ron")))
         .unwrap_or_default();
+    let effects: WeaponEffectTable = paths
+        .as_ref()
+        .and_then(|paths| read(paths.imported.join("effects").join("weapons.ron")))
+        .unwrap_or_default();
+    let gadgets = gadgets::GadgetData::from_table(&effects);
     info!(
-        "ai: {} layouts with strategic areas, {} weapon templates",
+        "ai: {} layouts with strategic areas, {} weapon templates, {} flashbangs, {} gas masks",
         level_ai.layouts.len(),
-        weapons.weapons.len()
+        weapons.weapons.len(),
+        gadgets.flashbangs.len(),
+        gadgets.gas_masks.len()
     );
     commands.insert_resource(AiData {
         level: level_ai,
         weapons,
+        gadgets,
     });
 }

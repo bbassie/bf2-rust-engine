@@ -76,6 +76,7 @@ pub fn import_level(
     let mut level_teams = teams(&interp.world);
     for team in &mut level_teams {
         team.voice = team_voice(&vfs, &team.language, out);
+        team.icons = crate::ui_icons::team_icons(&vfs, out, &team.name);
     }
     let languages: Vec<String> = level_teams.iter().map(|t| t.language.clone()).collect();
     crate::sounds::import_radio(&vfs, localization, &languages, out);
@@ -178,6 +179,8 @@ pub fn import_level(
         teams: level_teams,
         minimap,
         flag_models,
+        neutral_icons: crate::ui_icons::neutral_icons(&vfs, out),
+        vehicle_icons: Default::default(),
         ticket_loss_at_end_per_minute,
         vegetation,
     };
@@ -198,6 +201,10 @@ pub fn import_level(
     vehicle_names.dedup();
     let missing_templates = interp.missing_templates.keys().cloned().collect();
     let vehicles = vehicles::import(&mut interp, &converter, localization, &vehicle_names, out)?;
+    // The vehicles' map icons, now that their templates are loaded.
+    let mut desc = desc;
+    desc.vehicle_icons = crate::ui_icons::vehicle_icons(&mut interp, &vfs, out, &vehicle_names);
+    game_data::write_ron(level_dir.join("level.ron"), &desc)?;
     crate::effects::import_vehicle_weapons(&interp.world, out);
     if let Err(err) = crate::commander::import(&mut interp, &converter, &assets, &level_dir, out) {
         log::warn!("commander assets: {err:#}");

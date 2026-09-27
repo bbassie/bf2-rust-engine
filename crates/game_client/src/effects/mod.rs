@@ -218,6 +218,8 @@ struct Prepared {
     lights_until: f32,
     /// Explosions without a sound of their own get a generic one for a blast about this big.
     explosion_radius: Option<f32>,
+    /// Some emitter carries another one.
+    carriers: bool,
 }
 
 impl EffectLibrary {
@@ -247,7 +249,11 @@ impl EffectLibrary {
                         .or_insert_with(|| asset_server.load(format!("imported://{path}")))
                         .clone()
                 };
-                let textures = desc.emitters.iter().map(|e| texture(&e.texture)).collect();
+                let textures = desc
+                    .emitters
+                    .iter()
+                    .map(|e| if e.texture.is_empty() { Handle::default() } else { texture(&e.texture) })
+                    .collect();
                 let flashes = desc
                     .meshes
                     .iter()
@@ -278,6 +284,7 @@ impl EffectLibrary {
                 let explosion_radius = (name.starts_with("e_exp") && desc.sounds.is_empty())
                     .then(|| desc.emitters.iter().map(|e| e.size[1]).fold(0.0, f32::max) * 1.5);
                 Arc::new(Prepared {
+                    carriers: desc.emitters.iter().any(|e| e.carries.is_some()),
                     desc,
                     textures,
                     flashes,
@@ -388,11 +395,16 @@ fn clear_effects(mut world: ResMut<EffectWorld>) {
     world.particles = 0;
 }
 
-/// Effects the server sends, and the scorch marks of detonations among them.
+/// Effects the server sends. Detonations among them also get what BF2's material manager
+/// adds where they touch the ground: the dust, dirt or splash column of the explosion
+/// material on that surface (`e_mexp_*`, the part that lingers; the detonation effect
+/// itself is a flash of a few tenths of a second) and a scorch mark.
+#[allow(clippy::too_many_arguments)]
 fn receive_server_effects(
     mut received: MessageReader<PlayEffect>,
     mut effects: MessageWriter<SpawnEffect>,
     mut marks: MessageWriter<SpawnDecal>,
+    library: Res<EffectLibrary>,
     decals: Res<decals::Decals>,
     armory: Res<Armory>,
     spatial: SpatialQuery,
@@ -415,27 +427,31 @@ fn receive_server_effects(
                 .map_or(0, |p| p.explosion_material),
             material => material,
         };
+        if material == 0 {
+            continue;
+        }
         let up = effect.up.normalize_or(Vec3::Y);
         let Ok(down) = Dir3::new(-up) else {
             continue;
         };
-        let filter = SpatialQueryFilter::from_mask(GameLayer::World);
+        let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
+        // Airbursts touch nothing.
         let Some(hit) = spatial.cast_ray(effect.position + up * 0.5, down, 1.5, true, &filter) else {
             continue;
         };
         let point = effect.position + up * 0.5 - up * hit.distance;
-        let (Some(parent), Some(name)) = (
-            surfaces.decal_surface(hit.entity),
-            decals.decal(material, surfaces.material(hit.entity, point)),
-        ) else {
-            continue;
-        };
-        marks.write(SpawnDecal {
-            name: name.to_string(),
-            position: point,
-            normal: hit.normal,
-            parent,
-        });
+        let surface = surfaces.material(hit.entity, point);
+        if let Some(name) = library.impact(material, surface) {
+            effects.write(SpawnEffect::new(name, point).with_up(hit.normal));
+        }
+        if let (Some(parent), Some(name)) = (surfaces.decal_surface(hit.entity), decals.decal(material, surface)) {
+            marks.write(SpawnDecal {
+                name: name.to_string(),
+                position: point,
+                normal: hit.normal,
+                parent,
+            });
+        }
     }
 }
 
@@ -480,6 +496,8 @@ struct Particle {
     brightness: f32,
     frame: f32,
     emitter: u16,
+    /// Carriers: particles emitted by the carried emitter so far.
+    carried: u32,
 }
 
 impl Instance {
@@ -491,7 +509,7 @@ impl Instance {
             .map(|e| EmitterState {
                 start: e.delay,
                 emitted: 0,
-                done: !e.views.shows(first_person),
+                done: e.carried || !e.views.shows(first_person),
             })
             .collect();
         Self {
@@ -701,6 +719,7 @@ fn simulate(
         // New particles already have the age they'd have by now.
         integrate(instance, dt);
         emit(instance, &mut budget);
+        emit_carried(instance, &mut budget);
         alive += instance.particles.len();
         draw(instance, &mut batches, light, camera.translation, camera_forward);
     }
@@ -733,11 +752,9 @@ fn emit(instance: &mut Instance, budget: &mut usize) {
                 break;
             }
             let window = desc.duration.max(0.0);
-            let total = ((desc.rate * window).round() as u32).max(1);
-            let burst = (desc.rate * desc.burst.min(window)) as u32 + 1;
-            let due = if window <= 0.0 { total } else { (burst + (desc.rate * t) as u32).min(total) };
+            let (total, due) = emission(desc, t);
             while state.emitted < due {
-                let emitted_at = if state.emitted < burst { 0.0 } else { (state.emitted - burst) as f32 / desc.rate };
+                let emitted_at = emitted_at(desc, state.emitted);
                 let progress = state.emitted as f32 / total as f32;
                 state.emitted += 1;
                 if *budget == 0 {
@@ -761,6 +778,62 @@ fn emit(instance: &mut Instance, budget: &mut usize) {
             }
         }
     }
+}
+
+/// How many particles an emitter makes in all, and how many are due `t` seconds into its
+/// emission.
+fn emission(desc: &EmitterDesc, t: f32) -> (u32, u32) {
+    let window = desc.duration.max(0.0);
+    let total = ((desc.rate * window).round() as u32).max(1);
+    let burst = burst(desc);
+    let due = if window <= 0.0 { total } else { (burst + (desc.rate * t) as u32).min(total) };
+    (total, due)
+}
+
+/// Particles that come out at once.
+fn burst(desc: &EmitterDesc) -> u32 {
+    (desc.rate * desc.burst.min(desc.duration.max(0.0))) as u32 + 1
+}
+
+/// When particle `index` of an emission comes out.
+fn emitted_at(desc: &EmitterDesc, index: u32) -> f32 {
+    index.saturating_sub(burst(desc)) as f32 / desc.rate
+}
+
+/// Carrier particles run their carried emitter, leaving particles along their path.
+fn emit_carried(instance: &mut Instance, budget: &mut usize) {
+    if !instance.effect.carriers {
+        return;
+    }
+    let effect = instance.effect.clone();
+    let emitters = &effect.desc.emitters;
+    let mut spawned = Vec::new();
+    for carrier in &mut instance.particles {
+        let Some(index) = emitters[carrier.emitter as usize].carries.map(|i| i as usize) else {
+            continue;
+        };
+        let Some(desc) = emitters.get(index) else {
+            continue;
+        };
+        let t = carrier.age - desc.delay;
+        if t < 0.0 {
+            continue;
+        }
+        let (total, due) = emission(desc, t);
+        while carrier.carried < due {
+            let age = (t - emitted_at(desc, carrier.carried)).max(0.0);
+            let progress = carrier.carried as f32 / total as f32;
+            carrier.carried += 1;
+            if *budget == 0 {
+                continue;
+            }
+            *budget -= 1;
+            // Where the carrier was then.
+            let position = carrier.position - carrier.velocity * age;
+            spawned.push(spawn_particle(desc, index, progress, age, position, instance.rotation));
+        }
+    }
+    instance.particles.extend(spawned);
 }
 
 fn spawn_particle(desc: &EmitterDesc, index: usize, progress: f32, age: f32, position: Vec3, rotation: Quat) -> Particle {
@@ -808,6 +881,7 @@ fn spawn_particle(desc: &EmitterDesc, index: usize, progress: f32, age: f32, pos
         brightness: 1.0 - fastrand::f32() * desc.brightness_jitter,
         frame,
         emitter: index as u16,
+        carried: 0,
     }
 }
 
@@ -839,6 +913,9 @@ fn draw(instance: &Instance, batches: &mut render::Batches, light: Vec3, camera:
     let up = instance.rotation * Vec3::Y;
     for p in &instance.particles {
         let desc = &effect.desc.emitters[p.emitter as usize];
+        if desc.carries.is_some() {
+            continue;
+        }
         let t = p.age / p.life;
         let size = p.size * desc.size_curve.at(t);
         let opacity = desc.opacity_curve.at(t).clamp(0.0, 1.0);
@@ -854,7 +931,8 @@ fn draw(instance: &Instance, batches: &mut render::Batches, light: Vec3, camera:
         let additive = desc.blend == Blend::Additive;
         let mut color = a.lerp(b, blend) * p.brightness;
         if !additive {
-            color *= light;
+            // Lit by the scene, but brightness beyond 1 is fire glowing on its own (at night too).
+            color = color.min(Vec3::ONE) * light + (color - Vec3::ONE).max(Vec3::ZERO);
         }
         let half = size * 0.5;
         let (mode, axis, length) = match desc.facing {

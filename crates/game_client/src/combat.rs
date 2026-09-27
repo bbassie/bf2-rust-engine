@@ -286,11 +286,13 @@ fn select_weapon(
     if count == 0 {
         return;
     }
+    // Worn gear (night vision, gas mask) has keys of its own and is never held.
     let slot_of = |index: u8| {
         loadout
             .weapons
             .get(index as usize)
             .and_then(|w| armory.weapon(w))
+            .filter(|w| !w.worn)
             .map_or(0, |w| w.slot)
     };
     // Number keys pick a BF2 inventory slot; pressing again cycles weapons in that slot.
@@ -307,10 +309,18 @@ fn select_weapon(
             };
         }
     }
-    if scroll.delta.y < 0.0 {
-        selection.index = (selection.index + 1) % count;
-    } else if scroll.delta.y > 0.0 {
-        selection.index = (selection.index + count - 1) % count;
+    let step = match scroll.delta.y {
+        y if y < 0.0 => 1,
+        y if y > 0.0 => count - 1,
+        _ => return,
+    };
+    let mut index = selection.index;
+    for _ in 0..count {
+        index = (index + step) % count;
+        if slot_of(index) != 0 {
+            selection.index = index;
+            return;
+        }
     }
 }
 

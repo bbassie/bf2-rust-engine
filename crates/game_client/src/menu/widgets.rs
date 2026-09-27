@@ -261,42 +261,6 @@ pub(super) fn notice_box(p: &mut ChildSpawnerCommands, notice: &str) {
     ));
 }
 
-pub(super) fn map_preview(
-    p: &mut ChildSpawnerCommands,
-    minimap: Option<&str>,
-    size: f32,
-    asset_server: &AssetServer,
-) {
-    let mut frame = p.spawn((
-        Node {
-            width: px(size),
-            height: px(size),
-            flex_shrink: 0.0,
-            border_radius: BorderRadius::all(px(8)),
-            overflow: Overflow::clip(),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        BackgroundColor(MAP_BACKGROUND),
-    ));
-    match minimap {
-        Some(path) => {
-            frame.with_child((
-                ImageNode::new(asset_server.load(format!("imported://{path}"))),
-                Node {
-                    width: percent(100),
-                    height: percent(100),
-                    ..default()
-                },
-            ));
-        }
-        None => {
-            frame.with_child(text("No map preview", 14.0, DIM));
-        }
-    }
-}
-
 fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
     let last = &settings.last_match;
     match button {

@@ -273,6 +273,10 @@ pub struct SmokeCloud {
     pub duration: f32,
     /// Seconds since the grenade went off.
     pub age: f32,
+    /// Tear gas: hit points per second taken from those inside without a gas mask. 0 =
+    /// plain smoke.
+    #[serde(default)]
+    pub gas_damage: f32,
 }
 
 /// Seconds a smoke cloud takes to spread, and to thin out at the end.
@@ -380,6 +384,7 @@ mod tests {
             radius: 6.0,
             duration: 12.0,
             age: 0.1,
+            gas_damage: 0.0,
         };
         let (from, to) = (Vec3::new(-20.0, 0.0, 0.0), Vec3::new(20.0, 0.0, 0.0));
         assert!(!cloud.blocks(from, to), "not spread yet");

@@ -38,6 +38,7 @@ mod effects;
 mod gadgets;
 mod hud;
 mod local_input;
+mod map_icons;
 mod map_markers;
 mod menu;
 mod minimap;
@@ -239,6 +240,7 @@ fn main() -> AppExit {
         wounded::WoundedPlugin,
         radio::RadioPlugin,
         map_markers::MapMarkersPlugin,
+        map_icons::MapIconsPlugin,
         commander::ClientCommanderPlugin,
     ))
     .add_plugins((

@@ -1,25 +1,26 @@
 //! The minimap, top right: the level's map around us, flags in their owners' colors,
-//! teammates as dots, and us with our heading. It turns with us (N switches to north up).
+//! teammates as dots, vehicles, spotted enemies and orders (see `map_markers`), and us with
+//! our heading. It turns with us (N switches to north up).
 
 use bevy::{
     asset::embedded_asset,
-    platform::collections::HashMap,
     prelude::*,
     render::render_resource::AsBindGroup,
     shader::ShaderRef,
     ui_render::prelude::{MaterialNode, UiMaterial, UiMaterialPlugin},
 };
 use game_shared::{
-    conquest::{ControlPoint, FlagState},
     level::LoadedLevel,
     protocol::{ControlledBy, Team},
     soldier::Soldier,
     squad::SquadMember,
+    vehicle::Seated,
 };
 
 use crate::{
     camera::PlayerCamera,
-    conquest_hud::{FRIENDLY, SQUAD, team_color},
+    conquest_hud::{FRIENDLY, SQUAD},
+    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerBody, MarkerIcons, MarkerPointer, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -93,9 +94,6 @@ struct MinimapMap;
 struct MinimapIcons;
 #[derive(Component)]
 struct PlayerHeading;
-/// A dot for an entity (flag or soldier) on the minimap.
-#[derive(Component)]
-struct Icon(Entity);
 
 fn spawn_minimap(mut commands: Commands) {
     commands
@@ -220,23 +218,21 @@ fn to_map(level: &LoadedLevel, position: Vec3) -> (Vec2, f32) {
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_minimap(
-    mut commands: Commands,
     settings: Res<MinimapSettings>,
     level: Option<Res<LoadedLevel>>,
     camera: Single<&GlobalTransform, With<PlayerCamera>>,
     players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
     teams: Query<(&Team, Option<&SquadMember>)>,
-    control_points: Query<(Entity, &ControlPoint, &FlagState)>,
     soldiers: Query<
         (Entity, &SoldierRender, &ControlledBy, Has<game_shared::revive::Downed>),
-        (With<Soldier>, Without<LocalSoldier>),
+        (With<Soldier>, Without<LocalSoldier>, Without<Seated>),
     >,
     map: Single<Option<&MaterialNode<MinimapMaterial>>, With<MinimapMap>>,
     mut materials: ResMut<Assets<MinimapMaterial>>,
     icons_root: Single<Entity, With<MinimapIcons>>,
-    mut icons: Query<(Entity, &Icon, &mut Node, &mut BackgroundColor, &mut Visibility)>,
-    mut heading: Single<&mut UiTransform, With<PlayerHeading>>,
-    markers: Res<crate::map_markers::MapMarkers>,
+    mut icons: MarkerIcons,
+    mut heading: Single<&mut UiTransform, (With<PlayerHeading>, Without<MarkerBody>, Without<MarkerPointer>)>,
+    markers: Res<MapMarkers>,
 ) {
     let Some(level) = level else {
         return;
@@ -255,11 +251,8 @@ fn update_minimap(
         .single()
         .map(|(team, squad)| (*team, squad.copied()))
         .unwrap_or_default();
-    // What to show: flags always, teammates' soldiers.
-    let mut wanted: HashMap<Entity, (Vec3, Color, f32)> = HashMap::default();
-    for (entity, cp, state) in &control_points {
-        wanted.insert(entity, (cp.position, team_color(state.owner, local), 12.0));
-    }
+    // Teammates on foot (those in vehicles show with the vehicle).
+    let mut teammates = Vec::new();
     for (entity, render, controlled_by, downed) in &soldiers {
         let (team, squad) = teams.get(controlled_by.0).map(|(t, s)| (*t, s.copied())).unwrap_or_default();
         if team == local && local != Team::Spectator {
@@ -270,45 +263,26 @@ fn update_minimap(
                 (false, true) => (SQUAD, 6.0),
                 (false, false) => (FRIENDLY, 6.0),
             };
-            wanted.insert(entity, (render.position, color, size));
+            teammates.push(MapMarker::dot(entity, render.position, color, size).layer(SOLDIER_LAYER));
         }
-    }
-
-    // Spotted enemies, orders, the commander's assets.
-    for marker in &markers.0 {
-        wanted.insert(marker.key, (marker.position, marker.color, marker.size));
     }
 
     // Map offsets to minimap pixels, turned the opposite way to the map.
     let pixels_per_unit = INNER * map_meters / RANGE;
     let turn = Rot2::radians(-map_angle);
-    for (icon_entity, icon, mut node, mut background, mut visibility) in &mut icons {
-        let Some((position, color, size)) = wanted.remove(&icon.0) else {
-            commands.entity(icon_entity).despawn();
-            continue;
-        };
-        let offset = turn * ((to_map(&level, position).0 - center) * pixels_per_unit);
-        let at = offset + Vec2::splat(INNER / 2.0);
-        let inside = offset.x.abs() < INNER / 2.0 + size && offset.y.abs() < INNER / 2.0 + size;
-        visibility.set_if_neq(if inside { Visibility::Inherited } else { Visibility::Hidden });
-        node.left = px(at.x - size / 2.0);
-        node.top = px(at.y - size / 2.0);
-        background.0 = color;
-    }
-    for (entity, (_, color, size)) in wanted {
-        commands.entity(*icons_root).with_child((
-            Icon(entity),
-            Node {
-                position_type: PositionType::Absolute,
-                width: px(size),
-                height: px(size),
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(size / 2.0)),
-                ..default()
-            },
-            BackgroundColor(color),
-            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-            Visibility::Hidden,
-        ));
-    }
+    let placed = teammates.iter().chain(&markers.0).map(|marker| {
+        let offset = turn * ((to_map(&level, marker.position).0 - center) * pixels_per_unit);
+        let reach = marker.size;
+        let inside = offset.x.abs() < INNER / 2.0 + reach && offset.y.abs() < INNER / 2.0 + reach;
+        (marker, MapPoint::Pixels(offset + Vec2::splat(INNER / 2.0)), inside)
+    });
+    icons.sync(
+        *icons_root,
+        placed,
+        IconStyle {
+            scale: 1.0,
+            labels: false,
+            turn: map_angle,
+        },
+    );
 }

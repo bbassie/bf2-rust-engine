@@ -221,7 +221,12 @@ fn build_terrain_visuals(
                     });
                     let material = materials.add(StandardMaterial {
                         base_color_texture: texture,
-                        base_color: if path.is_empty() { untextured.base_color } else { Color::WHITE },
+                        base_color: if path.is_empty() {
+                            untextured.base_color
+                        } else {
+                            let [r, g, b] = surrounding.tint;
+                            Color::linear_rgb(r, g, b)
+                        },
                         perceptual_roughness: 0.95,
                         reflectance: 0.15,
                         cull_mode: None,
