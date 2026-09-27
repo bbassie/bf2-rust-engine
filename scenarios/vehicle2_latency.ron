@@ -1,0 +1,48 @@
+// Input latency of driving on a remote server: walk to the nearest Vodnik on Karkand, get in,
+// and time how long steering takes to visibly turn the wheels and full throttle to visibly
+// move it, a few times. Run against a local
+// dedicated server, with and without prediction and a slow connection:
+// server --level strike_at_karkand --port 16672
+// client --connect 127.0.0.1 --port 16672 --scenario scenarios/vehicle2_latency.ron --out target/scenarios/vehicle2/latency
+//   [--no-vehicle-prediction] [--input-delay 100]
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        WalkToVehicle("jep_vodnik"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(2.0),
+        VehicleInfo("entered"),
+        SteerResponseTime("steer 1"),
+        Wait(1.0),
+        SteerResponseTime("steer 2"),
+        Wait(1.0),
+        SteerResponseTime("steer 3"),
+        Wait(1.0),
+        ResponseTime("throttle 1"),
+        Move(0.0, -1.0),
+        Wait(1.5),
+        Move(0.0, 0.0),
+        Wait(2.0),
+        ResponseTime("throttle 2"),
+        Move(0.0, -1.0),
+        Wait(1.5),
+        Move(0.0, 0.0),
+        Wait(2.0),
+        ResponseTime("throttle 3"),
+        Move(0.0, 1.0),
+        Wait(1.0),
+        Move(1.0, 1.0),
+        Wait(1.0),
+        Move(0.0, 1.0),
+        Wait(1.0),
+        VehicleInfo("driven"),
+        Trace("drive", 0.0),
+        Move(0.0, 0.0),
+        Quit,
+    ],
+)

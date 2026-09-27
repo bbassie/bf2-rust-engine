@@ -26,6 +26,7 @@ use crate::{
     local_input::{LookState, cursor_locked},
     net::LocalSoldier,
     settings::{Action, Actions},
+    vehicle_prediction::PredictedVehicle,
 };
 
 /// How far in the past vehicles are shown when connected to a remote server.
@@ -113,15 +114,34 @@ fn record_snapshots(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn place_vehicles(
+    time: Res<Time>,
     real: Res<Time<Real>>,
+    fixed: Res<Time<Fixed>>,
     state: Res<State<ClientState>>,
-    mut vehicles: Query<(&VehicleMotion, &VehicleState, &Snapshots, &mut VehicleView, &mut Transform)>,
+    mut vehicles: Query<(
+        &VehicleMotion,
+        &VehicleState,
+        &Snapshots,
+        Option<&mut PredictedVehicle>,
+        &mut VehicleView,
+        &mut Transform,
+    )>,
 ) {
     let connected = *state.get() == ClientState::Connected;
     let at = real.elapsed_secs_f64() - INTERPOLATION_DELAY;
-    for (motion, current, snapshots, mut view, mut transform) in &mut vehicles {
-        if connected {
+    for (motion, current, snapshots, predicted, mut view, mut transform) in &mut vehicles {
+        if let Some(mut predicted) = predicted {
+            // The vehicle we drive, predicted (see `vehicle_prediction`).
+            *transform = predicted.transform(fixed.overstep_fraction(), time.delta_secs());
+            view.joints.clone_from(&predicted.state.joints);
+            view.wheels.clone_from(&predicted.state.wheels);
+            view.velocity = predicted.velocity();
+            view.speed = view.velocity.dot(transform.rotation * Vec3::NEG_Z);
+            view.engine = predicted.state.engine;
+            view.boost = predicted.state.boost;
+        } else if connected {
             let (a, b, t) = interpolate(&snapshots.0, at).unwrap_or((
                 (*motion, current.clone()),
                 (*motion, current.clone()),

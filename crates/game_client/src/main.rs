@@ -43,6 +43,7 @@ mod prediction;
 mod render;
 mod scenario;
 mod settings;
+mod vehicle_prediction;
 mod vehicles;
 
 #[derive(Parser, Debug, Clone, Resource)]
@@ -115,6 +116,13 @@ pub struct Cli {
     /// Debug: walk in circles and jump without any input, to exercise prediction.
     #[arg(long, hide = true)]
     debug_walk: bool,
+    /// Debug: hold input packets back this many milliseconds before sending them, like a
+    /// slow connection (for measuring prediction).
+    #[arg(long, hide = true, default_value_t = 0)]
+    input_delay: u32,
+    /// Debug: don't predict the vehicle we drive (to compare).
+    #[arg(long, hide = true)]
+    no_vehicle_prediction: bool,
     /// Debug: draw the bots' navigation grid near the camera and their paths.
     #[arg(long, hide = true)]
     debug_nav: bool,
@@ -218,7 +226,12 @@ fn main() -> AppExit {
         nav_debug::NavDebugPlugin,
         vehicles::ClientVehiclesPlugin,
     ))
-    .add_plugins((announcer::AnnouncerPlugin, bigmap::BigMapPlugin, audio::AudioPlugin))
+    .add_plugins((
+        announcer::AnnouncerPlugin,
+        bigmap::BigMapPlugin,
+        audio::AudioPlugin,
+        vehicle_prediction::VehiclePredictionPlugin,
+    ))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).
         GameServerPlugin { settings: None },

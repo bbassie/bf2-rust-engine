@@ -142,6 +142,8 @@ pub fn build_input(
     flight: Res<crate::vehicles::FlightStick>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
     active: Res<crate::net::ActiveMatch>,
+    real: Res<Time<Real>>,
+    mut delayed: Local<VecDeque<(f64, InputPacket)>>,
 ) {
     if active.setup.is_none() {
         return;
@@ -201,7 +203,19 @@ pub fn build_input(
         history.frames.pop_front();
     }
     let start = history.frames.len().saturating_sub(INPUT_REDUNDANCY);
-    packets.write(InputPacket {
+    let packet = InputPacket {
         frames: history.frames.range(start..).copied().collect(),
-    });
+    };
+    if cli.input_delay == 0 {
+        packets.write(packet);
+        return;
+    }
+    // Debug: a slow connection.
+    let now = real.elapsed_secs_f64();
+    delayed.push_back((now + cli.input_delay as f64 / 1000.0, packet));
+    while delayed.front().is_some_and(|(at, _)| *at <= now) {
+        if let Some((_, packet)) = delayed.pop_front() {
+            packets.write(packet);
+        }
+    }
 }

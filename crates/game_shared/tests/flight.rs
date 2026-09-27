@@ -9,8 +9,8 @@ use std::path::Path;
 use bevy::prelude::*;
 use game_data::VehicleCategory;
 use game_shared::{
-    flight::{BodyState, Controls, FlightState, GRAVITY, Surroundings, flight_forces, limit_pitch},
-    vehicle::{VehicleModel, step_joints},
+    flight::{BodyState, Controls, FlightState, Surroundings, flight_forces, limit_pitch},
+    vehicle::{VehicleModel, integrate, step_joints},
 };
 
 const DT: f32 = 1.0 / 60.0;
@@ -65,25 +65,7 @@ impl<'a> Sim<'a> {
             altitude: self.body.position.y,
         };
         let push = flight_forces(self.model, &self.body, &self.joints, controls, &mut self.flight, &around, DT);
-        let mass = desc.physics.mass;
-        let com = self.body.position + self.body.rotation * Vec3::from(desc.physics.center_of_mass);
-        let mut force = Vec3::NEG_Y * GRAVITY * desc.physics.gravity * mass;
-        let mut torque = push.torque;
-        for (f, p) in &push.forces {
-            force += *f;
-            torque += (*p - com).cross(*f);
-        }
-        let rotation = Mat3::from_quat(self.body.rotation);
-        let inverse_inertia = rotation * Mat3::from_diagonal(self.model.inertia.recip()) * rotation.transpose();
-        self.body.velocity += force / mass * DT;
-        self.body.angular_velocity += inverse_inertia * torque * DT;
-        // avian's angular damping of flying vehicles
-        self.body.angular_velocity *= 1.0 / (1.0 + DT * 0.05);
-        self.body.position += self.body.velocity * DT;
-        let w = self.body.angular_velocity;
-        let q = self.body.rotation;
-        let dq = Quat::from_xyzw(w.x, w.y, w.z, 0.0) * q;
-        self.body.rotation = Quat::from_xyzw(q.x + 0.5 * DT * dq.x, q.y + 0.5 * DT * dq.y, q.z + 0.5 * DT * dq.z, q.w + 0.5 * DT * dq.w).normalize();
+        integrate(self.model, &mut self.body, &push, DT);
         self.time += DT;
     }
 

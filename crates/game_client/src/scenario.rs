@@ -123,6 +123,12 @@ pub enum Step {
     VehicleTrace(String, f32),
     /// Flying: holds the stick at (roll right, pitch up), each -1..1; `Stick(0, 0)` centres it.
     Stick(f32, f32),
+    /// In a vehicle: once it stands still, gives full throttle and reports how long until the
+    /// vehicle is seen to move (faster than 0.3 m/s), then lets go. Gives up after 3 s.
+    ResponseTime(String),
+    /// In a vehicle: steers right and reports how long until a joint is seen to turn (the
+    /// steering, or a rudder), then lets go. Gives up after 3 s.
+    SteerResponseTime(String),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
     Release(Vec<Button>),
@@ -322,6 +328,8 @@ struct Runner {
     report: String,
     /// Keys pressed by the last `Key` step, released the next frame.
     released: Vec<KeyCode>,
+    /// Where something was when the current step began.
+    mark: Option<Vec3>,
 }
 
 /// What a player can do, for [`run_scenario`].
@@ -347,6 +355,7 @@ struct Vehicles<'w, 's> {
     seat: ResMut<'w, SeatRequest>,
     spatial: avian3d::prelude::SpatialQuery<'w, 's>,
     states: Query<'w, 's, &'static game_shared::vehicle::VehicleState>,
+    prediction: Res<'w, crate::vehicle_prediction::VehiclePredictionStats>,
 }
 
 impl Vehicles<'_, '_> {
@@ -369,7 +378,7 @@ impl Vehicles<'_, '_> {
         let forward = t.rotation * Vec3::NEG_Z;
         let right = t.rotation * Vec3::X;
         format!(
-            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2}",
+            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2}, replayed {} corrected {:.3}",
             t.translation.x,
             t.translation.y,
             t.translation.z,
@@ -379,6 +388,8 @@ impl Vehicles<'_, '_> {
             forward.y.clamp(-1.0, 1.0).asin().to_degrees(),
             (-right.y).clamp(-1.0, 1.0).asin().to_degrees(),
             state.engine,
+            self.prediction.replayed,
+            self.prediction.last_correction,
         )
     }
 }
@@ -523,34 +534,54 @@ fn run_scenario(
                 Progress::Done
             }
             Step::WalkToVehicle(template) => {
-                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                let (origin, speed) = soldier
+                    .single()
+                    .map(|(m, _)| (m.position, Vec2::new(m.velocity.x, m.velocity.z).length()))
+                    .unwrap_or_default();
+                // The nearest entry point of the nearest such vehicle.
                 let target = vehicles
                     .vehicles
                     .iter()
                     .filter(|(v, ..)| v.template == *template)
-                    .map(|(_, view, data)| {
-                        let entry = data.0.desc.entry_points.first();
-                        let point = entry.map_or(view.transform.translation, |e| {
-                            view.transform.transform_point(Vec3::from_array(e.position))
-                        });
-                        (point, entry.map_or(3.0, |e| e.radius))
+                    .flat_map(|(_, view, data)| {
+                        let entries = &data.0.desc.entry_points;
+                        let points: Vec<(Vec3, f32)> = match entries.is_empty() {
+                            true => vec![(view.transform.translation, 3.0)],
+                            false => entries
+                                .iter()
+                                .map(|e| (view.transform.transform_point(Vec3::from_array(e.position)), e.radius))
+                                .collect(),
+                        };
+                        points
                     })
                     .min_by(|a, b| a.0.distance(origin).total_cmp(&b.0.distance(origin)));
                 let to = target.map(|(point, radius)| (point - (origin + Vec3::Y), radius));
                 match to {
-                    Some((to, radius)) if Vec2::new(to.x, to.z).length() > radius * 0.6 && elapsed < 40.0 => {
+                    Some((to, radius)) if Vec2::new(to.x, to.z).length() > radius * 0.7 && elapsed < 60.0 => {
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = 0.0;
-                        input.movement = Some(Vec2::Y);
+                        // Stuck on something: jump and sidestep for a moment.
+                        let stuck = elapsed > 1.0 && speed < 1.0;
+                        if stuck {
+                            runner.mark = Some(Vec3::splat(now + 0.8));
+                        }
+                        let sidestepping = runner.mark.is_some_and(|until| now < until.x);
+                        input.movement = Some(if sidestepping { Vec2::new(1.0, 0.3) } else { Vec2::Y });
+                        input.buttons.set(Buttons::JUMP, stuck);
                         input.buttons.insert(Buttons::SPRINT);
                         Progress::Waiting
                     }
                     _ => {
-                        if to.is_none() {
-                            warn!("scenario: no {template} to walk to");
+                        match to {
+                            None => warn!("scenario: no {template} to walk to"),
+                            Some((to, _)) if elapsed >= 60.0 => {
+                                warn!("scenario: gave up walking to {template}, {:.1} m to go", to.length())
+                            }
+                            _ => {}
                         }
+                        runner.mark = None;
                         input.movement = None;
-                        input.buttons.remove(Buttons::SPRINT);
+                        input.buttons.remove(Buttons::SPRINT | Buttons::JUMP);
                         Progress::Done
                     }
                 }
@@ -601,6 +632,46 @@ fn run_scenario(
                     writeln!(runner.report, "{line}").ok();
                 }
                 done_if(elapsed >= *seconds)
+            }
+            Step::ResponseTime(label) | Step::SteerResponseTime(label) => {
+                let steering = matches!(step, Step::SteerResponseTime(_));
+                let current = vehicles
+                    .seated
+                    .single()
+                    .ok()
+                    .and_then(|s| vehicles.vehicles.get(s.vehicle).ok())
+                    .map(|(_, view, _)| view);
+                let view = current.map(|view| match steering {
+                    true => Vec3::new(view.joints.iter().map(|j| j[0].abs() + j[1].abs()).sum(), 0.0, 0.0),
+                    false => view.velocity,
+                });
+                // Throttle: from standing still (waiting up to 3 s for it).
+                let still = steering || current.is_none_or(|view| view.velocity.length() < 0.2);
+                if runner.frames == 0 && !still && elapsed < 3.0 {
+                    return;
+                }
+                if runner.frames == 0 {
+                    runner.mark = view;
+                    runner.step_started = Some(now);
+                    input.movement = Some(if steering { Vec2::X } else { Vec2::Y });
+                }
+                let elapsed = now - runner.step_started.unwrap_or(now);
+                runner.frames += 1;
+                let threshold = if steering { 0.02 } else { 0.3 };
+                let moved = view.zip(runner.mark).is_some_and(|(now, start)| now.distance(start) > threshold);
+                if moved || elapsed > 3.0 || view.is_none() {
+                    let line = match (moved, view) {
+                        (true, _) => format!("{label}: moved after {:.0} ms", elapsed * 1000.0),
+                        (false, Some(_)) => format!("{label}: didn't move within 3 s"),
+                        (false, None) => format!("{label}: not in a vehicle"),
+                    };
+                    info!("scenario: {line}");
+                    writeln!(runner.report, "{line}").ok();
+                    input.movement = None;
+                    Progress::Done
+                } else {
+                    Progress::Waiting
+                }
             }
             Step::Stick(roll, pitch) => {
                 let stick = Vec2::new(*roll, *pitch);

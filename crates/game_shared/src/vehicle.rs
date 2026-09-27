@@ -73,6 +73,8 @@ pub struct VehicleMotion {
     pub position: Vec3,
     pub rotation: Quat,
     pub velocity: Vec3,
+    /// World space, radians per second (the driver's prediction replays from it).
+    pub angular_velocity: Vec3,
 }
 
 impl Default for VehicleMotion {
@@ -81,6 +83,7 @@ impl Default for VehicleMotion {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
         }
     }
 }
@@ -88,6 +91,15 @@ impl Default for VehicleMotion {
 impl VehicleMotion {
     pub fn transform(&self) -> Transform {
         Transform::from_translation(self.position).with_rotation(self.rotation)
+    }
+
+    pub fn body(&self) -> BodyState {
+        BodyState {
+            position: self.position,
+            rotation: self.rotation,
+            velocity: self.velocity,
+            angular_velocity: self.angular_velocity,
+        }
     }
 
     /// Speed along the hull's forward axis, m/s.
@@ -517,8 +529,7 @@ fn add_vehicle_physics(
         entity.insert((RigidBody::Static, Stationary));
         return;
     }
-    // Aircraft keep flying through the air; ground vehicles lose a little to it.
-    let (linear, angular) = if desc.category.flies() { (0.0, 0.05) } else { (0.02, 0.3) };
+    let (linear, angular) = body_damping(desc);
     entity.insert((
         RigidBody::Dynamic,
         Mass(desc.physics.mass),
@@ -797,6 +808,9 @@ pub fn step_vehicle(
                     let limit = if throttle > 0.0 { top } else { desc.engine.reverse_speed.max(1.0) };
                     let ratio = (forward_speed.abs() / limit).min(1.3);
                     drive * throttle * (1.0 - ratio * ratio).max(-0.3)
+                } else if forward_speed.abs() < 1.0 {
+                    // Standing: the brakes hold it on slopes.
+                    stop
                 } else {
                     // Rolling resistance and engine braking.
                     stop * 0.08
@@ -989,12 +1003,48 @@ fn wrap_angle(a: f32) -> f32 {
 }
 
 /// Publishes where simulated vehicles ended up after the physics step.
-fn record_motion(mut vehicles: Query<(&Position, &Rotation, &LinearVelocity, &mut VehicleMotion), With<VehicleSim>>) {
-    for (position, rotation, velocity, mut motion) in &mut vehicles {
+#[allow(clippy::type_complexity)]
+fn record_motion(
+    mut vehicles: Query<(&Position, &Rotation, &LinearVelocity, &AngularVelocity, &mut VehicleMotion), With<VehicleSim>>,
+) {
+    for (position, rotation, velocity, angular, mut motion) in &mut vehicles {
         motion.set_if_neq(VehicleMotion {
             position: position.0,
             rotation: rotation.0,
             velocity: velocity.0,
+            angular_velocity: angular.0,
         });
     }
+}
+
+/// Linear and angular damping of a vehicle's body: aircraft keep flying through the air,
+/// ground vehicles lose a little to it.
+pub fn body_damping(desc: &VehicleDesc) -> (f32, f32) {
+    if desc.category.flies() { (0.0, 0.05) } else { (0.02, 0.3) }
+}
+
+/// Advances a vehicle's body by one tick under `push` and gravity, like avian does (without
+/// collisions): the driver's prediction on clients, where vehicles aren't simulated.
+pub fn integrate(model: &VehicleModel, body: &mut BodyState, push: &Push, dt: f32) {
+    let desc = &model.desc;
+    let mass = desc.physics.mass;
+    let com_local = Vec3::from(desc.physics.center_of_mass);
+    let com = body.position + body.rotation * com_local;
+    let mut force = Vec3::NEG_Y * GRAVITY * desc.physics.gravity * mass;
+    let mut torque = push.torque;
+    for (f, point) in &push.forces {
+        force += *f;
+        torque += (*point - com).cross(*f);
+    }
+    let rotation = Mat3::from_quat(body.rotation);
+    let inverse_inertia = rotation * Mat3::from_diagonal(model.inertia.recip()) * rotation.transpose();
+    let (linear, angular) = body_damping(desc);
+    body.velocity = (body.velocity + force / mass * dt) / (1.0 + dt * linear);
+    body.angular_velocity = (body.angular_velocity + inverse_inertia * torque * dt) / (1.0 + dt * angular);
+    // The body turns about its center of mass.
+    let w = body.angular_velocity * (0.5 * dt);
+    let q = body.rotation;
+    let spin = Quat::from_xyzw(w.x, w.y, w.z, 0.0) * q;
+    body.rotation = Quat::from_xyzw(q.x + spin.x, q.y + spin.y, q.z + spin.z, q.w + spin.w).normalize();
+    body.position = com + body.velocity * dt - body.rotation * com_local;
 }

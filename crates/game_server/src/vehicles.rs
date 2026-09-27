@@ -240,7 +240,7 @@ fn run_spawners(
                 VehicleMotion {
                     position,
                     rotation,
-                    velocity: Vec3::ZERO,
+                    ..default()
                 },
                 Replicated,
                 LevelEntity,
