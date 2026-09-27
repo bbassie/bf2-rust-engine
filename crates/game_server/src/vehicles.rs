@@ -521,9 +521,11 @@ fn carry_occupants(
         let transforms = model.part_transforms(&state.joints);
         let seat = Transform::from_translation(position.0).with_rotation(rotation.0)
             * model.seat_transform(&transforms, seated.seat as usize);
-        // Seated is about crouching height; the seat point is the hips.
+        // Seated is about crouching height; the seat point is the feet in the seat's pose (or
+        // the hips, for seats inside the hull).
+        let feet = if model.desc.seats.get(seated.seat as usize).is_some_and(|s| s.soldier.is_some()) { 0.0 } else { 0.45 };
         let next = SoldierMotion {
-            position: seat.translation - Vec3::Y * 0.45,
+            position: seat.translation - Vec3::Y * feet,
             velocity: velocity.0,
             yaw: applied.0.yaw,
             pitch: applied.0.pitch,

@@ -132,9 +132,17 @@ struct Builder<'a> {
     entry_points: Vec<EntryPointDesc>,
 }
 
+/// A part's model: the BF2 mesh file, its converted outside view and interior.
+#[derive(Clone)]
+struct PartMesh {
+    source: String,
+    outside: String,
+    interior: Option<String>,
+}
+
 #[derive(Clone, Default)]
 struct Inherited {
-    mesh: Option<(String, String)>,
+    mesh: Option<PartMesh>,
     collision: Option<String>,
 }
 
@@ -176,8 +184,9 @@ impl Builder<'_> {
             _ => {}
         }
 
-        // Meshes: vehicles and guns keep the third-person model in geom 1. Skinned parts
-        // (swaying antennas) need their skeleton, which isn't imported for vehicles yet.
+        // Meshes: vehicles and guns keep the third-person model in geom 1 and the interior
+        // (cockpits, gunner sights) in geom 0. Skinned parts (swaying antennas) need their
+        // skeleton, which isn't imported for vehicles yet.
         let own_mesh = template
             .geometry
             .as_deref()
@@ -185,13 +194,21 @@ impl Builder<'_> {
             .filter(|g| !g.ty.eq_ignore_ascii_case("SkinnedMesh"))
             .and_then(|g| g.mesh_path())
             .and_then(|path| {
-                let converted = self
-                    .converter
-                    .convert_mesh_geom(&path, 1, "_3p")
-                    .or_else(|_| self.converter.convert_mesh(&path))
-                    .map_err(|e| log::debug!("vehicle mesh {path}: {e:#}"))
-                    .ok()?;
-                Some((path, converted))
+                let (outside, interior) = match self.converter.convert_mesh_geom(&path, 1, "_3p") {
+                    Ok(outside) => (outside, self.converter.convert_mesh_geom(&path, 0, "_1p").ok()),
+                    Err(_) => (
+                        self.converter
+                            .convert_mesh(&path)
+                            .map_err(|e| log::debug!("vehicle mesh {path}: {e:#}"))
+                            .ok()?,
+                        None,
+                    ),
+                };
+                Some(PartMesh {
+                    source: path,
+                    outside,
+                    interior,
+                })
             });
         let own_collision = template
             .collision_mesh
@@ -235,7 +252,8 @@ impl Builder<'_> {
             name: template.name.to_ascii_lowercase(),
             parent,
             placement: placement(local),
-            mesh: mesh.as_ref().map(|(_, glb)| glb.clone()),
+            mesh: mesh.as_ref().map(|m| m.outside.clone()),
+            mesh_1p: mesh.as_ref().and_then(|m| m.interior.clone()),
             mesh_index: geometry_part.unwrap_or(0),
             collision,
             collision_part: collision_part.unwrap_or(0),
@@ -246,7 +264,7 @@ impl Builder<'_> {
             ty,
             hull,
             seat,
-            source_mesh: mesh.map(|(path, _)| (path, geometry_part.unwrap_or(0))),
+            source_mesh: mesh.map(|m| (m.source, geometry_part.unwrap_or(0))),
         });
 
         let inherited = Inherited {
@@ -423,6 +441,22 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
     };
 
     let mut meshes = MeshCache::default();
+    // Interiors have their own, shorter part lists (and some outside models lack parts the
+    // templates name): only parts a model has are drawn from it.
+    let mut parts = parts;
+    for (part, node) in parts.iter_mut().zip(&nodes) {
+        let Some((path, index)) = &node.source_mesh else {
+            continue;
+        };
+        let geoms = meshes.geom_count(converter, path);
+        let outside_geom = if geoms > 1 { 1 } else { 0 };
+        if meshes.part_count(converter, path, outside_geom).is_some_and(|count| *index >= count) {
+            part.mesh = None;
+        }
+        if part.mesh_1p.is_some() && meshes.part_count(converter, path, 0).is_none_or(|count| *index >= count) {
+            part.mesh_1p = None;
+        }
+    }
     let wheels: Vec<WheelDesc> = nodes
         .iter()
         .enumerate()
@@ -455,15 +489,19 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         .enumerate()
         .filter_map(|(seat, &part)| {
             let t = world.template(&nodes[part as usize].template)?;
+            let pose = seat_pose(converter, t, category, seat);
+            // BF2 puts the pose's root bone (the hips) at the seat: our soldier's origin (its
+            // feet) goes that far below.
+            let hips = pose.as_deref().and_then(|pose| pose_root(converter, pose)).unwrap_or(Vec3::ZERO);
             let soldier = t.get("seatinformation").and_then(|args| {
                 let target = args.first()?.to_ascii_lowercase();
                 let part = nodes.iter().position(|n| n.template == target)? as u32;
-                let position = coords::position(args.get(1).and_then(|p| parse_vec3(p))?);
+                let position = Vec3::from(coords::position(args.get(1).and_then(|p| parse_vec3(p))?));
                 let rotation = coords::rotation_ypr(args.get(2).and_then(|r| parse_vec3(r)).unwrap_or([0.0; 3]));
                 Some(Attachment {
                     part,
                     placement: Placement {
-                        position,
+                        position: (position - rotation * hips).to_array(),
                         rotation: rotation.to_array(),
                         ..Default::default()
                     },
@@ -482,6 +520,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
                 camera,
                 exit,
                 open: t.get_f32("isopenvehicle").unwrap_or(0.0) != 0.0,
+                pose,
             })
         })
         .collect();
@@ -856,6 +895,48 @@ fn tune_engine(desc: &mut VehicleDesc) {
     engine.brake_force = mass * 8.0;
 }
 
+/// The clip a seat's occupant plays: the sitting (or still) animation of its BF2 animation
+/// system, if the soldier bodies have it (they have BF2's common seat animations), else a
+/// common one for the role.
+fn seat_pose(converter: &MeshConverter, seat: &Template, category: VehicleCategory, index: usize) -> Option<String> {
+    let common = crate::soldiers::SEAT_ANIMATIONS;
+    let from_system = seat
+        .get_str("seatanimationsystem")
+        .and_then(|path| converter.vfs.read(&path.to_ascii_lowercase().replace('\\', "/")).ok())
+        .and_then(|data| {
+            let text = String::from_utf8_lossy(&data).to_ascii_lowercase();
+            let clips: Vec<String> = text
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("animationsystem.createanimation "))
+                .map(|path| path.trim().replace('\\', "/"))
+                .filter(|path| path.starts_with(common) && !path.contains("_die"))
+                .collect();
+            let rank = |path: &String| ["static", "sit", "still"].iter().position(|w| path.contains(w)).unwrap_or(9);
+            clips.into_iter().min_by_key(rank)
+        })
+        .and_then(|path| Some(path.rsplit('/').next()?.trim_end_matches(".baf").to_string()));
+    from_system.or_else(|| {
+        Some(
+            match (category, index) {
+                (VehicleCategory::Air | VehicleCategory::Helicopter, 0) => "3p_aircraftpilot_a_static",
+                (VehicleCategory::Stationary, _) => "3p_gunturret_a_sit",
+                (_, 0) => "3p_driver_a_static",
+                _ => "3p_passenger_a",
+            }
+            .to_string(),
+        )
+    })
+}
+
+/// Where a seat pose (a clip of the soldier bodies) has the root bone, from the model's
+/// origin, in its first frame.
+fn pose_root(converter: &MeshConverter, pose: &str) -> Option<Vec3> {
+    let data = converter.vfs.read(&format!("{}{pose}.baf", crate::soldiers::SEAT_ANIMATIONS)).ok()?;
+    let animation = bf2_formats::anim::Animation::parse(&data).ok()?;
+    let t = animation.tracks.iter().find(|t| t.bone == 0)?.translations.first()?;
+    Some(Vec3::new(t[0], t[1], -t[2]))
+}
+
 /// The seat's first-person camera: the first one in its part of the tree, skipping the
 /// alternative (ducked) cameras.
 fn seat_camera(world: &World, nodes: &[Node], cameras: &[(u32, String, Placement)], seat: u32) -> Option<SeatCamera> {
@@ -939,6 +1020,10 @@ impl MeshCache {
                 VisMesh::parse(&data, MeshKind::from_path(path)?).ok()
             })
             .as_ref()
+    }
+
+    fn geom_count(&mut self, converter: &MeshConverter, path: &str) -> usize {
+        self.mesh(converter, path).map_or(0, |m| m.geoms.len())
     }
 
     /// Number of parts of a bundled mesh geom.

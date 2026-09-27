@@ -323,8 +323,8 @@ impl VehicleModel {
         part * crate::level::placement_transform(&attachment.placement)
     }
 
-    /// Where a seat's occupant sits, in hull space: the seat position, else its camera,
-    /// else the seat part.
+    /// Where a seat's occupant sits, in hull space: the seat position (the soldier's feet in
+    /// the seat's pose), else its camera, else the seat part.
     pub fn seat_transform(&self, transforms: &[Transform], seat: usize) -> Transform {
         let Some(desc) = self.desc.seats.get(seat) else {
             return Transform::IDENTITY;
@@ -345,11 +345,20 @@ impl VehicleModel {
         part * Transform::from_translation(Vec3::from_array(weapon.muzzle))
     }
 
-    /// Where a seat looks from, in hull space: its camera, else just above the seat.
+    /// Where a seat looks from, in hull space: its camera, else about head height above the
+    /// seat.
     pub fn eye(&self, transforms: &[Transform], seat: usize) -> Vec3 {
         match self.desc.seats.get(seat).and_then(|s| s.camera.as_ref()) {
             Some(camera) => self.attachment(transforms, &camera.attachment).translation,
-            None => self.seat_transform(transforms, seat).translation + Vec3::Y * 0.6,
+            None => self.seat_transform(transforms, seat).translation + Vec3::Y * self.head_height(seat),
+        }
+    }
+
+    /// How far above `seat_transform` the occupant's head is.
+    pub fn head_height(&self, seat: usize) -> f32 {
+        match self.desc.seats.get(seat).and_then(|s| s.soldier.as_ref()) {
+            Some(_) => 1.1,
+            None => 0.6,
         }
     }
 

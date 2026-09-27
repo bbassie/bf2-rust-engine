@@ -7,7 +7,8 @@
 //! the ground speed, turning on the spot steps the feet round, and jumps go through
 //! take-off, airborne and landing clips. Shots, reloads and weapon switches play the
 //! weapon's one-shots on the upper body; a switch lowers the old weapon, swaps the model
-//! out of view and raises the new one.
+//! out of view and raises the new one. Soldiers in vehicles sit at their seat, drawn where
+//! the vehicle is drawn, in their seat's pose (BF2's seat animations).
 
 use bevy::{
     app::AnimationSystems,
@@ -24,6 +25,7 @@ use game_shared::{
     level::LoadedLevel,
     protocol::{ControlledBy, ShotFired, Team},
     soldier::{SOLDIER_CENTER, SOLDIER_HEIGHT, SOLDIER_RADIUS, Soldier, Stance},
+    vehicle::{Seated, VehicleData},
     weapons::{Armory, Inventory, Loadout},
 };
 
@@ -35,6 +37,7 @@ use crate::{
     combat::CombatFeedback,
     net::LocalSoldier,
     prediction::{RenderStateSystems, SoldierRender},
+    vehicles::{VehicleView, VehicleViewSystems},
 };
 
 pub struct SoldierRenderPlugin;
@@ -57,6 +60,7 @@ impl Plugin for SoldierRenderPlugin {
                 PostUpdate,
                 (update_visuals, animate)
                     .after(RenderStateSystems)
+                    .after(VehicleViewSystems)
                     .before(AnimationSystems)
                     .before(TransformSystems::Propagate),
             );
@@ -191,6 +195,8 @@ struct ModelAnimations {
     cycles: Vec<AnimationNodeIndex>,
     /// Per weapon set path, its clips of [`clips::UPPER`] and the one-shots.
     upper: HashMap<String, HashMap<&'static str, Clip>>,
+    /// Every other clip of the body (the vehicle seat poses), by name.
+    others: HashMap<String, Clip>,
 }
 
 #[derive(Resource)]
@@ -379,11 +385,18 @@ fn team_animations<'a>(
             }
         }
         let cycles = clips::cycles().filter_map(|name| legs.get(name)).map(|c| c.node).collect();
+        let others = body
+            .named_animations
+            .iter()
+            .filter(|(name, _)| !legs.contains_key(name.as_ref()))
+            .map(|(name, handle)| (name.to_string(), add_clip(&mut graph, handle, clip_assets)))
+            .collect();
         models.graphs[team] = Some(ModelAnimations {
             graph: graphs.add(graph),
             legs,
             cycles,
             upper: HashMap::default(),
+            others,
         });
     }
     let animations = models.graphs[team].as_mut()?;
@@ -565,16 +578,18 @@ fn attach_weapons(
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     mut materials: Bf2Materials,
-    soldiers: Query<(Option<&Loadout>, Option<&Inventory>)>,
+    soldiers: Query<(Option<&Loadout>, Option<&Inventory>, Has<Seated>)>,
     mut visuals: Query<(Entity, &SoldierVisual, &ModelRig, Option<&SoldierAnimator>, Option<&mut HeldWeapon>)>,
 ) {
     for (entity, visual, rig, animator, held) in &mut visuals {
-        let Ok((loadout, inventory)) = soldiers.get(visual.soldier) else {
+        let Ok((loadout, inventory, seated)) = soldiers.get(visual.soldier) else {
             continue;
         };
+        // Hands on the vehicle's controls.
         let weapon = animator
             .and_then(|a| a.hand.as_ref())
-            .or_else(|| active_weapon(&armory, loadout, inventory));
+            .or_else(|| active_weapon(&armory, loadout, inventory))
+            .filter(|_| !seated);
         let name = weapon.map_or(String::new(), |w| w.name.clone());
         let mut held = match held {
             Some(held) if held.name == name => held,
@@ -639,22 +654,29 @@ fn attach_weapons(
 
 fn update_visuals(
     third_person: Res<crate::camera::ThirdPerson>,
-    soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Has<game_shared::vehicle::Seated>)>,
+    soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Option<&Seated>)>,
+    vehicles: Query<(&VehicleView, &VehicleData)>,
     mut visuals: Query<(&SoldierVisual, &mut Transform, &mut Visibility)>,
 ) {
     for (visual, mut transform, mut visibility) in &mut visuals {
         let Ok((render, local, seated)) = soldiers.get(visual.soldier) else {
             continue;
         };
-        // First person: don't draw our own body inside the camera. Seated soldiers have no
-        // seated poses yet.
-        visibility.set_if_neq(if (local && !third_person.0) || seated {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
+        // In a vehicle: at the seat where the vehicle is drawn; not at all inside a closed
+        // hull (seats without a soldier position).
+        let seat = seated.and_then(|s| {
+            let (view, data) = vehicles.get(s.vehicle).ok()?;
+            let model = &data.0;
+            model.desc.seats.get(s.seat as usize)?.soldier.as_ref()?;
+            let transforms = model.part_transforms(&view.joints);
+            Some(view.transform * model.seat_transform(&transforms, s.seat as usize))
         });
-        *transform = Transform::from_translation(render.position)
-            .with_rotation(Quat::from_rotation_y(render.yaw));
+        // First person: don't draw our own body inside the camera.
+        let hidden = (local && !third_person.0) || (seated.is_some() && seat.is_none());
+        visibility.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
+        *transform = seat.unwrap_or_else(|| {
+            Transform::from_translation(render.position).with_rotation(Quat::from_rotation_y(render.yaw))
+        });
     }
 }
 
@@ -751,12 +773,33 @@ struct Cues<'a> {
     set: &'a str,
     fired: bool,
     reloading: bool,
+    /// Seated in a vehicle: the seat's pose.
+    seat_pose: Option<&'a str>,
 }
 
 impl SoldierAnimator {
     /// Picks this frame's clips and weights and advances the crossfades.
     fn update(&mut self, player: &mut AnimationPlayer, animations: &ModelAnimations, cues: &Cues, dt: f32) {
         let render = cues.render;
+        if let Some(pose) = cues.seat_pose {
+            // The whole body sits, hands off the weapon.
+            if self.state.is_some() {
+                self.state = None;
+                self.action = None;
+                self.legs.set_fade(FADE_STANCE);
+                self.upper.set_fade(FADE_STANCE);
+            }
+            self.legs.begin();
+            if let Some(&clip) = animations.others.get(pose).or_else(|| animations.legs.get(pose)) {
+                self.legs.play(player, clip, Play::looping(1.0));
+            }
+            self.legs.update(player, dt);
+            self.upper.begin();
+            self.upper.update(player, dt);
+            self.set.clear();
+            self.hand = None;
+            return;
+        }
         self.airborne = if render.grounded { 0.0 } else { self.airborne + dt };
         if dt > 0.0 {
             let turned = self.yaw.map_or(0.0, |yaw| angle_between(yaw, render.yaw));
@@ -935,15 +978,21 @@ fn animate(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     feedback: Res<CombatFeedback>,
     mut shots: MessageReader<ShotFired>,
-    soldiers: Query<(&SoldierRender, Option<Ref<Loadout>>, Option<&Inventory>, Has<LocalSoldier>)>,
+    soldiers: Query<(&SoldierRender, Option<Ref<Loadout>>, Option<&Inventory>, Has<LocalSoldier>, Option<&Seated>)>,
+    vehicles: Query<&VehicleData>,
     mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
     let fired: Vec<Entity> = shots.read().map(|shot| shot.soldier).collect();
     for (visual, body, rig, mut animator) in &mut visuals {
-        let (Ok((render, loadout, inventory, local)), Some(team)) = (soldiers.get(visual.soldier), body.0) else {
+        let (Ok((render, loadout, inventory, local, seated)), Some(team)) = (soldiers.get(visual.soldier), body.0)
+        else {
             continue;
         };
+        let seat_pose = seated.and_then(|s| {
+            let data = vehicles.get(s.vehicle).ok()?;
+            data.0.desc.seats.get(s.seat as usize)?.pose.clone()
+        });
         let loadout_changed = loadout.as_ref().is_some_and(|l| l.is_changed());
         let loadout = loadout.as_deref();
         let weapon = active_weapon(&armory, loadout, inventory);
@@ -982,6 +1031,7 @@ fn animate(
             set,
             fired,
             reloading,
+            seat_pose: seat_pose.as_deref(),
         };
         animator.update(&mut player, animations, &cues, time.delta_secs());
     }

@@ -347,7 +347,10 @@ pub fn seat_view(seated: &Seated, vehicles: &Query<(&VehicleView, &VehicleData)>
     let seat = model.desc.seats.get(seated.seat as usize)?;
     let local = match &seat.camera {
         Some(camera) => model.attachment(&transforms, &camera.attachment),
-        None => model.seat_transform(&transforms, seated.seat as usize) * Transform::from_xyz(0.0, 0.6, 0.0),
+        None => {
+            let height = model.head_height(seated.seat as usize);
+            model.seat_transform(&transforms, seated.seat as usize) * Transform::from_xyz(0.0, height, 0.0)
+        }
     };
     let (chase_distance, chase_height) = seat
         .camera
@@ -381,8 +384,8 @@ fn spawn_hud(mut commands: Commands) {
             position_type: PositionType::Absolute,
             bottom: px(28),
             left: percent(50),
-            margin: UiRect::left(px(-320)),
-            width: px(640),
+            margin: UiRect::left(px(-410)),
+            width: px(820),
             justify_content: JustifyContent::Center,
             ..default()
         },
@@ -446,9 +449,9 @@ fn update_hud(
                 .map(|(i, (w, gun))| {
                     let status = weapons.and_then(|s| s.guns.get(i)).copied().unwrap_or_default();
                     let name = if gun.display_name.is_empty() || gun.display_name == desc.display_name {
-                        gun.name.as_str()
+                        readable_name(&gun.name, &desc.name)
                     } else {
-                        gun.display_name.as_str()
+                        gun.display_name.clone()
                     };
                     let mut entry = format!("{}{}{name}", if status.selected { "> " } else { "  " }, if w.alt_fire { "[2] " } else { "" });
                     let _ = match (status.reloading, status.rounds) {
@@ -479,6 +482,16 @@ fn update_hud(
     if text.0 != lines {
         text.0 = lines;
     }
+}
+
+/// A gun's template name for people: `air_j10_archerlauncher` on the J-10 is `Archerlauncher`.
+fn readable_name(name: &str, vehicle: &str) -> String {
+    let short = name.strip_prefix(vehicle).map_or(name, |s| s.trim_start_matches('_'));
+    let mut words = short.replace('_', " ");
+    if let Some(first) = words.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    words
 }
 
 /// Tracers, muzzle flashes and sounds of vehicle guns.

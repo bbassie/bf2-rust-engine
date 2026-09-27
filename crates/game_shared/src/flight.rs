@@ -34,7 +34,7 @@ pub const GRAVITY: f32 = 9.81;
 const PLATE: f32 = 0.25;
 /// Drag from lift, per m/s² of lift (turning costs speed).
 const INDUCED_DRAG: f32 = 0.06;
-/// Jets hold this throttle while neither W nor S is pressed.
+/// Jets in the air hold this throttle while neither W nor S is pressed.
 const CRUISE_THROTTLE: f32 = 0.5;
 /// Share of full throttle a jet engine spools per second.
 const SPOOL_RATE: f32 = 0.8;
@@ -276,10 +276,13 @@ pub fn flight_forces(
     // Thrusters.
     let jet = desc.category == VehicleCategory::Air;
     if jet {
+        // On the ground the engines idle unless the pilot opens the throttle.
+        let parked = around.altitude < 5.0 && speed < 20.0;
         let target = match controls.throttle {
             _ if !controls.occupied => 0.0,
             t if t > 0.0 => 1.0,
             t if t < 0.0 => 0.0,
+            _ if parked => 0.0,
             _ => CRUISE_THROTTLE,
         };
         state.throttle += (target - state.throttle).clamp(-SPOOL_RATE * dt, SPOOL_RATE * dt);

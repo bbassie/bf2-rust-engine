@@ -1,6 +1,8 @@
 //! Draws vehicles: one entity per part, posed from [`VehicleView`] every frame (turrets and
-//! barrels at their joint angles, wheels on their springs, spinning with the speed). Meshes
-//! go through the static object pipeline.
+//! barrels at their joint angles, wheels on their springs, spinning with the speed, control
+//! surfaces, landing gear and rotor blades). Each part has its outside model and, if it has
+//! one, its interior (BF2's cockpits and sights), shown instead to an occupant looking out of
+//! a closed seat. Meshes go through the static object pipeline.
 
 use bevy::prelude::*;
 use game_shared::{
@@ -20,7 +22,7 @@ impl Plugin for VehicleRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(spawn_parts).add_systems(
             PostUpdate,
-            (pose_parts, hide_own_hull, show_wrecks)
+            (pose_parts, show_interior, show_wrecks)
                 .after(VehicleViewSystems)
                 .before(TransformSystems::Propagate),
         );
@@ -70,26 +72,40 @@ fn show_wrecks(
     }
 }
 
-/// Looking out of a closed hull in first person, the outside model would only block the
-/// view (BF2 draws a separate cockpit model there, which we don't import yet).
-fn hide_own_hull(
+/// Looking out of a closed seat in first person, the interior replaces the outside model
+/// (which would only block the view; without an interior nothing is drawn).
+fn show_interior(
     third_person: Res<ThirdPerson>,
     seated: Query<&Seated, With<LocalSoldier>>,
-    mut vehicles: Query<(Entity, &VehicleData, &mut Visibility), With<VehicleParts>>,
+    vehicles: Query<(Entity, &VehicleData, &VehicleParts)>,
+    mut visibility: Query<&mut Visibility>,
 ) {
     let inside = seated.single().ok().filter(|_| !third_person.0);
-    for (entity, data, mut visibility) in &mut vehicles {
-        let hidden = inside.is_some_and(|s| {
+    for (entity, data, parts) in &vehicles {
+        let inside = inside.is_some_and(|s| {
             s.vehicle == entity && data.0.desc.seats.get(s.seat as usize).is_some_and(|seat| !seat.open)
         });
-        visibility.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
+        let (outside, interior) = match inside {
+            true => (Visibility::Hidden, Visibility::Inherited),
+            false => (Visibility::Inherited, Visibility::Hidden),
+        };
+        for (list, wanted) in [(&parts.outside, outside), (&parts.interior, interior)] {
+            for &mesh in list {
+                if let Ok(mut visibility) = visibility.get_mut(mesh) {
+                    visibility.set_if_neq(wanted);
+                }
+            }
+        }
     }
 }
 
-/// The part entities of a vehicle, in part order, and how far each wheel has turned.
+/// The part entities of a vehicle, in part order, their outside and interior meshes, and how
+/// far each wheel has turned.
 #[derive(Component)]
 struct VehicleParts {
     parts: Vec<Entity>,
+    outside: Vec<Entity>,
+    interior: Vec<Entity>,
     spin: Vec<f32>,
 }
 
@@ -99,21 +115,36 @@ fn spawn_parts(add: On<Add, VehicleData>, mut commands: Commands, vehicles: Quer
     };
     let model = &data.0;
     let mut parts: Vec<Entity> = Vec::with_capacity(model.desc.parts.len());
+    let (mut outside, mut interior) = (Vec::new(), Vec::new());
     for (i, part) in model.desc.parts.iter().enumerate() {
         let parent = part.parent.map_or(add.entity, |p| parts[p as usize]);
-        let mut entity = commands.spawn((model.rest[i], Visibility::default(), ChildOf(parent)));
-        if let Some(mesh) = &part.mesh {
-            entity.insert(StaticMesh {
-                path: mesh.clone(),
-                index: part.mesh_index,
-            });
+        let entity = commands.spawn((model.rest[i], Visibility::default(), ChildOf(parent))).id();
+        let meshes = [(&part.mesh, &mut outside, Visibility::Inherited), (&part.mesh_1p, &mut interior, Visibility::Hidden)];
+        for (mesh, list, visibility) in meshes {
+            if let Some(path) = mesh {
+                list.push(
+                    commands
+                        .spawn((
+                            Transform::IDENTITY,
+                            visibility,
+                            StaticMesh {
+                                path: path.clone(),
+                                index: part.mesh_index,
+                            },
+                            ChildOf(entity),
+                        ))
+                        .id(),
+                );
+            }
         }
-        parts.push(entity.id());
+        parts.push(entity);
     }
     commands.entity(add.entity).insert((
         Visibility::default(),
         VehicleParts {
             parts,
+            outside,
+            interior,
             spin: vec![0.0; model.desc.wheels.len()],
         },
     ));
@@ -127,7 +158,7 @@ fn pose_parts(
     let dt = time.delta_secs();
     for (view, data, mut parts) in &mut vehicles {
         let model = &data.0;
-        let VehicleParts { parts, spin } = &mut *parts;
+        let VehicleParts { parts, spin, .. } = &mut *parts;
         for (i, &entity) in parts.iter().enumerate() {
             let mut local = model.rest[i];
             if let Some(angles) = model.joint_index[i].and_then(|j| view.joints.get(j)) {

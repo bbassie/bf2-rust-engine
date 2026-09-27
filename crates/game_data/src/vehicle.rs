@@ -367,6 +367,10 @@ pub struct VehiclePart {
     /// Visible mesh: `.glb` path relative to the imported root, and the mesh inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<String>,
+    /// The view from inside (cockpits, sights), drawn instead of `mesh` for an occupant
+    /// looking out of a closed seat; same mesh index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_1p: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub mesh_index: u32,
     /// Collision `.glb` (meshes named `part{N}_{projectile|vehicle|soldier|ai}`) and part.
@@ -467,6 +471,9 @@ pub struct SeatDesc {
     /// The occupant is exposed (can be shot, is drawn).
     #[serde(default)]
     pub open: bool,
+    /// The occupant's pose: a clip of the soldier bodies (from BF2's `seatAnimationSystem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pose: Option<String>,
 }
 
 /// A point on a part.

@@ -21,6 +21,8 @@ use crate::{
 const SKELETON: &str = "objects/soldiers/common/animations/3p_setup.ske";
 const SKELETON_1P: &str = "objects/soldiers/common/animations/1p_setup.ske";
 const ANIMATIONS: &str = "objects/soldiers/common/animations/3p/";
+/// Sitting and standing poses in vehicle seats (drivers, pilots, gunners, passengers).
+pub const SEAT_ANIMATIONS: &str = "objects/vehicles/common/animations/3p/";
 const FLAGS: &str = "objects/common/flags/";
 
 /// Z-mirror of a (true, un-conjugated) BF2 rotation.
@@ -173,7 +175,8 @@ pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
         };
         let skeleton = Skeleton::parse(&skeleton_data).context("parsing 3p_setup.ske")?;
 
-        let clips = load_clips(&vfs, ANIMATIONS);
+        let mut clips = load_clips(&vfs, ANIMATIONS);
+        clips.extend(load_clips(&vfs, SEAT_ANIMATIONS));
         let skeleton_1p = vfs
             .read(SKELETON_1P)
             .ok()
