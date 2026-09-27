@@ -160,7 +160,8 @@ Parse the declaration generically: offsets always follow the order above, but re
   * soldiers (skinned): G0 = 1P arms (bound to `1p_setup.ske`), G1 = 3P body (bound to `3p_setup.ske`) **[V]**
   * statics: G0 = intact, further geoms = destroyed variants
   * kits: one geom per kit
-* LODs: LOD0 is the most detailed. There's no distance info in the file (LOD distances come from `.con`/engine settings **[?]**).
+* LODs: LOD0 is the most detailed. There's no distance info in the file: switch distances come from the geometry template
+  and engine constants (§2.12).
 
 ### 2.5 BLENDINDICES (`D3DCOLOR`, 4 bytes) [S][V]
 
@@ -304,6 +305,28 @@ The parser handles them.
 * 19 zero normals in 3 old (v4) staticmeshes. Zero or non-unit tangents: see §2.7.
 * Detail UVs tile far outside [0,1] (95 k static vertices with |uv| > 64). This is normal, so use wrap addressing.
 * Some material `fxFile`s don't match the extension (40 bundled materials say `StaticMesh.fx`). The engine ignores this.
+
+### 2.12 LOD switch and cull distances (engine code, BF2 1.5)
+
+Read from the `RendDX9.dll` and `BF2.exe` 1.5 disassembly; the constants are the ones those binaries use.
+
+* `GeometryTemplate.setSubGeometryLodDistance <geom> <lod> <m>` is the camera distance at which LOD `lod` of geom `geom`
+  hands over to `lod + 1` (entries 0..lodCount-2; 386 of 722 static geometries set them, e.g. `billboard_highway_01`:
+  10, 23, 90 m). When the mesh loads, LODs without an entry get a running default: it starts at **50 m**, an unset LOD
+  takes the running value and adds 50, a set LOD adds its own distance to it. Unset entries below a set one are
+  zero-filled (`mosque`: LOD0 would never show); the importer treats them as unset.
+* Selection: `lod = 1 + max{ i : dist[i] · globalStaticMeshLodDistanceScale · qualityScale < d / zoom }` (else 0), `d` the
+  camera distance, `zoom = tan(fov₀/2) / tan(fov/2)` (1 unzoomed; fov₀ is the camera's first FOV). Highest geometry
+  quality: both scales 1 (medium: quality scale 0.8; low: 0.5, distances ×2 and one LOD skipped via
+  `forceStaticMeshSkipLod`). `GeometryTemplate.maxSkip3pLods` limits the skipping for geoms 1 and 2.
+* Culling (the object manager in `BF2.exe`): cull radius `r = 0.8 · object radius · ObjectTemplate.cullRadiusScale`
+  (default 1; 2 to 3.5 on long, flat statics such as walls, fences, sandbags, and on flags). With
+  `D² = |camera − origin|² − r²` and `C² = zoom · max(10π · distanceCullConst² · r², minCullDistance²)`, the object is
+  drawn fully up to `D² = 0.8 C²`, fades out until `1.2 C²`, and is hidden past the view distance plus `r`.
+  `renderer.distanceCullConst` is 4 by default and 8 on high quality (`distanceCullConstPCO`, for soldiers and vehicles,
+  5 and 10), `renderer.minCullDistance` 100 by default and 80 on high. So on high a static is drawn to about
+  `max(35.9 · radius · cullRadiusScale, 80)` m.
+* `ObjectTemplate.lodDistance High|Medium|Low` is only used by effects.
 
 ## 3. Collision meshes: `.collisionmesh`
 
@@ -551,7 +574,8 @@ Other anomalies are listed in §2.11.
 5. Lightmap UV when the last set coincides with a layer channel (e.g. ladder meshes with 3 sets and Dirt). Probably not lightmapped.
 6. `.baf` fps (24 per bf2-blender) and the road header `unknown` u32 / `.dat` trailing floats are unverified.
 7. How the engine uses `staticmesh` node matrices: data shows they're not needed for placement.
-8. How the engine picks the LOD (distance tables live outside these files).
+8. LOD selection (§2.12): the per-geom offset subtracted from the LOD distance (assumed 0), and which radius the object
+   manager's cull uses (the importer takes the farthest bounding box corner from the origin).
 
 ## 9. Sources
 

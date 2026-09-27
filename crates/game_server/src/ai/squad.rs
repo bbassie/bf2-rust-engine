@@ -157,8 +157,17 @@ const KIT_SHARES: [(&str, f32); 7] = [
 ];
 
 /// A kit slot for a bot of team `t`: the kind the team is shortest of, leaning towards the
-/// bot's favourite and the kit it has.
-pub fn choose_kit(armory: &Armory, t: usize, team_kits: &[(Entity, u8)], me: Entity, current: u8, personality: &Personality) -> u8 {
+/// bot's favourite and the kit it has. `enemy_vehicles`: the enemy drives vehicles, so
+/// anti-tank kits are in demand.
+pub fn choose_kit(
+    armory: &Armory,
+    t: usize,
+    team_kits: &[(Entity, u8)],
+    me: Entity,
+    current: u8,
+    personality: &Personality,
+    enemy_vehicles: usize,
+) -> u8 {
     let kind_of = |slot: u8| -> Option<&str> {
         let name = armory.team_kits.get(t)?.get(slot as usize)?;
         armory.kits.get(name).map(|k| k.kind.as_str())
@@ -173,10 +182,13 @@ pub fn choose_kit(armory: &Armory, t: usize, team_kits: &[(Entity, u8)], me: Ent
     (0..slots)
         .filter_map(|slot| kind_of(slot).map(|kind| (slot, kind)))
         .map(|(slot, kind)| {
-            let share = KIT_SHARES
+            let mut share = KIT_SHARES
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(kind))
                 .map_or(0.05, |(_, s)| *s);
+            if kind.eq_ignore_ascii_case("AT") {
+                share += 0.08 * enemy_vehicles.min(3) as f32;
+            }
             let have = others.iter().filter(|k| k.eq_ignore_ascii_case(kind)).count() as f32 / total;
             let mut score = share - have + 0.02 * fastrand::f32();
             if personality.favourite_kit.is_some_and(|f| f.eq_ignore_ascii_case(kind)) {

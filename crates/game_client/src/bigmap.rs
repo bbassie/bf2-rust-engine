@@ -1,6 +1,6 @@
 //! The full-screen map, shown while M is held: the whole level with flags (named), our team,
-//! our squad, vehicles, spotted enemies, orders (see `map_markers`) and us. North is up; the
-//! mouse stays with the game.
+//! our squad, vehicles, spotted enemies, orders (see `map_markers`) and us (in a vehicle, its
+//! white icon). North is up; the mouse stays with the game.
 
 use bevy::prelude::*;
 use game_shared::{
@@ -15,7 +15,7 @@ use crate::{
     camera::PlayerCamera,
     conquest_hud::{FRIENDLY, SQUAD},
     deploy::DeployScreen,
-    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerBody, MarkerIcon, MarkerIcons, MarkerPointer, SOLDIER_LAYER},
+    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -152,17 +152,15 @@ fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_big_map(
     level: Option<Res<LoadedLevel>>,
-    root: Single<&Visibility, (With<BigMapRoot>, Without<MarkerIcon>)>,
+    root: Single<&Visibility, (With<BigMapRoot>, NotMarker)>,
     camera: Single<&GlobalTransform, With<PlayerCamera>>,
     players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
     teams: Query<(&Team, Option<&SquadMember>)>,
     soldiers: Query<(Entity, &SoldierRender, &ControlledBy), (With<Soldier>, Without<LocalSoldier>, Without<Seated>)>,
-    image: Single<Entity, With<BigMapImage>>,
+    image: Single<(Entity, &ComputedNode), With<BigMapImage>>,
     mut icons: MarkerIcons,
-    mut heading: Single<
-        (&mut Node, &mut UiTransform),
-        (With<BigMapHeading>, Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerPointer>),
-    >,
+    mut heading: Single<(&mut Node, &mut UiTransform, &mut Visibility), (With<BigMapHeading>, Without<BigMapRoot>, NotMarker)>,
+    seated: Query<(), (With<LocalSoldier>, With<Seated>)>,
     markers: Res<MapMarkers>,
 ) {
     let Some(level) = level else {
@@ -173,10 +171,12 @@ fn update_big_map(
     }
     let at = |uv: Vec2| (percent(uv.x.clamp(0.0, 1.0) * 100.0), percent(uv.y.clamp(0.0, 1.0) * 100.0));
 
-    let (node, transform) = &mut *heading;
+    let (node, transform, visibility) = &mut *heading;
     (node.left, node.top) = at(map_uv(&level, camera.translation()));
     let forward = camera.forward();
     transform.rotation = Rot2::radians(forward.x.atan2(-forward.z));
+    // In a vehicle its icon shows where we are.
+    visibility.set_if_neq(if seated.is_empty() { Visibility::Inherited } else { Visibility::Hidden });
 
     let (local, local_squad) = players
         .single()
@@ -196,13 +196,7 @@ fn update_big_map(
         .iter()
         .chain(&markers.0)
         .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
-    icons.sync(
-        *image,
-        placed,
-        IconStyle {
-            scale: 1.25,
-            labels: true,
-            turn: 0.0,
-        },
-    );
+    let (image, node) = *image;
+    // Sized for the 605 px map of a 720p window, a little larger on larger ones.
+    icons.sync(image, placed, IconStyle::big_map(node, 1.25, 605.0));
 }

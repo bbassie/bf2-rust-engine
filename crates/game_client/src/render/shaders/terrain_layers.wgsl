@@ -26,6 +26,11 @@ struct TerrainLayers {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    // The terrain's own light relative to the level's sun and ambient (BF2 lit terrain with
+    // other colours than static objects): xyz scale the albedo, so sunlight, and the diffuse
+    // occlusion, so ambient light relative to sunlight.
+    light_sun: vec4<f32>,
+    light_ambient: vec4<f32>,
 }
 
 const TRI_PLANAR_0: u32 = 1u;
@@ -108,6 +113,8 @@ fn fragment(
     let base = pbr_input.material.base_color;
     pbr_input.material.base_color = vec4(min(base.rgb * pow(factor, vec3(2.2)), vec3(1.0)), base.a);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * layers.light_sun.rgb, pbr_input.material.base_color.a);
+    pbr_input.diffuse_occlusion *= layers.light_ambient.rgb;
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

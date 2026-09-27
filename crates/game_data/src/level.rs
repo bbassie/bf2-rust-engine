@@ -174,6 +174,129 @@ pub struct EnvironmentDesc {
     pub view_distance: f32,
     #[serde(default)]
     pub sky: Option<SkyDesc>,
+    /// How the level's world (static objects, terrain, trees) is lit, beyond the dynamic
+    /// `sun_color` / `ambient_color` above. `None` for levels made without it: renderers
+    /// then light everything from those two.
+    #[serde(default)]
+    pub lighting: Option<WorldLighting>,
+}
+
+/// The light of a level's world, as BF2's `sky.con` sets it for its shaders. Colours are
+/// gamma-space light factors: BF2 multiplies texture colours by them without converting to
+/// linear light, and some exceed 1.
+///
+/// BF2 lights each kind of object with its own colours (visibilities come from the baked
+/// lightmaps, 0..1):
+/// - Static objects (`RaShaderSTM.fx`): `texture x 2 x (0.65 x sky visibility x static_sky
+///   + sun visibility x N.L x static_sun + lamp light x point)`.
+/// - Terrain (`TerrainShader*.fx`): `colormap x detail x (2 x sun visibility x
+///   terrain_sun + sky visibility x terrain_gi)`, detail textures averaging 0.5 (so `x 2`
+///   keeps the colour map's brightness). The terrain lightmap's sun visibility already
+///   contains N.L, times `terrain_sun_scale`. Undergrowth is lit the same way.
+/// - Trees (`RaShaderLeaf.fx`, trunks): `texture x 2 x (tree_sun x N.L + tree_ambient / 2)`.
+/// - Soldiers and vehicles (`SkinnedMesh.fx`, `RaShaderBM.fx`): `texture x (sun_color x N.L
+///   + ambient_color x hemisphere)`, the hemisphere colour blending the ground colour below
+///   into `dynamic_sky` by the normal's height, minus `hemi_lerp_bias`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct WorldLighting {
+    /// Static objects: sky light (BF2 `Lightmanager.staticSkyColor`).
+    pub static_sky: [f32; 3],
+    /// Static objects: sunlight (`staticSunColor`); black on night levels.
+    pub static_sun: [f32; 3],
+    /// Static objects' highlights (`staticSpecularColor`).
+    pub static_specular: [f32; 3],
+    /// Lamps baked into static objects' lightmaps (`singlePointColor`).
+    pub point: [f32; 3],
+    /// Terrain sunlight (`terrain.sunColor`).
+    pub terrain_sun: [f32; 3],
+    /// Terrain sky light (`terrain.GIColor`).
+    pub terrain_gi: [f32; 3],
+    /// Sun visibility in the terrain lightmaps on open flat ground, relative to N.L: 1 for
+    /// most levels, lower where they were baked with a weaker sun (overcast Operation
+    /// Harvest: 0.5). Measured from the lightmaps.
+    pub terrain_sun_scale: f32,
+    /// `terrain.waterSunIntensity`.
+    pub water_sun_intensity: f32,
+    /// Trees: ambient light (`treeAmbientColor`).
+    pub tree_ambient: [f32; 3],
+    /// Trees: sunlight (`treeSunColor`).
+    pub tree_sun: [f32; 3],
+    /// Trees: sky colour (`treeSkyColor`).
+    pub tree_sky: [f32; 3],
+    /// Soldiers and vehicles: sky colour of the hemisphere light (`Lightmanager.skyColor`).
+    pub dynamic_sky: [f32; 3],
+    /// Soldiers and vehicles: how much the hemisphere light leans to the ground colour.
+    pub hemi_lerp_bias: f32,
+    /// Soldiers and vehicles: colour of lamps (`DynamicPointColor`).
+    pub dynamic_point: [f32; 3],
+    /// Particles in sunlight and in shadow (`effectSunColor`, `effectShadowColor`).
+    pub effect_sun: [f32; 3],
+    pub effect_shadow: [f32; 3],
+    /// BF2's "faked HDR" (the Special Forces night levels): the colours once the eye has
+    /// adapted to the dark (`*High`) and to bright light (`*Low`). The game blends between
+    /// them by how bright the view is; the colours above are the level editor's.
+    pub dark_adapted: Option<AdaptedLighting>,
+    pub bright_adapted: Option<AdaptedLighting>,
+    /// Seconds the faked HDR takes to adapt to bright light and to the dark.
+    pub adaptation_seconds: [f32; 2],
+}
+
+impl Default for WorldLighting {
+    fn default() -> Self {
+        Self {
+            static_sky: [0.5; 3],
+            static_sun: [0.8; 3],
+            static_specular: [0.5; 3],
+            point: [0.0; 3],
+            terrain_sun: [0.75; 3],
+            terrain_gi: [0.7; 3],
+            terrain_sun_scale: 1.0,
+            water_sun_intensity: 0.8,
+            tree_ambient: [0.5; 3],
+            tree_sun: [0.8; 3],
+            tree_sky: [0.8; 3],
+            dynamic_sky: [0.8; 3],
+            hemi_lerp_bias: 0.25,
+            dynamic_point: [1.0; 3],
+            effect_sun: [0.9; 3],
+            effect_shadow: [0.3; 3],
+            dark_adapted: None,
+            bright_adapted: None,
+            adaptation_seconds: [0.5, 2.0],
+        }
+    }
+}
+
+/// The colours BF2's faked HDR replaces (see [`WorldLighting`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AdaptedLighting {
+    pub static_sky: [f32; 3],
+    pub terrain_gi: [f32; 3],
+    pub point: [f32; 3],
+    /// Soldiers' and vehicles' sunlight (moonlight).
+    pub sun: [f32; 3],
+    pub dynamic_sky: [f32; 3],
+    pub dynamic_point: [f32; 3],
+}
+
+impl WorldLighting {
+    /// With the dark-adapted colours of the faked HDR where the level has them: what BF2
+    /// showed while the player looked at dark surroundings, the usual case on night levels.
+    /// Also returns the dynamic sun colour to use (`sun_color` unless adapted).
+    pub fn dark_adapted(&self, sun_color: [f32; 3]) -> (WorldLighting, [f32; 3]) {
+        let mut out = self.clone();
+        let mut sun = sun_color;
+        if let Some(adapted) = &self.dark_adapted {
+            out.static_sky = adapted.static_sky;
+            out.terrain_gi = adapted.terrain_gi;
+            out.point = adapted.point;
+            out.dynamic_sky = adapted.dynamic_sky;
+            out.dynamic_point = adapted.dynamic_point;
+            sun = adapted.sun;
+        }
+        (out, sun)
+    }
 }
 
 /// A textured sky dome drawn around the camera.
@@ -201,6 +324,7 @@ impl Default for EnvironmentDesc {
             fog_range: [300.0, 900.0],
             view_distance: 900.0,
             sky: None,
+            lighting: None,
         }
     }
 }

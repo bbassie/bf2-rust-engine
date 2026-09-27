@@ -81,6 +81,13 @@ struct Cli {
     /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
     #[arg(long)]
     mods: Option<PathBuf>,
+    /// Soak test: log the server's health (entities, memory, frame times, round) every
+    /// `--soak-every` seconds and quit after this many minutes (0: keep running).
+    #[arg(long)]
+    soak: Option<f32>,
+    /// Seconds between soak reports.
+    #[arg(long, default_value_t = 30.0)]
+    soak_every: f32,
 }
 
 #[derive(Subcommand, Debug)]
@@ -192,5 +199,11 @@ fn main() -> AppExit {
             settings: Some(settings),
         },
     ));
+    if let Some(minutes) = cli.soak {
+        app.add_plugins(game_server::soak::SoakPlugin {
+            duration: (minutes > 0.0).then(|| Duration::from_secs_f32(minutes * 60.0)),
+            every: cli.soak_every,
+        });
+    }
     app.run()
 }

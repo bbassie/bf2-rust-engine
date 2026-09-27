@@ -24,6 +24,10 @@ struct UndergrowthParams {
     distances: vec4<f32>,
     // xy: wind direction (XZ), z: alpha cutoff, w: fraction of plants kept at the fade start.
     wind: vec4<f32>,
+    // The terrain's light relative to the level's (BF2 lit undergrowth like the terrain):
+    // xyz scale the albedo, so sunlight, and the diffuse occlusion, so ambient light.
+    light_sun: vec4<f32>,
+    light_ambient: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: UndergrowthParams;
@@ -107,7 +111,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = to_linear(min(to_gamma(texel.rgb) * tint * params.distances.w * in.tint.y, vec3(1.0)));
 
     var pbr_input = pbr_input_new();
-    pbr_input.material.base_color = vec4(albedo, 1.0);
+    pbr_input.material.base_color = vec4(albedo * params.light_sun.rgb, 1.0);
     pbr_input.material.perceptual_roughness = 0.9;
     pbr_input.material.reflectance = vec3(0.2);
     // No fog: plants end well before fog starts (and fog's light scattering would sample the
@@ -124,6 +128,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let ao = textureLoad(screen_space_ambient_occlusion_texture, vec2<i32>(in.position.xy), 0).r;
     pbr_input.diffuse_occlusion = vec3(ao);
 #endif
+    pbr_input.diffuse_occlusion *= params.light_ambient.rgb;
 
     var color = apply_pbr_lighting(pbr_input);
     color = main_pass_post_lighting_processing(pbr_input, color);

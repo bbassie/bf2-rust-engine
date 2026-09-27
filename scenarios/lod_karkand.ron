@@ -1,0 +1,35 @@
+// Static mesh LODs and draw distances on Karkand: street level (LOD 0 and the first
+// switches at 25-50 m), a rooftop-height view across the city (several LODs cross-fading)
+// and two high vantage points (culling of small objects). Measures each view.
+// Before/after: run once with BF2_STATIC_LODS=off (full detail everywhere, no culling).
+// client --scenario scenarios/lod_karkand.ron --out target/scenarios/lod/karkand_on
+// BF2_STATIC_LODS=off client --scenario scenarios/lod_karkand.ron --out target/scenarios/lod/karkand_off
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-184.0, 158.0, -60.0), 0.0, -2.0),
+        Wait(2.0),
+        Screenshot("street"),
+        Measure("street", 5.0),
+        Camera((-184.0, 157.5, -80.0), 20.0, -8.0),
+        Wait(2.0),
+        Screenshot("square"),
+        Measure("square", 5.0),
+        Camera((-60.0, 185.0, 60.0), 45.0, -6.0),
+        Wait(2.0),
+        Screenshot("rooftops"),
+        Measure("rooftops", 5.0),
+        Camera((0.0, 320.0, 150.0), 38.7, -20.0),
+        Wait(3.0),
+        Screenshot("high"),
+        Measure("high", 5.0),
+        Camera((-204.0, 565.0, 192.0), 90.0, -30.0),
+        Wait(3.0),
+        Screenshot("air_400"),
+        Measure("air 400", 5.0),
+        Quit,
+    ],
+)

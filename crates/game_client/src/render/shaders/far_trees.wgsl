@@ -15,6 +15,9 @@
 struct FarTreeParams {
     // x: hand-over start, y: end (m), z: alpha cutoff.
     fade: vec4<f32>,
+    // Lit like the trees: xyz scale the albedo (sunlight) and the diffuse occlusion (ambient).
+    light_sun: vec4<f32>,
+    light_ambient: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: FarTreeParams;
@@ -85,7 +88,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var pbr_input = pbr_input_new();
     // BF2 doubles tree textures in gamma space like the detailed trees, but lit from above
     // the planes catch more light than a tree's own leaves: 1.5 matches their brightness.
-    pbr_input.material.base_color = vec4(pow(min(to_gamma(texel.rgb) * 1.5, vec3(1.0)), vec3(2.2)), 1.0);
+    pbr_input.material.base_color = vec4(pow(min(to_gamma(texel.rgb) * 1.5, vec3(1.0)), vec3(2.2)) * params.light_sun.rgb, 1.0);
+    pbr_input.diffuse_occlusion *= params.light_ambient.rgb;
     pbr_input.material.perceptual_roughness = 0.9;
     pbr_input.material.reflectance = vec3(0.1);
     pbr_input.material.flags = STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;

@@ -41,6 +41,16 @@ pub struct StaticMesh {
     pub index: u32,
 }
 
+/// Lower-detail meshes of a [`StaticMesh`] (the same `index` in each) and how far away it
+/// is drawn at all, from the object template. The server ignores it; the client picks the
+/// mesh by camera distance.
+#[derive(Component, Clone, Debug, Default)]
+pub struct StaticMeshLods {
+    pub lods: Vec<game_data::MeshLod>,
+    /// Beyond this distance (m) from the camera the object isn't drawn.
+    pub draw_distance: Option<f32>,
+}
+
 /// A part of a destroyable object.
 #[derive(Component, Clone, Debug)]
 pub struct Destructible {
@@ -130,10 +140,17 @@ pub fn spawn_objects(commands: &mut Commands, statics: &[StaticInstance], first_
             let mut spawn = |mesh: Option<&String>, collision: Option<&String>, wreck: bool| {
                 let mut entity = commands.spawn((LevelEntity, transform));
                 if let Some(mesh) = mesh {
-                    entity.insert(StaticMesh {
-                        path: mesh.clone(),
-                        index: part.mesh_index,
-                    });
+                    let lods = if wreck { &part.wreck_lods } else { &part.lods };
+                    entity.insert((
+                        StaticMesh {
+                            path: mesh.clone(),
+                            index: part.mesh_index,
+                        },
+                        StaticMeshLods {
+                            lods: lods.clone(),
+                            draw_distance: object.draw_distance,
+                        },
+                    ));
                 }
                 if let Some(collision) = collision
                     && let Some(collider) = cache.collider(collision, part.collision_part)

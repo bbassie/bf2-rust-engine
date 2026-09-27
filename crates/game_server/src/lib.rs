@@ -46,6 +46,7 @@ pub mod gear;
 pub mod radio;
 pub mod rotation;
 pub mod server_config;
+pub mod soak;
 pub mod stats;
 pub mod squads;
 pub mod destruction;

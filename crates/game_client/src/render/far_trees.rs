@@ -58,6 +58,9 @@ struct FarTreeMaterial {
 struct FarTreeParams {
     /// x: hand-over start, y: end (m), z: alpha cutoff.
     fade: Vec4,
+    /// Lit like the trees (`environment::LightScale::uniforms`).
+    light_sun: Vec4,
+    light_ambient: Vec4,
 }
 
 impl Material for FarTreeMaterial {
@@ -146,9 +149,12 @@ fn load_far_trees(
     let Some(atlas) = vegetation.tree_atlas.filter(|_| !vegetation.tree_lods.is_empty()) else {
         return;
     };
+    let (light_sun, light_ambient) = super::environment::LevelLight::new(&level.desc.environment).trees.uniforms();
     let material = materials.add(FarTreeMaterial {
         params: FarTreeParams {
             fade: Vec4::new(FAR_TREES_FROM, FAR_TREES_TO, 0.5, 0.0),
+            light_sun,
+            light_ambient,
         },
         atlas: asset_server.load(format!("imported://levels/{}/{atlas}", level.desc.name)),
     });

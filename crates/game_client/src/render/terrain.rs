@@ -98,8 +98,13 @@ fn build_terrain_visuals(
                 .map(|d| asset_server.load(format!("imported://{}", d.texture)))
         })
         .collect();
+    // BF2 lit the terrain with its own sun and sky colours.
+    let light = super::environment::LevelLight::new(&level.desc.environment);
+    let (light_sun, light_ambient) = light.terrain.uniforms();
     let mut params = TerrainLayerParams {
         side0_fade: Vec4::new(8.0, 16.0, 80.0, 220.0),
+        light_sun,
+        light_ambient,
         ..default()
     };
     if let Some(t) = desc {
@@ -224,8 +229,10 @@ fn build_terrain_visuals(
                         base_color: if path.is_empty() {
                             untextured.base_color
                         } else {
+                            // Far away, so one factor for the terrain's sun and sky light.
                             let [r, g, b] = surrounding.tint;
-                            Color::linear_rgb(r, g, b)
+                            let light = light.terrain.average(&light, 0.5);
+                            Color::linear_rgb(r * light.x, g * light.y, b * light.z)
                         },
                         perceptual_roughness: 0.95,
                         reflectance: 0.15,

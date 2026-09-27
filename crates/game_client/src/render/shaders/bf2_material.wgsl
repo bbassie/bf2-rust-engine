@@ -48,6 +48,10 @@ struct Bf2Layers {
     gloss: f32,
     albedo_scale: f32,
     _pad: f32,
+    // This kind of surface's light relative to the level's (trees: BF2's tree colours):
+    // xyz scale the albedo, so sunlight, and the diffuse occlusion, so ambient light.
+    light_sun: vec4<f32>,
+    light_ambient: vec4<f32>,
 }
 
 #ifdef BINDLESS
@@ -497,6 +501,8 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #endif
 
     pbr_input.material.base_color = pbr_functions::alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = vec4(pbr_input.material.base_color.rgb * layers.light_sun.rgb, pbr_input.material.base_color.a);
+    pbr_input.diffuse_occlusion *= layers.light_ambient.rgb;
 #ifdef BF2_DEBUG_LIGHTING
     pbr_input.material.base_color = vec4(vec3(0.5), pbr_input.material.base_color.a);
 #endif

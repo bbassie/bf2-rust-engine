@@ -1,0 +1,40 @@
+// Lighting check: Ghost Town (overcast): the central square, an office building, a Land Rover (ailraider).
+// Views with the sun (or moon) behind and in front of the camera, the sky, our soldier in
+// third person lit from the side, a building interior and a vehicle close up.
+// client --scenario scenarios/light_ghost_town.ron --out target/scenarios/light/<before|after>/ghost_town
+(
+    level: "ghost_town",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        Screenshot("spawn"),
+        // Sun behind the camera: sunlit faces.
+        Teleport((-190.8, 44.5, 37.8), 47.0, -4.0),
+        Wait(1.5),
+        Screenshot("sunlit"),
+        // Facing the sun: shaded faces against the bright sky.
+        Look(-133.0, -4.0),
+        Wait(0.5),
+        Screenshot("against_sun"),
+        Look(137.0, 18.0),
+        Wait(0.5),
+        Screenshot("sky"),
+        // Our soldier, lit from the side.
+        ThirdPerson(true),
+        Look(137.0, -8.0),
+        Wait(2.5),
+        Screenshot("soldier"),
+        ThirdPerson(false),
+        Teleport((-113.0, 41.0, 237.0), 0.0, -2.0),
+        Wait(1.5),
+        Screenshot("interior"),
+        NearVehicle("xpak_ailraider"),
+        ThirdPerson(true),
+        Wait(2.5),
+        Screenshot("vehicle"),
+        Quit,
+    ],
+)

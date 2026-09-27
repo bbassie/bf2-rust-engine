@@ -1,6 +1,7 @@
 //! The minimap, top right: the level's map around us, flags in their owners' colors,
 //! teammates as dots, vehicles, spotted enemies and orders (see `map_markers`), and us with
-//! our heading. It turns with us (N switches to north up).
+//! our heading (in a vehicle, its white icon is us). It turns with us (N switches to north
+//! up).
 
 use bevy::{
     asset::embedded_asset,
@@ -20,7 +21,7 @@ use game_shared::{
 use crate::{
     camera::PlayerCamera,
     conquest_hud::{FRIENDLY, SQUAD},
-    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerBody, MarkerIcons, MarkerPointer, SOLDIER_LAYER},
+    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -231,7 +232,8 @@ fn update_minimap(
     mut materials: ResMut<Assets<MinimapMaterial>>,
     icons_root: Single<Entity, With<MinimapIcons>>,
     mut icons: MarkerIcons,
-    mut heading: Single<&mut UiTransform, (With<PlayerHeading>, Without<MarkerBody>, Without<MarkerPointer>)>,
+    mut heading: Single<(&mut UiTransform, &mut Visibility), (With<PlayerHeading>, NotMarker)>,
+    seated: Query<(), (With<LocalSoldier>, With<Seated>)>,
     markers: Res<MapMarkers>,
 ) {
     let Some(level) = level else {
@@ -242,7 +244,10 @@ fn update_minimap(
     let forward = camera.forward();
     let heading_angle = forward.x.atan2(-forward.z);
     let map_angle = if settings.rotating { heading_angle } else { 0.0 };
-    heading.rotation = Rot2::radians(heading_angle - map_angle);
+    let (transform, visibility) = &mut *heading;
+    transform.rotation = Rot2::radians(heading_angle - map_angle);
+    // In a vehicle its icon shows where we are (the dot would cover its turret).
+    visibility.set_if_neq(if seated.is_empty() { Visibility::Inherited } else { Visibility::Hidden });
     if let Some(mut material) = map.and_then(|m| materials.get_mut(&m.0)) {
         material.params.view = Vec4::new(center.x, center.y, map_angle, RANGE / map_meters);
     }
@@ -283,6 +288,7 @@ fn update_minimap(
             scale: 1.0,
             labels: false,
             turn: map_angle,
+            size: Vec2::splat(INNER),
         },
     );
 }

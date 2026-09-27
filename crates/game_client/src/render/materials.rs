@@ -26,7 +26,10 @@ impl Plugin for MaterialsPlugin {
             MaterialPlugin::<TerrainMaterial>::default(),
         ))
         .init_resource::<Bf2MaterialCache>()
-        .add_systems(Update, load_env_map.run_if(resource_exists_and_changed::<LoadedLevel>))
+        .add_systems(
+            Update,
+            (load_env_map, apply_tree_light).run_if(resource_exists_and_changed::<LoadedLevel>),
+        )
         .add_systems(PostUpdate, swap_scene_materials);
     }
 }
@@ -67,7 +70,7 @@ pub struct TerrainLayers {
     pub detail_5: Option<Handle<Image>>,
 }
 
-#[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
+#[derive(ShaderType, Reflect, Debug, Clone, Copy)]
 pub struct TerrainLayerParams {
     /// Meters per repeat (top projection) of detail textures 0..3.
     pub tile_a: Vec4,
@@ -79,6 +82,26 @@ pub struct TerrainLayerParams {
     pub _pad0: u32,
     pub _pad1: u32,
     pub _pad2: u32,
+    /// The terrain's own light (`environment::LightScale::uniforms`): xyz scale the albedo
+    /// (sunlight) and the diffuse occlusion (ambient light relative to sunlight).
+    pub light_sun: Vec4,
+    pub light_ambient: Vec4,
+}
+
+impl Default for TerrainLayerParams {
+    fn default() -> Self {
+        Self {
+            tile_a: Vec4::ZERO,
+            tile_b: Vec4::ZERO,
+            side0_fade: Vec4::ZERO,
+            flags: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            light_sun: Vec4::ONE,
+            light_ambient: Vec4::ONE,
+        }
+    }
 }
 
 impl TerrainLayerParams {
@@ -119,6 +142,11 @@ pub struct Bf2Layers {
     pub gloss: f32,
     /// Albedo factor: BF2 doubles the lighting of static meshes.
     pub albedo_scale: f32,
+    /// Light of this kind of surface relative to the level's (`environment::LightScale`
+    /// uniforms): xyz scale the albedo after `albedo_scale` (sunlight) and the diffuse
+    /// occlusion (ambient light relative to sunlight). Trees follow the level's.
+    pub light_sun: Vec4,
+    pub light_ambient: Vec4,
     /// Detail texture (UV1) or wreck map (UV0), multiplies the base color.
     #[texture(51)]
     #[sampler(52)]
@@ -147,6 +175,8 @@ impl Default for Bf2Layers {
             flags: 0,
             gloss: STATIC_GLOSS,
             albedo_scale: 1.0,
+            light_sun: Vec4::ONE,
+            light_ambient: Vec4::ONE,
             detail: None,
             dirt: None,
             crack: None,
@@ -192,6 +222,8 @@ pub struct Bf2LayersUniform {
     pub gloss: f32,
     pub albedo_scale: f32,
     pub _pad: f32,
+    pub light_sun: Vec4,
+    pub light_ambient: Vec4,
 }
 
 impl From<&Bf2Layers> for Bf2LayersUniform {
@@ -201,6 +233,8 @@ impl From<&Bf2Layers> for Bf2LayersUniform {
             gloss: layers.gloss,
             albedo_scale: layers.albedo_scale,
             _pad: 0.0,
+            light_sun: layers.light_sun,
+            light_ambient: layers.light_ambient,
         }
     }
 }
@@ -243,6 +277,9 @@ struct Bf2MaterialCache {
     /// The level's environment cube map and the materials reflecting it.
     env_map: Option<Handle<Image>>,
     env_users: Vec<Handle<Bf2Material>>,
+    /// The level's tree light (`LightScale::uniforms`) and the tree materials.
+    tree_light: Option<(Vec4, Vec4)>,
+    tree_users: Vec<Handle<Bf2Material>>,
 }
 
 /// Makes BF2 materials from glTF materials: the `StandardMaterial` Bevy's glTF loader
@@ -295,11 +332,19 @@ impl Bf2Materials<'_> {
             .path()
             .map(|p| p.path().to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        let material = describe(base, &bf2, &path, &self.asset_server, self.cache.env_map.as_ref());
+        let mut material = describe(base, &bf2, &path, &self.asset_server, self.cache.env_map.as_ref());
         let reflects = technique_reflects(&bf2);
+        let tree = is_tree(&bf2, &path);
+        if tree && let Some((sun, ambient)) = self.cache.tree_light {
+            material.extension.light_sun = sun;
+            material.extension.light_ambient = ambient;
+        }
         let handle = self.materials.add(material);
         if reflects {
             self.cache.env_users.push(handle.clone());
+        }
+        if tree {
+            self.cache.tree_users.push(handle.clone());
         }
         self.cache.materials.insert(standard.id(), handle.clone());
         Some(handle)
@@ -332,6 +377,11 @@ const STATIC_GLOSS: f32 = 0.15;
 const GLASS_GLOSS: f32 = 0.5;
 /// Share of the light on a leaf that passes through to its other side.
 const LEAF_TRANSMISSION: f32 = 0.4;
+
+/// Tree (and bush) materials: static meshes from BF2's `vegitation` folders.
+fn is_tree(bf2: &serde_json::Value, path: &str) -> bool {
+    bf2["kind"].as_str().is_none_or(|k| k == "static") && path.contains("vegitation")
+}
 
 fn technique_reflects(bf2: &serde_json::Value) -> bool {
     bf2["kind"] != "static" && bf2["technique"].as_str().is_some_and(|t| t.to_ascii_lowercase().contains("envmap"))
@@ -491,6 +541,22 @@ fn load_env_map(
     for handle in &cache.env_users {
         if let Some(mut material) = materials.get_mut(handle) {
             set_env_map(&mut material.extension, cache.env_map.clone());
+        }
+    }
+}
+
+/// Lights the tree materials with the level's tree light (BF2 had separate tree colours).
+fn apply_tree_light(
+    level: Res<LoadedLevel>,
+    mut cache: ResMut<Bf2MaterialCache>,
+    mut materials: ResMut<Assets<Bf2Material>>,
+) {
+    let (sun, ambient) = super::environment::LevelLight::new(&level.desc.environment).trees.uniforms();
+    cache.tree_light = Some((sun, ambient));
+    for handle in &cache.tree_users {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.extension.light_sun = sun;
+            material.extension.light_ambient = ambient;
         }
     }
 }

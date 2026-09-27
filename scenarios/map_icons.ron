@@ -1,7 +1,9 @@
-// Flag and vehicle icons in game: the ticket bar and flag pills with the teams' flags, the
-// minimap and the big map with flag icons and vehicles (grey empty ones at the US base,
-// ours in blue with the turret line once we sit in the M1A2 and turn the turret), the
-// scoreboard's team flags, the deploy screen's markers and the commander screen.
+// Flag and vehicle icons in game: the ticket bar and flag pills with the teams' flags and
+// letters, the minimap (rotating and north up) and the big map with flag icons, placed labels
+// and vehicles (grey empty ones at the US base, ours in white with the turret line once we
+// sit in the M1A2 and turn the turret), the scoreboard's team flags, the deploy screen's
+// markers and the commander screen. For a bigger window add `--settings` with a
+// `(window_size: (1920, 1080))` file.
 // client --scenario scenarios/map_icons.ron --out target/scenarios/map_icons
 (
     level: "strike_at_karkand",
@@ -12,6 +14,10 @@
         WaitReady,
         Wait(1.5),
         Screenshot("hud"),
+        Key(KeyN),
+        Wait(0.2),
+        Screenshot("hud_north"),
+        Key(KeyN),
         HoldKey(KeyM),
         Wait(0.5),
         Screenshot("bigmap"),
@@ -34,6 +40,10 @@
         VehicleLook(70.0, 0.0),
         Wait(2.5),
         Screenshot("tank_minimap"),
+        Key(KeyN),
+        Wait(0.2),
+        Screenshot("tank_minimap_north"),
+        Key(KeyN),
         HoldKey(KeyM),
         Wait(0.5),
         Screenshot("tank_bigmap"),

@@ -1,0 +1,25 @@
+// Static mesh LODs and draw distances on a big map (Gulf of Oman): the town from 150 m up,
+// from 40 m up and from 400 m up. Measures each view.
+// client --scenario scenarios/lod_oman.ron --out target/scenarios/lod/oman_on
+// BF2_STATIC_LODS=off client --scenario scenarios/lod_oman.ron --out target/scenarios/lod/oman_off
+(
+    level: "gulf_of_oman",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-200.0, 200.0, 400.0), -45.0, -18.0),
+        Wait(3.0),
+        Screenshot("high"),
+        Measure("high", 5.0),
+        Camera((-20.0, 80.0, 220.0), -45.0, -8.0),
+        Wait(2.0),
+        Screenshot("low"),
+        Measure("low", 5.0),
+        Camera((-500.0, 450.0, 700.0), -45.0, -25.0),
+        Wait(3.0),
+        Screenshot("air_400"),
+        Measure("air 400", 5.0),
+        Quit,
+    ],
+)

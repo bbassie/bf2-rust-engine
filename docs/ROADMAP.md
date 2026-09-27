@@ -109,9 +109,11 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
   orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
   settings, ladders in navigation
-- AI commander using assets, bots using launchers/repairs (in progress)
-- Strategic layer from `StrategicAreas.ai`, squad orders, individual utility behaviours
-  seeded from `AIBehaviours.ai` and per-object AI templates
+- [x] AI commander (takes the post, gives way to humans, squad orders, artillery, UAV, scans,
+  supply drops); bots follow a human commander's orders, use launchers, wire-guided rockets,
+  flashbangs, tear gas and gas masks, repair vehicles and assets, throw bags
+- [x] Utility behaviours weighted like `AIBehaviours.ai`, BF2's weapon AI templates (ranges,
+  firing poses)
 - Bots driving vehicles and flying through the same input channels as players
 
 ## M5: Presentation

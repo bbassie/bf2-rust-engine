@@ -1,7 +1,7 @@
-//! Conquest on the HUD: tickets and flags at the top (with the teams' flags, and each
-//! control point's owner flag framed in its colour), capture progress while standing at a
-//! flag, capture notifications, and the end-of-round banner. Colors are relative to us:
-//! blue is our team, red the enemy, grey neutral.
+//! Conquest on the HUD: tickets and flags at the top (with the teams' flags, and a pill per
+//! control point with its owner's flag and its letter on the owner's colour), capture
+//! progress while standing at a flag, capture notifications, and the end-of-round banner.
+//! Colors are relative to us: blue is our team, red the enemy, grey neutral.
 
 use std::collections::VecDeque;
 
@@ -151,7 +151,7 @@ fn spawn_conquest_hud(mut commands: Commands) {
                 panel.spawn((
                     FlagRow,
                     Node {
-                        column_gap: px(6),
+                        column_gap: px(5),
                         align_items: AlignItems::Center,
                         ..default()
                     },
@@ -298,17 +298,24 @@ fn rebuild_flag_pills(
         commands.entity(row).with_children(|row| {
             row.spawn(Node {
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
+                align_items: AlignItems::Stretch,
                 row_gap: px(2),
                 ..default()
             })
             .with_children(|column| {
+                // The owner's flag, and the point's letter beside it on the owner's colour
+                // (on the flag it was hard to read).
                 column
                     .spawn((
                         FlagPill(entity),
                         Node {
-                            width: px(32),
                             height: px(23),
+                            padding: UiRect {
+                                left: px(3),
+                                right: px(5),
+                                ..default()
+                            },
+                            column_gap: px(3),
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::Center,
                             border_radius: BorderRadius::all(px(5)),
@@ -320,16 +327,15 @@ fn rebuild_flag_pills(
                         pill.spawn((
                             FlagPillIcon(entity),
                             Node {
-                                position_type: PositionType::Absolute,
-                                left: px(3),
-                                top: px(3),
-                                width: px(26),
+                                width: px(25),
                                 height: px(17),
+                                border: UiRect::all(px(1)),
                                 border_radius: BorderRadius::all(px(2)),
+                                display: Display::None,
                                 ..default()
                             },
+                            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.45)),
                             ImageNode::default(),
-                            Visibility::Hidden,
                         ));
                         pill.spawn((
                             Text::new(letter.to_uppercase()),
@@ -337,14 +343,17 @@ fn rebuild_flag_pills(
                             TextColor(TEXT),
                             TextShadow {
                                 offset: Vec2::splat(1.0),
-                                color: Color::srgba(0.0, 0.0, 0.0, 0.95),
+                                color: Color::srgba(0.0, 0.0, 0.0, 0.7),
+                            },
+                            Node {
+                                min_width: px(8),
+                                ..default()
                             },
                         ));
                     });
                 column
                     .spawn((
                         Node {
-                            width: px(32),
                             height: px(3),
                             border_radius: BorderRadius::all(px(1.5)),
                             ..default()
@@ -423,21 +432,21 @@ fn update_flag_pills(
     flags: Query<&FlagState>,
     mut pills: Query<(&FlagPill, &mut BackgroundColor), Without<FlagPillBar>>,
     mut bars: Query<(&FlagPillBar, &mut Node, &mut BackgroundColor), (Without<FlagPill>, Without<FlagPillIcon>)>,
-    mut pill_icons: Query<(&FlagPillIcon, &mut ImageNode, &mut Visibility)>,
+    mut pill_icons: Query<(&FlagPillIcon, &mut ImageNode, &mut Node), Without<FlagPillBar>>,
 ) {
     let local = local_team(&players);
-    for (icon, mut image, mut visibility) in &mut pill_icons {
+    // Without a flag for the owner (often neutral), just the letter.
+    for (icon, mut image, mut node) in &mut pill_icons {
         let Ok(state) = flags.get(icon.0) else { continue };
-        match icons.side(state.owner).flag.clone() {
-            Some(handle) => {
-                if image.image != handle {
-                    image.image = handle;
-                }
-                visibility.set_if_neq(Visibility::Inherited);
-            }
-            None => {
-                visibility.set_if_neq(Visibility::Hidden);
-            }
+        let handle = icons.side(state.owner).flag.clone();
+        let display = if handle.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        if let Some(handle) = handle
+            && image.image != handle
+        {
+            image.image = handle;
         }
     }
     for (pill, mut background) in &mut pills {
