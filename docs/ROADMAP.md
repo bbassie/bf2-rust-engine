@@ -113,7 +113,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - [x] Infantry navigation from our collision data: layered walkability grid, cached,
   background A*; stuck events down from ~250/min to 1-3/min
-- Path costs per vehicle class
+- Path costs per vehicle class (in progress)
 - [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
   orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
   settings, ladders in navigation
@@ -122,7 +122,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   flashbangs, tear gas and gas masks, repair vehicles and assets, throw bags
 - [x] Utility behaviours weighted like `AIBehaviours.ai`, BF2's weapon AI templates (ranges,
   firing poses)
-- Bots driving vehicles and flying through the same input channels as players
+- Bots driving vehicles and flying through the same input channels as players (in progress)
 
 ## M5: Presentation
 
