@@ -568,6 +568,22 @@ pub struct VehicleWeaponDesc {
     /// The sight drawn over the view from its seat (BF2's vehicle HUD for the weapon).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sight: Vec<HudPicture>,
+    /// Countermeasures (BF2's `PIFlareFire` launchers: decoy flares, smoke grenades), fired
+    /// by the countermeasure key instead of a trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub countermeasure: Option<CountermeasureDesc>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CountermeasureDesc {
+    /// Rounds per press (`fire.burstSize`).
+    pub burst: u32,
+    /// Where the rounds leave in turn (the launcher's barrels), part space; none: the muzzle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub barrels: Vec<crate::Placement>,
+    /// Decoy flares: heat seekers aimed at the vehicle lose it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decoy: bool,
 }
 
 /// A picture of a HUD overlay, placed on BF2's 800x600 HUD screen (centred on wider screens,

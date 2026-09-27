@@ -40,6 +40,7 @@ use crate::{
     AppliedInput, HostPlayer, PlayerClient, ServerSettings, ServerSimSystems,
     abilities::{BleedOut, Deaths, hurts_downed},
     destruction::Materials,
+    vehicles::Decoy,
 };
 
 pub struct CombatPlugin;
@@ -579,7 +580,7 @@ fn simulate_projectiles(
         (Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>),
         (With<Soldier>, Without<Downed>),
     >,
-    vehicles: Query<(&VehicleData, &Position, &LinearVelocity, &Rotation, Option<&VehicleState>)>,
+    vehicles: Query<(&VehicleData, &Position, &LinearVelocity, &Rotation, Option<&VehicleState>, Option<&Decoy>)>,
     materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
     mut soldier_hits: MessageWriter<SoldierHit>,
@@ -671,6 +672,10 @@ fn simulate_projectiles(
         if let Some(target) = live.target {
             // Heat seeking: towards where the aircraft will be, until it slips out of view.
             match vehicles.get(target) {
+                Ok((.., Some(decoy))) if decoy.active(time.elapsed_secs()) => {
+                    info!("{} lost its target to decoy flares", weapon.name);
+                    live.target = None;
+                }
                 Ok((_, position, velocity, ..)) => {
                     let to = position.0 - next.position;
                     if to.length() < HEAT_PROXIMITY {
@@ -770,7 +775,7 @@ fn simulate_projectiles(
                     attacker: attacker.clone(),
                 });
             }
-        } else if let Ok((vehicle, position, _, rotation, state)) = vehicles.get(body) {
+        } else if let Ok((vehicle, position, _, rotation, state, _)) = vehicles.get(body) {
             // The face it hits: front, side or rear armour, tracks, glass.
             let inverse = rotation.0.inverse();
             let joints = state.map_or(&[][..], |s| s.joints.as_slice());
@@ -1143,10 +1148,11 @@ pub fn spawn_projectile(
     ignore: Option<Entity>,
     origin: Vec3,
     direction: Vec3,
+    inherited: Vec3,
     target: Option<Entity>,
 ) {
     let fuse = weapon.projectile.time_to_live;
-    let velocity = direction * weapon.projectile.velocity;
+    let velocity = direction * weapon.projectile.velocity + inherited;
     let guided = weapon.fire.guidance == Guidance::Wire;
     let object = weapon.projectile.is_object();
     let name = weapon.name.clone();

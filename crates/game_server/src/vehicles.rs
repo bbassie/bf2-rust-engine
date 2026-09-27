@@ -93,7 +93,27 @@ struct GunState {
     /// Seconds it can't fire for having overheated.
     overheated: f32,
     lock: Option<(Entity, f32)>,
+    /// Countermeasures: rounds left of the burst the key started, and whether the key was
+    /// down last tick.
+    burst: u32,
+    pressed: bool,
 }
+
+/// Server-side: until when (elapsed seconds) its decoy flares draw heat seekers off the
+/// vehicle.
+#[derive(Component)]
+pub struct Decoy(pub f32);
+
+impl Decoy {
+    pub fn active(&self, now: f32) -> bool {
+        now < self.0
+    }
+}
+
+/// How long decoy flares keep heat seekers off the aircraft that dropped them.
+const DECOY_TIME: f32 = 3.0;
+/// Share of the aircraft's velocity decoy flares keep (they fall behind in arcs).
+const FLARE_INHERITED: f32 = 0.6;
 
 /// Server-side: a destroyed vehicle, removed when the timer runs out.
 #[derive(Component)]
@@ -548,6 +568,9 @@ fn carry_occupants(
 /// at their rate of fire, reloading when the magazine is empty. Where a seat has several
 /// guns on one trigger, its weapon keys choose which. Machine guns overheat, heat seekers
 /// lock on to enemy aircraft in their sight and hand the target to their missiles.
+/// Countermeasures fire a burst per press of their key, out of their barrels in turn;
+/// flares keep heat seekers off the vehicle for a while. Shells, missiles and bombs leave
+/// with the vehicle's velocity (bombs are dropped at none of their own), flares with some.
 #[allow(clippy::type_complexity)]
 fn fire_vehicle_guns(
     mut commands: Commands,
@@ -556,31 +579,34 @@ fn fire_vehicle_guns(
         Entity,
         &VehicleData,
         &VehicleState,
-        &Position,
-        &Rotation,
+        (&Position, &Rotation, &LinearVelocity),
         &SeatInputs,
         &VehicleHealth,
         &mut VehicleGuns,
         &mut VehicleWeapons,
     )>,
-    targets: Query<(Entity, &VehicleData, &Position, &VehicleHealth)>,
+    targets: Query<(Entity, &VehicleData, &Position, &VehicleHealth, Option<&Decoy>)>,
     seated: Query<(Entity, &Seated, &ControlledBy)>,
     teams: Query<&Team>,
     mut shots: MessageWriter<ToClients<VehicleShot>>,
 ) {
     let dt = time.delta_secs();
+    let now = time.elapsed_secs();
     let occupants: HashMap<(Entity, u8), (Entity, Entity)> = seated
         .iter()
         .map(|(soldier, s, c)| ((s.vehicle, s.seat), (soldier, c.0)))
         .collect();
     let team_of = |player: Entity| teams.get(player).copied().unwrap_or_default();
     // Aircraft someone flies, and the pilot's team.
+    // Flares in the air hide them.
     let aircraft: Vec<(Entity, Vec3, Team)> = targets
         .iter()
-        .filter(|(_, data, _, health)| data.0.desc.category.flies() && !health.wrecked())
-        .filter_map(|(entity, _, position, _)| Some((entity, position.0, team_of(occupants.get(&(entity, 0))?.1))))
+        .filter(|(_, data, _, health, decoy)| {
+            data.0.desc.category.flies() && !health.wrecked() && !decoy.is_some_and(|d| d.active(now))
+        })
+        .filter_map(|(entity, _, position, ..)| Some((entity, position.0, team_of(occupants.get(&(entity, 0))?.1))))
         .collect();
-    for (vehicle, data, state, position, rotation, inputs, health, mut guns, mut status) in &mut vehicles {
+    for (vehicle, data, state, (position, rotation, velocity), inputs, health, mut guns, mut status) in &mut vehicles {
         if health.wrecked() {
             continue;
         }
@@ -601,11 +627,19 @@ fn fire_vehicle_guns(
                 .weapons
                 .iter()
                 .enumerate()
-                .filter(|(_, w)| w.seat == weapon.seat && w.alt_fire == weapon.alt_fire)
+                .filter(|(_, w)| w.seat == weapon.seat && w.alt_fire == weapon.alt_fire && w.countermeasure.is_none())
                 .map(|(i, _)| i)
                 .collect();
             let pick = input.map_or(0, |i| i.weapon as usize) % group.len().max(1);
-            let selected = group.get(pick) == Some(&index);
+            // Countermeasures have a key of their own.
+            let selected = weapon.countermeasure.is_some() || group.get(pick) == Some(&index);
+            if let (Some(countermeasure), Some(input)) = (&weapon.countermeasure, input) {
+                let down = input.pressed(Buttons::COUNTERMEASURE);
+                if down && !gun.pressed && gun.burst == 0 && gun.reload <= 0.0 {
+                    gun.burst = countermeasure.burst;
+                }
+                gun.pressed = down;
+            }
 
             gun.cooldown = (gun.cooldown - dt).max(0.0);
             if let Some(overheat) = &desc.fire.overheat {
@@ -648,14 +682,22 @@ fn fire_vehicle_guns(
                     gun.rounds = desc.magazine_size;
                 }
             } else if let (Some(input), Some((soldier, player))) = (input, occupant) {
-                let trigger = input.pressed(if weapon.alt_fire { Buttons::AIM } else { Buttons::FIRE });
-                if trigger && selected && gun.cooldown <= 0.0 && gun.overheated <= 0.0 && desc.projectile.velocity > 0.0 {
+                let trigger = match weapon.countermeasure {
+                    Some(_) => gun.burst > 0,
+                    None => input.pressed(if weapon.alt_fire { Buttons::AIM } else { Buttons::FIRE }),
+                };
+                let fires = desc.projectile.velocity > 0.0 || desc.projectile.is_object();
+                if trigger && selected && gun.cooldown <= 0.0 && gun.overheated <= 0.0 && fires {
                     gun.cooldown = 60.0 / desc.rounds_per_minute.max(1.0);
+                    // Rounds fired from this magazine so far pick the barrel.
+                    let fired = desc.magazine_size.saturating_sub(gun.rounds) as usize;
+                    gun.burst = gun.burst.saturating_sub(1);
                     // A magazine size of 0 never runs dry.
                     if desc.magazine_size > 0 {
                         gun.rounds = gun.rounds.saturating_sub(1);
                         if gun.rounds == 0 {
                             gun.reload = desc.reload_time.max(0.5);
+                            gun.burst = 0;
                         }
                     }
                     if let Some(overheat) = &desc.fire.overheat {
@@ -665,7 +707,14 @@ fn fire_vehicle_guns(
                             gun.overheated = overheat.penalty.max(0.5);
                         }
                     }
-                    let muzzle = muzzle(&mut transforms);
+                    let barrels = weapon.countermeasure.as_ref().map_or(&[][..], |c| c.barrels.as_slice());
+                    let muzzle = match barrels.get(fired % barrels.len().max(1)) {
+                        Some(barrel) => {
+                            let transforms = transforms.get_or_insert_with(|| model.part_transforms(&state.joints));
+                            world * transforms[weapon.part as usize] * game_shared::level::placement_transform(barrel)
+                        }
+                        None => muzzle(&mut transforms),
+                    };
                     let forward = muzzle.rotation * Vec3::NEG_Z;
                     let direction = spread_direction(forward, desc.deviation.min, (fastrand::f32(), fastrand::f32()));
                     let target = desc
@@ -673,6 +722,13 @@ fn fire_vehicle_guns(
                         .lock
                         .and_then(|lock| gun.lock.filter(|(_, time)| *time >= lock.time))
                         .map(|(target, _)| target);
+                    // Shells, missiles, bombs and smoke grenades fly on with the vehicle; flares
+                    // fall behind.
+                    let inherited = match &weapon.countermeasure {
+                        _ if !desc.projectile.is_object() => Vec3::ZERO,
+                        Some(countermeasure) if countermeasure.decoy => velocity.0 * FLARE_INHERITED,
+                        _ => velocity.0,
+                    };
                     combat::spawn_projectile(
                         &mut commands,
                         desc.clone(),
@@ -681,8 +737,12 @@ fn fire_vehicle_guns(
                         Some(vehicle),
                         muzzle.translation,
                         direction,
+                        inherited,
                         target,
                     );
+                    if weapon.countermeasure.as_ref().is_some_and(|c| c.decoy) {
+                        commands.entity(vehicle).insert(Decoy(now + DECOY_TIME));
+                    }
                     shots.write(ToClients {
                         targets: SendTargets::All,
                         message: VehicleShot {

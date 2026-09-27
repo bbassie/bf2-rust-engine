@@ -358,7 +358,7 @@ fn detonator_desc(interp: &mut Interpreter, converter: &MeshConverter, t: &Templ
 
 /// Smoke clouds look about this big once spread (the effect's particles fly out a few
 /// meters and are up to 9 m across).
-const SMOKE_RADIUS: f32 = 6.0;
+pub(crate) const SMOKE_RADIUS: f32 = 6.0;
 
 fn projectile_desc(
     interp: &mut Interpreter,

@@ -396,10 +396,12 @@ pub enum Action {
     RollRight,
     /// Flying: the mouse looks around instead of moving the stick while held.
     FreeLook,
+    /// In a vehicle: decoy flares or smoke grenades.
+    Countermeasures,
 }
 
 impl Action {
-    pub const ALL: [Action; 40] = [
+    pub const ALL: [Action; 41] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -431,6 +433,7 @@ impl Action {
         Action::RollLeft,
         Action::RollRight,
         Action::FreeLook,
+        Action::Countermeasures,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
         Action::WeaponSlot(3),
@@ -476,6 +479,7 @@ impl Action {
             Action::RollLeft => "Roll left (flying)".into(),
             Action::RollRight => "Roll right (flying)".into(),
             Action::FreeLook => "Free look (flying)".into(),
+            Action::Countermeasures => "Countermeasures (flares, smoke)".into(),
         }
     }
 
@@ -532,6 +536,7 @@ impl Action {
             Action::RollLeft => Key(KeyCode::ArrowLeft),
             Action::RollRight => Key(KeyCode::ArrowRight),
             Action::FreeLook => Key(KeyCode::AltLeft),
+            Action::Countermeasures => Key(KeyCode::KeyG),
         }
     }
 }

@@ -19,10 +19,10 @@ use bf2_formats::{
     mesh::{MeshKind, Usage, VisMesh},
 };
 use game_data::{
-    AeroDesc, AfterburnerDesc, Attachment, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc, GearDesc,
-    GearboxDesc, JointAxis, JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera, SeatDesc, ThrusterDesc,
-    VehicleArmorEffect, VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc,
-    WingDesc,
+    AeroDesc, AfterburnerDesc, Attachment, CountermeasureDesc, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc,
+    GearDesc, GearboxDesc, JointAxis, JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera,
+    SeatDesc, ThrusterDesc, VehicleArmorEffect, VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics,
+    VehicleWeaponDesc, WheelDesc, WingDesc,
 };
 use glam::{Affine3A, Quat, Vec3};
 
@@ -94,6 +94,11 @@ pub fn import(
             tune_engine(&mut desc, drivetrain.as_ref());
         }
         desc.weapons = weapon_descs(interp, converter, localization, &huds, &desc, out);
+        // Smoke and flare effects live with the vehicle effects, which aren't all imported.
+        for weapon in desc.weapons.iter().filter(|w| w.countermeasure.is_some()) {
+            let projectile = &weapon.weapon.projectile;
+            effects.extend(projectile.detonation_effect.iter().chain(&projectile.trail_effect).cloned());
+        }
         desc.sounds = crate::sounds::SoundConverter::new(converter.vfs, out).vehicle(&interp.world, name);
         desc.armor_effects = armor_effects(interp, name);
         effects.extend(desc.armor_effects.iter().map(|e| e.effect.clone()));
@@ -1341,11 +1346,8 @@ fn weapon_descs(
         if !t.ty.eq_ignore_ascii_case("GenericFireArm") || t.get_str("projectiletemplate").is_none() {
             continue;
         }
-        // Smoke launchers, and ammo belts that only animate (velocity 0), aren't guns.
         let fire_input = t.get_str("fire.fireinput").unwrap_or("PIFire").to_ascii_lowercase();
-        if fire_input == "piflarefire" || t.get_f32("velocity") == Some(0.0) {
-            continue;
-        }
+        let countermeasure = fire_input == "piflarefire";
         // The muzzle: the child furthest forward (muzzle flash effects sit there).
         let muzzle = t
             .children
@@ -1358,8 +1360,12 @@ fn weapon_descs(
         let sounds = crate::sounds::SoundConverter::new(converter.vfs, out);
         let mut weapon = weapons::weapon_desc(interp, converter, &sounds, &t, out);
         weapon.display_name = localization.resolve(&weapon.display_name);
-        // Horns are "guns" firing harmless projectiles for their sound.
-        if weapon.projectile.damage <= 0.0 && weapon.projectile.explosion_damage <= 0.0 {
+        let countermeasure = countermeasure.then(|| countermeasure_desc(&t, &mut weapon));
+        // Horns are "guns" firing harmless projectiles for their sound; ammo belts that only
+        // animate don't fire at all (velocity 0, unlike bombs, which drop).
+        let harmless = weapon.projectile.damage <= 0.0 && weapon.projectile.explosion_damage <= 0.0;
+        let inert = weapon.projectile.velocity <= 0.0 && !weapon.projectile.explodes();
+        if countermeasure.is_none() && (harmless || inert) {
             continue;
         }
         // Vehicle guns without a deviation setting are dead accurate (the handheld default
@@ -1373,8 +1379,48 @@ fn weapon_descs(
             seat: desc.seat_of(index),
             alt_fire: fire_input == "pialtfire",
             weapon,
-            sight: t.get_f32("weaponhud.guiindex").map_or_else(Vec::new, |index| huds.sight(index as u32)),
+            sight: t
+                .get_f32("weaponhud.guiindex")
+                .filter(|_| countermeasure.is_none())
+                .map_or_else(Vec::new, |index| huds.sight(index as u32)),
+            countermeasure,
         });
     }
     weapons
+}
+
+/// A `PIFlareFire` launcher: its burst and barrels, and its projectile as a countermeasure.
+/// Smoke grenades (a smoke effect riding on the projectile) lay their smoke where they land,
+/// like hand-thrown ones; decoy flares fall and bounce, burning, as replicated objects. The
+/// launcher refills `ammo.minimumTimeUntilReload` after it was emptied.
+fn countermeasure_desc(t: &Template, weapon: &mut game_data::WeaponDesc) -> CountermeasureDesc {
+    let projectile = &mut weapon.projectile;
+    let smoke_trail = projectile.trail_effect.take_if(|e| e.contains("smoke"));
+    if let Some(effect) = smoke_trail {
+        projectile.smoke = Some(game_data::SmokeDesc {
+            radius: weapons::SMOKE_RADIUS,
+            duration: projectile.time_to_live.max(10.0),
+            gas_damage: 0.0,
+        });
+        projectile.detonation_effect = Some(effect);
+    } else {
+        projectile.impact = game_data::Impact::Bounce;
+    }
+    if let Some(refill) = t.get_f32("ammo.minimumtimeuntilreload") {
+        weapon.reload_time = weapon.reload_time.max(refill);
+    }
+    CountermeasureDesc {
+        burst: t.get_f32("fire.burstsize").unwrap_or(1.0).max(1.0) as u32,
+        barrels: t
+            .children
+            .iter()
+            .filter(|c| c.position.is_some())
+            .map(|c| Placement {
+                position: coords::position(c.position.unwrap_or_default()),
+                rotation: coords::rotation_ypr(c.rotation.unwrap_or_default()).to_array(),
+                ..Default::default()
+            })
+            .collect(),
+        decoy: projectile.smoke.is_none(),
+    }
 }

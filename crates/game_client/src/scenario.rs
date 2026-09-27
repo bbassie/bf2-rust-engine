@@ -217,6 +217,7 @@ pub enum Button {
     Use,
     Reload,
     FireMode,
+    Countermeasure,
 }
 
 impl Button {
@@ -231,6 +232,7 @@ impl Button {
             Button::Use => Buttons::USE,
             Button::Reload => Buttons::RELOAD,
             Button::FireMode => Buttons::FIRE_MODE,
+            Button::Countermeasure => Buttons::COUNTERMEASURE,
         }
     }
 }
