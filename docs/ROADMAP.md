@@ -108,8 +108,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   AI top speeds; per-face armour materials (front/side/rear/top/tracks) for direct hits
 - [x] Countermeasures (smoke launchers, decoy flares that break heat seeker locks), bombs,
   track texture scrolling (BF2's UV matrices: belts, rim treads, hubs, sprockets)
-- Passenger/pilot HUD overlays (`hudPass`, aircraft instruments), artillery and commander
-  assets
+- [x] Vehicle HUD in our own style: seats and occupants, hit points, speed and gear, turret
+  direction, guns and countermeasures; flight instruments for pilots (horizon and pitch
+  ladder, heading, airspeed, throttle, altitude, climb rate, stall and pull-up warnings)
+- Artillery and commander assets as vehicles
 - Flight tuning against BF2 (rudder authority, VTOL F-35B hover, helicopter landing)
 
 ## M4: BF2-style bots

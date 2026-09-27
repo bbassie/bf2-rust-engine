@@ -154,8 +154,11 @@ helicopter, sea, stationary) comes from the engine type.
   for gunners, the weapon's BF2 HUD sight (reticle, periscope frame) from
   `menu/hud/hudsetup/vehicles`, laid out on BF2's 800x600 screen. The camera uses the seat's
   camera point (gunners' views turn with their turret) or chases the vehicle (V); pilots get
-  a stiff chase camera. The HUD shows the guns, ammo, heat, lock, speed, altitude, throttle
-  and afterburner. BF2's armor effects show the damage state: smoke (and sparks) while the
+  a stiff chase camera. The vehicle HUD (`vehicle_hud`, our own design) has a panel with
+  the vehicle's hit points, who sits in which seat, speed and gear, where the turret points
+  and the seat's guns (ammo, heat, lock) and countermeasures; pilots get flight instruments
+  (banking horizon and pitch ladder, heading, airspeed, throttle and afterburner, altitude
+  and climb rate, stall and pull-up warnings). BF2's armor effects show the damage state: smoke (and sparks) while the
   hit points are under their thresholds, the explosion and wreck fires at 0; the wreck burns
   down to -100 % over its 10 s and blows apart.
 

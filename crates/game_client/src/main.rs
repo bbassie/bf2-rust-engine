@@ -53,6 +53,7 @@ mod scenario;
 mod settings;
 mod summary;
 mod vehicle_prediction;
+mod vehicle_hud;
 mod vehicles;
 mod wounded;
 

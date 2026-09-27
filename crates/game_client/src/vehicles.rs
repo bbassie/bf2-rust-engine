@@ -10,14 +10,7 @@ use std::collections::VecDeque;
 
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*, window::CursorOptions};
 use bevy_replicon::prelude::*;
-use std::fmt::Write as _;
-
-use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
-use game_data::VehicleCategory;
-use game_shared::{
-    physics::GameLayer,
-    vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleMotion, VehicleShot, VehicleState, VehicleWeapons},
-};
+use game_shared::vehicle::{Seated, Vehicle, VehicleData, VehicleMotion, VehicleShot, VehicleState, VehicleWeapons};
 
 use crate::{
     audio::PlaySound,
@@ -39,7 +32,7 @@ impl Plugin for ClientVehiclesPlugin {
         app.init_resource::<SeatRequest>()
             .init_resource::<FlightStick>()
             .add_observer(add_view)
-            .add_systems(Startup, spawn_hud)
+            .add_plugins(crate::vehicle_hud::VehicleHudPlugin)
             .add_systems(
                 PreUpdate,
                 record_snapshots
@@ -47,7 +40,7 @@ impl Plugin for ClientVehiclesPlugin {
                     .run_if(in_state(ClientState::Connected)),
             )
             .init_resource::<VehicleSight>()
-            .add_systems(Update, (read_seat_keys, update_hud, receive_shots))
+            .add_systems(Update, (read_seat_keys, receive_shots))
             .add_systems(PostUpdate, update_sight.after(VehicleViewSystems))
             .add_systems(Update, fly.after(crate::local_input::LookSystems))
             .add_systems(
@@ -479,136 +472,8 @@ pub fn seat_view(seated: &Seated, vehicles: &Query<(&VehicleView, &VehicleData)>
     })
 }
 
-#[derive(Component)]
-struct VehicleHudText;
-
-fn spawn_hud(mut commands: Commands) {
-    commands.spawn((
-        VehicleHudText,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(16.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.92, 0.94, 0.96)),
-        TextShadow {
-            offset: Vec2::splat(1.0),
-            color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-        },
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: px(28),
-            left: percent(50),
-            margin: UiRect::left(px(-410)),
-            width: px(820),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        TextLayout::justify(Justify::Center),
-    ));
-}
-
-/// The vehicle lines of the HUD: vehicle, seat, speed and hit points (aircraft add altitude,
-/// throttle and afterburner), then the seat's guns with rounds, heat and lock, and its
-/// countermeasures with their key.
-fn update_hud(
-    seated: Query<&Seated, With<LocalSoldier>>,
-    vehicles: Query<(&VehicleView, &VehicleData, Option<&VehicleHealth>, Option<&VehicleWeapons>)>,
-    spatial: SpatialQuery,
-    actions: Actions,
-    mut text: Single<&mut Text, With<VehicleHudText>>,
-) {
-    let lines = seated
-        .single()
-        .ok()
-        .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d, h, w)| (s, v, d, h, w)))
-        .map(|(seated, view, data, health, weapons)| {
-            let model = &data.0;
-            let desc = &model.desc;
-            let seat = seated.seat as usize;
-            let role = match seat {
-                0 if desc.category.flies() => "Pilot",
-                0 if desc.category == VehicleCategory::Stationary => "Gunner",
-                0 => "Driver",
-                _ if model.seat_aims(seat) => "Gunner",
-                _ => "Passenger",
-            };
-            let hit_points = health.map_or(desc.hit_points, |h| h.current);
-            let mut line = format!(
-                "{}   |   {role} ({}/{})   |   {:.0} km/h",
-                desc.display_name,
-                seat + 1,
-                desc.seats.len(),
-                view.velocity.length() * 3.6,
-            );
-            if desc.category.flies() {
-                let filter = SpatialQueryFilter::from_mask(GameLayer::World);
-                let altitude = spatial
-                    .cast_ray(view.transform.translation, Dir3::NEG_Y, 2000.0, true, &filter)
-                    .map_or(2000.0, |hit| hit.distance);
-                let _ = write!(line, "   |   ALT {altitude:.0} m   |   ");
-                let _ = match desc.category {
-                    VehicleCategory::Air => write!(line, "THR {:.0}%", view.engine * 100.0),
-                    _ => write!(line, "ROTOR {:.0}%", view.engine * 100.0),
-                };
-                if desc.afterburner.is_some() {
-                    let _ = write!(line, "   AB {:.0}%", view.boost * 100.0);
-                }
-            }
-            let _ = write!(line, "   |   {:.0} HP", hit_points.ceil());
-            // The guns this seat fires.
-            let guns: Vec<String> = desc
-                .weapons
-                .iter()
-                .zip(&model.guns)
-                .enumerate()
-                .filter(|(_, (w, _))| w.seat as usize == seat)
-                .map(|(i, (w, gun))| {
-                    let status = weapons.and_then(|s| s.guns.get(i)).copied().unwrap_or_default();
-                    // Unlocalized names are template names.
-                    let unnamed = gun.display_name.is_empty()
-                        || gun.display_name == desc.display_name
-                        || gun.display_name.contains('_');
-                    let name = if unnamed { readable_name(&gun.name, &desc.name) } else { gun.display_name.clone() };
-                    let trigger = match (&w.countermeasure, w.alt_fire) {
-                        (Some(_), _) => format!("[{}] ", actions.label(Action::Countermeasures)),
-                        (None, true) => "[2] ".into(),
-                        (None, false) => String::new(),
-                    };
-                    let chosen = status.selected && w.countermeasure.is_none();
-                    let mut entry = format!("{}{trigger}{name}", if chosen { "> " } else { "  " });
-                    let _ = match (status.reloading, status.rounds) {
-                        (true, _) => write!(entry, "  reloading"),
-                        (false, u16::MAX) => Ok(()),
-                        (false, rounds) => write!(entry, "  {rounds}"),
-                    };
-                    if gun.fire.overheat.is_some() {
-                        let _ = match status.heat {
-                            255 => write!(entry, "  OVERHEATED"),
-                            heat => write!(entry, "  heat {:.0}%", heat as f32 / 2.54),
-                        };
-                    }
-                    if gun.fire.lock.is_some() {
-                        let _ = match status.lock {
-                            255 => write!(entry, "  LOCKED"),
-                            0 => Ok(()),
-                            lock => write!(entry, "  locking {:.0}%", lock as f32 / 2.55),
-                        };
-                    }
-                    entry
-                })
-                .collect();
-            if guns.is_empty() { line } else { format!("{line}
-{}", guns.join("      ")) }
-        })
-        .unwrap_or_default();
-    if text.0 != lines {
-        text.0 = lines;
-    }
-}
-
 /// A gun's template name for people: `air_j10_archerlauncher` on the J-10 is `Archerlauncher`.
-fn readable_name(name: &str, vehicle: &str) -> String {
+pub fn readable_name(name: &str, vehicle: &str) -> String {
     let short = name.strip_prefix(vehicle).map_or(name, |s| s.trim_start_matches('_'));
     let mut words = short.replace('_', " ").trim().to_string();
     if let Some(first) = words.get_mut(..1) {
