@@ -842,10 +842,13 @@ fn grab_wire(m: &SoldierMotion, wire: &Wire, wish: Vec3, tuning: &SoldierTuning)
     let along = wire.along(hands);
     let flat = Vec3::new(wire.down.x, 0.0, wire.down.z).normalize_or_zero();
     let heading = wish.normalize_or_zero().dot(flat) > 0.3;
+    let feet = wire.at(along) - Vec3::Y * tuning.zipline_hang;
+    // Not where hanging from it would put the feet in the ground.
     (heading
         && wire.at(along).distance(hands) <= ZIPLINE_REACH
-        && wire.length - along >= tuning.zipline_no_entry)
-        .then(|| wire.at(along) - Vec3::Y * tuning.zipline_hang)
+        && wire.length - along >= tuning.zipline_no_entry
+        && feet.y >= m.position.y)
+        .then_some(feet)
 }
 
 /// One tick on a zipline: sliding down the wire, faster the steeper it is, until its end or
@@ -886,8 +889,12 @@ fn ride(
     // Feet on the ground (the wire's low end is often low): standing there.
     let shape = shapes.movement(Stance::Standing);
     let center = Stance::Standing.collision_center();
-    if let Some(floor) = world.cast(shape, hands + center, Dir3::NEG_Y, tuning.zipline_hang + SKIN)
-        && floor.distance < tuning.zipline_hang
+    if let Some(floor) = world.cast(
+        shape,
+        hands + center,
+        Dir3::NEG_Y,
+        tuning.zipline_hang + SKIN,
+    ) && floor.distance < tuning.zipline_hang
     {
         m.position.y = hands.y - floor.distance + SKIN;
         m.velocity.y = 0.0;
@@ -1189,7 +1196,8 @@ impl Surroundings<'_, '_, '_> {
             .shape_intersections(&shapes.ladder_probe, center, Quat::IDENTITY, &filter)
             .into_iter()
             .filter_map(|entity| {
-                let (collider, position, rotation, layers) = self.mover.colliders.get(entity).ok()?;
+                let (collider, position, rotation, layers) =
+                    self.mover.colliders.get(entity).ok()?;
                 let half = collider.aabb(Vec3::ZERO, Quat::IDENTITY).size() * 0.5;
                 let rope = layers.is_some_and(|l| l.memberships.has_all(GameLayer::Rope));
                 Some(Ladder {

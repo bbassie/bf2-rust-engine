@@ -11,6 +11,7 @@ mod input;
 mod levels;
 mod loading;
 mod pages;
+mod preview;
 mod widgets;
 
 use std::{
@@ -50,7 +51,7 @@ use crate::{
     settings::{Action, Binding, DisplayMode, Settings, ViewDistance},
 };
 
-use self::{browser::*, input::*, levels::*, loading::*, pages::*, widgets::*};
+use self::{browser::*, input::*, levels::*, loading::*, pages::*, preview::*, widgets::*};
 
 pub struct MenuPlugin {
     /// Where the client starts: the main menu, or loading a match from the command line.

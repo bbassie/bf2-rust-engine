@@ -23,7 +23,7 @@ use bevy::{
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
 use bevy_replicon::prelude::*;
-use game_data::{FireKind, FireMode, FiringPose, WeaponDesc};
+use game_data::{FireKind, FireMode, FiringPose, FlashbangDesc, WeaponDesc};
 use game_shared::{
     conquest::{ControlPoint, Deployment, FlagState, team_index},
     input::{Buttons, InputFrame},
@@ -33,7 +33,11 @@ use game_shared::{
     revive::Downed,
     soldier::{Health, Soldier, SoldierMotion, Stance},
     squad::SquadMember,
-    vehicle::{Seated, Vehicle, VehicleMotion},
+    commander::CommanderAssets,
+    gear::{SoldierGear, TearGas},
+    projectile::SmokeCloud,
+    statics::DestroyedStatics,
+    vehicle::{Seated, Vehicle, VehicleHealth, VehicleMotion},
     weapons::{Armory, Inventory, Loadout, cooks},
 };
 
@@ -44,12 +48,18 @@ use crate::{
         self, AiData,
         skill::{Personality, Skill},
         squad::{self, SquadSnapshot},
+        gadgets::Flashes,
         stats::{AiStats, TeamStats},
         strategy::{self, OrderKind, StrategicMap, Strategy, TeamIntel, hash01},
         tactics,
     },
+    destruction::ObjectHealth,
     nav::{LadderStep, NavGrid, NavPath, Navigation, Waypoint},
 };
+
+mod equipment;
+
+use equipment::{LaunchTarget, RepairTarget};
 
 pub struct BotPlugin;
 
@@ -66,6 +76,8 @@ impl Plugin for BotPlugin {
         .init_resource::<TeamIntel>()
         .init_resource::<SquadSnapshot>()
         .init_resource::<AiStats>()
+        .init_resource::<ai::commander::AiCommander>()
+        .init_resource::<Flashes>()
         .add_systems(
             Update,
             (
@@ -76,11 +88,22 @@ impl Plugin for BotPlugin {
         )
         .add_systems(
             FixedUpdate,
+            // Detonation effects are sent to clients (and gone) by the next tick.
+            ai::gadgets::watch_detonations
+                .after(crate::combat::CombatSystems)
+                .run_if(in_state(ClientState::Disconnected)),
+        )
+        .add_systems(
+            FixedUpdate,
             (
                 squad::snapshot,
                 strategy::update_map,
                 strategy::plan,
+                ai::commander::yield_to_humans,
+                ai::commander::command,
+                ai::gadgets::wear_gas_masks,
                 think,
+                ai::gadgets::forget_flashes,
                 log_stats,
                 ai::stats::track_events,
                 ai::stats::log_stats,
@@ -146,6 +169,8 @@ pub struct BotStats {
     max_path_seconds: f32,
     /// Ladders bots got on.
     climbs: u32,
+    /// Times a bot found it couldn't walk to its goal.
+    stranded: u32,
     /// Milliseconds spent in `think`.
     think_ms: f32,
     max_think_ms: f32,
@@ -176,6 +201,11 @@ enum Activity {
     /// Medics: to a critically wounded teammate and shocking him back to life, for at most
     /// `time` more seconds.
     Revive { soldier: Entity, time: f32 },
+    /// Firing a grenade or rocket launcher: `time` seconds into it, `shots` rounds left
+    /// before, fired `fired` seconds into it (negative: not yet).
+    Launch { target: LaunchTarget, time: f32, weapon: u8, shots: u16, fired: f32 },
+    /// Engineers: to something of the team's that is damaged, and the wrench at it.
+    Repair { target: RepairTarget, time: f32 },
 }
 
 /// How a bot stands while shooting.
@@ -203,6 +233,25 @@ pub struct BotBrain {
     ammo_bag: Option<u8>,
     /// The bag to hold out now (see `decide`).
     bag: Option<u8>,
+    /// Grenade launcher, rocket launcher, tear gas launcher, flashbang, wrench (loadout
+    /// indices).
+    launcher: Option<u8>,
+    rocket: Option<u8>,
+    gas_launcher: Option<u8>,
+    flashbang: Option<u8>,
+    wrench: Option<u8>,
+    /// Rocket bots: the enemy vehicle in sight, and where.
+    armor: Option<(Entity, Vec3)>,
+    launch_cooldown: f32,
+    bag_cooldown: f32,
+    repair_cooldown: f32,
+    /// The last flashbang that blinded it: how, how strongly, how long ago.
+    flash: Option<(FlashbangDesc, f32, f32)>,
+    /// Blinded or dazed by it right now.
+    blind: bool,
+    dazed: bool,
+    /// How deep in tear gas it is without a mask, 0..1.
+    gassed: f32,
 
     /// Enemy soldier being engaged.
     target: Option<Entity>,
@@ -249,6 +298,8 @@ pub struct BotBrain {
     regroup: f32,
     /// Squad leaders: the squad gathered before the assault.
     staged: bool,
+    /// [`StrategicMap::generation`] its area indices belong to.
+    map_generation: u32,
     /// Phase of looking around while holding a position.
     sweep: f32,
     /// Kit and spawn were chosen for this death.
@@ -261,6 +312,8 @@ pub struct BotBrain {
     climbing: bool,
     /// Sprinting while stamina lasts (see `act`).
     sprinting: bool,
+    /// Seconds left waiting after finding its goal out of walking reach.
+    stranded: f32,
 
     goal: Option<Vec3>,
     /// Walking straight to the goal without a path; and the goal that was checked for.
@@ -300,6 +353,19 @@ impl Default for BotBrain {
             medic_bag: None,
             ammo_bag: None,
             bag: None,
+            launcher: None,
+            rocket: None,
+            gas_launcher: None,
+            flashbang: None,
+            wrench: None,
+            armor: None,
+            launch_cooldown: 5.0,
+            bag_cooldown: 0.0,
+            repair_cooldown: 0.0,
+            flash: None,
+            blind: false,
+            dazed: false,
+            gassed: 0.0,
             target: None,
             last_seen: None,
             scan_timer: fastrand::f32() * SCAN_INTERVAL,
@@ -327,12 +393,14 @@ impl Default for BotBrain {
             via: None,
             regroup: 0.0,
             staged: false,
+            map_generation: 0,
             sweep: fastrand::f32() * TAU,
             deployed: false,
             spawn_on_leader: false,
             jump_held: false,
             climbing: false,
             sprinting: true,
+            stranded: 0.0,
             goal: None,
             direct: false,
             direct_goal: None,
@@ -359,6 +427,8 @@ enum Steer {
     Toward { target: Vec3, jump: bool, ladder: Option<LadderStep> },
     /// At the end of the path.
     Arrived,
+    /// At the end of a path that doesn't reach the goal: it can't be walked to from here.
+    Stranded,
 }
 
 /// Where a bot wants to go this tick.
@@ -421,14 +491,20 @@ struct Senses<'w, 's> {
             Option<&'static Health>,
             Option<&'static AppliedInput>,
             Option<&'static Loadout>,
-            Has<Seated>,
+            Option<&'static Seated>,
             Has<Downed>,
         ),
         With<Soldier>,
     >,
     teams: Query<'w, 's, &'static Team>,
     wounded: Wounded<'w, 's>,
-    vehicles: Query<'w, 's, &'static VehicleMotion, With<Vehicle>>,
+    vehicles: Query<'w, 's, (Entity, &'static VehicleMotion, Option<&'static VehicleHealth>), With<Vehicle>>,
+    flashes: Res<'w, Flashes>,
+    gas: Query<'w, 's, (&'static SmokeCloud, &'static TearGas)>,
+    gear: Query<'w, 's, &'static SoldierGear>,
+    assets: Res<'w, CommanderAssets>,
+    destroyed: Query<'w, 's, &'static DestroyedStatics>,
+    object_health: Res<'w, ObjectHealth>,
 }
 
 impl Senses<'_, '_> {
@@ -493,11 +569,18 @@ impl BotBrain {
     /// A new soldier: remember its weapons, forget the last life.
     fn new_life(&mut self, w: &Senses, me: &Me) {
         self.soldier = Some(me.soldier);
+        self.stranded = 0.0;
         self.primary = me.inventory.map_or(0, |i| i.active);
         self.paddles = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Paddles));
         self.medic_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::MedicBag));
         self.ammo_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::AmmoBag));
         self.bag = None;
+        self.armor = None;
+        self.flash = None;
+        self.blind = false;
+        self.dazed = false;
+        self.gassed = 0.0;
+        self.pick_equipment(w, me);
         self.grenade = me.loadout.and_then(|l| {
             (0..l.weapons.len() as u8).find(|&i| {
                 // Frag grenades: thrown, on a fuse, no trigger (unlike mines).
@@ -553,9 +636,28 @@ impl BotBrain {
                 team_stats.leader_spawns += 1;
             }
         }
+        if self.map_generation != w.map.generation {
+            // A new round or level: areas it remembers are gone.
+            self.map_generation = w.map.generation;
+            self.order = None;
+            self.spot = None;
+            self.via = None;
+            self.staged = false;
+        }
         self.seq = self.seq.wrapping_add(1);
         let skill = self.personality.skill(w.settings.bot_skill);
         self.sense(w, me, skill, intel, team_stats, dt);
+        if self.blind {
+            // Blinded by a flashbang: crouch where it stands until it can see again.
+            self.activity = Activity::Objective;
+            let intent = Intent {
+                buttons: Buttons::CROUCH,
+                look: Look::Yaw(self.yaw),
+                weapon: Some(self.primary),
+                ..default()
+            };
+            return self.act(w, me, intent, stats, dt);
+        }
         self.decide_timer -= dt;
         if self.decide_timer <= 0.0 {
             self.decide_timer = DECIDE_INTERVAL;
@@ -610,6 +712,10 @@ impl BotBrain {
             }
             Activity::Throw { at, time, weapon } => self.throw(w, me, at, time, weapon, &mut intent, dt),
             Activity::Revive { soldier, time } => self.revive(w, me, soldier, time, &mut intent, dt),
+            Activity::Launch { target, time, weapon, shots, fired } => {
+                self.launch(w, me, skill, target, time, weapon, shots, fired, &mut intent, dt)
+            }
+            Activity::Repair { target, time } => self.repair(w, me, target, time, &mut intent, dt),
             Activity::Objective => {
                 self.objective(w, me, &mut intent, dt);
                 intent.weapon = intent.weapon.or(self.bag);
@@ -635,6 +741,14 @@ impl BotBrain {
         self.hurt_ago += dt;
         self.grenade_cooldown -= dt;
         self.flank_cooldown -= dt;
+        self.launch_cooldown -= dt;
+        self.bag_cooldown -= dt;
+        self.repair_cooldown -= dt;
+        if self.feel_gadgets(w, me, team_stats, dt) {
+            // Blind: sees nothing.
+            self.target = None;
+            return;
+        }
         if let Some((_, age)) = &mut self.last_seen {
             *age += dt;
         }
@@ -660,15 +774,17 @@ impl BotBrain {
             return;
         }
         self.scan_timer = SCAN_INTERVAL;
+        self.scan_armor(w, me);
 
-        let range = skill.sight_range();
+        // Tear gas in the eyes: sees less far.
+        let range = skill.sight_range() * (1.0 - 0.5 * self.gassed);
         let view = skill.view_angle();
         let mut candidates: Vec<(Entity, f32, Vec3, bool)> = Vec::new();
         let mut heard: Option<(f32, Vec3)> = None;
         for (entity, motion, controlled_by, _, _, applied, _, seated, downed) in &w.soldiers {
-            // TODO: fight vehicles and their crews; for now bots leave them alone. Nor do
-            // they shoot the critically wounded.
-            if entity == me.soldier || seated || downed || !w.is_enemy(controlled_by.0, me.team) {
+            // Crews are fought through their vehicles (rocket launchers, `scan_armor`); the
+            // critically wounded are left alone.
+            if entity == me.soldier || seated.is_some() || downed || !w.is_enemy(controlled_by.0, me.team) {
                 continue;
             }
             let to = motion.position - position;
@@ -715,9 +831,11 @@ impl BotBrain {
             self.target = seen;
             self.engaged = 0.0;
             if let Some((_, _, chest, outside)) = best {
-                self.reaction = skill.reaction_time() + if outside { 0.3 } else { 0.0 };
+                let impairment = self.impairment();
+                self.reaction = (skill.reaction_time() + if outside { 0.3 } else { 0.0 }) * impairment;
                 let angle = fastrand::f32() * TAU;
-                self.aim_error = Vec2::new(angle.cos(), angle.sin()) * skill.aim_error() * (0.6 + 0.8 * fastrand::f32());
+                self.aim_error =
+                    Vec2::new(angle.cos(), angle.sin()) * skill.aim_error() * (0.6 + 0.8 * fastrand::f32()) * impairment;
                 self.style = self.engage_style(w, me, chest.distance(eye));
             }
         }
@@ -778,12 +896,19 @@ impl BotBrain {
     fn decide(&mut self, w: &Senses, me: &Me, team_stats: &mut TeamStats, covers: &mut u32) {
         if me.motion.climbing {
             // Hands on the rungs: nothing to do but climb on.
-            if matches!(self.activity, Activity::Engage | Activity::Throw { .. } | Activity::Search { .. }) {
+            if matches!(
+                self.activity,
+                Activity::Engage
+                    | Activity::Throw { .. }
+                    | Activity::Search { .. }
+                    | Activity::Launch { .. }
+                    | Activity::Repair { .. }
+            ) {
                 self.activity = Activity::Objective;
             }
             return;
         }
-        if matches!(self.activity, Activity::Throw { .. }) {
+        if matches!(self.activity, Activity::Throw { .. } | Activity::Launch { .. }) {
             return;
         }
         let position = me.motion.position;
@@ -854,8 +979,7 @@ impl BotBrain {
         // Out of a fight, medics and support soldiers hold their bags out while someone
         // close by is hurt or low on ammo (held, a bag heals or resupplies everyone within a
         // few meters).
-        // TODO: throw bags to teammates further away; badly hurt bots go to medics; engineers
-        // repair friendly vehicles (`Gadget::Wrench`) once bots use vehicles.
+        // TODO: badly hurt bots go to medics.
         self.bag = None;
         if target.is_none() && self.hurt_ago > 3.0 {
             let team = me.team;
@@ -912,6 +1036,13 @@ impl BotBrain {
             }
         }
 
+        self.equipment_options(w, me, target, &mut best);
+        if self.gassed > 0.25
+            && let Some(spot) = self.out_of_gas(w, me)
+        {
+            consider(&mut best, 6.5, Activity::Cover { spot, time: 1.0 + spot.distance(position) / 4.0 });
+        }
+
         if target.is_none() {
             // Around an enemy who went behind cover.
             if let Some((at, age)) = self.last_seen
@@ -946,7 +1077,13 @@ impl BotBrain {
                     team_stats.flanks += 1;
                     self.flank_cooldown = 20.0;
                 }
-                Activity::Throw { .. } => team_stats.grenades += 1,
+                Activity::Throw { weapon, .. } if Some(weapon) == self.grenade || Some(weapon) == self.flashbang => {
+                    team_stats.grenades += 1
+                }
+                Activity::Throw { .. } => team_stats.bags += 1,
+                Activity::Launch { target: LaunchTarget::Vehicle(_), .. } => team_stats.rockets += 1,
+                Activity::Launch { .. } => team_stats.launches += 1,
+                Activity::Repair { .. } => team_stats.repairs += 1,
                 Activity::Revive { .. } => team_stats.revives += 1,
                 _ => {}
             }
@@ -982,7 +1119,7 @@ impl BotBrain {
         // (an Ornstein-Uhlenbeck process).
         let settle = skill.aim_settle();
         self.aim_error *= 1.0 - (settle * dt).min(1.0);
-        let wander = skill.aim_spread(distance) * (2.0 * settle * dt).sqrt();
+        let wander = skill.aim_spread(distance) * (2.0 * settle * dt).sqrt() * self.impairment();
         self.aim_error += Vec2::new(gaussian(), gaussian()) * wander;
         self.yaw = turn_towards(self.yaw, desired_yaw, skill.turn_rate() * dt);
         self.pitch += (desired_pitch - self.pitch).clamp(-4.0 * dt, 4.0 * dt);
@@ -991,7 +1128,7 @@ impl BotBrain {
 
         // Attackers work their way forward: a few seconds moving, a few shooting.
         let advance = match self.order {
-            Some((OrderKind::Attack, index)) if me.health_fraction > 0.5 && distance > 25.0 => {
+            Some((OrderKind::Attack, index)) if me.health_fraction > 0.5 && distance > 25.0 && index < w.map.areas.len() => {
                 let area = &w.map.areas[index];
                 let phase = (self.engaged + hash01(self.seed, 3) * 5.0) % 5.0;
                 let moving = phase < 1.5 + 1.5 * self.personality.aggression;
@@ -1094,8 +1231,17 @@ impl BotBrain {
         }
         if time > wound + desc.fire.launch_delay + 0.4 {
             self.activity = Activity::Objective;
-            self.grenade_cooldown = 20.0 + 20.0 * fastrand::f32();
+            if Some(weapon) == self.grenade || Some(weapon) == self.flashbang {
+                self.grenade_cooldown = 20.0 + 20.0 * fastrand::f32();
+            } else {
+                self.bag_cooldown = 8.0;
+            }
             intent.weapon = Some(self.primary);
+            if Some(weapon) == self.flashbang {
+                // Turn away before it goes off.
+                let behind = me.motion.eye_position() - flat(at - me.motion.position).normalize_or_zero() * 10.0;
+                self.activity = Activity::Search { at: behind, time: 2.5 };
+            }
             return;
         }
         self.activity = Activity::Throw { at, time, weapon };
@@ -1104,7 +1250,7 @@ impl BotBrain {
     /// Which way to step out of the path of a vehicle about to run it over, if one is.
     fn dodge_vehicles(&self, w: &Senses, me: &Me) -> Option<Vec3> {
         let position = me.motion.position;
-        w.vehicles.iter().find_map(|vehicle| {
+        w.vehicles.iter().find_map(|(_, vehicle, _)| {
             let velocity = flat(vehicle.velocity);
             let speed = velocity.length();
             let offset = flat(position - vehicle.position);
@@ -1170,6 +1316,7 @@ impl BotBrain {
                     .objective_for(me.team, me.motion.position, &w.map, self.seed)
                     .map(|o| (o.kind, o.area))
             })
+            .filter(|(_, area)| *area < w.map.areas.len())
     }
 
     /// The flag someone at `position` is at: to take or to hold.
@@ -1411,7 +1558,14 @@ impl BotBrain {
         let mut jump = false;
         let mut ladder = None;
         self.goal = intent.goal.map(|g| g.position);
-        if let Some(goal) = intent.goal {
+        // Where walking can't get it (a carrier, an island), it waits for a while rather than
+        // pushing against the edge, then tries again.
+        // TODO: vehicles (boats, aircraft) off such spawns.
+        self.stranded -= dt;
+        if self.stranded <= 0.0 && self.stranded > -dt {
+            self.repath = true;
+        }
+        if let Some(goal) = intent.goal.filter(|_| self.stranded <= 0.0) {
             // Short, clear moves need no path.
             if self.direct_goal.is_none_or(|g| g.distance_squared(goal.position) > 1.0) {
                 self.direct_goal = Some(goal.position);
@@ -1422,6 +1576,11 @@ impl BotBrain {
                 (Some(nav), false) => match self.follow_path(nav, goal.position, goal.tolerance, me.motion, dt, stats) {
                     Steer::Toward { target, jump, ladder } => (target, jump, ladder),
                     Steer::Arrived => (goal.position, false, None),
+                    Steer::Stranded => {
+                        stats.stranded += 1;
+                        self.stranded = 10.0;
+                        (position, false, None)
+                    }
                 },
                 _ => (goal.position, false, None),
             };
@@ -1689,8 +1848,13 @@ impl BotBrain {
             }
         }
         let Some(waypoint) = path.waypoints.get(self.waypoint) else {
+            let complete = path.complete;
             self.path = None;
-            return Steer::Arrived;
+            return if complete || flat(goal - position).length() < 3.0 {
+                Steer::Arrived
+            } else {
+                Steer::Stranded
+            };
         };
         if motion.climbing {
             // Height changes and no progress along the ground are what climbing is.
@@ -1766,7 +1930,7 @@ impl BotBrain {
         let objective = match leader {
             // Human leaders decide where the squad goes.
             Some(l) if squad.is_some_and(|s| !s.leader_is_bot) => Some(l.position),
-            _ => area.map(|a| w.map.areas[a].position),
+            _ => area.and_then(|a| w.map.areas.get(a)).map(|a| a.position),
         };
         let spawns: Vec<(u8, Vec3)> = w
             .map
@@ -1851,7 +2015,7 @@ fn think(
             continue;
         };
         // Down, the server ignores its input; in a vehicle, bots do nothing yet.
-        if seated || downed {
+        if seated.is_some() || downed {
             // TODO: bots driving and gunning vehicles. They never get in by themselves.
             brain.seq = brain.seq.wrapping_add(1);
             buffer.push(InputFrame {
@@ -1894,7 +2058,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             "bots: {} stuck events in the last minute ({} on orders, {} advancing, {} to cover or \
              flanking; {:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
-             {:.1} ms avg, {:.1} ms max; {} ladders climbed; thinking {:.2} ms per tick, {:.1} ms max; \
+             {:.1} ms avg, {:.1} ms max; {} ladders climbed, {} goals out of reach; thinking {:.2} ms per tick, {:.1} ms max; \
              stuck most at {}",
             stats.stuck_events,
             stats.stuck_by_activity[0],
@@ -1911,6 +2075,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.path_seconds * 1000.0 / stats.paths.max(1) as f32,
             stats.max_path_seconds * 1000.0,
             stats.climbs,
+            stats.stranded,
             stats.think_ms / stats.ticks.max(1) as f32,
             stats.max_think_ms,
             hotspots(&stats.stuck_spots),

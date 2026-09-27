@@ -16,7 +16,7 @@ use std::{
     path::PathBuf,
 };
 
-use bevy::{asset::io::AssetSourceBuilder, diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
+use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
 use bevy_replicon_renet::RepliconRenetPlugins;
 use clap::Parser;
 use game_server::{GameServerPlugin, ServerSettings};
@@ -38,9 +38,11 @@ mod effects;
 mod gadgets;
 mod hud;
 mod local_input;
+mod map_icons;
 mod map_markers;
 mod menu;
 mod minimap;
+mod mod_assets;
 mod nav_debug;
 mod net;
 mod prediction;
@@ -83,6 +85,9 @@ pub struct Cli {
     /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
+    /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
+    #[arg(long)]
+    mods: Option<PathBuf>,
     /// Save a screenshot to this path once everything is loaded (plus
     /// `--screenshot-delay` seconds), then exit.
     #[arg(long)]
@@ -164,6 +169,10 @@ impl Cli {
                 public: self.public,
                 local_player: (!self.spectate).then_some(name),
                 local_team: self.team,
+                coop: game_server::coop::CoopSettings {
+                    human_team: self.team,
+                    ..default()
+                },
                 ..default()
             }),
         })
@@ -203,7 +212,7 @@ fn main() -> AppExit {
     if let Some((scenario, _)) = &scenario {
         scenario.apply(&mut cli);
     }
-    let paths = GamePaths::resolve(cli.imported.clone());
+    let paths = GamePaths::resolve_with_mods(cli.imported.clone(), cli.mods.clone());
     let settings_file = SettingsFile::locate(cli.settings.clone(), scenario.is_some());
     let settings = settings_file.load();
     let menu_scenario = scenario.as_ref().is_some_and(|(s, _)| s.menu);
@@ -211,11 +220,8 @@ fn main() -> AppExit {
 
     let mut app = App::new();
     // Converted BF2 assets live outside the game folder and are addressed as
-    // `imported://levels/...`. Must be registered before the asset plugin.
-    app.register_asset_source(
-        "imported",
-        AssetSourceBuilder::platform_default(&paths.imported.to_string_lossy(), None),
-    );
+    // `imported://levels/...`, with mods on top. Must be registered before the asset plugin.
+    app.register_asset_source("imported", mod_assets::imported_source(&paths));
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
@@ -252,6 +258,7 @@ fn main() -> AppExit {
         wounded::WoundedPlugin,
         radio::RadioPlugin,
         map_markers::MapMarkersPlugin,
+        map_icons::MapIconsPlugin,
         commander::ClientCommanderPlugin,
         vehicle_prediction::VehiclePredictionPlugin,
     ))

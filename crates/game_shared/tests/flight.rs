@@ -9,6 +9,7 @@ use std::path::Path;
 use bevy::prelude::*;
 use game_data::VehicleCategory;
 use game_shared::{
+    config::GamePaths,
     flight::{BodyState, Controls, FlightState, Surroundings, flight_forces, limit_pitch},
     vehicle::{VehicleModel, integrate, step_joints},
 };
@@ -18,7 +19,7 @@ const DT: f32 = 1.0 / 60.0;
 fn load(name: &str) -> Option<VehicleModel> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../imported");
     let desc = game_data::read_ron(root.join("vehicles").join(format!("{name}.ron"))).ok()?;
-    Some(VehicleModel::new(desc, &root))
+    Some(VehicleModel::new(desc, &GamePaths { imported: root, mods: Vec::new() }))
 }
 
 struct Sim<'a> {

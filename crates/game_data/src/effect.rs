@@ -225,6 +225,14 @@ pub struct EmitterDesc {
     pub spin: [f32; 2],
     #[serde(default, skip_serializing_if = "Curve::is_one")]
     pub spin_curve: Curve,
+    /// Particle systems as particles (BF2 `ParticleSystemEmitter`, the fire fingers of
+    /// vehicle explosions): this emitter's particles are invisible (no texture) and each
+    /// runs the emitter at this index, relative to itself, until it dies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carries: Option<u32>,
+    /// Runs only on the particles of the emitter that carries it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub carried: bool,
 }
 
 fn is_zero(v: &f32) -> bool {

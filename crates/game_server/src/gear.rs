@@ -1,19 +1,15 @@
 //! Gas masks and tear gas on the server: puts [`SoldierGear`] on soldiers and sets it from
-//! their players' [`GearRequest`]s, marks the smoke clouds of tear gas grenades with
-//! [`TearGas`], and hurts soldiers breathing it without a mask.
-//!
-//! Which clouds are tear gas: the detonation effect sent to clients (`PlayEffect`) has a gas
-//! cloud (`effects/<name>.ron`, BF2 `gasCloudType TearGas`), and the smoke cloud appears
-//! where it went off.
+//! their players' [`GearRequest`]s, marks the smoke clouds of tear gas grenades
+//! (`SmokeCloud::gas_damage`) with [`TearGas`], and hurts soldiers breathing it without a
+//! mask.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use game_data::{EffectDesc, GasDesc, WeaponEffectTable};
+use game_data::WeaponEffectTable;
 use game_shared::{
     config::GamePaths,
-    effects::PlayEffect,
     gear::{GearRequest, SoldierGear, TearGas, gas_exposure},
     projectile::SmokeCloud,
     soldier::{Health, Soldier, SoldierMotion},
@@ -36,17 +32,11 @@ impl Plugin for GearPlugin {
     }
 }
 
-/// How far (horizontally) a smoke cloud may be from the detonation that made it.
-const MATCH_DISTANCE: f32 = 1.5;
-/// Seconds a gas detonation waits for its cloud.
-const MATCH_TIME: f32 = 1.0;
-
-/// Gas masks and gas effects, from the imported effects.
+/// The weapons that are gas masks, from the imported weapon effects.
 #[derive(Resource, Default)]
 struct GearData {
     loaded: bool,
     gas_masks: HashSet<String>,
-    gases: HashMap<String, Option<GasDesc>>,
 }
 
 impl GearData {
@@ -58,14 +48,6 @@ impl GearData {
         let table: WeaponEffectTable =
             game_data::read_ron(paths.imported.join("effects/weapons.ron")).unwrap_or_default();
         self.gas_masks = table.weapons.into_iter().filter(|(_, w)| w.gas_mask).map(|(n, _)| n).collect();
-    }
-
-    fn gas(&mut self, paths: &GamePaths, effect: &str) -> Option<GasDesc> {
-        *self.gases.entry(effect.to_string()).or_insert_with(|| {
-            game_data::read_ron::<EffectDesc>(paths.imported.join(format!("effects/{effect}.ron")))
-                .ok()
-                .and_then(|desc| desc.gas)
-        })
     }
 }
 
@@ -100,28 +82,13 @@ fn receive_requests(
     }
 }
 
-/// Marks the smoke clouds of tear gas detonations.
-fn mark_tear_gas(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut effects: MessageReader<ToClients<PlayEffect>>,
-    clouds: Query<(Entity, &SmokeCloud), (Added<SmokeCloud>, Without<TearGas>)>,
-    paths: Res<GamePaths>,
-    mut data: ResMut<GearData>,
-    mut pending: Local<Vec<(Vec3, GasDesc, f32)>>,
-) {
-    let now = time.elapsed_secs();
-    for effect in effects.read() {
-        if let Some(gas) = data.gas(&paths, &effect.message.name) {
-            pending.push((effect.message.position, gas, now));
-        }
-    }
-    pending.retain(|(_, _, at)| now - at < MATCH_TIME);
+/// Marks the smoke clouds of tear gas grenades.
+fn mark_tear_gas(mut commands: Commands, clouds: Query<(Entity, &SmokeCloud), (Added<SmokeCloud>, Without<TearGas>)>) {
     for (entity, cloud) in &clouds {
-        let horizontal = |a: Vec3, b: Vec3| a.xz().distance(b.xz());
-        if let Some(index) = pending.iter().position(|(at, ..)| horizontal(*at, cloud.position) < MATCH_DISTANCE) {
-            let (_, gas, _) = pending.swap_remove(index);
-            commands.entity(entity).insert(TearGas { damage: gas.damage });
+        if cloud.gas_damage > 0.0 {
+            commands.entity(entity).insert(TearGas {
+                damage: cloud.gas_damage,
+            });
         }
     }
 }

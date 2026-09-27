@@ -121,6 +121,7 @@ fn fill_bot_squads(
     time: Res<Time>,
     mut timer: Local<f32>,
     players: Query<(Entity, &Team, Option<&SquadMember>, Has<BotBrain>), With<Player>>,
+    commanders: Query<(), With<game_shared::commander::Commander>>,
 ) {
     *timer -= time.delta_secs();
     if *timer > 0.0 {
@@ -129,7 +130,8 @@ fn fill_bot_squads(
     *timer = 2.0;
     let mut sizes = squad_sizes(players.iter().map(|(_, t, m, _)| (t, m)));
     for (entity, &team, member, bot) in &players {
-        if !bot || member.is_some() || team == Team::Spectator {
+        // Commanders lead the team, not a squad.
+        if !bot || member.is_some() || team == Team::Spectator || commanders.contains(entity) {
             continue;
         }
         // Fill the fullest squad with room first, leaving one place for a human.

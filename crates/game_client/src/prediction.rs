@@ -82,8 +82,11 @@ pub struct SoldierRender {
     pub stance: Stance,
     pub velocity: Vec3,
     pub grounded: bool,
-    /// On a ladder.
+    /// On a ladder, or on a grappling rope if `on_rope`.
     pub climbing: bool,
+    pub on_rope: bool,
+    /// Hanging from a zipline.
+    pub riding: bool,
     /// Eye height above the feet, easing toward the stance's so the view moves with the
     /// body when crouching or going prone instead of jumping.
     pub eye_height: f32,
@@ -141,6 +144,8 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             velocity: motion.velocity,
             grounded: motion.grounded,
             climbing: motion.climbing,
+            on_rope: motion.on_rope,
+            riding: motion.riding,
             eye_height: motion.stance.eye_height(),
             step_offset: 0.0,
         },
@@ -297,6 +302,8 @@ fn update_render_state(
             velocity: to.velocity,
             grounded: to.grounded,
             climbing: to.climbing,
+            on_rope: to.on_rope,
+            riding: to.riding,
             eye_height: render.eye_height + (eye_target - render.eye_height) * eye_blend,
             step_offset: (step * (1.0 - eye_blend)).clamp(-STEP_SMOOTHING, STEP_SMOOTHING),
         };

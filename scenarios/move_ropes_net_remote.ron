@@ -1,0 +1,30 @@
+// Grappling rope over the network, the joining side (see move_ropes_net_host.ron): the host
+// brings us in front of the office building, we throw the hook (the assault kit's 9th
+// weapon) and climb the rope, predicted.
+// The server picks our team: the SAS, as the host plays the insurgents.
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        ThirdPerson(true),
+        Wait(16.0),
+        Weapon(8),
+        Look(0.0, 50.0),
+        Wait(1.5),
+        Hold([Fire]),
+        Wait(0.3),
+        Release([Fire]),
+        Wait(3.0),
+        Look(0.0, 15.0),
+        Wait(0.3),
+        Screenshot("rope"),
+        Move(0.0, 1.0),
+        Trace("to_rope", 5.0),
+        Trace("climb", 2.0),
+        Screenshot("on_rope"),
+        Trace("climb_top", 4.0),
+        Screenshot("roof"),
+        Move(0.0, 0.0),
+        Quit,
+    ],
+)

@@ -35,6 +35,7 @@ mod roads;
 mod soldiers;
 mod sounds;
 mod terrain;
+mod ui_icons;
 mod vegetation;
 mod vehicle_hud;
 mod vehicles;

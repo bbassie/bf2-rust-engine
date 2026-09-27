@@ -192,7 +192,7 @@ pub fn load_level(paths: &GamePaths, name: &str) -> anyhow::Result<LoadedLevel> 
         return Ok(test_range());
     }
     let dir = paths.level_dir(name);
-    let desc: LevelDesc = game_data::read_ron(dir.join("level.ron"))?;
+    let desc: LevelDesc = paths.read_ron(format!("levels/{name}/level.ron"))?;
     let heightmap = desc
         .terrain
         .as_ref()

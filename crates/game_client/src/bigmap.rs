@@ -1,19 +1,21 @@
 //! The full-screen map, shown while M is held: the whole level with flags (named), our team,
-//! our squad and us. North is up; the mouse stays with the game.
+//! our squad, vehicles, spotted enemies, orders (see `map_markers`) and us. North is up; the
+//! mouse stays with the game.
 
-use bevy::{platform::collections::HashMap, prelude::*};
+use bevy::prelude::*;
 use game_shared::{
-    conquest::{ControlPoint, FlagState},
     level::LoadedLevel,
     protocol::{ControlledBy, Team},
     soldier::Soldier,
     squad::SquadMember,
+    vehicle::Seated,
 };
 
 use crate::{
     camera::PlayerCamera,
-    conquest_hud::{FRIENDLY, SQUAD, team_color},
+    conquest_hud::{FRIENDLY, SQUAD},
     deploy::DeployScreen,
+    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerBody, MarkerIcon, MarkerIcons, MarkerPointer, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -34,7 +36,6 @@ impl Plugin for BigMapPlugin {
     }
 }
 
-const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
 
 #[derive(Component)]
 struct BigMapRoot;
@@ -42,9 +43,6 @@ struct BigMapRoot;
 struct BigMapImage;
 #[derive(Component)]
 struct BigMapHeading;
-/// A marker for an entity (flag or soldier).
-#[derive(Component)]
-struct BigMapIcon(Entity);
 
 fn spawn_big_map(mut commands: Commands) {
     commands
@@ -153,18 +151,19 @@ fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_big_map(
-    mut commands: Commands,
     level: Option<Res<LoadedLevel>>,
-    root: Single<&Visibility, With<BigMapRoot>>,
+    root: Single<&Visibility, (With<BigMapRoot>, Without<MarkerIcon>)>,
     camera: Single<&GlobalTransform, With<PlayerCamera>>,
     players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
     teams: Query<(&Team, Option<&SquadMember>)>,
-    control_points: Query<(Entity, &ControlPoint, &FlagState)>,
-    soldiers: Query<(Entity, &SoldierRender, &ControlledBy), (With<Soldier>, Without<LocalSoldier>)>,
+    soldiers: Query<(Entity, &SoldierRender, &ControlledBy), (With<Soldier>, Without<LocalSoldier>, Without<Seated>)>,
     image: Single<Entity, With<BigMapImage>>,
-    mut icons: Query<(Entity, &BigMapIcon, &mut Node, &mut BackgroundColor), Without<BigMapHeading>>,
-    mut heading: Single<(&mut Node, &mut UiTransform), With<BigMapHeading>>,
-    markers: Res<crate::map_markers::MapMarkers>,
+    mut icons: MarkerIcons,
+    mut heading: Single<
+        (&mut Node, &mut UiTransform),
+        (With<BigMapHeading>, Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerPointer>),
+    >,
+    markers: Res<MapMarkers>,
 ) {
     let Some(level) = level else {
         return;
@@ -183,78 +182,27 @@ fn update_big_map(
         .single()
         .map(|(team, squad)| (*team, squad.copied()))
         .unwrap_or_default();
-    // Flags with names, teammates (squad mates in green).
-    let mut wanted: HashMap<Entity, (Vec3, Color, f32, Option<String>)> = HashMap::default();
-    for (entity, cp, state) in &control_points {
-        wanted.insert(entity, (cp.position, team_color(state.owner, local), 18.0, Some(cp.name.clone())));
-    }
+    // Teammates on foot (squad mates in green); flags, vehicles and the rest are markers.
+    let mut teammates = Vec::new();
     for (entity, render, controlled_by) in &soldiers {
         let (team, squad) = teams.get(controlled_by.0).map(|(t, s)| (*t, s.copied())).unwrap_or_default();
         if team == local && local != Team::Spectator {
             let squad_mate = local_squad.zip(squad).is_some_and(|(a, b)| a.squad == b.squad);
-            wanted.insert(entity, (render.position, if squad_mate { SQUAD } else { FRIENDLY }, 8.0, None));
+            let color = if squad_mate { SQUAD } else { FRIENDLY };
+            teammates.push(MapMarker::dot(entity, render.position, color, 6.5).layer(SOLDIER_LAYER));
         }
     }
-
-    // Spotted enemies, orders, the commander's assets.
-    for marker in &markers.0 {
-        wanted.insert(marker.key, (marker.position, marker.color, marker.size + 2.0, marker.label.clone()));
-    }
-
-    for (icon_entity, icon, mut node, mut background) in &mut icons {
-        let Some((position, color, _, _)) = wanted.remove(&icon.0) else {
-            commands.entity(icon_entity).despawn();
-            continue;
-        };
-        (node.left, node.top) = at(map_uv(&level, position));
-        background.0 = color;
-    }
-    for (entity, (position, color, size, label)) in wanted {
-        let (left, top) = at(map_uv(&level, position));
-        let mut icon = commands.spawn((
-            BigMapIcon(entity),
-            Node {
-                position_type: PositionType::Absolute,
-                left,
-                top,
-                width: px(size),
-                height: px(size),
-                margin: UiRect {
-                    left: px(-size / 2.0),
-                    top: px(-size / 2.0),
-                    ..default()
-                },
-                border: UiRect::all(px(1.5)),
-                border_radius: BorderRadius::all(px(size / 2.0)),
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            BackgroundColor(color),
-            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
-            ChildOf(*image),
-        ));
-        if let Some(label) = label {
-            icon.with_child((
-                Text::new(label),
-                TextFont {
-                    font_size: FontSize::Px(13.0),
-                    ..default()
-                },
-                TextColor(TEXT),
-                TextShadow {
-                    offset: Vec2::splat(1.0),
-                    color: Color::srgba(0.0, 0.0, 0.0, 0.9),
-                },
-                TextLayout::justify(Justify::Center),
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: px(size + 2.0),
-                    width: px(140),
-                    left: px(size / 2.0 - 70.0),
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-            ));
-        }
-    }
+    let placed = teammates
+        .iter()
+        .chain(&markers.0)
+        .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
+    icons.sync(
+        *image,
+        placed,
+        IconStyle {
+            scale: 1.25,
+            labels: true,
+            turn: 0.0,
+        },
+    );
 }

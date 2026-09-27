@@ -28,7 +28,7 @@ Milestones are ordered so that each one ends with something playable.
 Still to do for BF2 fidelity: baked lightmaps (statics and terrain), dirt/crack layers,
 surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
-## M1: Infantry combat (in progress)
+## M1: Infantry combat
 
 - [x] Soldier meshes and animations (skinned mesh + `.ske`/`.baf` import), per-team models
 - [x] Third-person movement animations: legs from the soldier set, upper body from weapon sets
@@ -52,11 +52,13 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Scopes: BF2's zoom models with reticles, bolt-action rifles leave the scope
 - [x] Destructible objects (barricades, barrels, signs, wrecks, chain explosions) and
   BF2's material damage table
-- Thrown and launched projectiles (in progress): hand grenades (cooking, bouncing, fuse), smoke grenades
+- [x] Thrown and launched projectiles: hand grenades (cooking, bouncing, fuse), smoke grenades
   with smoke that blocks sight, under-barrel grenade launchers, rocket launchers, C4 and
   claymores, shotgun pellets
-- Lag compensation
-- Per-bone hit zones
+- [x] Lag compensation: the server judges hits against where targets were on the shooter's
+  screen (up to 250 ms)
+- [x] Per-bone hit zones: BF2's skeleton collision capsules and damage table columns (head,
+  body, body armour, limbs)
 - [x] Man-down (BF2's 15 s, 320 HP wreck threshold) and revive with shock paddles
 - [x] Medic, support and engineer abilities: medic/ammo bags (held or thrown), wrench repairs
   of vehicles and objects, kit ability charge, BF2 scoring
@@ -74,7 +76,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Squads: create/join/leave, squad leader spawning, bots in squads
 - [x] Commo rose (Q) with BF2's radio voice-overs, spotting (HUD, minimap, map), automatic soldier
   call-outs (reloading, grenade out, man down)
-- Commander: orders to squads, artillery, UAV, supply drops, scans (in progress)
+- [x] Commander: post, mutiny, squad orders, artillery, UAV, satellite scan, supply drops,
+  commander screen (Caps Lock)
 
 ## M3: Vehicles (in progress)
 
@@ -103,27 +106,38 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Infantry navigation from our collision data: layered walkability grid, cached,
   background A*; stuck events down from ~250/min to 1-3/min
 - Path costs per vehicle class
-- Strategy, squad orders and behaviours (in progress)
+- [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
+  orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
+  settings, ladders in navigation
+- AI commander using assets, bots using launchers/repairs (in progress)
 - Strategic layer from `StrategicAreas.ai`, squad orders, individual utility behaviours
   seeded from `AIBehaviours.ai` and per-object AI templates
 - Bots driving vehicles and flying through the same input channels as players
 
 ## M5: Presentation
 
-- BF2-accurate materials: dirt/crack layers on statics, normal-mapped bundled and skinned
-  meshes, environment maps (in progress)
-- Water, undergrowth/overgrowth, surrounding terrain (in progress)
+- [x] BF2-accurate materials: dirt/crack layers on statics, normal-mapped bundled and skinned
+  meshes, environment maps
+- [x] Water, undergrowth/overgrowth, surrounding terrain, view distance setting (grows with
+  altitude), BF2's distant tree stand-ins
+- Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
 - Effects: particles for muzzle flashes, impacts, explosions, smoke (in progress)
-- Audio: footsteps, distance falloff, flybys, ambience (in progress)
+- [x] Audio: BF2's sounds with its distance model, weapons (near/far, cracks), footsteps per
+  surface, vehicles, ambience, voices, announcements ducking the rest
 - [x] Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
   audio, controls, key bindings, mouse sensitivity, field of view) saved to disk, pause menu:
   a modern design of our own, not a copy of BF2's UI
-- Server browser (LAN discovery), chat, end-of-round summary (in progress)
+- [x] BF2's team flags and vehicle icons across the HUD, maps and menus; the level page previews
+  each layout's objectives
+- [x] Server browser (LAN discovery, favourites), text chat (all/team/squad), end-of-round
+  summary with career stats
 
 ## Later
 
-- Special Forces gadgets: night vision, gas masks, flashbangs, zipline, grappling hook (in
-  progress)
-- Co-op
-- Modding workflow: authoring new content directly in glTF + RON
-- Admin tools (RCON), map rotation, server config, stats (in progress); master server
+- [x] Special Forces night vision, gas masks and tear gas, flashbangs, blast tinnitus
+- [x] Zipline and grappling hook (Special Forces): BF2 rope lengths and lifetimes, climbing, sliding, over the network
+- [x] Co-op: bots fill both teams around the humans, who play one side
+- [x] Modding workflow: mods authored directly in glTF + RON (`mods/`, see docs/MODDING.md)
+- [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
+  map changes; server config file; persistent player stats
+- [x] Master server: servers register and heartbeat, the browser lists internet servers

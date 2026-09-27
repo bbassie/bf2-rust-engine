@@ -8,7 +8,10 @@
 //! (next to enemy ground), what the team has seen of the enemy around it, flags being taken
 //! right now, distance, and ticket bleed.
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_data::StrategicLayoutDesc;
@@ -18,8 +21,15 @@ use game_shared::{
     protocol::{MatchInfo, Team},
 };
 
+use game_shared::{
+    commander::{Commander, OrderKind as CommanderOrderKind, SquadOrder as CommanderOrder},
+    protocol::Player,
+    soldier::SoldierMotion,
+    vehicle::VehicleMotion,
+};
+
 use super::{AiData, squad::SquadSnapshot};
-use crate::conquest::ControlPointRules;
+use crate::{conquest::ControlPointRules, radio::Spot};
 
 /// Seconds between plans.
 const PLAN_INTERVAL: f32 = 3.0;
@@ -49,14 +59,20 @@ pub struct Area {
 }
 
 /// The strategic areas of the layout being played, rebuilt every round (control points are
-/// new entities then).
+/// new entities then) and with every level.
 #[derive(Resource, Default)]
 pub struct StrategicMap {
     pub areas: Vec<Area>,
     /// Control point entities by index.
     pub control_points: Vec<Option<Entity>>,
+    /// Changes with every rebuild (never 0 once built): area indices kept from an older
+    /// map mean nothing.
+    pub generation: u32,
     built_for: Vec<Entity>,
 }
+
+/// Generations of maps ever built, so they differ even when the resource is replaced.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 impl StrategicMap {
     /// The area of a control point.
@@ -95,6 +111,7 @@ struct PointInfo<'a> {
 /// Rebuilds the areas when the control points change (new level or round).
 pub fn update_map(
     mut map: ResMut<StrategicMap>,
+    mut strategy: ResMut<Strategy>,
     data: Res<AiData>,
     level: Res<LoadedLevel>,
     match_info: Single<&MatchInfo>,
@@ -103,9 +120,11 @@ pub fn update_map(
     let mut points: Vec<(Entity, &ControlPoint, &ControlPointRules)> = control_points.iter().collect();
     points.sort_by_key(|(_, cp, _)| cp.index);
     let entities: Vec<Entity> = points.iter().map(|(e, ..)| *e).collect();
-    if entities == map.built_for && !data.is_changed() {
+    if entities == map.built_for && map.generation != 0 && !data.is_changed() && !level.is_changed() {
         return;
     }
+    // Orders and objectives name areas of the old map: plan again right away.
+    *strategy = Strategy::default();
     let layout = level.game_mode(&match_info.mode, match_info.size);
     let spawn_ids: Vec<&str> = layout
         .map(|l| l.spawn_points.iter().map(|s| s.control_point.as_str()).collect())
@@ -146,6 +165,7 @@ pub fn update_map(
     *map = StrategicMap {
         areas,
         control_points: by_index,
+        generation: GENERATION.fetch_add(1, Ordering::Relaxed) + 1,
         built_for: entities,
     };
 }
@@ -269,6 +289,11 @@ pub struct SquadOrder {
     pub age: f32,
     /// The squad is led by a human: only a suggestion. Bots in it follow their leader.
     pub suggestion: bool,
+    /// Given by the team's human commander, and kept while he keeps it.
+    pub commanded: bool,
+    /// A point to go to and hold instead of the area (a human commander's order away
+    /// from the flags).
+    pub point: Option<Vec3>,
 }
 
 /// A flag worth attacking or defending, and how much.
@@ -305,10 +330,11 @@ impl Strategy {
     /// distance, varied a little per bot (`seed`).
     pub fn objective_for(&self, team: Team, position: Vec3, map: &StrategicMap, seed: u32) -> Option<Objective> {
         let objectives = team_index(team).map(|t| &self.objectives[t])?;
-        objectives.iter().copied().max_by(|a, b| {
+        objectives.iter().copied().filter(|o| o.area < map.areas.len()).max_by(|a, b| {
             let score = |o: &Objective| {
                 let jitter = 1.0 + 0.3 * hash01(seed, o.area as u32);
-                o.value * jitter / (1.0 + map.areas[o.area].position.distance(position) / 300.0)
+                let distance = map.areas.get(o.area).map_or(f32::MAX, |a| a.position.distance(position));
+                o.value * jitter / (1.0 + distance / 300.0)
             };
             score(a).total_cmp(&score(b))
         })
@@ -350,6 +376,18 @@ impl TeamIntel {
             .count()
     }
 
+    /// Where enemies of `team` were seen in the last `max_age` seconds.
+    pub fn recent(&self, team: Team, max_age: f32) -> Vec<Vec3> {
+        let Some(t) = team_index(team) else {
+            return Vec::new();
+        };
+        self.seen[t]
+            .values()
+            .filter(|(_, time)| self.clock - time < max_age)
+            .map(|(p, _)| *p)
+            .collect()
+    }
+
     fn tick(&mut self, dt: f32) {
         self.clock += dt;
         let clock = self.clock;
@@ -360,6 +398,7 @@ impl TeamIntel {
 }
 
 /// The commanders: every few seconds, value the flags for both teams and hand out orders.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     time: Res<Time>,
     map: Res<StrategicMap>,
@@ -368,9 +407,21 @@ pub fn plan(
     snapshot: Res<SquadSnapshot>,
     flags: Query<&FlagState>,
     tickets: Query<&Tickets>,
+    commanders: Query<(&Team, &Player), With<Commander>>,
+    commander_orders: Query<&CommanderOrder>,
+    mut spots: MessageReader<Spot>,
+    spotted: Query<(Option<&SoldierMotion>, Option<&VehicleMotion>)>,
 ) {
     let dt = time.delta_secs();
     intel.tick(dt);
+    // What the commander's UAV and scans show, the team knows.
+    for spot in spots.read() {
+        if let Ok((soldier, vehicle)) = spotted.get(spot.target)
+            && let Some(position) = soldier.map(|s| s.position + Vec3::Y).or(vehicle.map(|v| v.position))
+        {
+            intel.report(spot.team, spot.target, position);
+        }
+    }
     for order in strategy.orders.values_mut() {
         order.age += dt;
     }
@@ -383,6 +434,8 @@ pub fn plan(
         strategy.orders.clear();
         return;
     }
+    let count = map.areas.len();
+    strategy.orders.retain(|_, order| order.area < count);
     let states: Vec<Option<FlagState>> = map
         .areas
         .iter()
@@ -416,10 +469,30 @@ pub fn plan(
         let still_valid = |order: &SquadOrder| {
             objectives.iter().any(|o| o.area == order.area && o.kind == order.kind)
         };
-        // Recent orders that still make sense stay; they count first.
+        // A human commander's orders go to the bot-led squads as they are.
+        let human_commander = commanders.iter().any(|(t, player)| *t == team && !player.is_bot);
         let mut open = Vec::new();
         for &(squad, position, human) in &squads {
+            let given = commander_orders
+                .iter()
+                .find(|o| human_commander && !human && o.team == team && o.squad == squad)
+                .and_then(|o| commanded_order(&map, &states, team, o));
+            if let Some(mut order) = given {
+                if let Some(current) = strategy.orders.get(&(team, squad))
+                    && current.commanded
+                    && current.area == order.area
+                    && current.kind == order.kind
+                    && current.point == order.point
+                {
+                    order.age = current.age;
+                }
+                *load.entry(order.area).or_default() += 1.0;
+                strategy.orders.insert((team, squad), order);
+                continue;
+            }
+            // Recent orders that still make sense stay; they count first.
             match strategy.orders.get(&(team, squad)) {
+                Some(order) if order.commanded => open.push((squad, position, human)),
                 Some(order) if order.age < MIN_ORDER_AGE && still_valid(order) => {
                     *load.entry(order.area).or_default() += weight(human);
                 }
@@ -458,6 +531,8 @@ pub fn plan(
                         area: best.area,
                         age: if same { current.map_or(0.0, |c| c.age) } else { 0.0 },
                         suggestion: human,
+                        commanded: false,
+                        point: None,
                     };
                     strategy.orders.insert((team, squad), order);
                 }
@@ -473,6 +548,32 @@ pub fn plan(
         }
         strategy.objectives[t] = objectives;
     }
+}
+
+/// A human commander's order as the bots take it: attack or defend the flag it is at, or
+/// hold the point it names.
+fn commanded_order(
+    map: &StrategicMap,
+    states: &[Option<FlagState>],
+    team: Team,
+    order: &CommanderOrder,
+) -> Option<SquadOrder> {
+    let area = map.nearest(order.position)?;
+    let near = map.areas[area].position.xz().distance(order.position.xz()) < map.areas[area].radius + 30.0;
+    let held = states.get(area).copied().flatten().is_some_and(|s| s.owner == team);
+    let kind = match order.kind {
+        CommanderOrderKind::Attack if near && !held => OrderKind::Attack,
+        CommanderOrderKind::Move if near && !held => OrderKind::Attack,
+        _ => OrderKind::Defend,
+    };
+    Some(SquadOrder {
+        kind,
+        area,
+        age: 0.0,
+        suggestion: false,
+        commanded: true,
+        point: (!near).then_some(order.position),
+    })
 }
 
 /// How much each flag is worth attacking or defending for `team`.

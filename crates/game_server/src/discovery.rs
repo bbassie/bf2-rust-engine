@@ -1,13 +1,16 @@
 //! Answers LAN browser queries (see `game_shared::discovery`) with the server's name, map
-//! and player count.
+//! and player count, and announces the server to a master server if one is configured.
 
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use game_shared::{
     PROTOCOL_ID,
-    discovery::{DISCOVERY_PORTS, ServerInfo, encode_reply, parse_query},
+    discovery::{
+        DISCOVERY_PORTS, HEARTBEAT_SECONDS, MASTER_PORT, ServerInfo, encode_bye, encode_heartbeat, encode_reply,
+        parse_query,
+    },
     level::LoadedLevel,
     protocol::Player,
 };
@@ -20,7 +23,7 @@ impl Plugin for DiscoveryPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            answer_queries
+            (answer_queries, heartbeat)
                 .run_if(resource_exists::<DiscoveryResponder>)
                 .run_if(in_state(ClientState::Disconnected)),
         );
@@ -30,6 +33,32 @@ impl Plugin for DiscoveryPlugin {
 #[derive(Resource)]
 pub struct DiscoveryResponder {
     socket: UdpSocket,
+    port: u16,
+    master: Option<Master>,
+}
+
+/// The master server this server announces itself to.
+struct Master {
+    socket: UdpSocket,
+    address: SocketAddr,
+    /// Seconds until the next heartbeat.
+    next: f32,
+}
+
+impl Master {
+    fn connect(address: &str) -> std::io::Result<Self> {
+        let address = (address, MASTER_PORT)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+            .or_else(|| address.to_socket_addrs().ok()?.next())
+            .ok_or_else(|| std::io::Error::other(format!("can't find `{address}`")))?;
+        // Loopback masters get a loopback socket (tests without firewall prompts).
+        let ip: IpAddr = if address.ip().is_loopback() { Ipv4Addr::LOCALHOST.into() } else { Ipv4Addr::UNSPECIFIED.into() };
+        let socket = UdpSocket::bind((ip, 0))?;
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket, address, next: 0.0 })
+    }
 }
 
 /// Listens for browser queries on the first free discovery port, on the same interfaces
@@ -48,14 +77,45 @@ pub fn start(world: &mut World) {
             continue;
         }
         info!("answering server browser queries on UDP port {port}");
-        world.insert_resource(DiscoveryResponder { socket });
+        let master = settings.master_server.as_deref().and_then(|address| match Master::connect(address) {
+            Ok(master) => {
+                info!("announcing to master server {}", master.address);
+                Some(master)
+            }
+            Err(err) => {
+                warn!("master server: {err}");
+                None
+            }
+        });
+        world.insert_resource(DiscoveryResponder { socket, port, master });
         return;
     }
     warn!("no free discovery port: LAN browsers won't list this server");
 }
 
 pub fn stop(world: &mut World) {
-    world.remove_resource::<DiscoveryResponder>();
+    let game_port = world.resource::<ServerSettings>().port;
+    if let Some(responder) = world.remove_resource::<DiscoveryResponder>()
+        && let Some(master) = responder.master
+    {
+        let _ = master.socket.send_to(&encode_bye(game_port), master.address);
+    }
+}
+
+/// Tells the master server we're still here, every half minute.
+fn heartbeat(time: Res<Time<Real>>, settings: Res<ServerSettings>, mut responder: ResMut<DiscoveryResponder>) {
+    let port = responder.port;
+    let Some(master) = responder.master.as_mut() else {
+        return;
+    };
+    master.next -= time.delta_secs();
+    if master.next > 0.0 {
+        return;
+    }
+    master.next = HEARTBEAT_SECONDS;
+    if let Err(err) = master.socket.send_to(&encode_heartbeat(settings.port, port), master.address) {
+        warn!("master server {}: {err}", master.address);
+    }
 }
 
 fn answer_queries(

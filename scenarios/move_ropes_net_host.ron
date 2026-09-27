@@ -1,0 +1,23 @@
+// Grappling rope over the network, the hosting side: once the remote client
+// (move_ropes_net_remote.ron) has joined, its soldier is brought 1.5 m in front of us, 15 m
+// south of Warlord's office building, where it throws a grappling hook onto the roof and
+// climbs the rope with prediction (its report has the corrections). We play the insurgents,
+// so the joining client is put on the SAS side, whose assault kit has the hook.
+// client --host --port 16673 --scenario scenarios/move_ropes_net_host.ron --out target/scenarios/move/ropes_net_host
+// client --connect 127.0.0.1 --port 16673 --scenario scenarios/move_ropes_net_remote.ron --out target/scenarios/move/ropes_net_remote
+(
+    level: "warlord",
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        ThirdPerson(true),
+        Teleport((99.0, 93.0, 191.5), 0.0, 10.0),
+        Wait(14.0),
+        Summon(100.0),
+        Wait(20.0),
+        Screenshot("host_sees_climb"),
+        Wait(25.0),
+        Quit,
+    ],
+)

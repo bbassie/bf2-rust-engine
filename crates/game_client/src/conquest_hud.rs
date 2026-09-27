@@ -1,4 +1,5 @@
-//! Conquest on the HUD: tickets and flags at the top, capture progress while standing at a
+//! Conquest on the HUD: tickets and flags at the top (with the teams' flags, and each
+//! control point's owner flag framed in its colour), capture progress while standing at a
 //! flag, capture notifications, and the end-of-round banner. Colors are relative to us:
 //! blue is our team, red the enemy, grey neutral.
 
@@ -12,7 +13,10 @@ use game_shared::{
     soldier::SoldierMotion,
 };
 
-use crate::net::{LocalPlayer, LocalSoldier};
+use crate::{
+    map_icons::UiIcons,
+    net::{LocalPlayer, LocalSoldier},
+};
 
 pub struct ConquestHudPlugin;
 
@@ -25,6 +29,7 @@ impl Plugin for ConquestHudPlugin {
                 (
                     rebuild_flag_pills,
                     update_tickets,
+                    update_ticket_flags,
                     update_flag_pills,
                     update_capture_panel,
                     receive_flag_events,
@@ -78,10 +83,18 @@ struct TicketText {
     /// 0 = ours (left), 1 = theirs (right).
     side: usize,
 }
+/// A team's flag next to its tickets.
+#[derive(Component)]
+struct TicketFlag {
+    side: usize,
+}
 #[derive(Component)]
 struct FlagRow;
 #[derive(Component)]
 struct FlagPill(Entity);
+/// The owner's flag inside a pill.
+#[derive(Component)]
+struct FlagPillIcon(Entity);
 #[derive(Component)]
 struct FlagPillBar(Entity);
 #[derive(Component)]
@@ -133,6 +146,7 @@ fn spawn_conquest_hud(mut commands: Commands) {
                 BackgroundColor(PANEL),
             ))
             .with_children(|panel| {
+                panel.spawn(ticket_flag(0));
                 panel.spawn((TicketText { side: 0 }, Text::new(""), font(20.0), TextColor(FRIENDLY)));
                 panel.spawn((
                     FlagRow,
@@ -143,6 +157,7 @@ fn spawn_conquest_hud(mut commands: Commands) {
                     },
                 ));
                 panel.spawn((TicketText { side: 1 }, Text::new(""), font(20.0), TextColor(ENEMY)));
+                panel.spawn(ticket_flag(1));
             });
         });
 
@@ -244,6 +259,22 @@ fn spawn_conquest_hud(mut commands: Commands) {
         });
 }
 
+fn ticket_flag(side: usize) -> impl Bundle {
+    (
+        TicketFlag { side },
+        Node {
+            width: px(30),
+            height: px(20),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(3)),
+            display: Display::None,
+            ..default()
+        },
+        BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ImageNode::default(),
+    )
+}
+
 /// One pill per control point, in layout order, rebuilt when the set of points changes.
 fn rebuild_flag_pills(
     mut commands: Commands,
@@ -276,20 +307,44 @@ fn rebuild_flag_pills(
                     .spawn((
                         FlagPill(entity),
                         Node {
-                            width: px(26),
-                            height: px(26),
+                            width: px(32),
+                            height: px(23),
                             justify_content: JustifyContent::Center,
                             align_items: AlignItems::Center,
-                            border_radius: BorderRadius::all(px(6)),
+                            border_radius: BorderRadius::all(px(5)),
                             ..default()
                         },
                         BackgroundColor(NEUTRAL),
                     ))
-                    .with_child((Text::new(letter.to_uppercase()), font(14.0), TextColor(TEXT)));
+                    .with_children(|pill| {
+                        pill.spawn((
+                            FlagPillIcon(entity),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px(3),
+                                top: px(3),
+                                width: px(26),
+                                height: px(17),
+                                border_radius: BorderRadius::all(px(2)),
+                                ..default()
+                            },
+                            ImageNode::default(),
+                            Visibility::Hidden,
+                        ));
+                        pill.spawn((
+                            Text::new(letter.to_uppercase()),
+                            font(14.0),
+                            TextColor(TEXT),
+                            TextShadow {
+                                offset: Vec2::splat(1.0),
+                                color: Color::srgba(0.0, 0.0, 0.0, 0.95),
+                            },
+                        ));
+                    });
                 column
                     .spawn((
                         Node {
-                            width: px(26),
+                            width: px(32),
                             height: px(3),
                             border_radius: BorderRadius::all(px(1.5)),
                             ..default()
@@ -339,13 +394,52 @@ fn update_tickets(
     }
 }
 
+/// The teams' flags next to their tickets.
+fn update_ticket_flags(
+    icons: Res<UiIcons>,
+    players: Query<&Team, With<LocalPlayer>>,
+    mut flags: Query<(&TicketFlag, &mut ImageNode, &mut Node)>,
+) {
+    let local = local_team(&players);
+    let ours = if local == Team::Two { Team::Two } else { Team::One };
+    for (flag, mut image, mut node) in &mut flags {
+        let team = if flag.side == 0 { ours } else { ours.opponent() };
+        let handle = icons.side(team).flag.clone();
+        let display = if handle.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let handle = handle.unwrap_or_default();
+        if image.image != handle {
+            image.image = handle;
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
 fn update_flag_pills(
+    icons: Res<UiIcons>,
     players: Query<&Team, With<LocalPlayer>>,
     flags: Query<&FlagState>,
     mut pills: Query<(&FlagPill, &mut BackgroundColor), Without<FlagPillBar>>,
-    mut bars: Query<(&FlagPillBar, &mut Node, &mut BackgroundColor), Without<FlagPill>>,
+    mut bars: Query<(&FlagPillBar, &mut Node, &mut BackgroundColor), (Without<FlagPill>, Without<FlagPillIcon>)>,
+    mut pill_icons: Query<(&FlagPillIcon, &mut ImageNode, &mut Visibility)>,
 ) {
     let local = local_team(&players);
+    for (icon, mut image, mut visibility) in &mut pill_icons {
+        let Ok(state) = flags.get(icon.0) else { continue };
+        match icons.side(state.owner).flag.clone() {
+            Some(handle) => {
+                if image.image != handle {
+                    image.image = handle;
+                }
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+            None => {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
+        }
+    }
     for (pill, mut background) in &mut pills {
         if let Ok(state) = flags.get(pill.0) {
             background.0 = team_color(state.owner, local).with_alpha(0.85);

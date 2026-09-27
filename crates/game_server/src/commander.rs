@@ -244,7 +244,8 @@ fn handle_commands(
             }
             CommanderRequest::Mutiny if commander.is_some_and(|c| c != player) => {
                 team_state.mutiny.insert(player);
-                let voters = players.iter().filter(|p| *p.2 == team && !p.4).count().max(1);
+                // The team's humans vote (bots never do).
+                let voters = players.iter().filter(|p| *p.2 == team && !p.4 && !p.1.is_bot).count().max(1);
                 let votes = team_state.mutiny.len();
                 info!("mutiny against {team:?}'s commander: {votes}/{voters}");
                 if votes as f32 / voters as f32 > MUTINY_SHARE
@@ -352,8 +353,10 @@ fn handle_commands(
                     }
                     Asset::Scan => {
                         let enemy = |c: &ControlledBy| players.get(c.0).is_ok_and(|p| *p.2 != team && *p.2 != Team::Spectator);
+                        let mut seen = 0;
                         for (soldier, controlled_by, seated) in &enemies {
                             if enemy(controlled_by) {
+                                seen += 1;
                                 let target = seated.map_or(soldier, |s| s.vehicle);
                                 spots.write(Spot {
                                     target,
@@ -362,6 +365,7 @@ fn handle_commands(
                                 });
                             }
                         }
+                        info!("{team:?} scan: {seen} enemies marked");
                         RadioCommand::ScanInitiated
                     }
                     Asset::Supply => {
@@ -575,6 +579,7 @@ fn run_uavs(
             continue;
         }
         uav.next_sweep = 1.0;
+        let mut seen = 0;
         for (soldier, motion, controlled_by, seated) in &soldiers {
             let enemy = teams.get(controlled_by.0).is_ok_and(|t| *t != effect.team && *t != Team::Spectator);
             let (target, position) = match seated.and_then(|s| vehicles.get(s.vehicle).ok().map(|v| (s.vehicle, v.position))) {
@@ -582,6 +587,7 @@ fn run_uavs(
                 None => (soldier, motion.position),
             };
             if enemy && position.xz().distance(effect.position.xz()) <= effect.radius {
+                seen += 1;
                 spots.write(Spot {
                     target,
                     team: effect.team,
@@ -589,6 +595,7 @@ fn run_uavs(
                 });
             }
         }
+        debug!("{:?} UAV sees {seen} enemies", effect.team);
     }
 }
 

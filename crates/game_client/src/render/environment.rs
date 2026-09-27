@@ -37,8 +37,10 @@ impl Plugin for EnvironmentPlugin {
     }
 }
 
-/// Illuminance (lux) of the sun.
-const SUN_ILLUMINANCE: f32 = 12_000.0;
+/// Illuminance (lux) of the sun. BF2 adds about 2 x sun on top of 2 x ambient (in gamma
+/// terms) and saturates; ~4000 lux adds about 1.3x the face-value luminance of the ambient
+/// model below, so sunlit surfaces stay readable and shade isn't crushed by tonemapping.
+const SUN_ILLUMINANCE: f32 = 4_000.0;
 
 /// The level's sun (lights the world layer only).
 #[derive(Component)]
@@ -88,9 +90,14 @@ fn apply_environment(
     ));
 
     clear.0 = rgb(env.sky_color);
+    // BF2 lights in gamma space: colour = texture * 2 * (ambient + sun * n.l), so a surface
+    // in shade shows at 2 * ambient of its texture brightness; in linear terms that is
+    // (2 * ambient)^2.2 of the luminance at which a texture shows at face value (~1000
+    // cd/m2 at the default exposure).
+    let ambient_linear = env.ambient_color.map(|c| (2.0 * c).clamp(0.0, 1.0).powf(2.2));
     *ambient = GlobalAmbientLight {
-        color: rgb(env.ambient_color),
-        brightness: 350.0,
+        color: Color::linear_rgb(ambient_linear[0], ambient_linear[1], ambient_linear[2]),
+        brightness: 1000.0,
         ..default()
     };
     // BF2's view distances were tuned for 2005 hardware (Karkand: 140 m). Stretch them;

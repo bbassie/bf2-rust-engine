@@ -76,13 +76,10 @@ fn find_targets(
             _ => continue,
         };
         targets.0.push((entity, position));
-        markers.0.push(MapMarker {
-            key: entity,
-            position,
-            color: ENEMY,
-            size: 7.0,
-            label: None,
-        });
+        // Spotted vehicles show with their icon (`map_icons`).
+        if soldier.is_some() {
+            markers.0.push(MapMarker::dot(entity, position, ENEMY, 7.0));
+        }
     }
 }
 

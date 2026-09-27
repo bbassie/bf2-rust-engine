@@ -145,7 +145,7 @@ pub fn import(
 
     let world_size = grid as f32 * scale[0];
     let surrounding = cell_size.and_then(|s| {
-        surrounding(vfs, &cells, &raw, size, scale, s, &colormap_base, level_dir)
+        surrounding(vfs, &cells, &raw, size, scale, s, &colormap_base, (&color_maps, patches), level_dir)
             .map_err(|e| log::warn!("{level_name}: surrounding terrain: {e:#}"))
             .ok()
             .flatten()
@@ -185,6 +185,7 @@ fn surrounding(
     primary_scale: [f32; 3],
     cell_size: f32,
     colormap_base: &str,
+    (primary_maps, patches): (&[String], usize),
     level_dir: &Path,
 ) -> Result<Option<SurroundingTerrainDesc>> {
     let mut secondaries = HashMap::new();
@@ -261,6 +262,7 @@ fn surrounding(
         }
     }
 
+    let tint = seam_tint(level_dir, &color_maps, primary_maps, patches);
     let half = 1.5 * cell_size;
     Ok(Some(SurroundingTerrainDesc {
         heightmap: "surrounding.r16".into(),
@@ -269,7 +271,112 @@ fn surrounding(
         height_scale: primary_scale[1],
         origin: [-half, 0.0, -half],
         color_maps,
+        tint,
     }))
+}
+
+/// BF2's surrounding colour maps are often more saturated than the terrain's (it hid them
+/// in fog). Compares both along the four seams (32 m strips, sRGB) and returns the linear
+/// multiplier that makes the surrounding match.
+fn seam_tint(level_dir: &Path, ring: &[String], primary: &[String], patches: usize) -> [f32; 3] {
+    let image = |name: &str| -> Option<Vec<u8>> { (!name.is_empty()).then(|| std::fs::read(level_dir.join(name)).ok())? };
+    let (mut ring_sum, mut primary_sum) = ([0.0f64; 3], [0.0f64; 3]);
+    // Side cells (index in the 3x3 grid) and which strip of each image touches the seam.
+    enum Side { North, South, West, East }
+    for (cell, side) in [(1, Side::North), (7, Side::South), (3, Side::West), (5, Side::East)] {
+        let Some(ring_image) = ring.get(cell).and_then(|n| image(n)) else { continue };
+        // The ring cell's strip facing the terrain, and the terrain patches' strips facing it.
+        let (ring_strip, patch_indices, patch_strip): (Strip, Vec<usize>, Strip) = match side {
+            Side::North => (Strip::Bottom, (0..patches).collect(), Strip::Top),
+            Side::South => (Strip::Top, (0..patches).map(|x| (patches - 1) * patches + x).collect(), Strip::Bottom),
+            Side::West => (Strip::Right, (0..patches).map(|z| z * patches).collect(), Strip::Left),
+            Side::East => (Strip::Left, (0..patches).map(|z| z * patches + patches - 1).collect(), Strip::Right),
+        };
+        let Some(ring_mean) = dds_mean(&ring_image, ring_strip, 1.0 / 32.0) else { continue };
+        let means: Vec<[f64; 3]> = patch_indices
+            .iter()
+            .filter_map(|&i| image(primary.get(i)?)) 
+            .filter_map(|data| dds_mean(&data, patch_strip, 1.0 / 8.0))
+            .collect();
+        if means.is_empty() {
+            continue;
+        }
+        for c in 0..3 {
+            ring_sum[c] += ring_mean[c];
+            primary_sum[c] += means.iter().map(|m| m[c]).sum::<f64>() / means.len() as f64;
+        }
+    }
+    if ring_sum.iter().any(|&v| v <= 0.0) {
+        return [1.0; 3];
+    }
+    std::array::from_fn(|c| ((primary_sum[c] / ring_sum[c]) as f32).powf(2.2).clamp(0.3, 3.0))
+}
+
+#[derive(Clone, Copy)]
+enum Strip {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Mean sRGB colour (0..1) of a strip along one edge of a DXT1 or 32-bit DDS image,
+/// `fraction` of its size wide (top mip only).
+fn dds_mean(data: &[u8], strip: Strip, fraction: f32) -> Option<[f64; 3]> {
+    if data.len() < 128 || &data[..4] != b"DDS " {
+        return None;
+    }
+    let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize;
+    let (height, width) = (u32_at(12), u32_at(16));
+    let dxt1 = u32_at(80) & 4 != 0 && &data[84..88] == b"DXT1";
+    let bgra = u32_at(80) & 4 == 0 && u32_at(88) == 32;
+    let (w, h) = (((width as f32 * fraction) as usize).max(1), ((height as f32 * fraction) as usize).max(1));
+    let (x0, y0, x1, y1) = match strip {
+        Strip::Top => (0, 0, width, h),
+        Strip::Bottom => (0, height - h, width, height),
+        Strip::Left => (0, 0, w, height),
+        Strip::Right => (width - w, 0, width, height),
+    };
+    let mut sum = [0.0f64; 3];
+    let mut count = 0.0;
+    if dxt1 {
+        let blocks_x = width.div_ceil(4);
+        for by in y0 / 4..y1.div_ceil(4) {
+            for bx in x0 / 4..x1.div_ceil(4) {
+                let o = 128 + (by * blocks_x + bx) * 8;
+                let block = data.get(o..o + 8)?;
+                let rgb = |c: u16| [((c >> 11) & 31) as f64 / 31.0, ((c >> 5) & 63) as f64 / 63.0, (c & 31) as f64 / 31.0];
+                let (c0, c1) = (u16::from_le_bytes([block[0], block[1]]), u16::from_le_bytes([block[2], block[3]]));
+                let (p0, p1) = (rgb(c0), rgb(c1));
+                let palette: [[f64; 3]; 4] = if c0 > c1 {
+                    [p0, p1, std::array::from_fn(|i| (2.0 * p0[i] + p1[i]) / 3.0), std::array::from_fn(|i| (p0[i] + 2.0 * p1[i]) / 3.0)]
+                } else {
+                    [p0, p1, std::array::from_fn(|i| (p0[i] + p1[i]) / 2.0), [0.0; 3]]
+                };
+                for texel in 0..16 {
+                    let index = (block[4 + texel / 4] >> (2 * (texel % 4))) & 3;
+                    for c in 0..3 {
+                        sum[c] += palette[index as usize][c];
+                    }
+                    count += 1.0;
+                }
+            }
+        }
+    } else if bgra {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let o = 128 + (y * width + x) * 4;
+                let px = data.get(o..o + 4)?;
+                for (c, &v) in [px[2], px[1], px[0]].iter().enumerate() {
+                    sum[c] += v as f64 / 255.0;
+                }
+                count += 1.0;
+            }
+        }
+    } else {
+        return None;
+    }
+    (count > 0.0).then(|| sum.map(|s| s / count))
 }
 
 /// How a surrounding colour map is turned relative to the primary colour maps.

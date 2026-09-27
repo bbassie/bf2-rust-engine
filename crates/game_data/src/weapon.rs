@@ -76,6 +76,9 @@ pub struct WeaponDesc {
     /// How the weapon launches its projectiles: guns, throwing, placing charges.
     #[serde(default)]
     pub fire: FireDesc,
+    /// Worn, not held (BF2 `isNightVision`, `isGasMask`): switched by keys of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worn: bool,
     /// C4: the detonator the hands hold instead while it is out (BF2 `fire.detonatorObject`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detonator: Option<DetonatorDesc>,
@@ -324,6 +327,10 @@ pub struct SmokeDesc {
     pub radius: f32,
     /// Seconds from the grenade going off until the cloud is gone.
     pub duration: f32,
+    /// Tear gas (BF2 `gasCloudType TearGas`): hit points per second it takes from those
+    /// inside without a gas mask (`gasCloudDamage`). 0 = plain smoke.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gas_damage: f32,
 }
 
 /// The model and first-person animations of a C4 detonator.

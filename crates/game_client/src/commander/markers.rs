@@ -71,6 +71,15 @@ fn kind_name(kind: AssetKind) -> &'static str {
     }
 }
 
+/// Short, for crowded maps.
+fn short_name(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Artillery => "Arty",
+        AssetKind::Uav => "UAV",
+        AssetKind::Radar => "Radar",
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn map_markers(
     mut commands: Commands,
@@ -98,38 +107,23 @@ fn map_markers(
         if order.team != team {
             continue;
         }
-        let label = if commander {
-            format!("{}: {}", squad_name(order.squad), order.kind.label())
-        } else if squad.is_some_and(|s| s.squad == order.squad) {
-            order.kind.label().to_string()
-        } else {
+        if !commander && squad.is_none_or(|s| s.squad != order.squad) {
             continue;
-        };
-        markers.0.push(MapMarker {
-            key: entity,
-            position: order.position,
-            color: order_color(order.kind),
-            size: 10.0,
-            label: Some(label),
-        });
+        }
+        let label = format!("{}: {}", squad_name(order.squad), order.kind.label());
+        markers.0.push(MapMarker::dot(entity, order.position, order_color(order.kind), 10.0).label(label));
     }
     for (entity, effect) in &effects {
         if effect.team != team {
             continue;
         }
         let label = match effect.asset {
-            Asset::Artillery => "Artillery strike",
+            Asset::Artillery => "Strike",
             Asset::Uav => "UAV",
             Asset::Supply => "Supplies",
             Asset::Scan => continue,
         };
-        markers.0.push(MapMarker {
-            key: entity,
-            position: effect.position,
-            color: asset_color(effect.asset),
-            size: 9.0,
-            label: Some(label.into()),
-        });
+        markers.0.push(MapMarker::dot(entity, effect.position, asset_color(effect.asset), 9.0).label(label));
     }
     let destroyed = destroyed.single().ok();
     for (asset, key) in assets.instances.iter().zip(&keys.0) {
@@ -137,17 +131,17 @@ fn map_markers(
             continue;
         }
         let down = destroyed.is_some_and(|d| d.0.contains(&asset.instance));
-        markers.0.push(MapMarker {
-            key: *key,
-            position: Vec3::from_array(asset.placement.position),
-            color: if down { DESTROYED } else { GOLD },
-            size: 8.0,
-            label: Some(if down {
-                format!("{} (destroyed)", kind_name(asset.kind))
-            } else {
-                kind_name(asset.kind).to_string()
-            }),
-        });
+        let label = if down {
+            format!("{} (down)", short_name(asset.kind))
+        } else {
+            short_name(asset.kind).to_string()
+        };
+        let color = if down { DESTROYED } else { GOLD };
+        markers.0.push(
+            MapMarker::dot(*key, Vec3::from_array(asset.placement.position), color, 8.0)
+                .label(label)
+                .layer(crate::map_markers::VEHICLE_LAYER),
+        );
     }
 }
 

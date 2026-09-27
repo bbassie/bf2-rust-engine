@@ -1,0 +1,11 @@
+(
+    name: "sample_crate",
+    kind: "SimpleObject",
+    parts: [
+        {
+            "mesh": Some("objects/sample/meshes/crate.glb"),
+            "collision": Some("objects/sample/meshes/crate.collision.glb"),
+            "position": (0.0, 0.0, 0.0),
+        },
+    ],
+)

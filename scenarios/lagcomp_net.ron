@@ -13,7 +13,7 @@
         Hold([Fire]),
         Wait(1.0),
         Release([Fire]),
-        TrackEnemy(90.0, 1.2),
+        TrackEnemy(180.0, 1.2),
         Quit,
     ],
 )

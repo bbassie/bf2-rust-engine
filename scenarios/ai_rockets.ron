@@ -1,0 +1,35 @@
+// Bots against a vehicle: we drive the US LAV-25 from the base towards the Hotel, where MEC
+// anti-tank bots fire their (wire-guided) rockets at it; US engineer bots nearby repair it.
+// The log has the rockets fired ("fires chat_eryx") and the per-minute "ai team" lines
+// (rockets, repairs).
+// client --scenario scenarios/ai_rockets.ron --out target/scenarios/ai/rockets
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 24,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        NearVehicle("usapc_lav25"),
+        Wait(1.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        ThirdPerson(true),
+        VehicleInfo("entered"),
+        Move(0.0, 1.0),
+        Wait(10.0),
+        Move(0.0, 0.0),
+        VehicleInfo("stopped"),
+        Screenshot("stopped"),
+        Wait(30.0),
+        VehicleInfo("30 s later"),
+        Screenshot("under_fire"),
+        Wait(30.0),
+        VehicleInfo("60 s later"),
+        Screenshot("later"),
+        Quit,
+    ],
+)

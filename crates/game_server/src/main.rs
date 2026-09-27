@@ -72,9 +72,15 @@ struct Cli {
     /// TCP port of the remote console (0: off).
     #[arg(long)]
     rcon_port: Option<u16>,
+    /// Announce the server to this master server (`host[:port]`).
+    #[arg(long)]
+    master: Option<String>,
     /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
+    /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
+    #[arg(long)]
+    mods: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -157,6 +163,9 @@ fn main() -> AppExit {
     if let Some(port) = cli.rcon_port {
         settings.admin.rcon_port = port;
     }
+    if let Some(master) = cli.master {
+        settings.master_server = Some(master);
+    }
     settings.public |= cli.public;
     settings.friendly_fire |= cli.friendly_fire;
 
@@ -175,7 +184,7 @@ fn main() -> AppExit {
     ))
     // Physics may expect mesh assets depending on unified features; they are CPU-only here.
     .init_asset::<Mesh>()
-    .insert_resource(GamePaths::resolve(cli.imported))
+    .insert_resource(GamePaths::resolve_with_mods(cli.imported, cli.mods))
     .add_plugins((
         SharedPlugin,
         RepliconRenetPlugins,

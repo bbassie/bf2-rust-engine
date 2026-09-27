@@ -77,6 +77,11 @@ struct DeathNotice;
 struct Scoreboard;
 #[derive(Component)]
 struct ScoreboardColumn(usize);
+/// A team's name and flag over its scoreboard column.
+#[derive(Component)]
+struct ScoreboardTeam(usize);
+#[derive(Component)]
+struct ScoreboardFlag(usize);
 
 fn font(size: f32) -> TextFont {
     TextFont {
@@ -295,16 +300,45 @@ fn spawn_hud(mut commands: Commands) {
             ))
             .with_children(|board| {
                 for column in 0..2 {
-                    board.spawn((
-                        ScoreboardColumn(column),
-                        Text::new(""),
-                        font(16.0),
-                        TextColor(TEXT),
-                        Node {
-                            min_width: px(300),
+                    board
+                        .spawn(Node {
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(8),
                             ..default()
-                        },
-                    ));
+                        })
+                        .with_children(|column_node| {
+                            column_node
+                                .spawn(Node {
+                                    column_gap: px(10),
+                                    align_items: AlignItems::Center,
+                                    ..default()
+                                })
+                                .with_children(|header| {
+                                    header.spawn((
+                                        ScoreboardFlag(column),
+                                        Node {
+                                            width: px(56),
+                                            height: px(28),
+                                            border_radius: BorderRadius::all(px(3)),
+                                            display: Display::None,
+                                            ..default()
+                                        },
+                                        ImageNode::default(),
+                                    ));
+                                    header.spawn((ScoreboardTeam(column), Text::new(""), font(20.0), TextColor(TEXT)));
+                                });
+                            column_node.spawn((
+                                ScoreboardColumn(column),
+                                Text::new(""),
+                                font(16.0),
+                                TextColor(TEXT),
+                                TextLayout::no_wrap(),
+                                Node {
+                                    min_width: px(300),
+                                    ..default()
+                                },
+                            ));
+                        });
                 }
             });
         });
@@ -500,11 +534,15 @@ fn update_death_notice(
     };
 }
 
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_scoreboard(
     actions: Actions,
     players: Query<(&Player, &Team, &Score, Option<&SquadMember>, Has<LocalPlayer>)>,
     mut board: Single<&mut Visibility, With<Scoreboard>>,
-    mut columns: Query<(&ScoreboardColumn, &mut Text)>,
+    mut columns: Query<(&ScoreboardColumn, &mut Text), Without<ScoreboardTeam>>,
+    mut headers: Query<(&ScoreboardTeam, &mut Text, &mut TextColor), Without<ScoreboardColumn>>,
+    mut flags: Query<(&ScoreboardFlag, &mut ImageNode, &mut Node)>,
+    icons: Res<crate::map_icons::UiIcons>,
     level: Option<Res<LoadedLevel>>,
 ) {
     let show = actions.pressed(Action::Scoreboard);
@@ -512,17 +550,33 @@ fn update_scoreboard(
     if !show {
         return;
     }
+    let local = players.iter().find(|p| p.4).map_or(Team::Spectator, |p| *p.1);
+    for (header, mut text, mut color) in &mut headers {
+        let team = if header.0 == 0 { Team::One } else { Team::Two };
+        let name = crate::conquest_hud::team_name(level.as_deref(), team);
+        if text.0 != name {
+            text.0 = name;
+        }
+        color.0 = crate::conquest_hud::team_color(team, local);
+    }
+    for (flag, mut image, mut node) in &mut flags {
+        let team = if flag.0 == 0 { Team::One } else { Team::Two };
+        let side = icons.side(team);
+        let handle = side.large.clone().or_else(|| side.flag.clone());
+        let display = if handle.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let handle = handle.unwrap_or_default();
+        if image.image != handle {
+            image.image = handle;
+        }
+    }
     for (column, mut text) in &mut columns {
         let team = if column.0 == 0 { Team::One } else { Team::Two };
-        let name = level
-            .as_ref()
-            .and_then(|l| l.desc.teams.get(column.0))
-            .map(|t| t.name.clone())
-            .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| format!("Team {}", column.0 + 1));
         let mut rows: Vec<_> = players.iter().filter(|(_, t, ..)| **t == team).collect();
         rows.sort_by(|a, b| b.2.score.cmp(&a.2.score));
-        let mut out = format!("{name}\n{:<22}{:<9}{:>5}{:>5}{:>7}\n", "", "SQUAD", "K", "D", "SCORE");
+        let mut out = format!("{:<22}{:<9}{:>5}{:>5}{:>7}\n", "", "SQUAD", "K", "D", "SCORE");
         for (player, _, score, squad, local) in rows {
             let marker = if local { "> " } else { "  " };
             let name: String = player.name.chars().take(19).collect();

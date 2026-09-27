@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 
 use bevy::prelude::*;
 use game_data::HitZone;
+use serde::{Deserialize, Serialize};
 
 use crate::soldier::{SoldierMotion, Stance};
 
@@ -18,6 +19,11 @@ pub const LIMBS: u32 = 77;
 /// No hit zone reaches further than this from a soldier's feet (prone soldiers lie about
 /// 2 m long).
 pub const REACH: f32 = 2.4;
+
+/// The server's tick, on an entity of its own, replicated every tick: clients tell from it
+/// which tick the world they see is from (`InputFrame::view_tick`), for lag compensation.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ServerClock(pub u32);
 
 /// Where a ray met a soldier.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -146,10 +152,38 @@ pub fn fallback() -> &'static [HitZone] {
             prone,
         };
         vec![
-            zone("head", HEAD, 0.11, [[0.0, 1.6, 0.0], [0.0, 1.7, 0.0]], [[0.0, 1.1, -0.2], [0.0, 1.2, -0.2]], [[0.0, 0.3, -0.9], [0.0, 0.3, -1.0]]),
-            zone("torso", BODY, 0.18, [[0.0, 1.0, 0.0], [0.0, 1.4, 0.0]], [[0.0, 0.6, 0.0], [0.0, 0.95, -0.15]], [[0.0, 0.2, 0.0], [0.0, 0.25, -0.7]]),
-            zone("left_leg", BODY, 0.09, [[-0.1, 0.1, 0.0], [-0.1, 0.9, 0.0]], [[-0.15, 0.1, 0.1], [-0.12, 0.55, -0.1]], [[-0.15, 0.12, 0.9], [-0.1, 0.15, 0.05]]),
-            zone("right_leg", BODY, 0.09, [[0.1, 0.1, 0.0], [0.1, 0.9, 0.0]], [[0.15, 0.1, 0.1], [0.12, 0.55, -0.1]], [[0.15, 0.12, 0.9], [0.1, 0.15, 0.05]]),
+            zone(
+                "head",
+                HEAD,
+                0.11,
+                [[0.0, 1.6, 0.0], [0.0, 1.7, 0.0]],
+                [[0.0, 1.1, -0.2], [0.0, 1.2, -0.2]],
+                [[0.0, 0.3, -0.9], [0.0, 0.3, -1.0]],
+            ),
+            zone(
+                "torso",
+                BODY,
+                0.18,
+                [[0.0, 1.0, 0.0], [0.0, 1.4, 0.0]],
+                [[0.0, 0.6, 0.0], [0.0, 0.95, -0.15]],
+                [[0.0, 0.2, 0.0], [0.0, 0.25, -0.7]],
+            ),
+            zone(
+                "left_leg",
+                BODY,
+                0.09,
+                [[-0.1, 0.1, 0.0], [-0.1, 0.9, 0.0]],
+                [[-0.15, 0.1, 0.1], [-0.12, 0.55, -0.1]],
+                [[-0.15, 0.12, 0.9], [-0.1, 0.15, 0.05]],
+            ),
+            zone(
+                "right_leg",
+                BODY,
+                0.09,
+                [[0.1, 0.1, 0.0], [0.1, 0.9, 0.0]],
+                [[0.15, 0.1, 0.1], [0.12, 0.55, -0.1]],
+                [[0.15, 0.12, 0.9], [0.1, 0.15, 0.05]],
+            ),
         ]
     });
     &ZONES
@@ -168,7 +202,10 @@ mod tests {
         assert!((cap - 3.8).abs() < 1e-4);
         assert_eq!(ray_capsule(Vec3::new(0.05, 0.5, 0.0), Vec3::X, a, b, 0.2), Some(0.0));
         assert!(ray_capsule(Vec3::new(-5.0, 0.5, 0.3), Vec3::X, a, b, 0.2).is_none());
-        assert!(ray_capsule(Vec3::new(5.0, 0.5, 0.0), Vec3::X, a, b, 0.2).is_none(), "behind");
+        assert!(
+            ray_capsule(Vec3::new(5.0, 0.5, 0.0), Vec3::X, a, b, 0.2).is_none(),
+            "behind"
+        );
     }
 
     #[test]
@@ -183,8 +220,14 @@ mod tests {
         assert_eq!(head.material, HEAD);
         let leg = pose.ray(zones, Vec3::new(0.0, 2.4, 0.1), Vec3::X, 100.0).unwrap();
         assert_eq!(leg.material, BODY);
-        assert!(pose.ray(zones, Vec3::new(0.0, 4.5, 0.0), Vec3::X, 100.0).is_none(), "over the head");
-        let prone = BodyPose { stance: Stance::Prone, ..pose };
+        assert!(
+            pose.ray(zones, Vec3::new(0.0, 4.5, 0.0), Vec3::X, 100.0).is_none(),
+            "over the head"
+        );
+        let prone = BodyPose {
+            stance: Stance::Prone,
+            ..pose
+        };
         assert!(prone.ray(zones, Vec3::new(0.0, 3.65, 0.0), Vec3::X, 100.0).is_none());
     }
 }

@@ -1,0 +1,6 @@
+// A new kit made from the imported US assault kit, carrying the sample carbine.
+(
+    base: "us_assault",
+    name: "sample_rifleman",
+    weapons: ["sample_carbine", "uspis_92fs", "hgr_smoke", "kni_knife", "parachutelauncher"],
+)

@@ -1,0 +1,2 @@
+# Caches the game writes next to levels (the bots' navigation grids).
+navgrid_*.bin

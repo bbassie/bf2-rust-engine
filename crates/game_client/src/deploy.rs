@@ -97,6 +97,9 @@ struct PointMarker {
     entity: Entity,
     index: u8,
 }
+/// The owner's flag on a control point's marker.
+#[derive(Component)]
+struct PointFlag(Entity);
 
 fn font(size: f32) -> TextFont {
     TextFont {
@@ -306,6 +309,21 @@ fn rebuild_markers(
                 },
                 BackgroundColor(NEUTRAL),
                 BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            ))
+            .with_child((
+                PointFlag(entity),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(2.0),
+                    top: px(MARKER / 2.0 - 8.5),
+                    width: px(MARKER - 8.0),
+                    height: px(13.0),
+                    border_radius: BorderRadius::all(px(1)),
+                    ..default()
+                },
+                ImageNode::default(),
+                Visibility::Hidden,
+                bevy::ui::FocusPolicy::Pass,
             ))
             .with_child((
                 Text::new(cp.name.clone()),
@@ -611,8 +629,24 @@ fn update_markers(
     players: Query<(&Team, &Deployment), With<LocalPlayer>>,
     flags: Query<&FlagState>,
     mut markers: Query<(&PointMarker, &Interaction, &mut BackgroundColor, &mut BorderColor)>,
+    mut point_flags: Query<(&PointFlag, &mut ImageNode, &mut Visibility)>,
+    icons: Res<crate::map_icons::UiIcons>,
 ) {
     let team = local_team(&players);
+    for (flag, mut image, mut visibility) in &mut point_flags {
+        let Ok(state) = flags.get(flag.0) else { continue };
+        match icons.side(state.owner).flag.clone() {
+            Some(handle) => {
+                if image.image != handle {
+                    image.image = handle;
+                }
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+            None => {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
+        }
+    }
     let chosen = players.single().ok().and_then(|(_, d)| d.control_point);
     for (marker, interaction, mut background, mut border) in &mut markers {
         let Ok(state) = flags.get(marker.entity) else {

@@ -192,7 +192,9 @@ fn home_page(
             BackgroundColor(CARD),
         ))
         .with_children(|card| {
-            map_preview(card, level.minimap.as_deref(), 132.0, asset_server);
+            let layout = pick_layout(level, &last.mode, last.size);
+            let layout = layout.as_ref().map(|(m, s)| (m.as_str(), *s));
+            layout_preview(card, level, layout, local_side(last), 132.0, asset_server);
             card.spawn(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(6),
@@ -235,6 +237,16 @@ fn home_page(
             ..default()
         },
     ));
+}
+
+/// The team we'd play on.
+fn local_side(last: &crate::settings::LastMatch) -> game_shared::protocol::Team {
+    use game_shared::protocol::Team;
+    match (last.spectate, last.team) {
+        (true, _) => Team::Spectator,
+        (false, 2) => Team::Two,
+        _ => Team::One,
+    }
 }
 
 /// Play (singleplayer) or Host: pick a level, layout, team and bots.
@@ -303,13 +315,15 @@ pub(super) fn build_level_details(
     catalog: Res<LevelCatalog>,
     asset_server: Res<AssetServer>,
     details: Query<(Entity, &LevelDetails, Option<&Children>)>,
-    mut built: Local<Option<(Entity, String)>>,
+    mut built: Local<Option<(Entity, String, bool, String, u32, u8, bool)>>,
 ) {
     let Ok((entity, info, children)) = details.single() else {
         return;
     };
     let last = &settings.last_match;
-    let key = (entity, last.level.clone());
+    let coop = game_server::coop::is_coop(&last.mode);
+    // Rebuilt for another layout or team too: the preview shows the layout's objectives.
+    let key = (entity, last.level.clone(), coop, last.mode.clone(), last.size, last.team, last.spectate);
     if built.as_ref() == Some(&key) {
         return;
     }
@@ -322,7 +336,9 @@ pub(super) fn build_level_details(
     };
     let host = info.host;
     commands.entity(entity).with_children(|p| {
-        map_preview(p, level.minimap.as_deref(), 300.0, &asset_server);
+        let layout = pick_layout(level, &last.mode, last.size);
+        let layout = layout.as_ref().map(|(m, s)| (m.as_str(), *s));
+        layout_preview(p, level, layout, local_side(last), 300.0, &asset_server);
         p.spawn(Node {
             flex_direction: FlexDirection::Column,
             row_gap: px(6),
@@ -359,12 +375,14 @@ pub(super) fn build_level_details(
                     ..default()
                 })
                 .with_children(|chips| {
+                    team_flag(chips, &level.icons[1], 22.0, &asset_server);
                     button(
                         chips,
                         MenuButton::Team(1),
                         Look::Plain,
                         level.teams[0].clone(),
                     );
+                    team_flag(chips, &level.icons[2], 22.0, &asset_server);
                     button(
                         chips,
                         MenuButton::Team(2),
@@ -378,7 +396,18 @@ pub(super) fn build_level_details(
                     switch(chips, Toggle::Spectate);
                     chips.spawn(text("Spectate", 15.0, DIM));
                 });
-            section(options, "Bots");
+            if coop {
+                options.spawn(text(
+                    if host {
+                        "Co-op: everyone who joins plays on your team, bots fill both teams."
+                    } else {
+                        "Co-op: bots fill both teams."
+                    },
+                    13.0,
+                    DIM,
+                ));
+            }
+            section(options, if coop { "Bots (both teams)" } else { "Bots" });
             options
                 .spawn(Node {
                     column_gap: px(8),

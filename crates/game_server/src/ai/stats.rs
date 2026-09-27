@@ -46,6 +46,20 @@ pub struct TeamStats {
     pub reactions: u32,
     /// Medics going to revive someone.
     pub revives: u32,
+    /// Bags thrown to teammates, launcher shots, rockets at vehicles, repairs begun.
+    pub bags: u32,
+    pub launches: u32,
+    pub rockets: u32,
+    pub repairs: u32,
+    /// Bots blinded by flashbangs, and seconds spent in tear gas without a mask.
+    pub flashed: u32,
+    pub gassed: f32,
+    /// The AI commander: orders given, artillery strikes, UAVs, scans, supply drops.
+    pub orders: u32,
+    pub artillery: u32,
+    pub uavs: u32,
+    pub scans: u32,
+    pub supplies: u32,
     pub spawns: u32,
     /// Spawns on the squad leader.
     pub leader_spawns: u32,
@@ -65,6 +79,17 @@ impl TeamStats {
         self.grenades += other.grenades;
         self.reactions += other.reactions;
         self.revives += other.revives;
+        self.bags += other.bags;
+        self.launches += other.launches;
+        self.rockets += other.rockets;
+        self.repairs += other.repairs;
+        self.flashed += other.flashed;
+        self.gassed += other.gassed;
+        self.orders += other.orders;
+        self.artillery += other.artillery;
+        self.uavs += other.uavs;
+        self.scans += other.scans;
+        self.supplies += other.supplies;
         self.spawns += other.spawns;
         self.leader_spawns += other.leader_spawns;
     }
@@ -166,7 +191,9 @@ pub fn log_stats(
         info!(
             "ai team {}: {} captured, {} neutralized, {} kills, {} deaths in the last minute \
              ({} / {} / {} / {} in {} min); {:.0}% of bot time at objectives, {:.0}% fighting; \
-             {} covers, {} flanks, {} grenades, {} reactions, {} revives; {} of {} spawns on the squad leader; \
+             {} covers, {} flanks, {} grenades, {} reactions, {} revives, {} bags, {} launcher shots, \
+             {} rockets, {} repairs, {} flashed, {:.0} s gassed; commander: {} orders, {} artillery, {} UAVs, \
+             {} scans, {} supply drops; {} of {} spawns on the squad leader; \
              kits {}; {:?}, {} squads attacking, {} defending: {}",
             t + 1,
             minute.captures,
@@ -185,6 +212,17 @@ pub fn log_stats(
             minute.grenades,
             minute.reactions,
             minute.revives,
+            minute.bags,
+            minute.launches,
+            minute.rockets,
+            minute.repairs,
+            minute.flashed,
+            minute.gassed,
+            minute.orders,
+            minute.artillery,
+            minute.uavs,
+            minute.scans,
+            minute.supplies,
             minute.leader_spawns,
             minute.spawns,
             kits.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "),

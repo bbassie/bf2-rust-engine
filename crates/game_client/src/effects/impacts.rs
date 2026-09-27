@@ -1,6 +1,7 @@
-//! What a bullet hit is made of, for its impact effect: soldiers are flesh, static objects
-//! and the terrain have the materials the importer found (`levels/<name>/surfaces.ron`),
-//! destroyable parts their hit material. Ids are BF2's material ids (`materials.ron`).
+//! What a bullet hit is made of, for its impact effect: soldiers are flesh, vehicles armor,
+//! static objects and the terrain have the materials the importer found
+//! (`levels/<name>/surfaces.ron`), destroyable parts their hit material. Ids are BF2's
+//! material ids (`materials.ron`).
 
 use avian3d::prelude::*;
 use bevy::{ecs::system::SystemParam, prelude::*};
@@ -16,6 +17,8 @@ pub const HUMAN_BODY: u32 = 24;
 pub const HUMAN_HEAD: u32 = 25;
 pub const HUMAN_LIMBS: u32 = 77;
 pub const CONCRETE: u32 = 78;
+/// Light vehicle armor, for vehicles (their hulls' own materials live on the server).
+pub const VEHICLE_ARMOR: u32 = 27;
 /// Small arms bullets, the projectile material of most handheld weapons.
 pub const BULLET: u32 = 38;
 
@@ -105,6 +108,13 @@ impl SurfaceQuery<'_, '_> {
             .is_ok_and(|l| l.memberships.has_all(GameLayer::Soldier))
         {
             return HUMAN_BODY;
+        }
+        if self
+            .layers
+            .get(entity)
+            .is_ok_and(|l| l.memberships.has_all(GameLayer::Vehicle))
+        {
+            return VEHICLE_ARMOR;
         }
         if self.terrain.contains(entity) {
             return self.surfaces.terrain_at(point).unwrap_or(DIRT);

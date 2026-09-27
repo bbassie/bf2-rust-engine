@@ -9,13 +9,13 @@ use game_shared::{
     config::GamePaths,
     conquest::{Deployment, Tickets},
     level::{LevelEntity, LoadedLevel, TEST_RANGE},
-    protocol::{MatchInfo, Player, Score},
+    protocol::{MatchInfo, Player, Score, Team},
     weapons::Armory,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Controls, RespawnTimer, ServerSettings,
+    Controls, RespawnTimer, ServerSettings, coop,
     ai::{
         squad::SquadSnapshot,
         strategy::{StrategicMap, Strategy, TeamIntel},
@@ -64,6 +64,8 @@ pub struct MapRotation {
     pub current: Option<usize>,
     /// Bots on maps that don't say.
     pub default_bots: u32,
+    /// Bot skill outside co-op.
+    pub default_bot_skill: f32,
 }
 
 impl MapRotation {
@@ -73,7 +75,7 @@ impl MapRotation {
         let (maps, missing): (Vec<MapEntry>, Vec<MapEntry>) =
             settings.rotation.iter().cloned().partition(|m| level_exists(paths, &m.level));
         for map in missing {
-            warn!("map rotation: no level `{}` in {}", map.level, paths.imported.display());
+            warn!("map rotation: no level `{}` in {} or the mods", map.level, paths.imported.display());
         }
         let current = maps
             .iter()
@@ -83,10 +85,13 @@ impl MapRotation {
         if let Some(bots) = current.and_then(|i| maps[i].bots) {
             settings.bots = bots;
         }
+        let default_bot_skill = settings.bot_skill;
+        settings.bot_skill = bot_skill_for(settings, &settings.mode.clone(), default_bot_skill);
         Self {
             maps,
             current,
             default_bots,
+            default_bot_skill,
         }
     }
 
@@ -138,6 +143,7 @@ pub fn change_map(world: &mut World, map: &MapEntry) {
         message: ChatLine::server(format!("Loading {name} ({} {})", mode_label(&map.mode), map.size)),
     });
     let mut bots = map.bots.unwrap_or(world.resource::<ServerSettings>().bots);
+    let mut skill = world.resource::<ServerSettings>().bot_skill;
     if let Some(mut rotation) = world.get_resource_mut::<MapRotation>() {
         rotation.current = rotation
             .maps
@@ -145,9 +151,12 @@ pub fn change_map(world: &mut World, map: &MapEntry) {
             .position(|m| m.level == map.level && m.mode == map.mode && m.size == map.size)
             .or_else(|| rotation.maps.iter().position(|m| m.level == map.level));
         bots = map.bots.unwrap_or(rotation.default_bots);
+        skill = rotation.default_bot_skill;
     }
     let mut settings = world.resource_mut::<ServerSettings>();
+    let was_coop = coop::is_coop(&settings.mode);
     settings.bots = bots;
+    settings.bot_skill = bot_skill_for(&settings, &map.mode, skill);
     settings.level = map.level.clone();
     settings.mode = map.mode.clone();
     settings.size = map.size;
@@ -162,12 +171,19 @@ pub fn change_map(world: &mut World, map: &MapEntry) {
         // Children went with their parents.
         let _ = world.try_despawn(entity);
     }
-    let humans: Vec<Entity> = world
+    let mut humans: Vec<Entity> = world
         .query_filtered::<Entity, With<Player>>()
         .iter(world)
         .collect();
-    for player in humans {
+    humans.sort();
+    // From co-op back to conquest: humans share out over both teams again (into co-op,
+    // `coop::balance_teams` moves them to theirs).
+    let rebalance = was_coop && !coop::is_coop(&map.mode);
+    for (i, player) in humans.into_iter().enumerate() {
         let mut entity = world.entity_mut(player);
+        if rebalance && entity.get::<Team>().is_some_and(|t| *t != Team::Spectator) {
+            entity.insert(if i % 2 == 0 { Team::One } else { Team::Two });
+        }
         entity.remove::<(Controls, RespawnTimer)>();
         entity.insert(Score::default());
         if let Some(mut deployment) = entity.get_mut::<Deployment>() {
@@ -199,21 +215,22 @@ pub fn forget_level(world: &mut World) {
     world.insert_resource(SquadSnapshot::default());
 }
 
+/// Bot skill on a map of `mode`: the co-op skill on co-op maps if set, else `default`.
+fn bot_skill_for(settings: &ServerSettings, mode: &str, default: f32) -> f32 {
+    match settings.coop.bot_skill {
+        Some(skill) if coop::is_coop(mode) => skill.clamp(0.0, 1.0),
+        _ => default,
+    }
+}
+
 /// Whether `level` can be played: the built-in test range or an imported level.
 pub fn level_exists(paths: &GamePaths, level: &str) -> bool {
     level == TEST_RANGE || paths.level_dir(level).join("level.ron").is_file()
 }
 
-/// Imported level folders, sorted.
+/// Levels that can be played: the test range, then the imported and mod levels.
 pub fn available_levels(paths: &GamePaths) -> Vec<String> {
-    let mut levels: Vec<String> = std::fs::read_dir(paths.imported.join("levels"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().join("level.ron").is_file())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    levels.sort();
+    let mut levels = paths.level_names();
     levels.insert(0, TEST_RANGE.into());
     levels
 }

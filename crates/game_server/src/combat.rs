@@ -21,7 +21,7 @@ use game_data::{FireKind, FireMode, Guidance, HitZone, TriggerBy, WeaponDesc};
 use game_shared::{
     conquest::RoundState,
     effects::PlayEffect,
-    hitzones::{BodyPose, HEAD},
+    hitzones::{BodyPose, HEAD, ServerClock},
     input::Buttons,
     physics::GameLayer,
     projectile::{
@@ -29,7 +29,7 @@ use game_shared::{
         steer,
     },
     protocol::{ControlledBy, HitConfirmed, Player, ShotFired, Team},
-    revive::WRECK_HIT_POINTS,
+    revive::{Downed, WRECK_HIT_POINTS},
     soldier::{Health, Hitbox, Soldier, SoldierMotion},
     statics::Destructible,
     vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
@@ -245,14 +245,21 @@ fn current_tick(tick: &ServerTick) -> u32 {
     tick.get().wrapping_add(1)
 }
 
-/// Remembers where every soldier is this tick.
+/// Remembers where every soldier is this tick, and tells clients which tick it is.
 #[allow(clippy::type_complexity)]
 fn record_poses(
     mut commands: Commands,
     tick: Res<ServerTick>,
+    mut clock: Query<&mut ServerClock>,
     mut soldiers: Query<(Entity, &SoldierMotion, Has<Seated>, Option<&mut PoseHistory>), With<Soldier>>,
 ) {
     let tick = current_tick(&tick);
+    match clock.single_mut() {
+        Ok(mut clock) => clock.0 = tick,
+        Err(_) => {
+            commands.spawn((ServerClock(tick), Replicated));
+        }
+    }
     for (entity, motion, seated, history) in &mut soldiers {
         let pose = BodyPose::of(motion, seated);
         match history {
@@ -508,7 +515,7 @@ fn fire_weapons(
                     });
                 }
                 debug!(
-                    "{name} fires {} ({} ticks back, saw tick {} at {now})",
+                    "{name} ({player:?}) fires {} ({} ticks back, saw tick {} at {now})",
                     weapon.name,
                     rewind_for(input.view_tick, now),
                     input.view_tick
@@ -568,7 +575,10 @@ fn simulate_projectiles(
     mut projectiles: Query<(Entity, &mut Live, &mut ProjectileMotion)>,
     shooters: Query<(&SoldierMotion, &Inventory, Has<Seated>)>,
     colliders: Query<&ColliderOf>,
-    soldiers: Query<(Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>), With<Soldier>>,
+    soldiers: Query<
+        (Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>),
+        (With<Soldier>, Without<Downed>),
+    >,
     vehicles: Query<(&VehicleData, &Position, &LinearVelocity)>,
     materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
@@ -579,7 +589,8 @@ fn simulate_projectiles(
 ) {
     let dt = time.delta_secs();
     let now = current_tick(&tick);
-    // Soldiers inside closed vehicles can't be hit; those on open seats can.
+    // Soldiers inside closed vehicles can't be hit, those on open seats can; bullets pass
+    // over the critically wounded (only blasts and shock paddles reach them).
     let targets: Vec<Target> = soldiers
         .iter()
         .filter(|(.., seated)| {
@@ -698,10 +709,19 @@ fn simulate_projectiles(
                 .filter(|target| target.entity != shooter)
                 .filter_map(|target| {
                     let hit = target.pose(now, rewind).ray(target.zones, origin, *direction, length)?;
-                    Some((target.entity, hit))
+                    Some((target, hit))
                 })
                 .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
-                .map(|(entity, hit)| {
+                .map(|(target, hit)| {
+                    if rewind > 0 {
+                        let now_too = target.pose.ray(target.zones, origin, *direction, length).is_some();
+                        debug!(
+                            "rewound hit on {:?}: {}",
+                            target.entity,
+                            if now_too { "a hit without rewinding too" } else { "a miss without rewinding" }
+                        );
+                    }
+                    let entity = target.entity;
                     let contact = projectile::Contact {
                         entity,
                         point: hit.point,
@@ -737,8 +757,8 @@ fn simulate_projectiles(
             if let Some(target) = targets.iter().find(|t| t.entity == hit.entity) {
                 let moved = target.pose(now, live.rewind).position.distance(target.pose.position);
                 debug!(
-                    "{} hit {:?} in material {part} (x{factor}) for {damage:.1}, judged {} ticks back (moved {moved:.2} m since)",
-                    weapon.name, hit.entity, live.rewind
+                    "{} of {:?} hit {:?} in material {part} (x{factor}) for {damage:.1}, judged {} ticks back (moved {moved:.2} m since)",
+                    weapon.name, live.shooter_player, hit.entity, live.rewind
                 );
             }
             if damage > 0.0 {
@@ -884,6 +904,7 @@ fn detonate(
                     radius: smoke.radius,
                     duration: smoke.duration + SMOKE_LINGER,
                     age: 0.0,
+                    gas_damage: smoke.gas_damage,
                 },
                 Replicated,
             ));
@@ -1166,5 +1187,58 @@ fn kill_the_dead(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use game_shared::{hitzones, soldier::Stance};
+
+    use super::*;
+
+    /// A soldier running along +X at 6 m/s, one pose per tick up to tick 100.
+    fn runner() -> PoseHistory {
+        PoseHistory(
+            (100 - POSE_HISTORY as u32 + 1..=100)
+                .map(|tick| {
+                    let pose = BodyPose {
+                        position: Vec3::new(tick as f32 * 0.1, 0.0, -20.0),
+                        yaw: 0.0,
+                        stance: Stance::Standing,
+                    };
+                    (tick, pose)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn rewinding_is_capped_and_off_for_the_present() {
+        assert_eq!(rewind_for(0, 500), 0);
+        assert_eq!(rewind_for(494, 500), 6);
+        assert_eq!(rewind_for(400, 500), MAX_REWIND);
+        assert_eq!(rewind_for(510, 500), 0, "a view from the future is the present");
+    }
+
+    #[test]
+    fn shots_are_judged_where_the_target_was_when_the_shooter_saw_it() {
+        let history = runner();
+        let target = Target {
+            entity: Entity::PLACEHOLDER,
+            pose: history.at(100).unwrap(),
+            history: Some(&history),
+            zones: hitzones::fallback(),
+        };
+        // The shooter saw tick 90 (10 ticks back): the target a meter behind where it is now.
+        let seen = target.pose(100, 10);
+        assert!((seen.position.x - 9.0).abs() < 1e-4);
+        let aim = seen.position + Vec3::Y * 1.2;
+        let direction = aim.normalize();
+        let rewound = seen.ray(target.zones, Vec3::ZERO, direction, 100.0);
+        let present = target.pose.ray(target.zones, Vec3::ZERO, direction, 100.0);
+        assert!(rewound.is_some_and(|hit| hit.material == hitzones::BODY));
+        assert!(present.is_none(), "a meter ahead by now");
+        // Further back than the history keeps: the oldest pose.
+        assert_eq!(target.pose(100, 60).position, history.0.front().unwrap().1.position);
     }
 }

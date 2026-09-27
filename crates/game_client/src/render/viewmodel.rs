@@ -188,8 +188,7 @@ fn load_arms(
             .get(index)
             .and_then(|team| team.kits.first())
             .and_then(|kit| {
-                let path = paths.imported.join("soldiers").join(format!("{}.ron", kit.soldier));
-                game_data::read_ron::<SoldierDesc>(&path).ok()
+                paths.read_ron::<SoldierDesc>(format!("soldiers/{}.ron", kit.soldier)).ok()
             })
             .and_then(|desc| desc.mesh_1p)
             .map(|path| asset_server.load(format!("imported://{path}")));
@@ -427,7 +426,7 @@ fn animate_view_model(
         return;
     };
     // Both hands on a ladder: the weapon is slung, as in BF2's ladder seat.
-    if motion.climbing {
+    if motion.climbing || motion.riding {
         visibility.set_if_neq(Visibility::Hidden);
         state.animated_weapon.clear();
         return;

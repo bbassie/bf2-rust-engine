@@ -11,18 +11,18 @@ use bevy::{
 };
 use game_shared::{
     commander::{Asset, AssetEffect, CommanderAssets, CommanderRequest, OrderKind, SquadOrder, TeamAssets},
-    conquest::{ControlPoint, FlagState},
     level::LoadedLevel,
     protocol::{ControlledBy, Player, Team},
     soldier::Soldier,
     squad::{SquadMember, squad_name},
+    vehicle::Seated,
 };
 
 use super::{CommanderScreen, GOLD, Tool, font, map_point, map_size, map_uv};
 use crate::{
     commander::markers::{asset_color, order_color},
-    conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, team_color},
-    map_markers::MapMarkers,
+    conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD},
+    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerBody, MarkerIcon, MarkerIcons, MarkerPointer, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -76,11 +76,9 @@ enum ScreenButton {
     Close,
 }
 
-/// What a map icon stands for.
+/// What a map icon stands for: the area an asset effect covers.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum IconKey {
-    Entity(Entity),
-    /// The area an asset effect covers.
     Area(Entity),
 }
 
@@ -650,31 +648,19 @@ fn update_map(
     level: Option<Res<LoadedLevel>>,
     local: Query<&Team, With<LocalPlayer>>,
     members: Query<(&Team, Option<&SquadMember>)>,
-    control_points: Query<(Entity, &ControlPoint, &FlagState)>,
-    soldiers: Query<(Entity, &SoldierRender, &ControlledBy, Has<LocalSoldier>), With<Soldier>>,
+    soldiers: Query<(Entity, &SoldierRender, &ControlledBy, Has<LocalSoldier>), (With<Soldier>, Without<Seated>)>,
     effects: Query<(Entity, &AssetEffect)>,
     markers: Res<MapMarkers>,
     map: Single<Entity, With<ScreenMap>>,
-    mut icons: Query<(Entity, &MapIcon, &mut Node, &mut BackgroundColor)>,
+    mut areas: Query<(Entity, &MapIcon, &mut Node), (Without<MarkerIcon>, Without<MarkerBody>, Without<MarkerPointer>)>,
+    mut icons: MarkerIcons,
 ) {
     let Some(level) = level.filter(|_| screen.open) else {
         return;
     };
     let team = local.single().copied().unwrap_or_default();
-    let mut wanted: HashMap<IconKey, IconSpec> = HashMap::default();
-    let dot = |position, color, size, label: Option<String>| IconSpec {
-        position,
-        color,
-        size,
-        label,
-        area: false,
-    };
-    for (entity, cp, state) in &control_points {
-        wanted.insert(
-            IconKey::Entity(entity),
-            dot(cp.position, team_color(state.owner, team), 16.0, Some(cp.name.clone())),
-        );
-    }
+    // Our soldiers on foot by squad; flags, vehicles and the rest are markers.
+    let mut ours = Vec::new();
     for (entity, render, controlled_by, local_soldier) in &soldiers {
         let Ok((soldier_team, member)) = members.get(controlled_by.0) else {
             continue;
@@ -682,23 +668,33 @@ fn update_map(
         if *soldier_team != team || team == Team::Spectator {
             continue;
         }
-        let spec = match member {
-            _ if local_soldier => dot(render.position, GOLD, 10.0, Some("You".into())),
+        let marker = match member {
+            _ if local_soldier => MapMarker::dot(entity, render.position, Color::WHITE, 8.0),
             Some(member) => {
                 let color = if screen.squad == Some(member.squad) { SQUAD } else { FRIENDLY };
-                let label = member.leader.then(|| squad_name(member.squad).to_string());
-                dot(render.position, color, if member.leader { 11.0 } else { 8.0 }, label)
+                let marker = MapMarker::dot(entity, render.position, color, if member.leader { 8.5 } else { 6.0 });
+                if member.leader { marker.label(squad_name(member.squad)) } else { marker }
             }
-            None => dot(render.position, NEUTRAL, 7.0, None),
+            None => MapMarker::dot(entity, render.position, NEUTRAL, 5.5),
         };
-        wanted.insert(IconKey::Entity(entity), spec);
+        ours.push(marker.layer(SOLDIER_LAYER));
     }
-    for marker in &markers.0 {
-        wanted.insert(
-            IconKey::Entity(marker.key),
-            dot(marker.position, marker.color, marker.size + 3.0, marker.label.clone()),
-        );
-    }
+    let placed = ours
+        .iter()
+        .chain(&markers.0)
+        .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
+    icons.sync(
+        *map,
+        placed,
+        IconStyle {
+            scale: 1.3,
+            labels: true,
+            turn: 0.0,
+        },
+    );
+
+    // The areas our strikes, UAVs and crates cover.
+    let mut wanted: HashMap<IconKey, IconSpec> = HashMap::default();
     for (entity, effect) in &effects {
         if effect.team != team || effect.asset == Asset::Scan {
             continue;
@@ -715,16 +711,12 @@ fn update_map(
             },
         );
     }
-
-    for (icon_entity, icon, mut node, mut background) in &mut icons {
+    for (icon_entity, icon, mut node) in &mut areas {
         match wanted.remove(&icon.0) {
-            Some(spec) if spec.label == icon.1.label && spec.size == icon.1.size && spec.area == icon.1.area => {
+            Some(spec) if spec.size == icon.1.size => {
                 let uv = map_uv(&level, spec.position).clamp(Vec2::ZERO, Vec2::ONE);
                 node.left = percent(uv.x * 100.0);
                 node.top = percent(uv.y * 100.0);
-                if !spec.area {
-                    background.0 = spec.color;
-                }
             }
             Some(spec) => {
                 commands.entity(icon_entity).despawn();

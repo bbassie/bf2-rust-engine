@@ -28,6 +28,7 @@ bevy_replicon = { workspace = true, features = ["client", "server"] }
 serde.workspace = true
 ron.workspace = true
 anyhow.workspace = true
+serde_json = "1"
 bitflags = { version = "2", features = ["serde"] }
 game_data.workspace = true
 gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
