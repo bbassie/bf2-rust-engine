@@ -11,17 +11,22 @@ committed or redistributed.
 
 ## Status
 
-Early foundation. What works today:
+Playable infantry conquest. What works today:
 
 - Dedicated server (headless) and client, plus listen server and singleplayer from the client.
 - Server-authoritative soldier movement with client-side prediction and reconciliation.
 - Remote players are interpolated; everything is rendered smoothly independent of the 60 Hz tick.
-- Bots that use the same input path as humans (they roam between control points for now).
-- A procedural test range so everything can be tested without BF2 data.
+- Conquest after BF2's rules: capturing flags, ticket bleed, rounds. A deploy screen with the
+  level's map for picking a kit and a spawn point.
+- Infantry combat: BF2's kits and weapons with their fire rates, deviation, recoil and
+  projectiles; first-person arms and weapons with BF2's animations; third-person soldiers.
+- Bots that use the same input path as humans: they capture flags and fight.
 - Importer for BF2 levels: terrain with detail texture blending, roads, sky, water, ~1800
   static objects on Strike at Karkand (meshes as glTF with BF2's layered materials, collision
-  as trimeshes), conquest/co-op layouts, teams and kits. All 30 levels import.
-- Animated BF2 soldier models per team (third person with V).
+  as trimeshes), conquest/co-op layouts, teams, kits, weapons, soldiers and animations,
+  English names. All 30 levels import.
+- Real-time lighting (sun shadows, SSAO), so maps can be relit (e.g. night versions).
+- A procedural test range so everything can be tested without BF2 data.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
 
@@ -42,19 +47,24 @@ Requires a recent stable Rust toolchain. The first build takes a while (Bevy).
 
 ```sh
 # Singleplayer on the built-in test range with 7 bots
-cargo run -p game_client --release
+cargo run -p game_client
+
+# Strike at Karkand (after importing, see below) with 15 bots
+cargo run -p game_client -- --level strike_at_karkand --bots 15
 
 # Dedicated server + two clients
-cargo run -p game_server --release -- --bots 10
-cargo run -p game_client --release -- --connect 127.0.0.1 --name Alice
-cargo run -p game_client --release -- --connect 127.0.0.1 --name Bob
+cargo run -p game_server -- --level strike_at_karkand --bots 10
+cargo run -p game_client -- --connect 127.0.0.1 --name Alice
+cargo run -p game_client -- --connect 127.0.0.1 --name Bob
 
 # Listen server
-cargo run -p game_client --release -- --host --bots 8
+cargo run -p game_client -- --host --bots 8
 ```
 
 Controls: click to capture the mouse, `Esc` to release. `WASD` move, `Shift` sprint, `Space`
-jump, `Ctrl` crouch, `Z` prone, `V` third person.
+jump, `Ctrl` crouch, `Z` prone. `LMB` fire, `RMB` zoom, `R` reload, `B` fire mode, `1`-`6` or
+the mouse wheel switch weapons. `Enter` opens the deploy screen, `Tab` the scoreboard, `V`
+toggles third person.
 
 For day-to-day development use the dev profile (`cargo run -p game_client`): dependencies are
 fully optimized there too, so it runs nearly as fast as `--release` and rebuilds much faster.

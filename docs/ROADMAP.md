@@ -41,17 +41,21 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Projectiles with gravity, server-side hit detection, damage falloff, headshots,
   explosions
 - [x] Health, death, respawn, kill feed, scoreboard
+- [x] Deploy screen with kit and spawn point selection on the level's map
 - Lag compensation
 - Material damage matrix (143 materials), per-bone hit zones
-- Man-down/revive, respawn screen with kit and spawn point selection
+- Man-down/revive
 - Grenades, shotgun pellets, scopes
 - Medic, support and engineer abilities (heal/resupply/repair all use the damage matrix)
 
-## M2: Conquest
+## M2: Conquest (in progress)
 
-- Control points (capture by majority, flag animation), ticket bleed, win conditions
-  ported from the original rules
-- Scoreboard, kill feed, minimap
+- [x] Control points: flags lowered and raised by the team with more soldiers in the radius,
+  using each point's capture times (BF2's `gpm_cq` rules)
+- [x] Ticket bleed by area value, a ticket per death, win conditions, round restart
+- [x] Scoreboard, kill feed, capture notifications, flag and ticket HUD
+- Flag models moving on their poles, capture sounds
+- Minimap and full map in the HUD
 - Squads and commander (basic)
 
 ## M3: Vehicles

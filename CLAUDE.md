@@ -31,4 +31,7 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
   over several launches. `client --screenshot out.png` is the one-shot shorthand.
 - `--debug-walk` exercises prediction; the HUD shows RTT and prediction corrections.
 - Test with dev builds (`target/debug/client.exe`); release builds take much longer.
+- If the user is playing, `target/debug/client.exe` is locked and the build ends with
+  "failed to remove file"; the compile still succeeded, so run `target/debug/deps/client.exe`.
+  Never kill the user's game.
 - Networking: start `server --bots 8` then `client --connect 127.0.0.1`.
