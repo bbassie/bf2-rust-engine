@@ -116,7 +116,8 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - [x] BF2-accurate materials: dirt/crack layers on statics, normal-mapped bundled and skinned
   meshes, environment maps
-- Water, undergrowth/overgrowth, surrounding terrain (in progress)
+- [x] Water, undergrowth/overgrowth, surrounding terrain, view distance setting (grows with
+  altitude), BF2's distant tree stand-ins
 - Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
 - Effects: particles for muzzle flashes, impacts, explosions, smoke (in progress)
 - Audio: footsteps, distance falloff, flybys, ambience (in progress)

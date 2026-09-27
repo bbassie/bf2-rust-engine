@@ -143,13 +143,24 @@ fn flag_markers(
 ) {
     let (team, _) = local_side(&local);
     for (entity, cp, state) in &control_points {
+        let image = icons.side(state.owner).map_flag(cp.uncapturable);
+        // The icon's pole stands on the point; its cloth gets the owner's colour behind it.
+        let (size, frame) = if image.is_some() { (24.0, Some(FLAG_CLOTH)) } else { (12.0, None) };
         markers.0.push(MapMarker {
-            image: icons.side(state.owner).map_flag(cp.uncapturable),
+            image,
+            frame,
             layer: FLAG_LAYER,
-            ..MapMarker::dot(entity, cp.position, team_color(state.owner, team).with_alpha(0.85), 16.0).label(cp.name.clone())
+            ..MapMarker::dot(entity, cp.position, team_color(state.owner, team), size).label(cp.name.clone())
         });
     }
 }
+
+/// Where the cloth of BF2's map flag icons is (33x33 icons, the pole's foot in the middle),
+/// with a pixel around it.
+pub const FLAG_CLOTH: Rect = Rect {
+    min: Vec2::new(12.5 / 33.0, 3.5 / 33.0),
+    max: Vec2::new(33.0 / 33.0, 20.5 / 33.0),
+};
 
 /// Size and shape (width over height) of a vehicle without an icon.
 fn class_shape(class: VehicleClass) -> (f32, f32) {

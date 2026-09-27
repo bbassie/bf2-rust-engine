@@ -328,6 +328,7 @@ fn spawn_hud(mut commands: Commands) {
                                 Text::new(""),
                                 font(16.0),
                                 TextColor(TEXT),
+                                TextLayout::no_wrap(),
                                 Node {
                                     min_width: px(300),
                                     ..default()

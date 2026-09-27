@@ -46,9 +46,11 @@ pub struct MapMarker {
     /// Shown under it on the big maps.
     pub label: Option<String>,
     /// Drawn as this image instead of a dot: in `color` when `tint` (white silhouettes),
-    /// else as it is on a dot of `color`.
+    /// else as it is on a dot of `color`, or on a box of `color` covering `frame` (a part of
+    /// the image, in shares of its size).
     pub image: Option<Handle<Image>>,
     pub tint: bool,
+    pub frame: Option<Rect>,
     /// Width over height of a dot drawn as a rounded box (vehicles without an icon).
     pub aspect: f32,
     /// Clockwise from north, radians: the icon turns with it.
@@ -68,6 +70,7 @@ impl MapMarker {
             label: None,
             image: None,
             tint: false,
+            frame: None,
             aspect: 1.0,
             heading: None,
             pointer: None,
@@ -132,6 +135,8 @@ pub struct MarkerPointer;
 struct IconShape {
     image: Option<AssetId<Image>>,
     tint: bool,
+    /// Hundredths of the image.
+    frame: Option<[i32; 4]>,
     /// Tenths of a pixel.
     width: i32,
     height: i32,
@@ -227,6 +232,10 @@ fn shape(marker: &MapMarker, style: IconStyle) -> IconShape {
     IconShape {
         image: marker.image.as_ref().map(|i| i.id()),
         tint: marker.tint,
+        frame: marker
+            .frame
+            .filter(|_| marker.image.is_some() && !marker.tint)
+            .map(|r| [r.min.x, r.min.y, r.max.x, r.max.y].map(|v| (v * 100.0).round() as i32)),
         width: (width * 10.0) as i32,
         height: (height * 10.0) as i32,
         label: marker.label.clone().filter(|_| style.labels),
@@ -276,6 +285,43 @@ fn spawn(commands: &mut Commands, parent: Entity, marker: &MapMarker, point: Map
                 ChildOf(root),
             ))
             .id(),
+        (Some(image), false) if marker.frame.is_some() => {
+            // A box of the marker's colour behind part of the image (a flag's cloth), the
+            // image around it.
+            let frame = marker.frame.unwrap_or(Rect::new(0.0, 0.0, 1.0, 1.0));
+            let body = commands
+                .spawn((
+                    MarkerBody,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(-width / 2.0 + frame.min.x * width),
+                        top: px(-height / 2.0 + frame.min.y * height),
+                        width: px(frame.width() * width),
+                        height: px(frame.height() * height),
+                        border_radius: BorderRadius::all(px(2)),
+                        ..default()
+                    },
+                    rotation,
+                    BackgroundColor(marker.color),
+                    FocusPolicy::Pass,
+                    ChildOf(root),
+                ))
+                .id();
+            commands.spawn((
+                ImageNode::new(image.clone()),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(-frame.min.x * width),
+                    top: px(-frame.min.y * height),
+                    width: px(width),
+                    height: px(height),
+                    ..default()
+                },
+                FocusPolicy::Pass,
+                ChildOf(body),
+            ));
+            body
+        }
         (Some(image), false) => {
             let body = commands
                 .spawn((

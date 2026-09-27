@@ -441,6 +441,7 @@ fn receive_server_effects(
         };
         let point = effect.position + up * 0.5 - up * hit.distance;
         let surface = surfaces.material(hit.entity, point);
+        debug!("{} on surface {surface}: {:?}", effect.name, library.impact(material, surface));
         if let Some(name) = library.impact(material, surface) {
             effects.write(SpawnEffect::new(name, point).with_up(hit.normal));
         }

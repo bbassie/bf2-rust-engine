@@ -51,17 +51,22 @@ impl GadgetData {
 #[derive(Resource, Default)]
 pub struct Flashes(pub Vec<(Vec3, FlashbangDesc)>);
 
+/// Notes the flashbangs going off this tick, from the detonation effects sent to clients.
 pub fn watch_detonations(
     data: Res<super::AiData>,
     mut effects: MessageReader<ToClients<PlayEffect>>,
     mut flashes: ResMut<Flashes>,
 ) {
-    flashes.0.clear();
     for effect in effects.read() {
         if let Some(desc) = data.gadgets.flashbangs.get(&effect.message.name) {
             flashes.0.push((effect.message.position, *desc));
         }
     }
+}
+
+/// The bots have seen them.
+pub fn forget_flashes(mut flashes: ResMut<Flashes>) {
+    flashes.0.clear();
 }
 
 /// Bots with a gas mask wear it while tear gas is near.

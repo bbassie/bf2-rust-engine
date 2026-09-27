@@ -88,15 +88,22 @@ impl Plugin for BotPlugin {
         )
         .add_systems(
             FixedUpdate,
+            // Detonation effects are sent to clients (and gone) by the next tick.
+            ai::gadgets::watch_detonations
+                .after(crate::combat::CombatSystems)
+                .run_if(in_state(ClientState::Disconnected)),
+        )
+        .add_systems(
+            FixedUpdate,
             (
                 squad::snapshot,
                 strategy::update_map,
                 strategy::plan,
                 ai::commander::yield_to_humans,
                 ai::commander::command,
-                ai::gadgets::watch_detonations,
                 ai::gadgets::wear_gas_masks,
                 think,
+                ai::gadgets::forget_flashes,
                 log_stats,
                 ai::stats::track_events,
                 ai::stats::log_stats,

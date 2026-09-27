@@ -97,9 +97,9 @@ struct PointMarker {
     entity: Entity,
     index: u8,
 }
-/// The owner's flag on a control point's marker (and whether it's a main base).
+/// The owner's flag on a control point's marker.
 #[derive(Component)]
-struct PointFlag(Entity, bool);
+struct PointFlag(Entity);
 
 fn font(size: f32) -> TextFont {
     TextFont {
@@ -311,13 +311,14 @@ fn rebuild_markers(
                 BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
             ))
             .with_child((
-                PointFlag(entity, cp.uncapturable),
+                PointFlag(entity),
                 Node {
                     position_type: PositionType::Absolute,
-                    left: percent(-10),
-                    top: percent(-16),
-                    width: percent(116),
-                    height: percent(116),
+                    left: px(2.0),
+                    top: px(MARKER / 2.0 - 8.5),
+                    width: px(MARKER - 8.0),
+                    height: px(13.0),
+                    border_radius: BorderRadius::all(px(1)),
                     ..default()
                 },
                 ImageNode::default(),
@@ -634,7 +635,7 @@ fn update_markers(
     let team = local_team(&players);
     for (flag, mut image, mut visibility) in &mut point_flags {
         let Ok(state) = flags.get(flag.0) else { continue };
-        match icons.side(state.owner).map_flag(flag.1) {
+        match icons.side(state.owner).flag.clone() {
             Some(handle) => {
                 if image.image != handle {
                     image.image = handle;

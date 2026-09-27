@@ -214,12 +214,18 @@ impl BotBrain {
         // Special forces: a flashbang at an enemy close by, tear gas at enemies further off.
         if let Some(at) = target.map(|t| t.position).or(self.last_seen.filter(|(_, age)| *age < 3.0).map(|(at, _)| at)) {
             let distance = flat(at - position).length();
+            let eye = me.motion.eye_position();
+            let arc_clear = || {
+                let early = eye + flat(at - eye).normalize_or_zero() * 5.0 + Vec3::Y * 1.5;
+                tactics::line_of_sight(&w.spatial, eye, early)
+            };
             if let Some(flashbang) = self.flashbang
                 && self.grenade_cooldown <= 0.0
                 && ammo_left(me, flashbang) > 0
                 && (8.0..22.0).contains(&distance)
                 && fastrand::f32() < 0.3
                 && friends_clear(w, me, at, 15.0)
+                && arc_clear()
             {
                 offer(best, 6.5, Activity::Throw { at, time: 0.0, weapon: flashbang });
             }

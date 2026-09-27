@@ -1134,3 +1134,56 @@ fn kill_the_dead(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use game_shared::{hitzones, soldier::Stance};
+
+    use super::*;
+
+    /// A soldier running along +X at 6 m/s, one pose per tick up to tick 100.
+    fn runner() -> PoseHistory {
+        PoseHistory(
+            (100 - POSE_HISTORY as u32 + 1..=100)
+                .map(|tick| {
+                    let pose = BodyPose {
+                        position: Vec3::new(tick as f32 * 0.1, 0.0, -20.0),
+                        yaw: 0.0,
+                        stance: Stance::Standing,
+                    };
+                    (tick, pose)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn rewinding_is_capped_and_off_for_the_present() {
+        assert_eq!(rewind_for(0, 500), 0);
+        assert_eq!(rewind_for(494, 500), 6);
+        assert_eq!(rewind_for(400, 500), MAX_REWIND);
+        assert_eq!(rewind_for(510, 500), 0, "a view from the future is the present");
+    }
+
+    #[test]
+    fn shots_are_judged_where_the_target_was_when_the_shooter_saw_it() {
+        let history = runner();
+        let target = Target {
+            entity: Entity::PLACEHOLDER,
+            pose: history.at(100).unwrap(),
+            history: Some(&history),
+            zones: hitzones::fallback(),
+        };
+        // The shooter saw tick 90 (10 ticks back): the target a meter behind where it is now.
+        let seen = target.pose(100, 10);
+        assert!((seen.position.x - 9.0).abs() < 1e-4);
+        let aim = seen.position + Vec3::Y * 1.2;
+        let direction = aim.normalize();
+        let rewound = seen.ray(target.zones, Vec3::ZERO, direction, 100.0);
+        let present = target.pose.ray(target.zones, Vec3::ZERO, direction, 100.0);
+        assert!(rewound.is_some_and(|hit| hit.material == hitzones::BODY));
+        assert!(present.is_none(), "a meter ahead by now");
+        // Further back than the history keeps: the oldest pose.
+        assert_eq!(target.pose(100, 60).position, history.0.front().unwrap().1.position);
+    }
+}
