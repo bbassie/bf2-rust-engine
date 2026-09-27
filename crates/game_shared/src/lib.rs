@@ -11,6 +11,7 @@ use bevy_replicon::prelude::*;
 pub mod config;
 pub mod conquest;
 pub mod effects;
+pub mod flight;
 pub mod input;
 pub mod ladder;
 pub mod level;

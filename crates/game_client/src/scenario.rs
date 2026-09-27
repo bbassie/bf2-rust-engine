@@ -118,6 +118,11 @@ pub enum Step {
     VehicleInfo(String),
     /// Logs every moving or occupied vehicle (works connected to a remote server too).
     LogVehicles(String),
+    /// Adds our vehicle's state (position, speed, altitude above ground, climb rate,
+    /// attitude, engine) to the report every 0.25 s for this many seconds.
+    VehicleTrace(String, f32),
+    /// Flying: holds the stick at (roll right, pitch up), each -1..1; `Stick(0, 0)` centres it.
+    Stick(f32, f32),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
     Release(Vec<Button>),
@@ -186,6 +191,7 @@ impl Button {
 pub struct ScenarioInput {
     pub buttons: Buttons,
     pub movement: Option<Vec2>,
+    pub stick: Option<Vec2>,
 }
 
 impl Scenario {
@@ -339,6 +345,42 @@ struct Vehicles<'w, 's> {
     riders: Query<'w, 's, &'static Seated>,
     seated: Query<'w, 's, &'static Seated, With<LocalSoldier>>,
     seat: ResMut<'w, SeatRequest>,
+    spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+    states: Query<'w, 's, &'static game_shared::vehicle::VehicleState>,
+}
+
+impl Vehicles<'_, '_> {
+    /// `label t: at (x, y, z) 320 km/h, 85 m up (climb 3.2 m/s), heading 12, pitch 4, roll -30, engine 0.8`
+    fn flight_line(&self, label: &str, elapsed: f32) -> String {
+        let Some((view, state)) = self
+            .seated
+            .single()
+            .ok()
+            .and_then(|s| Some((self.vehicles.get(s.vehicle).ok()?.1, self.states.get(s.vehicle).ok()?)))
+        else {
+            return format!("{label} {elapsed:5.2}: not in a vehicle");
+        };
+        let t = view.transform;
+        let filter = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+        let altitude = self
+            .spatial
+            .cast_ray(t.translation, Dir3::NEG_Y, 2000.0, true, &filter)
+            .map_or(f32::NAN, |hit| hit.distance);
+        let forward = t.rotation * Vec3::NEG_Z;
+        let right = t.rotation * Vec3::X;
+        format!(
+            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2}",
+            t.translation.x,
+            t.translation.y,
+            t.translation.z,
+            view.velocity.length() * 3.6,
+            view.velocity.y,
+            crate::vehicles::heading(t.rotation).to_degrees(),
+            forward.y.clamp(-1.0, 1.0).asin().to_degrees(),
+            (-right.y).clamp(-1.0, 1.0).asin().to_degrees(),
+            state.engine,
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -461,10 +503,15 @@ fn run_scenario(
                 match (nearest, soldier.single_mut()) {
                     (Some((_, view, data)), Ok((mut motion, _))) => {
                         let desc = &data.0.desc;
-                        let entry = desc.entry_points.first().map_or(Vec3::ZERO, |e| Vec3::from_array(e.position));
-                        // Beside the door, outside the hull.
-                        let side = desc.physics.bounds[0][0] - 0.8;
-                        let target = view.transform.transform_point(Vec3::new(side, 0.0, entry.z));
+                        // Beside the door, outside the hull, within reach of the entry point.
+                        let local = match desc.entry_points.first() {
+                            Some(entry) => {
+                                let side = (desc.physics.bounds[0][0] - 0.8).max(entry.position[0] - entry.radius * 0.6);
+                                Vec3::new(side, (entry.position[1] - 1.0).min(0.0), entry.position[2])
+                            }
+                            None => Vec3::new(desc.physics.bounds[0][0] - 0.8, 0.0, 0.0),
+                        };
+                        let target = view.transform.transform_point(local);
                         motion.position = target;
                         motion.velocity = Vec3::ZERO;
                         let to = view.transform.translation - target;
@@ -543,6 +590,21 @@ fn run_scenario(
                 let line = format!("{label}: {} vehicles; {}", vehicles.all.iter().count(), lines.join("; "));
                 info!("scenario: {line}");
                 writeln!(runner.report, "{line}").ok();
+                Progress::Done
+            }
+            Step::VehicleTrace(label, seconds) => {
+                let due = runner.frames == 0 || elapsed >= runner.frames as f32 * 0.25;
+                if due {
+                    runner.frames += 1;
+                    let line = vehicles.flight_line(label, elapsed);
+                    info!("scenario: {line}");
+                    writeln!(runner.report, "{line}").ok();
+                }
+                done_if(elapsed >= *seconds)
+            }
+            Step::Stick(roll, pitch) => {
+                let stick = Vec2::new(*roll, *pitch);
+                input.stick = (stick != Vec2::ZERO).then_some(stick);
                 Progress::Done
             }
             Step::VehicleInfo(label) => {

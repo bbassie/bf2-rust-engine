@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 
-use bevy::prelude::*;
+use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*, window::CursorOptions};
 use bevy_replicon::prelude::*;
 use game_shared::vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleMotion, VehicleShot, VehicleState};
 
@@ -16,8 +16,9 @@ use crate::{
     audio::PlaySound,
     combat::{EffectAssets, spawn_tracer},
     effects::{EffectLibrary, SpawnEffect},
-    local_input::LookState,
+    local_input::{LookState, cursor_locked},
     net::LocalSoldier,
+    settings::{Action, Actions},
 };
 
 /// How far in the past vehicles are shown when connected to a remote server.
@@ -28,6 +29,7 @@ pub struct ClientVehiclesPlugin;
 impl Plugin for ClientVehiclesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SeatRequest>()
+            .init_resource::<FlightStick>()
             .add_observer(add_view)
             .add_systems(Startup, spawn_hud)
             .add_systems(
@@ -37,6 +39,7 @@ impl Plugin for ClientVehiclesPlugin {
                     .run_if(in_state(ClientState::Connected)),
             )
             .add_systems(Update, (read_seat_keys, update_hud, receive_shots))
+            .add_systems(Update, fly.after(crate::local_input::LookSystems))
             .add_systems(
                 PostUpdate,
                 (place_vehicles, follow_vehicle_heading)
@@ -60,6 +63,10 @@ pub struct VehicleView {
     pub wheels: Vec<f32>,
     /// Along the hull's forward axis, m/s.
     pub speed: f32,
+    /// World space, m/s.
+    pub velocity: Vec3,
+    /// Rotor speed or throttle, 0..1.
+    pub engine: f32,
 }
 
 /// Received states, by local receive time.
@@ -116,11 +123,15 @@ fn place_vehicles(
             view.joints = lerp_joints(&a.1.joints, &b.1.joints, t);
             view.wheels = a.1.wheels.iter().zip(&b.1.wheels).map(|(x, y)| x + (y - x) * t).collect();
             view.speed = a.0.forward_speed() + (b.0.forward_speed() - a.0.forward_speed()) * t;
+            view.velocity = a.0.velocity.lerp(b.0.velocity, t);
+            view.engine = a.1.engine + (b.1.engine - a.1.engine) * t;
         } else {
             // Hosting: avian already interpolates the body's transform between ticks.
             view.joints.clone_from(&current.joints);
             view.wheels.clone_from(&current.wheels);
             view.speed = motion.forward_speed();
+            view.velocity = motion.velocity;
+            view.engine = current.engine;
         }
         view.transform = *transform;
     }
@@ -184,17 +195,96 @@ fn read_seat_keys(
     }
 }
 
+/// The pilot's stick: the mouse and the arrow keys move it, and it centres itself when let
+/// go. Holding free look turns the view instead.
+#[derive(Resource, Default)]
+pub struct FlightStick {
+    /// Piloting an aircraft: the mouse flies instead of looking around.
+    pub active: bool,
+    /// x = roll right, y = pitch up (pulled back), -1..1.
+    pub stick: Vec2,
+    /// The mouse's share of the stick.
+    mouse: Vec2,
+    /// Free look: the view's yaw (left positive) and pitch away from straight ahead.
+    pub look: Vec2,
+}
+
+/// Stick travel per mouse count at sensitivity 1, and how quickly it centres (1/s).
+const STICK_PER_COUNT: f32 = 0.012;
+const STICK_CENTERING: f32 = 3.0;
+/// How quickly the free-look view swings back ahead once let go (1/s).
+const LOOK_RETURN: f32 = 6.0;
+
+/// Whether the local player pilots this seat: the first seat of a jet or helicopter.
+pub fn pilots(data: &VehicleData, seat: u8) -> bool {
+    seat == 0 && data.0.desc.category.flies()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fly(
+    time: Res<Time>,
+    mouse: Res<AccumulatedMouseMotion>,
+    actions: Actions,
+    cursor: Single<&CursorOptions>,
+    mut look: ResMut<LookState>,
+    mut flight: ResMut<FlightStick>,
+    seated: Query<&Seated, With<LocalSoldier>>,
+    vehicles: Query<(&VehicleView, &VehicleData)>,
+) {
+    let pilot = seated
+        .single()
+        .ok()
+        .and_then(|s| vehicles.get(s.vehicle).ok().filter(|(_, d)| pilots(d, s.seat)));
+    flight.active = pilot.is_some();
+    let Some((view, _)) = pilot else {
+        flight.stick = Vec2::ZERO;
+        flight.mouse = Vec2::ZERO;
+        flight.look = Vec2::ZERO;
+        return;
+    };
+    let dt = time.delta_secs();
+    let delta = if cursor_locked(&cursor) { mouse.delta } else { Vec2::ZERO };
+    let vertical = if look.invert_y { -delta.y } else { delta.y };
+    if actions.pressed(Action::FreeLook) {
+        let sensitivity = look.sensitivity;
+        flight.look.x -= delta.x * sensitivity;
+        flight.look.y = (flight.look.y - vertical * sensitivity).clamp(-1.4, 1.4);
+    } else {
+        let scale = STICK_PER_COUNT * look.sensitivity / crate::local_input::BASE_SENSITIVITY;
+        flight.mouse = (flight.mouse + Vec2::new(delta.x, vertical) * scale).clamp(Vec2::NEG_ONE, Vec2::ONE);
+        flight.look *= (-LOOK_RETURN * dt).exp();
+    }
+    flight.mouse *= (-STICK_CENTERING * dt).exp();
+    let keys = Vec2::new(
+        actions.axis(Action::RollRight, Action::RollLeft),
+        actions.axis(Action::PitchUp, Action::PitchDown),
+    );
+    flight.stick = (flight.mouse + keys).clamp(Vec2::NEG_ONE, Vec2::ONE);
+    // The soldier looks where the camera does (the server aims with it, and it's the
+    // facing when getting out).
+    let (yaw, pitch, _) = flight_view(view.transform.rotation, flight.look).to_euler(EulerRot::YXZ);
+    look.yaw = yaw;
+    look.pitch = pitch.clamp(-1.5, 1.5);
+}
+
+/// The pilot's view: along the aircraft, turned by free look.
+pub fn flight_view(vehicle: Quat, look: Vec2) -> Quat {
+    vehicle * Quat::from_euler(EulerRot::YXZ, look.x, look.y, 0.0)
+}
+
 /// In a seat that doesn't aim (driving, riding along) the view turns with the vehicle, so
 /// looking ahead stays looking ahead through corners. Gunners keep their aim steady.
 fn follow_vehicle_heading(
     seated: Query<&Seated, With<LocalSoldier>>,
     vehicles: Query<(&VehicleView, &VehicleData)>,
+    flight: Res<FlightStick>,
     mut look: ResMut<LookState>,
     mut last: Local<Option<(Entity, u8, f32)>>,
 ) {
     let Some((seated, view, data)) = seated
         .single()
         .ok()
+        .filter(|_| !flight.active)
         .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d)| (s, v, d)))
     else {
         *last = None;

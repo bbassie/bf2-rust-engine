@@ -1,10 +1,11 @@
 //! Vehicles: `vehicles/<name>.ron`.
 //!
 //! A vehicle is a tree of parts (hull, turret, barrel, wheels, ...) placed relative to their
-//! parents. Some parts are joints turned by a seat's input (turrets, barrels, steering), some
-//! are wheels. Seats say where their occupant sits, looks from and gets out. The physics
-//! values are in our own terms (newtons, meters per second); the importer derives them from
-//! the BF2 templates and they can be tuned by hand.
+//! parents. Some parts are joints turned by a seat's input (turrets, barrels, steering,
+//! control surfaces), some are wheels. Seats say where their occupant sits, looks from and
+//! gets out. Aircraft and boats add wings (lifting surfaces), thrusters, a rotor or floaters.
+//! The physics values are in our own terms (newtons, meters per second); the importer derives
+//! them from the BF2 templates and they can be tuned by hand.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +18,32 @@ pub struct VehicleDesc {
     /// Human readable name, e.g. `HMMWV`.
     #[serde(default)]
     pub display_name: String,
+    /// What it is, for the controls, camera and HUD.
+    #[serde(default)]
+    pub category: VehicleCategory,
     pub drive: DriveKind,
     pub physics: VehiclePhysics,
     pub engine: EngineDesc,
+    /// Lifting surfaces: wings, control surfaces, fins, rudders (in air and water alike).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wings: Vec<WingDesc>,
+    /// Jet engines and ship propellers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thrusters: Vec<ThrusterDesc>,
+    /// Helicopters: main and tail rotor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotor: Option<RotorDesc>,
+    /// Boats and amphibious vehicles: where the hull floats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floaters: Vec<FloaterDesc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing_gear: Option<LandingGearDesc>,
+    /// Jets: extra thrust while sprint is held (BF2 `sprintFactor` and its meter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub afterburner: Option<AfterburnerDesc>,
+    /// How aircraft and boats move through air and water.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aero: Option<AeroDesc>,
     #[serde(default = "default_hit_points")]
     pub hit_points: f32,
     /// Material of the hull for direct hits, and for blast damage (ids of the material
@@ -53,14 +77,16 @@ pub struct VehicleDesc {
 impl VehicleDesc {
     /// Whether a part moves rigidly with the hull's collision: the hull and anything
     /// attached to it without joints in between, plus yaw-only joints (turrets). Wheels are
-    /// left to the suspension.
+    /// left to the suspension; rotor blades and landing gear don't collide.
     pub fn is_hull_part(&self, index: usize) -> bool {
         let mut i = index;
         loop {
             let part = &self.parts[i];
             if let Some(joint) = &part.joint {
                 let [yaw, pitch, roll] = &joint.axes;
-                let turret = yaw.input.is_some() && pitch.input.is_none() && roll.input.is_none();
+                let turret = matches!(yaw.input, Some(JointInput::AimYaw | JointInput::Steer))
+                    && pitch.input.is_none()
+                    && roll.input.is_none();
                 if !turret || i != index {
                     return false;
                 }
@@ -97,6 +123,30 @@ pub enum DriveKind {
     Wheeled,
     /// Skid-steered tracks.
     Tracked,
+    /// Wheels (or skids) that only roll, steer and brake: aircraft push with engines or rotors.
+    Rolling,
+    /// Nothing drives it over ground (boats, stationary weapons).
+    None,
+}
+
+/// BF2's vehicle categories (`vehicleCategory`), plus stationary weapons.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VehicleCategory {
+    #[default]
+    Land,
+    /// Jets.
+    Air,
+    Helicopter,
+    Sea,
+    /// Guns and launchers fixed to the ground (TOW, machine gun nests, AA launchers).
+    Stationary,
+}
+
+impl VehicleCategory {
+    /// Flown with the stick (mouse or arrow keys) by the pilot.
+    pub fn flies(self) -> bool {
+        matches!(self, Self::Air | Self::Helicopter)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -109,6 +159,12 @@ pub struct VehiclePhysics {
     /// Air and rolling drag coefficient.
     #[serde(default)]
     pub drag: f32,
+    /// Drag multiplier along the hull's x (right), y (up) and z (back) axes.
+    #[serde(default = "ones", skip_serializing_if = "is_ones")]
+    pub drag_modifier: [f32; 3],
+    /// Multiplier on the inertia of a solid box of `bounds` (BF2 `inertiaModifier`).
+    #[serde(default = "ones", skip_serializing_if = "is_ones")]
+    pub inertia_modifier: [f32; 3],
     /// Relative to the hull origin.
     #[serde(default)]
     pub center_of_mass: [f32; 3],
@@ -122,10 +178,147 @@ impl Default for VehiclePhysics {
             mass: 1000.0,
             gravity: 1.0,
             drag: 0.0,
+            drag_modifier: [1.0; 3],
+            inertia_modifier: [1.0; 3],
             center_of_mass: [0.0; 3],
             bounds: [[-1.0, -0.5, -2.0], [1.0, 1.0, 2.0]],
         }
     }
+}
+
+/// A lifting surface (BF2 `Wing`). It pushes along its normal (the part's up axis) against
+/// the flow through it, and control surfaces add lift in proportion to their deflection
+/// (their part's joint, turned by the stick, rudder or throttle input).
+///
+/// Forces are accelerations times the vehicle's mass, like BF2's (a heavier jet with the
+/// same wings flies the same): with airspeed `u` along the hull and `w` the flow speed along
+/// the normal, the push is `mass * (-lift * w * u + flap_lift * deflection * u²)`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WingDesc {
+    /// The wing's part; its joint (if any) is the control surface deflection.
+    pub part: u32,
+    /// Where the force acts, hull space (BF2 part position plus `setPositionOffset`).
+    pub position: [f32; 3],
+    /// Lift per angle of attack, 1/m (from `setWingLift`).
+    #[serde(default)]
+    pub lift: f32,
+    /// Lift at full deflection, 1/m (from `setFlapLift`).
+    #[serde(default)]
+    pub flap_lift: f32,
+    /// Lowered automatically at low speed (landing flaps, `setLiftRegulated`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub landing_flap: bool,
+}
+
+/// A jet engine or ship propeller: pushes along its forward axis with the throttle.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ThrusterDesc {
+    /// Hull space.
+    pub position: [f32; 3],
+    /// Direction of the push, hull space.
+    pub direction: [f32; 3],
+    /// Acceleration at full throttle and standstill, m/s² (from BF2 `setTorque` ×
+    /// `setDifferential`; like lift, thrust doesn't depend on mass in BF2).
+    pub acceleration: f32,
+    /// The push fades out towards this forward speed (`noPropellerEffectAtSpeed`), m/s.
+    pub max_speed: f32,
+    /// Share of the push available in reverse.
+    #[serde(default)]
+    pub reverse: f32,
+    /// Only pushes while under water (ship propellers).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub water: bool,
+}
+
+/// A helicopter's rotors (BF2 `c_ETHelicopter` engines under tilting rotor heads). The
+/// collective holds the altitude unless the pilot climbs or sinks (BF2
+/// `regulateVerticalPos`), the stick tilts the helicopter, the rudder turns the tail.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RotorDesc {
+    /// Rotor hub, hull space.
+    pub position: [f32; 3],
+    /// Seconds from standstill to full rotor speed.
+    #[serde(default = "default_spin_up")]
+    pub spin_up: f32,
+    /// Vertical speed at full collective up and down, m/s.
+    pub climb_speed: [f32; 2],
+    /// Most extra push beyond hovering, as a share of gravity.
+    pub lift_margin: f32,
+    /// Horizontal share of the rotor's push is magnified by this (`horizontalSpeedMagnifier`).
+    #[serde(default = "one")]
+    pub horizontal_magnifier: f32,
+    /// Damping of horizontal speed, 1/s (from `dampHorizontalVel`).
+    #[serde(default)]
+    pub horizontal_damping: f32,
+    /// Collective regulation holds the altitude up to this tilt (degrees) and fades out by
+    /// `no_regulation_angle` (`maxVertRegAngle`, `noVertRegAngle`).
+    #[serde(default = "default_regulation_angle")]
+    pub regulation_angle: f32,
+    #[serde(default = "default_no_regulation_angle")]
+    pub no_regulation_angle: f32,
+    /// Turn rates at full stick and rudder (pitch, yaw, roll), radians per second.
+    pub turn_rates: [f32; 3],
+    /// How quickly the turn rates are reached, 1/s.
+    #[serde(default = "default_response")]
+    pub response: f32,
+    /// How strongly it levels out without stick input, 1/s.
+    #[serde(default)]
+    pub leveling: f32,
+    /// Tail rotor, hull space.
+    pub tail_position: [f32; 3],
+}
+
+/// A buoyant point of the hull (BF2 `FloatingBundle`).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FloaterDesc {
+    /// Hull space.
+    pub position: [f32; 3],
+    /// Lift when fully submerged, as a share of the vehicle's weight (from
+    /// `setFloatMaxLift`).
+    pub lift: f32,
+    /// How deep it goes before it is fully submerged, meters (`setHullHeight`).
+    pub depth: f32,
+}
+
+/// Flight and swimming tuning of aircraft and boats; accelerations, like the wings'.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AeroDesc {
+    /// Air drag: deceleration per squared speed along each hull axis, times
+    /// `physics.drag_modifier` (from BF2 `drag`).
+    pub drag: f32,
+    /// Wings gain no more lift beyond this angle of attack, degrees.
+    pub stall_angle: f32,
+    /// Most acceleration the wings give, m/s².
+    pub max_load: f32,
+    /// Damping of rotation about the pitch, yaw and roll axes: constant (1/s), and per m/s of
+    /// airspeed.
+    pub angular_damping: [f32; 3],
+    pub speed_damping: [f32; 3],
+    /// Water drag of a submerged hull across, up and along it, 1/s.
+    #[serde(default)]
+    pub water_drag: [f32; 3],
+}
+
+/// When the landing gear goes up and down (BF2 `LandingGear`): up above `up_height` meters
+/// and faster than `up_speed` m/s, down below `down_height` and slower than `down_speed`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LandingGearDesc {
+    pub up_height: f32,
+    pub up_speed: f32,
+    pub down_height: f32,
+    pub down_speed: f32,
+}
+
+/// BF2's sprint on vehicles: a meter that empties in `duration` seconds of use, refills in
+/// `recover` seconds and can be used again above `min_charge`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AfterburnerDesc {
+    /// Thrust multiplier.
+    pub factor: f32,
+    pub duration: f32,
+    pub recover: f32,
+    #[serde(default)]
+    pub min_charge: f32,
 }
 
 /// How hard the vehicle pushes and stops.
@@ -228,10 +421,19 @@ pub enum JointInput {
     AimYaw,
     /// Follows the occupant's aim vertically.
     AimPitch,
-    /// Steering (right = positive).
+    /// Steering and rudder (right = positive).
     Steer,
     /// Throttle (forward = positive).
     Throttle,
+    /// Flight stick forward/back (back = positive = nose up).
+    Pitch,
+    /// Flight stick left/right (right = positive).
+    Roll,
+    /// Landing gear: turns to its limit while the gear is up.
+    Gear,
+    /// Spins with the rotor or engine (rotor blades), at `speed` degrees per second at full
+    /// power.
+    Spin,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -311,8 +513,32 @@ fn default_hit_points() -> f32 {
     1000.0
 }
 
+fn default_regulation_angle() -> f32 {
+    35.0
+}
+
+fn default_spin_up() -> f32 {
+    6.0
+}
+
+fn default_response() -> f32 {
+    4.0
+}
+
+fn default_no_regulation_angle() -> f32 {
+    55.0
+}
+
 fn one() -> f32 {
     1.0
+}
+
+fn ones() -> [f32; 3] {
+    [1.0; 3]
+}
+
+fn is_ones(v: &[f32; 3]) -> bool {
+    *v == [1.0; 3]
 }
 
 fn is_zero(v: &u32) -> bool {

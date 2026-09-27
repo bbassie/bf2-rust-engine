@@ -2,9 +2,12 @@
 //!
 //! The server simulates every vehicle as an avian rigid body (a compound of convex hulls from
 //! the hull's collision mesh) pushed around by raycast suspension springs, tyre or track
-//! friction and engine forces, driven by the [`InputFrame`]s of its occupants. Clients get
-//! [`VehicleMotion`] and [`VehicleState`] replicated and show the vehicle slightly in the past
-//! (see the client's `vehicles` module); there is no vehicle prediction yet.
+//! friction and engine forces, and for aircraft and boats by wings, thrusters, rotors and
+//! floaters (see [`crate::flight`]), driven by the [`InputFrame`]s of its occupants.
+//! Stationary weapons are static bodies whose joints aim. Clients get [`VehicleMotion`] and
+//! [`VehicleState`] replicated and show vehicles slightly in the past, except the one they
+//! drive, which they predict with the same [`step_vehicle`] (see the client's `vehicles`
+//! module).
 
 use std::{
     collections::HashMap,
@@ -15,12 +18,14 @@ use std::{
 use avian3d::prelude::*;
 use bevy::{ecs::entity::MapEntities, prelude::*};
 use bevy_replicon::prelude::*;
-use game_data::{DriveKind, JointInput, VehicleDesc, WeaponDesc};
+use game_data::{DriveKind, JointInput, VehicleCategory, VehicleDesc, WeaponDesc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     config::GamePaths,
-    input::{Buttons, InputFrame},
+    flight::{self, BodyState, Controls, FlightState, GRAVITY, Push, Surroundings},
+    input::InputFrame,
+    level::LoadedLevel,
     physics::GameLayer,
 };
 
@@ -32,7 +37,7 @@ impl Plugin for VehiclePlugin {
             .add_observer(add_vehicle_physics)
             .add_systems(
                 FixedUpdate,
-                simulate_vehicles
+                (simulate_vehicles, aim_stationary)
                     .in_set(VehicleSystems::Simulate)
                     .run_if(in_state(ClientState::Disconnected)),
             )
@@ -53,9 +58,6 @@ pub enum VehicleSystems {
     Simulate,
     Record,
 }
-
-/// Standard gravity; vehicles multiply it by their gravity modifier.
-const GRAVITY: f32 = 9.81;
 
 /// A vehicle. Replicated; the description is `vehicles/<template>.ron`.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -100,6 +102,9 @@ pub struct VehicleState {
     pub joints: Vec<[f32; 3]>,
     /// How far each wheel hangs below its rest position, meters (negative: pushed up).
     pub wheels: Vec<f32>,
+    /// Rotor speed or throttle, 0..1 (for rotor blades, sounds and the HUD).
+    #[serde(default)]
+    pub engine: f32,
 }
 
 /// Hit points. Replicated. At 0 the vehicle is a wreck.
@@ -183,6 +188,12 @@ pub struct VehicleModel {
     pub joint_count: usize,
     /// Per part: rest transform relative to its parent.
     pub rest: Vec<Transform>,
+    /// Per part: rest transform in hull space.
+    pub rest_hull: Vec<Transform>,
+    /// Per part: it is a wing (its steering joint isn't eased off with speed).
+    pub is_wing: Vec<bool>,
+    /// Principal moments of inertia about the hull axes (kg m²).
+    pub inertia: Vec3,
     /// Hull collision (convex hulls of the hull and turret parts), if it has any.
     pub collider: Option<Collider>,
     /// The guns' weapon descriptions, shared with the projectiles they fire.
@@ -190,7 +201,7 @@ pub struct VehicleModel {
 }
 
 impl VehicleModel {
-    fn new(desc: VehicleDesc, root: &Path) -> Self {
+    pub fn new(desc: VehicleDesc, root: &Path) -> Self {
         let mut joint_index = Vec::with_capacity(desc.parts.len());
         let mut joint_count = 0;
         for part in &desc.parts {
@@ -205,16 +216,56 @@ impl VehicleModel {
             .map(|p| crate::level::placement_transform(&p.placement))
             .collect();
         let guns = desc.weapons.iter().map(|w| Arc::new(w.weapon.clone())).collect();
+        let mut is_wing = vec![false; desc.parts.len()];
+        for wing in &desc.wings {
+            if let Some(flag) = is_wing.get_mut(wing.part as usize) {
+                *flag = true;
+            }
+        }
+        // A solid box of the hull's size, scaled like BF2's `inertiaModifier`.
+        let physics = &desc.physics;
+        let [min, max] = physics.bounds.map(Vec3::from_array);
+        let size = (max - min).max(Vec3::splat(0.5));
+        let inertia = Vec3::new(
+            size.y * size.y + size.z * size.z,
+            size.x * size.x + size.z * size.z,
+            size.x * size.x + size.y * size.y,
+        ) * physics.mass
+            / 12.0
+            * Vec3::from(physics.inertia_modifier);
         let mut model = Self {
             desc,
             joint_index,
             joint_count,
             rest,
+            rest_hull: Vec::new(),
+            is_wing,
+            inertia,
             collider: None,
             guns,
         };
+        model.rest_hull = model.part_transforms(&[]);
         model.collider = model.build_collider(root);
         model
+    }
+
+    /// A part's rest orientation in hull space.
+    pub fn rest_rotation(&self, part: usize) -> Quat {
+        self.rest_hull.get(part).map_or(Quat::IDENTITY, |t| t.rotation)
+    }
+
+    /// How far a control surface is deflected, -1..1 of its travel about its pitch axis.
+    pub fn deflection(&self, joints: &[[f32; 3]], part: usize) -> f32 {
+        let (Some(joint), Some(angles)) = (
+            self.desc.parts.get(part).and_then(|p| p.joint.as_ref()),
+            self.joint_index.get(part).copied().flatten().and_then(|j| joints.get(j)),
+        ) else {
+            return 0.0;
+        };
+        let axis = &joint.axes[1];
+        let angle = angles[1].to_degrees();
+        let limit = if angle >= 0.0 { axis.max } else { -axis.min };
+        if limit > 0.0 { (angle / limit).clamp(-1.0, 1.0) } else { 0.0 }
     }
 
     /// Transform of every part in hull space, with joints at the given angles.
@@ -368,12 +419,27 @@ impl VehicleLibrary {
 #[derive(Component, Clone)]
 pub struct VehicleData(pub Arc<VehicleModel>);
 
-/// Server-side simulation state.
-#[derive(Component, Default)]
+/// Simulation state carried from tick to tick (server, and the driver's prediction).
+#[derive(Component, Clone, Debug, Default, PartialEq)]
 pub struct VehicleSim {
     /// Suspension compression per wheel last tick, meters.
-    compression: Vec<f32>,
+    pub compression: Vec<f32>,
+    pub flight: FlightState,
 }
+
+impl VehicleSim {
+    pub fn new(desc: &VehicleDesc) -> Self {
+        Self {
+            compression: vec![0.0; desc.wheels.len()],
+            flight: FlightState::new(),
+        }
+    }
+}
+
+/// Server-side: a vehicle that never moves (stationary weapons); a static body whose joints
+/// still aim.
+#[derive(Component)]
+pub struct Stationary;
 
 /// Gives every vehicle its collider, and on the server a dynamic rigid body.
 fn add_vehicle_physics(
@@ -405,46 +471,43 @@ fn add_vehicle_physics(
         entity.insert(RigidBody::Kinematic);
         return;
     }
-    let [min, max] = desc.physics.bounds.map(Vec3::from_array);
-    let size = max - min;
-    let mass = desc.physics.mass;
-    // A solid box of the hull's size.
-    let inertia = Vec3::new(
-        size.y * size.y + size.z * size.z,
-        size.x * size.x + size.z * size.z,
-        size.x * size.x + size.y * size.y,
-    ) * mass
-        / 12.0;
     entity.insert((
-        RigidBody::Dynamic,
-        Mass(mass),
-        CenterOfMass(Vec3::from_array(desc.physics.center_of_mass)),
-        AngularInertia::new(inertia),
-        GravityScale(desc.physics.gravity),
-        LinearDamping(0.02),
-        AngularDamping(0.3),
-        Friction::new(0.4),
-        TransformInterpolation,
         VehicleState {
             joints: vec![[0.0; 3]; model.joint_count],
             wheels: vec![0.0; desc.wheels.len()],
+            engine: 0.0,
         },
-        VehicleSim {
-            compression: vec![0.0; desc.wheels.len()],
-        },
+        VehicleSim::new(desc),
         SeatInputs(vec![None; desc.seats.len()]),
         VehicleHealth {
             current: desc.hit_points,
             max: desc.hit_points,
         },
     ));
+    if desc.category == VehicleCategory::Stationary {
+        entity.insert((RigidBody::Static, Stationary));
+        return;
+    }
+    // Aircraft keep flying through the air; ground vehicles lose a little to it.
+    let (linear, angular) = if desc.category.flies() { (0.0, 0.05) } else { (0.02, 0.3) };
+    entity.insert((
+        RigidBody::Dynamic,
+        Mass(desc.physics.mass),
+        CenterOfMass(Vec3::from_array(desc.physics.center_of_mass)),
+        AngularInertia::new(model.inertia),
+        GravityScale(desc.physics.gravity),
+        LinearDamping(linear),
+        AngularDamping(angular),
+        Friction::new(0.4),
+        TransformInterpolation,
+    ));
 }
 
 /// Compression room above a wheel's rest position, meters.
 fn bump_travel(drive: DriveKind) -> f32 {
     match drive {
-        DriveKind::Wheeled => 0.25,
         DriveKind::Tracked => 0.2,
+        _ => 0.25,
     }
 }
 
@@ -457,106 +520,164 @@ const TYRE_STIFFNESS: f32 = 0.4;
 /// Tyre forces act this fraction of the way up from the ground to the center of mass, so
 /// cornering doesn't roll the vehicle over as easily.
 const ANTI_ROLL: f32 = 0.6;
+/// How far down aircraft look for the ground (landing gear, hovering), meters.
+const ALTITUDE_PROBE: f32 = 200.0;
+
+/// The level's water surface, if it has water.
+pub fn water_height(level: Option<&LoadedLevel>) -> Option<f32> {
+    level.and_then(|l| l.desc.water.as_ref()).map(|w| w.height)
+}
 
 #[allow(clippy::type_complexity)]
 fn simulate_vehicles(
     time: Res<Time>,
     spatial: SpatialQuery,
-    mut vehicles: Query<(
-        Entity,
-        &VehicleData,
-        &SeatInputs,
-        &mut VehicleState,
-        &mut VehicleSim,
-        Forces,
-        Has<Sleeping>,
-    )>,
+    level: Option<Res<LoadedLevel>>,
+    mut vehicles: Query<
+        (
+            Entity,
+            &VehicleData,
+            &SeatInputs,
+            &mut VehicleState,
+            &mut VehicleSim,
+            Forces,
+            Has<Sleeping>,
+        ),
+        Without<Stationary>,
+    >,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
+    let water = water_height(level.as_deref());
     for (entity, data, inputs, mut state, mut sim, mut forces, sleeping) in &mut vehicles {
         let occupied = inputs.0.iter().any(Option::is_some);
         if sleeping && !occupied {
             continue;
         }
-        let model = &data.0;
-        let desc = &model.desc;
-        let body_pos = forces.position().0;
-        let body_rot = forces.rotation().0;
-        let driver = inputs.0.first().copied().flatten();
-        let (throttle, steer, handbrake) = driver.map_or((0.0, 0.0, false), |input| {
-            let m = input.movement_vec();
-            (m.y, m.x, input.pressed(Buttons::JUMP))
-        });
-        let velocity = forces.linear_velocity();
-        let forward = body_rot * Vec3::NEG_Z;
-        let forward_speed = velocity.dot(forward);
-        let top = desc.engine.top_speed.max(1.0);
-
-        // What each gunner looks at: guns converge on the point under their crosshair.
-        let aim_filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
-            .with_excluded_entities([entity]);
-        let previous = model.part_transforms(&state.joints);
-        let aim_points: Vec<Option<Vec3>> = inputs
-            .0
-            .iter()
-            .enumerate()
-            .map(|(seat, input)| {
-                let input = input.as_ref().filter(|_| model.seat_aims(seat))?;
-                let eye = body_pos + body_rot * model.eye(&previous, seat);
-                let dir = Dir3::new(Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0) * Vec3::NEG_Z).ok()?;
-                let distance = spatial
-                    .cast_ray(eye, dir, AIM_RANGE, true, &aim_filter)
-                    .map_or(AIM_RANGE, |hit| hit.distance.max(MIN_AIM_DISTANCE));
-                Some(eye + *dir * distance)
-            })
-            .collect();
-
-        // Joints: turrets follow their gunner's aim, steering follows the driver.
-        let mut joints = state.joints.clone();
-        joints.resize(model.joint_count, [0.0; 3]);
-        let mut hull: Vec<Transform> = Vec::with_capacity(desc.parts.len());
-        for (i, part) in desc.parts.iter().enumerate() {
-            let parent = part.parent.map_or(Transform::IDENTITY, |p| hull[p as usize]);
-            if let (Some(joint), Some(j)) = (&part.joint, model.joint_index[i]) {
-                let seat = joint.seat as usize;
-                let rest = parent * model.rest[i];
-                let frame = body_rot * rest.rotation;
-                let pivot = body_pos + body_rot * rest.translation;
-                let aim = aim_points
-                    .get(seat)
-                    .copied()
-                    .flatten()
-                    .and_then(|point| (point - pivot).try_normalize());
-                let steer_scale = 1.0 - 0.6 * (forward_speed.abs() / top).min(1.0);
-                joints[j] = step_joint(joint, joints[j], aim, frame, steer * steer_scale, dt);
-            }
-            let mut local = model.rest[i];
-            if let Some(angles) = model.joint_index[i].map(|j| joints[j]) {
-                local.rotation *= joint_rotation(angles);
-            }
-            hull.push(parent * local);
-        }
-
-        // Suspension, tyres and tracks.
-        let tracked = desc.drive == DriveKind::Tracked;
-        let up = body_rot * Vec3::Y;
-        let Ok(down) = Dir3::new(-up) else {
-            continue;
+        let body = BodyState {
+            position: forces.position().0,
+            rotation: forces.rotation().0,
+            velocity: forces.linear_velocity(),
+            angular_velocity: forces.angular_velocity(),
         };
+        let mut next = state.clone();
+        let push = step_vehicle(&data.0, &body, &inputs.0, &mut next, &mut sim, &spatial, entity, water, dt);
+        // An empty vehicle at rest may fall asleep: don't keep it awake with its own springs.
+        if occupied {
+            apply_push(&mut forces, &push);
+        } else {
+            apply_push(&mut forces.non_waking(), &push);
+        }
+        state.set_if_neq(next);
+    }
+}
+
+fn apply_push(forces: &mut impl WriteRigidBodyForces, push: &Push) {
+    for (force, point) in &push.forces {
+        forces.apply_force_at_point(*force, *point);
+    }
+    if push.torque != Vec3::ZERO {
+        forces.apply_torque(push.torque);
+    }
+}
+
+/// Stationary weapons only turn their joints towards their gunner's aim.
+fn aim_stationary(
+    time: Res<Time>,
+    spatial: SpatialQuery,
+    mut vehicles: Query<(Entity, &VehicleData, &SeatInputs, &mut VehicleState, &Position, &Rotation), With<Stationary>>,
+) {
+    let dt = time.delta_secs();
+    for (entity, data, inputs, mut state, position, rotation) in &mut vehicles {
+        if inputs.0.iter().all(Option::is_none) {
+            continue;
+        }
+        let body = BodyState {
+            position: position.0,
+            rotation: rotation.0,
+            ..default()
+        };
+        let mut next = state.clone();
+        let aims = aim_points(&data.0, &body, &inputs.0, &state.joints, &spatial, entity);
+        next.joints = step_joints(&data.0, &body, &aims, &state.joints, &Controls::default(), &FlightState::default(), dt).0;
+        state.set_if_neq(next);
+    }
+}
+
+/// One tick of a vehicle: turns its joints, and returns the forces of its suspension, tyres
+/// or tracks, engines, wings, rotor and floaters. `state` and `sim` are advanced. Shared by
+/// the server and the driver's prediction.
+#[allow(clippy::too_many_arguments)]
+pub fn step_vehicle(
+    model: &VehicleModel,
+    body: &BodyState,
+    inputs: &[Option<InputFrame>],
+    state: &mut VehicleState,
+    sim: &mut VehicleSim,
+    spatial: &SpatialQuery,
+    entity: Entity,
+    water: Option<f32>,
+    dt: f32,
+) -> Push {
+    let desc = &model.desc;
+    let body_pos = body.position;
+    let body_rot = body.rotation;
+    let driver = inputs.first().copied().flatten();
+    let mut controls = Controls::from_input(driver.as_ref());
+    if desc.category == VehicleCategory::Air
+        && let Some(aero) = &desc.aero
+    {
+        controls.pitch = flight::limit_pitch(body, aero.stall_angle, controls.pitch);
+    }
+    let (throttle, steer, handbrake) = (controls.throttle, controls.steer, controls.brake);
+    let velocity = body.velocity;
+    let forward = body_rot * Vec3::NEG_Z;
+    let forward_speed = velocity.dot(forward);
+    let top = desc.engine.top_speed.max(1.0);
+    let com_local = Vec3::from_array(desc.physics.center_of_mass);
+    let com_world = body_pos + body_rot * com_local;
+    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([entity]);
+
+    // Height above ground or water, for the landing gear and hovering.
+    let altitude = if desc.aero.is_some() {
+        let ground = spatial
+            .cast_ray(com_world, Dir3::NEG_Y, ALTITUDE_PROBE, true, &filter)
+            .map_or(ALTITUDE_PROBE, |hit| hit.distance);
+        water.map_or(ground, |w| ground.min((com_world.y - w).max(0.0)))
+    } else {
+        0.0
+    };
+    let around = Surroundings { water, altitude };
+
+    // Joints: turrets follow their gunner's aim, steering and control surfaces the driver,
+    // landing gear the gear state, rotor blades the rotor.
+    let aims = aim_points(model, body, inputs, &state.joints, spatial, entity);
+    let (joints, hull) = step_joints(model, body, &aims, &state.joints, &controls, &sim.flight, dt);
+
+    // Wings, engines, rotor, floaters.
+    let mut push = flight::flight_forces(model, body, &joints, &controls, &mut sim.flight, &around, dt);
+
+    // Suspension, tyres and tracks.
+    let tracked = desc.drive == DriveKind::Tracked;
+    let rolling = desc.drive == DriveKind::Rolling;
+    let skids = desc.category == VehicleCategory::Helicopter;
+    let up = body_rot * Vec3::Y;
+    sim.compression.resize(desc.wheels.len(), 0.0);
+    let mut wheel_offsets = state.wheels.clone();
+    wheel_offsets.resize(desc.wheels.len(), 0.0);
+    let gear_up = desc.landing_gear.is_some() && sim.flight.gear_up;
+    if let Ok(down) = Dir3::new(-up)
+        && !gear_up
+    {
         let carrying = |w: &game_data::WheelDesc| w.contact || tracked;
         let carriers = desc.wheels.iter().filter(|w| carrying(w)).count().max(1) as f32;
         let wheel_mass = desc.physics.mass / carriers;
         let max_strength = desc.wheels.iter().map(|w| w.strength).fold(0.0, f32::max).max(1.0);
         let g = GRAVITY * desc.physics.gravity;
         let travel_up = bump_travel(desc.drive);
-        let com_local = Vec3::from_array(desc.physics.center_of_mass);
-        let com_world = body_pos + body_rot * com_local;
         let com_height = com_local.y;
-        let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
-            .with_excluded_entities([entity]);
         let [mu_long, mu_lat] = desc.engine.grip;
         let yaw_rate_cmd = -steer * desc.engine.turn_rate * (1.0 - 0.4 * (forward_speed.abs() / top).min(1.0));
         let track_speed_cmd = if throttle >= 0.0 {
@@ -564,12 +685,6 @@ fn simulate_vehicles(
         } else {
             throttle * desc.engine.reverse_speed
         };
-
-        sim.compression.resize(desc.wheels.len(), 0.0);
-        let mut wheel_offsets = state.wheels.clone();
-        wheel_offsets.resize(desc.wheels.len(), 0.0);
-        // Forces and where they act, applied together at the end.
-        let mut pushes: Vec<(Vec3, Vec3)> = Vec::with_capacity(desc.wheels.len() * 2 + 1);
         for (wi, wheel) in desc.wheels.iter().enumerate() {
             let strength = if wheel.strength > 0.0 { wheel.strength } else { max_strength };
             let omega2 = strength * if tracked { 9.0 } else { 3.0 };
@@ -601,7 +716,7 @@ fn simulate_vehicles(
                 spring += k * 20.0 * -center_distance;
             }
             let load = spring.max(0.0);
-            pushes.push((up * load, top_point));
+            push.forces.push((up * load, top_point));
 
             // Friction at the contact patch.
             let contact = top_point + *down * hit.distance;
@@ -611,7 +726,7 @@ fn simulate_vehicles(
                 continue;
             };
             let side = fwd.cross(normal);
-            let v = forces.velocity_at_point(contact);
+            let v = body.velocity_at(contact, com_world);
             let (v_long, v_lat) = (v.dot(*fwd), v.dot(side));
             let per_tick = wheel_mass / dt * TYRE_STIFFNESS;
             let brake = desc.engine.brake_force / carriers;
@@ -637,6 +752,11 @@ fn simulate_vehicles(
                     ((want_long - v_long) * per_tick).clamp(-limit, limit),
                     (want_lat - v_lat) * per_tick,
                 )
+            } else if rolling {
+                // Aircraft: skids don't roll; wheels roll freely unless braking.
+                let stop = (-v_long * per_tick).clamp(-brake, brake);
+                let braking = skids || driver.is_none() || handbrake || (throttle < 0.0 && forward_speed.abs() < 30.0);
+                (if braking { stop } else { stop * 0.02 }, -v_lat * per_tick)
             } else {
                 let stop = (-v_long * per_tick).clamp(-brake, brake);
                 let long = if driver.is_none() || handbrake {
@@ -660,53 +780,133 @@ fn simulate_vehicles(
             let scale = if usage > 1.0 { 1.0 / usage } else { 1.0 };
             let contact_height = frame.translation.y - wheel.radius - wheel_offsets[wi];
             let lift = (com_height - contact_height).max(0.0) * ANTI_ROLL;
-            pushes.push(((*fwd * long + side * lat) * scale, contact + up * lift));
+            push.forces.push(((*fwd * long + side * lat) * scale, contact + up * lift));
         }
-
-        // Air drag.
-        let speed = velocity.length();
-        if speed > 0.1 {
-            pushes.push((-velocity * speed * desc.physics.drag * 1.2, com_world));
-        }
-
-        // An empty vehicle at rest may fall asleep: don't keep it awake with its own springs.
-        if occupied {
-            for (force, point) in pushes {
-                forces.apply_force_at_point(force, point);
-            }
-        } else {
-            let mut forces = forces.non_waking();
-            for (force, point) in pushes {
-                forces.apply_force_at_point(force, point);
-            }
-        }
-
-        let next = VehicleState {
-            joints,
-            wheels: wheel_offsets,
-        };
-        state.set_if_neq(next);
+    } else {
+        sim.compression.iter_mut().for_each(|c| *c = 0.0);
     }
+
+    // Air and rolling drag of ground vehicles (aircraft and boats have theirs in `flight`).
+    let speed = velocity.length();
+    if desc.aero.is_none() && speed > 0.1 {
+        push.forces.push((-velocity * speed * desc.physics.drag * 1.2, com_world));
+    }
+
+    *state = VehicleState {
+        joints,
+        wheels: wheel_offsets,
+        engine: sim.flight.engine(),
+    };
+    push
 }
 
-/// Moves one joint towards what its seat asks for. `frame` is the joint's rest orientation
-/// in world space (hull rotation included).
-fn step_joint(
-    joint: &game_data::JointDesc,
-    mut angles: [f32; 3],
+/// What each gunner looks at: guns converge on the point under their crosshair.
+fn aim_points(
+    model: &VehicleModel,
+    body: &BodyState,
+    inputs: &[Option<InputFrame>],
+    current: &[[f32; 3]],
+    spatial: &SpatialQuery,
+    entity: Entity,
+) -> Vec<Option<Vec3>> {
+    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([entity]);
+    let previous = model.part_transforms(current);
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(seat, input)| {
+            let input = input.as_ref().filter(|_| model.seat_aims(seat))?;
+            let eye = body.position + body.rotation * model.eye(&previous, seat);
+            let dir = Dir3::new(Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0) * Vec3::NEG_Z).ok()?;
+            let distance = spatial
+                .cast_ray(eye, dir, AIM_RANGE, true, &filter)
+                .map_or(AIM_RANGE, |hit| hit.distance.max(MIN_AIM_DISTANCE));
+            Some(eye + *dir * distance)
+        })
+        .collect()
+}
+
+/// Turns every joint towards what its seat asks for (aimed joints towards `aim_points`, per
+/// seat); returns the new angles and the parts' transforms in hull space with them.
+pub fn step_joints(
+    model: &VehicleModel,
+    body: &BodyState,
+    aim_points: &[Option<Vec3>],
+    current: &[[f32; 3]],
+    controls: &Controls,
+    flight: &FlightState,
+    dt: f32,
+) -> (Vec<[f32; 3]>, Vec<Transform>) {
+    let desc = &model.desc;
+    let (body_pos, body_rot) = (body.position, body.rotation);
+    let forward_speed = body.velocity.dot(body_rot * Vec3::NEG_Z);
+    let top = desc.engine.top_speed.max(1.0);
+
+    let mut joints = current.to_vec();
+    joints.resize(model.joint_count, [0.0; 3]);
+    let mut hull: Vec<Transform> = Vec::with_capacity(desc.parts.len());
+    for (i, part) in desc.parts.iter().enumerate() {
+        let parent = part.parent.map_or(Transform::IDENTITY, |p| hull[p as usize]);
+        if let (Some(joint), Some(j)) = (&part.joint, model.joint_index[i]) {
+            let seat = joint.seat as usize;
+            let rest = parent * model.rest[i];
+            let frame = body_rot * rest.rotation;
+            let pivot = body_pos + body_rot * rest.translation;
+            let aim = aim_points
+                .get(seat)
+                .copied()
+                .flatten()
+                .and_then(|point| (point - pivot).try_normalize());
+            // Steering eases off with speed; rudders and control surfaces don't.
+            let steer_scale = if model.is_wing[i] { 1.0 } else { 1.0 - 0.6 * (forward_speed.abs() / top).min(1.0) };
+            let drive = JointDrive {
+                aim,
+                frame,
+                steer: controls.steer * steer_scale,
+                pitch: controls.pitch,
+                roll: controls.roll,
+                gear_up: flight.gear_up,
+                spin: flight.spin.max(flight.throttle.abs()),
+            };
+            joints[j] = step_joint(joint, joints[j], &drive, dt);
+        }
+        let mut local = model.rest[i];
+        if let Some(angles) = model.joint_index[i].map(|j| joints[j]) {
+            local.rotation *= joint_rotation(angles);
+        }
+        hull.push(parent * local);
+    }
+    (joints, hull)
+}
+
+/// What turns a joint this tick.
+struct JointDrive {
+    /// The seat's aim direction (world space).
     aim: Option<Vec3>,
+    /// The joint's rest orientation in world space (hull rotation included).
     frame: Quat,
     steer: f32,
-    dt: f32,
-) -> [f32; 3] {
+    pitch: f32,
+    roll: f32,
+    gear_up: bool,
+    /// Rotor or engine speed, 0..1.
+    spin: f32,
+}
+
+/// Moves one joint towards what its seat asks for.
+fn step_joint(joint: &game_data::JointDesc, mut angles: [f32; 3], drive: &JointDrive, dt: f32) -> [f32; 3] {
     // The aim direction in the joint's frame.
-    let aim = aim.map(|d| frame.inverse() * d);
+    let aim = drive.aim.map(|d| drive.frame.inverse() * d);
     for axis in 0..3 {
         let a = &joint.axes[axis];
         let Some(kind) = a.input else {
             continue;
         };
         let (min, max) = (a.min.to_radians(), a.max.to_radians());
+        let stick = |input: f32| {
+            let t = (input * a.speed.signum()).clamp(-1.0, 1.0);
+            Some(if t >= 0.0 { t * max } else { -t * min })
+        };
         let target = match kind {
             JointInput::AimYaw => aim.map(|d| (-d.x).atan2(-d.z)),
             JointInput::AimPitch => aim.map(|d| {
@@ -714,9 +914,17 @@ fn step_joint(
                 let d = Quat::from_rotation_y(-angles[0]) * d;
                 d.y.atan2(Vec2::new(d.x, d.z).length())
             }),
-            JointInput::Steer => {
-                let t = (steer * a.speed.signum()).clamp(-1.0, 1.0);
-                Some(if t >= 0.0 { t * max } else { -t * min })
+            JointInput::Steer => stick(drive.steer),
+            JointInput::Pitch => stick(drive.pitch),
+            JointInput::Roll => stick(drive.roll),
+            JointInput::Gear => Some(match drive.gear_up {
+                true if max != 0.0 => max,
+                true => min,
+                false => 0.0,
+            }),
+            JointInput::Spin => {
+                angles[axis] = wrap_angle(angles[axis] + a.speed.to_radians() * drive.spin * dt);
+                None
             }
             JointInput::Throttle => None,
         };

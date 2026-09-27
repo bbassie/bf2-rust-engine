@@ -101,6 +101,19 @@ fn overview_on_level_load(
     look.pitch = -0.55;
 }
 
+/// How quickly the aircraft chase camera turns after the aircraft (1/s).
+const CHASE_STIFFNESS: f32 = 6.0;
+
+/// `pivot + offset`, pulled in if the world is in the way (at least `min` meters out).
+fn chase_position(spatial: &avian3d::prelude::SpatialQuery, pivot: Vec3, offset: Vec3, min: f32) -> Vec3 {
+    let filter = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+    let distance = Dir3::new(offset)
+        .ok()
+        .and_then(|dir| spatial.cast_ray(pivot, dir, offset.length(), true, &filter))
+        .map_or(offset.length(), |hit| (hit.distance - 0.3).max(min));
+    pivot + offset.normalize_or_zero() * distance
+}
+
 /// Whether the camera follows our soldier from behind instead of through its eyes.
 #[derive(Resource, Default)]
 pub struct ThirdPerson(pub bool);
@@ -121,7 +134,9 @@ fn update_camera(
     spatial: avian3d::prelude::SpatialQuery,
     soldier: Query<(&SoldierRender, Option<&Seated>), With<LocalSoldier>>,
     vehicles: Query<(&crate::vehicles::VehicleView, &VehicleData)>,
+    flight: Res<crate::vehicles::FlightStick>,
     camera: Single<(&mut Transform, &mut Spectator), With<PlayerCamera>>,
+    mut chase: Local<Option<Quat>>,
 ) {
     let (mut transform, mut spectator) = camera.into_inner();
     let rotation = look.rotation();
@@ -133,6 +148,23 @@ fn update_camera(
         .and_then(|(_, seated)| seated)
         .and_then(|seated| crate::vehicles::seat_view(seated, &vehicles))
     {
+        // Piloting: the view is fixed to the aircraft (turned by free look); the chase
+        // camera follows its rotation a little behind.
+        if flight.active {
+            let wanted = crate::vehicles::flight_view(view.vehicle.rotation, flight.look);
+            let smoothed = chase.map_or(wanted, |c| c.slerp(wanted, 1.0 - (-CHASE_STIFFNESS * time.delta_secs()).exp()));
+            *chase = Some(smoothed);
+            transform.translation = if third_person.0 {
+                let offset = smoothed * Vec3::new(0.0, view.chase_height, view.chase_distance * 0.8);
+                chase_position(&spatial, view.vehicle.translation, offset, 3.0)
+            } else {
+                view.eye
+            };
+            transform.rotation = if third_person.0 { smoothed } else { wanted };
+            spectator.position = transform.translation;
+            return;
+        }
+        *chase = None;
         transform.translation = if third_person.0 {
             let pivot = view.vehicle.translation + Vec3::Y * 1.5;
             let offset = rotation * Vec3::new(0.0, 0.0, view.chase_distance * 0.7) + Vec3::Y * view.chase_height;

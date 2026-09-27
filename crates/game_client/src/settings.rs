@@ -289,10 +289,17 @@ pub enum Action {
     /// Full-screen map while held.
     Map,
     MinimapRotation,
+    /// Flying: the stick on the keyboard (the mouse also moves it).
+    PitchUp,
+    PitchDown,
+    RollLeft,
+    RollRight,
+    /// Flying: the mouse looks around instead of moving the stick while held.
+    FreeLook,
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 32] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -311,6 +318,11 @@ impl Action {
         Action::Scoreboard,
         Action::Map,
         Action::MinimapRotation,
+        Action::PitchUp,
+        Action::PitchDown,
+        Action::RollLeft,
+        Action::RollRight,
+        Action::FreeLook,
         Action::WeaponSlot(1),
         Action::WeaponSlot(2),
         Action::WeaponSlot(3),
@@ -343,6 +355,11 @@ impl Action {
             Action::Scoreboard => "Scoreboard".into(),
             Action::Map => "Map".into(),
             Action::MinimapRotation => "Minimap rotation".into(),
+            Action::PitchUp => "Pitch up (flying)".into(),
+            Action::PitchDown => "Pitch down (flying)".into(),
+            Action::RollLeft => "Roll left (flying)".into(),
+            Action::RollRight => "Roll right (flying)".into(),
+            Action::FreeLook => "Free look (flying)".into(),
         }
     }
 
@@ -386,6 +403,11 @@ impl Action {
             Action::Scoreboard => Key(KeyCode::Tab),
             Action::Map => Key(KeyCode::KeyM),
             Action::MinimapRotation => Key(KeyCode::KeyN),
+            Action::PitchUp => Key(KeyCode::ArrowDown),
+            Action::PitchDown => Key(KeyCode::ArrowUp),
+            Action::RollLeft => Key(KeyCode::ArrowLeft),
+            Action::RollRight => Key(KeyCode::ArrowRight),
+            Action::FreeLook => Key(KeyCode::AltLeft),
         }
     }
 }

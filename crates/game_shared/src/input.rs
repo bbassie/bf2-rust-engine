@@ -36,11 +36,23 @@ pub struct InputFrame {
     pub weapon: u8,
     /// In a vehicle: the seat to move to, counting from 1 (0 = stay).
     pub seat: u8,
+    /// Flying: the stick, quantized like `movement`: x = roll right, y = pitch up (pulled
+    /// back). Throttle and rudder are `movement`.
+    pub stick: [i8; 2],
 }
 
 impl InputFrame {
     pub fn movement_vec(&self) -> Vec2 {
         Vec2::new(self.movement[0] as f32, self.movement[1] as f32) / 127.0
+    }
+
+    pub fn stick_vec(&self) -> Vec2 {
+        Vec2::new(self.stick[0] as f32, self.stick[1] as f32) / 127.0
+    }
+
+    pub fn set_stick(&mut self, v: Vec2) {
+        let v = v.clamp(Vec2::NEG_ONE, Vec2::ONE) * 127.0;
+        self.stick = [v.x.round() as i8, v.y.round() as i8];
     }
 
     pub fn set_movement(&mut self, v: Vec2) {

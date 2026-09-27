@@ -20,10 +20,14 @@ impl Plugin for LocalInputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LookState>()
             .init_resource::<InputHistory>()
-            .add_systems(Update, (grab_cursor, mouse_look).chain())
+            .add_systems(Update, (grab_cursor, mouse_look).chain().in_set(LookSystems))
             .add_systems(FixedUpdate, build_input.in_set(LocalInputSystems));
     }
 }
+
+/// Runs in `Update` when the mouse turns the view.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LookSystems;
 
 /// Runs in `FixedUpdate` when this tick's [`InputFrame`] is produced.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -109,9 +113,11 @@ fn mouse_look(
     motion: Res<AccumulatedMouseMotion>,
     actions: Actions,
     cursor: Single<&CursorOptions>,
+    flight: Res<crate::vehicles::FlightStick>,
     mut look: ResMut<LookState>,
 ) {
-    if !cursor_locked(&cursor) {
+    // Piloting, the mouse moves the stick (see `vehicles::fly`).
+    if !cursor_locked(&cursor) || flight.active {
         return;
     }
     let sensitivity = look.sensitivity * look.zoom_scale;
@@ -133,6 +139,7 @@ pub fn build_input(
     cli: Res<crate::Cli>,
     selection: Res<crate::combat::WeaponSelection>,
     seat: Res<crate::vehicles::SeatRequest>,
+    flight: Res<crate::vehicles::FlightStick>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
     active: Res<crate::net::ActiveMatch>,
 ) {
@@ -174,11 +181,17 @@ pub fn build_input(
         if look.jump_latched {
             frame.buttons.insert(Buttons::JUMP);
         }
+        if flight.active {
+            frame.set_stick(flight.stick);
+        }
     }
     if let Some(scenario) = scenario {
         frame.buttons |= scenario.buttons;
         if let Some(movement) = scenario.movement {
             frame.set_movement(movement);
+        }
+        if let Some(stick) = scenario.stick {
+            frame.set_stick(stick);
         }
     }
     look.jump_latched = false;

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use game_data::VehicleSpawnerDesc;
+use game_data::{VehicleCategory, VehicleSpawnerDesc};
 use game_shared::{
     config::GamePaths,
     conquest::{FlagState, RoundState},
@@ -21,7 +21,7 @@ use game_shared::{
     soldier::Health,
     vehicle::{
         SeatInputs, Seated, Vehicle, VehicleData, VehicleHealth, VehicleLibrary, VehicleModel, VehicleMotion,
-        VehicleShot, VehicleState, VehicleSystems,
+        VehicleShot, VehicleState, VehicleSystems, water_height,
     },
     weapons::spread_direction,
 };
@@ -50,7 +50,7 @@ impl Plugin for VehiclesPlugin {
             FixedUpdate,
             (
                 ride_vehicles.in_set(ServerSimSystems::ApplyInputs),
-                (enter_vehicles, wreck_vehicles)
+                (enter_vehicles, crash_damage, wreck_vehicles)
                     .chain()
                     .after(ServerSimSystems::ApplyInputs)
                     .before(VehicleSystems::Simulate),
@@ -148,6 +148,7 @@ fn create_spawners(
 fn run_spawners(
     mut commands: Commands,
     time: Res<Time>,
+    level: Res<LoadedLevel>,
     paths: Res<GamePaths>,
     mut library: ResMut<VehicleLibrary>,
     round: Single<Ref<RoundState>>,
@@ -217,7 +218,7 @@ fn run_spawners(
             continue;
         };
         let rotation = Quat::from_array(spawner.desc.placement.rotation);
-        let position = resting_position(&model, home, &spatial);
+        let position = resting_position(&model, home, &spatial, water_height(Some(&level)));
         let guns = model
             .guns
             .iter()
@@ -245,9 +246,13 @@ fn run_spawners(
     }
 }
 
-/// Puts a vehicle's wheels on the ground below a spawner.
-fn resting_position(model: &VehicleModel, spawner: Vec3, spatial: &SpatialQuery) -> Vec3 {
+/// Puts a vehicle's wheels on the ground below a spawner, a boat on the water; stationary
+/// weapons stand where the spawner is.
+fn resting_position(model: &VehicleModel, spawner: Vec3, spatial: &SpatialQuery, water: Option<f32>) -> Vec3 {
     let desc = &model.desc;
+    if desc.category == VehicleCategory::Stationary {
+        return spawner;
+    }
     // How far the lowest wheel (or the hull) reaches below the origin.
     let reach = desc
         .wheels
@@ -258,7 +263,17 @@ fn resting_position(model: &VehicleModel, spawner: Vec3, spatial: &SpatialQuery)
     let ground = spatial
         .cast_ray(spawner + Vec3::Y * 3.0, Dir3::NEG_Y, 12.0, true, &filter)
         .map_or(spawner.y, |hit| spawner.y + 3.0 - hit.distance);
-    Vec3::new(spawner.x, ground + reach + 0.1, spawner.z)
+    // Boats float with their floaters about half under.
+    let surface = water
+        .filter(|w| !desc.floaters.is_empty() && *w > ground)
+        .map(|w| {
+            let floater = desc.floaters.iter().map(|f| f.position[1] - f.depth * 0.5).fold(f32::MAX, f32::min);
+            w - floater
+        });
+    match surface {
+        Some(height) => Vec3::new(spawner.x, height.max(ground + reach + 0.1), spawner.z),
+        None => Vec3::new(spawner.x, ground + reach + 0.1, spawner.z),
+    }
 }
 
 /// The occupant of every seat of every vehicle.
@@ -599,6 +614,62 @@ fn fire_vehicle_guns(
                     direction,
                 },
             });
+        }
+    }
+}
+
+/// Server-side: a vehicle's velocity last tick, to notice crashes.
+#[derive(Component, Default)]
+struct LastVelocity(Vec3);
+
+/// Speed lost in one tick beyond which a crash does damage (m/s), and hit points per m/s
+/// beyond it; aircraft are more fragile.
+const CRASH_SPEED: [f32; 2] = [18.0, 9.0];
+const CRASH_DAMAGE: [f32; 2] = [25.0, 60.0];
+
+/// Hitting something hard hurts, and vehicles that can't float drown in deep water (BF2
+/// `hpLostWhileInDeepWater`).
+#[allow(clippy::type_complexity)]
+fn crash_damage(
+    mut commands: Commands,
+    time: Res<Time>,
+    level: Option<Res<LoadedLevel>>,
+    mut vehicles: Query<(
+        Entity,
+        &Vehicle,
+        &VehicleData,
+        &Position,
+        &LinearVelocity,
+        &mut VehicleHealth,
+        Option<&mut LastVelocity>,
+    )>,
+) {
+    let water = water_height(level.as_deref());
+    for (entity, vehicle, data, position, velocity, mut health, last) in &mut vehicles {
+        let Some(mut last) = last else {
+            commands.entity(entity).insert(LastVelocity(velocity.0));
+            continue;
+        };
+        if health.wrecked() {
+            continue;
+        }
+        let desc = &data.0.desc;
+        let fragile = desc.category.flies() as usize;
+        let change = (velocity.0 - last.0).length();
+        last.0 = velocity.0;
+        let mut damage = (change - CRASH_SPEED[fragile]).max(0.0) * CRASH_DAMAGE[fragile];
+        if damage > 0.0 {
+            info!("{} crashed ({change:.1} m/s)", vehicle.template);
+        }
+        if let Some(water) = water
+            && desc.floaters.is_empty()
+            && desc.category != VehicleCategory::Stationary
+            && position.0.y < water - 1.0
+        {
+            damage += if desc.category.flies() { 400.0 } else { 100.0 } * time.delta_secs();
+        }
+        if damage > 0.0 {
+            health.current -= damage;
         }
     }
 }
