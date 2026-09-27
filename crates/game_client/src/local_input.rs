@@ -78,8 +78,9 @@ fn grab_cursor(
     window: Single<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    deploy: Res<crate::deploy::DeployScreen>,
 ) {
-    if mouse.just_pressed(MouseButton::Left) && !cursor_locked(&cursor) {
+    if mouse.just_pressed(MouseButton::Left) && !cursor_locked(&cursor) && !deploy.open {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
     }

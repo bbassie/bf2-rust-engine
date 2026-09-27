@@ -43,7 +43,11 @@ use bevy::{
         view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk},
     },
 };
-use game_shared::{input::Buttons, level::LoadedLevel, soldier::SoldierMotion};
+use game_shared::{
+    input::Buttons,
+    level::LoadedLevel,
+    soldier::{Health, SoldierMotion},
+};
 use serde::Deserialize;
 
 use crate::{
@@ -92,6 +96,12 @@ pub enum Step {
     ThirdPerson(bool),
     Ssao(bool),
     Shadows(bool),
+    /// Presses and releases a key, e.g. `Key(Enter)`.
+    Key(KeyCode),
+    /// Clicks the UI button with this `Name`, e.g. `Click("kit:5")`.
+    Click(String),
+    /// Our soldier dies (singleplayer and listen server only).
+    Kill,
     /// Saves `<out>/<name>.png` (or `name` itself if it ends in `.png`).
     Screenshot(String),
     /// Frame time statistics over this many seconds, logged and added to the report.
@@ -204,7 +214,7 @@ impl Plugin for ScenarioPlugin {
                     note_asset_events::<AnimationClip>,
                     note_asset_events::<Shader>,
                 ),
-                run_scenario,
+                run_scenario.in_set(ScenarioSystems),
             )
                 .chain(),
         );
@@ -215,6 +225,10 @@ impl Plugin for ScenarioPlugin {
         }
     }
 }
+
+/// Runs the scenario's steps in `Update`. UI reacting to `Key`/`Click` steps runs after it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScenarioSystems;
 
 /// Pipelines still compiling, counted in the render world.
 #[derive(Resource, Clone, Default)]
@@ -252,6 +266,19 @@ struct Runner {
     screenshot_pending: bool,
     samples: Vec<f32>,
     report: String,
+    /// Keys pressed by the last `Key` step, released the next frame.
+    released: Vec<KeyCode>,
+}
+
+/// What a player can do, for [`run_scenario`].
+#[derive(bevy::ecs::system::SystemParam)]
+struct PlayerControls<'w, 's> {
+    input: ResMut<'w, ScenarioInput>,
+    look: ResMut<'w, LookState>,
+    third_person: ResMut<'w, ThirdPerson>,
+    selection: ResMut<'w, WeaponSelection>,
+    keys: ResMut<'w, ButtonInput<KeyCode>>,
+    buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -269,17 +296,25 @@ fn run_scenario(
     mut readiness: ResMut<Readiness>,
     waiting_pipelines: Res<WaitingPipelines>,
     level: Option<Res<LoadedLevel>>,
-    mut input: ResMut<ScenarioInput>,
-    mut look: ResMut<LookState>,
-    mut third_person: ResMut<ThirdPerson>,
-    mut selection: ResMut<WeaponSelection>,
-    mut soldier: Query<&mut SoldierMotion, With<LocalSoldier>>,
+    player: PlayerControls,
+    mut soldier: Query<(&mut SoldierMotion, &mut Health), With<LocalSoldier>>,
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
     mut suns: Query<&mut DirectionalLight, With<Sun>>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let PlayerControls {
+        mut input,
+        mut look,
+        mut third_person,
+        mut selection,
+        mut keys,
+        mut buttons,
+    } = player;
     let now = time.elapsed_secs();
+    for key in runner.released.drain(..) {
+        keys.release(key);
+    }
     if waiting_pipelines.0.load(Ordering::Relaxed) > 0 {
         readiness.last_pipeline_wait = now;
     }
@@ -317,7 +352,7 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Teleport(position, yaw, pitch) => {
-                if let Ok(mut motion) = soldier.single_mut() {
+                if let Ok((mut motion, _)) = soldier.single_mut() {
                     motion.position = Vec3::from(*position);
                     motion.velocity = Vec3::ZERO;
                 } else {
@@ -369,6 +404,24 @@ fn run_scenario(
             Step::Shadows(on) => {
                 for mut sun in &mut suns {
                     sun.shadow_maps_enabled = *on;
+                }
+                Progress::Done
+            }
+            Step::Key(key) => {
+                keys.press(*key);
+                runner.released.push(*key);
+                Progress::Done
+            }
+            Step::Click(name) => {
+                match buttons.iter_mut().find(|(n, _)| n.as_str() == name) {
+                    Some((_, mut interaction)) => *interaction = Interaction::Pressed,
+                    None => warn!("scenario: no button named {name}"),
+                }
+                Progress::Done
+            }
+            Step::Kill => {
+                for (_, mut health) in &mut soldier {
+                    health.current = 0.0;
                 }
                 Progress::Done
             }

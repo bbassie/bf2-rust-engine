@@ -4,7 +4,10 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
-use bf2_formats::con::{Interpreter, Template};
+use bf2_formats::{
+    con::{Interpreter, Template},
+    localization::Localization,
+};
 use game_data::{
     DeviationDesc, FireMode, KitDesc, ProjectileDesc, RecoilDesc, WeaponDesc, WeaponSounds,
 };
@@ -15,6 +18,7 @@ use crate::meshes::MeshConverter;
 pub fn import(
     interp: &mut Interpreter,
     converter: &MeshConverter,
+    localization: &Localization,
     kits: &[String],
     out: &Path,
 ) -> Result<(usize, usize)> {
@@ -53,7 +57,8 @@ pub fn import(
         let Some(template) = interp.world.template(name).cloned() else {
             continue;
         };
-        let desc = weapon_desc(interp, converter, &template, out);
+        let mut desc = weapon_desc(interp, converter, &template, out);
+        desc.display_name = localization.resolve(&desc.display_name);
         game_data::write_ron(out.join("weapons").join(format!("{name}.ron")), &desc)?;
         weapon_count += 1;
     }

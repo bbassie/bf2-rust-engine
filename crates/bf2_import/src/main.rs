@@ -13,6 +13,7 @@ use std::{path::PathBuf, time::Instant};
 use anyhow::{Context, Result, bail};
 use bf2_formats::{
     Bf2Install, Side, Vfs,
+    localization::Localization,
     collision::CollisionMesh,
     mesh::{MeshKind, VisMesh},
 };
@@ -92,10 +93,12 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(&cli.out)?;
             write_readme(&cli.out)?;
             import_soldiers(&install, &cli.out);
+            let localization = Localization::load(&install, "english");
+            log::info!("{} localized strings", localization.len());
             for level in levels {
                 let started = Instant::now();
                 log::info!("importing {} ({})", level.name, level.mod_name);
-                match level::import_level(&install, &level, &cli.out) {
+                match level::import_level(&install, &level, &localization, &cli.out) {
                     Ok(report) => {
                         log::info!(
                             "{}: {} statics, {} roads, {} kits, {} weapons, {} templates, {} mesh files, modes [{}] in {:.1}s",

@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 pub mod config;
+pub mod conquest;
 pub mod input;
 pub mod level;
 pub mod physics;

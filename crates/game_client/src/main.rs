@@ -20,6 +20,8 @@ use game_shared::{SharedPlugin, config::GamePaths};
 
 mod camera;
 mod combat;
+mod conquest_hud;
+mod deploy;
 mod hud;
 mod local_input;
 mod net;
@@ -150,6 +152,8 @@ fn main() -> AppExit {
         render::RenderPlugin,
         hud::HudPlugin,
         combat::ClientCombatPlugin,
+        conquest_hud::ConquestHudPlugin,
+        deploy::DeployPlugin,
     ))
     .insert_resource(paths);
 

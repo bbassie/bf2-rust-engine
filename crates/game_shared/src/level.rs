@@ -279,13 +279,18 @@ pub fn test_range() -> LoadedLevel {
         heights,
     };
 
-    let base = |id: &str, team: u8, z: f32| ControlPointDesc {
+    let base = |id: &str, name: &str, team: u8, z: f32| ControlPointDesc {
         id: id.into(),
-        name: id.into(),
+        name: name.into(),
         position: [0.0, heightmap.height_at(0.0, z), z],
         initial_team: team,
         radius: 15.0,
         uncapturable: true,
+        area_value: [50.0, 50.0],
+        time_to_get_control: 10.0,
+        time_to_lose_control: 10.0,
+        only_takeable_by_team: 0,
+        enemy_ticket_loss_when_captured: 0.0,
     };
     let spawns = |cp: &str, z: f32, yaw: f32| -> Vec<SpawnPointDesc> {
         (-3..=3)
@@ -306,8 +311,8 @@ pub fn test_range() -> LoadedLevel {
         mode: "gpm_cq".into(),
         size: 16,
         control_points: vec![
-            base("base_one", 1, 200.0),
-            base("base_two", 2, -200.0),
+            base("base_one", "North Base", 1, 200.0),
+            base("base_two", "South Base", 2, -200.0),
             ControlPointDesc {
                 id: "center".into(),
                 name: "Center".into(),
@@ -315,6 +320,7 @@ pub fn test_range() -> LoadedLevel {
                 initial_team: 0,
                 radius: 12.0,
                 uncapturable: false,
+                ..base("center", "Center", 0, 0.0)
             },
         ],
         spawn_points: [
@@ -330,6 +336,7 @@ pub fn test_range() -> LoadedLevel {
             name: TEST_RANGE.into(),
             display_name: "Test Range".into(),
             game_modes: vec![conquest],
+            ticket_loss_at_end_per_minute: 200.0,
             ..default()
         },
         dir: None,

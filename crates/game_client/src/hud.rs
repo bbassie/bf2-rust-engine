@@ -312,8 +312,9 @@ fn update_status(
         String::new()
     };
     let help = if cursor.grab_mode == bevy::window::CursorGrabMode::None {
-        // Explicit lines: auto-wrapped text and its shadow get laid out differently.
-        "\nclick to play  |  WASD move  shift sprint  space jump  ctrl crouch  Z prone\nLMB fire  RMB zoom  R reload  B fire mode  1-6 weapons  |  V third person  Tab scores"
+        // Explicit short lines: auto-wrapped text and its shadow get laid out differently,
+        // and long lines run into the ticket bar.
+        "\nclick to play  |  Enter deploy  |  Tab scores\nWASD move  shift sprint  space jump\nctrl crouch  Z prone  V third person\nLMB fire  RMB zoom  R reload  B mode  1-6 weapons"
     } else {
         ""
     };

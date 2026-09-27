@@ -20,6 +20,7 @@ use bevy_replicon_renet::{
 };
 use game_shared::{
     PROTOCOL_ID,
+    conquest::{ControlPoint, Deployment, FlagState, RoundState},
     input::{InputFrame, InputPacket},
     level::LoadedLevel,
     protocol::{ClientHello, ControlledBy, MatchInfo, Player, PlayerNetId, Team},
@@ -29,6 +30,7 @@ use game_shared::{
 
 pub mod bots;
 pub mod combat;
+pub mod conquest;
 
 /// How the server was configured to run.
 #[derive(Resource, Clone, Debug)]
@@ -74,7 +76,7 @@ pub struct GameServerPlugin {
 impl Plugin for GameServerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.settings.clone())
-            .add_plugins((bots::BotPlugin, combat::CombatPlugin))
+            .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin))
             .add_systems(Startup, (start_networking, start_match))
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
@@ -119,17 +121,6 @@ pub struct ClientPlayer(pub Entity);
 /// Server-side: the soldier a player currently controls.
 #[derive(Component)]
 pub struct Controls(pub Entity);
-
-/// Server-side: which kit slot (0..7) the player spawns with.
-#[derive(Component, Clone, Copy, Debug)]
-pub struct KitChoice(pub u8);
-
-impl Default for KitChoice {
-    fn default() -> Self {
-        // Assault: a rifle, the most generally useful kit.
-        Self(2)
-    }
-}
 
 /// Server-side: the input applied to a soldier this tick (weapons read it after movement).
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -373,56 +364,72 @@ fn apply_inputs(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn respawn_players(
     mut commands: Commands,
     time: Res<Time>,
     level: Res<LoadedLevel>,
     armory: Res<Armory>,
-    match_info: Single<&MatchInfo>,
+    match_state: Single<(&MatchInfo, Option<&RoundState>)>,
+    control_points: Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules)>,
     mut players: Query<
-        (Entity, &Team, Option<&KitChoice>, Option<&mut RespawnTimer>),
+        (Entity, &Team, &mut Deployment, Option<&mut RespawnTimer>),
         (With<Player>, Without<Controls>),
     >,
 ) {
+    let (match_info, round) = *match_state;
     // Kits load right after the level; spawning earlier would leave soldiers unarmed.
-    if armory.kits.is_empty() {
+    // Nobody spawns between rounds.
+    if armory.kits.is_empty() || round != Some(&RoundState::Playing) {
         return;
     }
-    for (player, team, kit, timer) in &mut players {
-        let kit = kit.copied().unwrap_or_default();
+    for (player, team, mut deployment, timer) in &mut players {
         if *team == Team::Spectator {
             continue;
         }
-        match timer {
-            None => {
-                // First spawn is immediate.
-                spawn_soldier(&mut commands, player, *team, kit, &level, &armory, &match_info);
-            }
+        let ready = match timer {
+            // First spawn is immediate.
+            None => true,
             Some(mut timer) => {
-                if timer.0.tick(time.delta()).is_finished() {
-                    commands.entity(player).remove::<RespawnTimer>();
-                    spawn_soldier(&mut commands, player, *team, kit, &level, &armory, &match_info);
+                timer.0.tick(time.delta());
+                let left = timer.0.remaining_secs();
+                // Tenths are enough for the countdown and replicate less often.
+                let shown = (left * 10.0).ceil() / 10.0;
+                if deployment.respawn_in != shown {
+                    deployment.respawn_in = shown;
                 }
+                timer.0.is_finished()
             }
+        };
+        if !ready {
+            continue;
         }
+        let Some((position, yaw)) =
+            pick_spawn(&level, match_info, *team, &deployment, &control_points)
+        else {
+            // No spawn point held: wait.
+            continue;
+        };
+        commands.entity(player).remove::<RespawnTimer>();
+        deployment.respawn_in = 0.0;
+        spawn_soldier(&mut commands, player, *team, deployment.kit, position, yaw, &armory);
     }
 }
 
-/// Spawns a soldier for `player` at one of its team's spawn points.
+/// Spawns a soldier for `player` with kit slot `kit`.
 pub fn spawn_soldier(
     commands: &mut Commands,
     player: Entity,
     team: Team,
-    kit: KitChoice,
-    level: &LoadedLevel,
+    kit: u8,
+    position: Vec3,
+    yaw: f32,
     armory: &Armory,
-    match_info: &MatchInfo,
 ) -> Entity {
-    let (position, yaw) = pick_spawn(level, match_info, team);
     let motion = SoldierMotion::at(position, yaw);
     let team_index = if team == Team::Two { 1 } else { 0 };
     let loadout = armory
-        .kit_for(team_index, kit.0 as usize)
+        .kit_for(team_index, kit as usize)
         .map(|k| Loadout {
             kit: k.name.clone(),
             weapons: k.weapons.clone(),
@@ -446,25 +453,38 @@ pub fn spawn_soldier(
     soldier
 }
 
-fn pick_spawn(level: &LoadedLevel, match_info: &MatchInfo, team: Team) -> (Vec3, f32) {
-    let team_id = match team {
-        Team::One => 1,
-        Team::Two => 2,
-        Team::Spectator => 0,
+/// A spawn point at a control point `team` holds: the chosen one if possible. `None` if the
+/// team holds no point with spawn points.
+fn pick_spawn(
+    level: &LoadedLevel,
+    match_info: &MatchInfo,
+    team: Team,
+    deployment: &Deployment,
+    control_points: &Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules)>,
+) -> Option<(Vec3, f32)> {
+    let layout = level.game_mode(&match_info.mode, match_info.size);
+    let spawn_points = layout.map(|l| l.spawn_points.as_slice()).unwrap_or_default();
+    let held: Vec<(u8, &str)> = control_points
+        .iter()
+        .filter(|(_, state, _)| state.owner == team)
+        .map(|(cp, _, rules)| (cp.index, rules.id.as_str()))
+        .collect();
+    let at = |ids: &[&str]| -> Vec<_> {
+        spawn_points
+            .iter()
+            .filter(|sp| ids.contains(&sp.control_point.as_str()))
+            .collect()
     };
-    let candidates: Vec<_> = level
-        .game_mode(&match_info.mode, match_info.size)
-        .map(|mode| {
-            mode.spawn_points
-                .iter()
-                .filter(|sp| {
-                    mode.control_points
-                        .iter()
-                        .any(|cp| cp.id == sp.control_point && cp.initial_team == team_id)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let chosen: Vec<&str> = held
+        .iter()
+        .filter(|(index, _)| Some(*index) == deployment.control_point)
+        .map(|(_, id)| *id)
+        .collect();
+    let mut candidates = at(&chosen);
+    if candidates.is_empty() {
+        let all: Vec<&str> = held.iter().map(|(_, id)| *id).collect();
+        candidates = at(&all);
+    }
 
     let (mut position, yaw) = match fastrand::choice(&candidates) {
         Some(sp) => {
@@ -472,18 +492,16 @@ fn pick_spawn(level: &LoadedLevel, match_info: &MatchInfo, team: Team) -> (Vec3,
             let (yaw, _, _) = rotation.to_euler(EulerRot::YXZ);
             (Vec3::from_array(sp.placement.position), yaw)
         }
-        None => {
-            let center = level
-                .heightmap
-                .as_ref()
-                .map(|h| h.center())
-                .unwrap_or_default();
+        // Levels without control points (or spawn points): the middle of the map.
+        None if control_points.is_empty() || spawn_points.is_empty() => {
+            let center = level.heightmap.as_ref().map(|h| h.center()).unwrap_or_default();
             (center, 0.0)
         }
+        None => return None,
     };
     if let Some(heightmap) = &level.heightmap {
         let ground = heightmap.height_at(position.x, position.z);
         position.y = position.y.max(ground + 0.1);
     }
-    (position, yaw)
+    Some((position, yaw))
 }

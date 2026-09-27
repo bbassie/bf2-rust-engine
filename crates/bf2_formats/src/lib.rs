@@ -7,6 +7,7 @@ pub mod anim;
 pub mod collision;
 pub mod con;
 pub mod install;
+pub mod localization;
 pub mod mesh;
 pub mod reader;
 pub mod road;

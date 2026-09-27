@@ -8,6 +8,7 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    conquest::{ControlPoint, DeployRequest, Deployment, FlagEvent, FlagState, RoundState, Tickets},
     input::InputPacket,
     soldier::{Health, InputAck, Soldier, SoldierMotion},
     weapons::{Inventory, Loadout},
@@ -29,8 +30,15 @@ impl Plugin for ProtocolPlugin {
             .replicate::<Health>()
             .replicate::<Loadout>()
             .replicate::<Inventory>()
+            .replicate::<ControlPoint>()
+            .replicate::<FlagState>()
+            .replicate::<Tickets>()
+            .replicate::<RoundState>()
+            .replicate::<Deployment>()
             .add_client_message::<InputPacket>(Channel::Unreliable)
             .add_client_message::<ClientHello>(Channel::Ordered)
+            .add_client_message::<DeployRequest>(Channel::Ordered)
+            .add_mapped_server_message::<FlagEvent>(Channel::Ordered)
             .add_mapped_server_message::<ShotFired>(Channel::Unreliable)
             .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
             .add_mapped_server_message::<KillFeed>(Channel::Ordered);
@@ -50,7 +58,7 @@ pub struct MatchInfo {
 
 /// A participant in the match, human or bot. Outlives the soldiers it controls.
 #[derive(Component, Serialize, Deserialize, Clone, Debug)]
-#[require(Team, Score)]
+#[require(Team, Score, Deployment)]
 pub struct Player {
     pub name: String,
     pub is_bot: bool,

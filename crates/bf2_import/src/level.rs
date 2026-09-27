@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use bf2_formats::{
     Bf2Install, LevelInfo, Side,
+    localization::Localization,
     con::{Instance, Interpreter, Template, World, parse_vec3},
 };
 use game_data::{
@@ -32,7 +33,12 @@ pub struct LevelReport {
     pub game_modes: Vec<String>,
 }
 
-pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Result<LevelReport> {
+pub fn import_level(
+    install: &Bf2Install,
+    level: &LevelInfo,
+    localization: &Localization,
+    out: &Path,
+) -> Result<LevelReport> {
     let vfs = install.level_vfs(level, Side::Both)?;
     let base = format!("levels/{}", level.name);
     let mut interp = Interpreter::new(&vfs);
@@ -70,7 +76,8 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
         .iter()
         .flat_map(|t| t.kits.iter().map(|k| k.kit.clone()))
         .collect();
-    let (kit_count, weapon_count) = weapons::import(&mut interp, &converter, &kit_names, out)?;
+    let (kit_count, weapon_count) =
+        weapons::import(&mut interp, &converter, localization, &kit_names, out)?;
 
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
@@ -116,8 +123,19 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
 
     let game_modes: Vec<GameModeDesc> = layouts
         .iter()
-        .map(|(mode, size, range)| build_game_mode(world, mode, *size, &world.instances[range.clone()]))
+        .map(|(mode, size, range)| {
+            build_game_mode(world, localization, mode, *size, &world.instances[range.clone()])
+        })
         .collect();
+    // The top-down map BF2 shows in game, copied as-is (north up, not flipped).
+    let minimap = converter.file(&format!("{base}/hud/minimap/ingamemap.dds"));
+    let ticket_loss_at_end_per_minute = world
+        .commands
+        .iter()
+        .rev()
+        .find(|c| c.name == "gamelogic.setticketlossatendpermin")
+        .and_then(|c| c.args.first()?.parse().ok())
+        .unwrap_or(200.0);
 
     let desc = LevelDesc {
         name: name.clone(),
@@ -129,6 +147,8 @@ pub fn import_level(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resu
         roads,
         game_modes,
         teams: level_teams,
+        minimap,
+        ticket_loss_at_end_per_minute,
     };
     game_data::write_ron(level_dir.join("level.ron"), &desc)?;
 
@@ -313,7 +333,13 @@ fn flatten(
     visited.remove(&name.to_ascii_lowercase());
 }
 
-fn build_game_mode(world: &World, mode: &str, size: u32, instances: &[Instance]) -> GameModeDesc {
+fn build_game_mode(
+    world: &World,
+    localization: &Localization,
+    mode: &str,
+    size: u32,
+    instances: &[Instance],
+) -> GameModeDesc {
     let mut layout = GameModeDesc {
         mode: mode.to_string(),
         size,
@@ -332,14 +358,23 @@ fn build_game_mode(world: &World, mode: &str, size: u32, instances: &[Instance])
                     .get_str("controlpointid")
                     .unwrap_or(&template.name)
                     .to_string(),
-                name: template
-                    .get_str("setcontrolpointname")
-                    .unwrap_or(&template.name)
-                    .to_string(),
+                name: localization.resolve(
+                    template.get_str("setcontrolpointname").unwrap_or(&template.name),
+                ),
                 position: placement.position,
                 initial_team: template.get_f32("team").unwrap_or(0.0) as u8,
                 radius: template.get_f32("radius").unwrap_or(10.0),
                 uncapturable: template.get_f32("unabletochangeteam").unwrap_or(0.0) != 0.0,
+                area_value: [
+                    template.get_f32("areavalueteam1").unwrap_or(0.0),
+                    template.get_f32("areavalueteam2").unwrap_or(0.0),
+                ],
+                time_to_get_control: template.get_f32("timetogetcontrol").unwrap_or(10.0),
+                time_to_lose_control: template.get_f32("timetolosecontrol").unwrap_or(10.0),
+                only_takeable_by_team: template.get_f32("onlytakeablebyteam").unwrap_or(0.0) as u8,
+                enemy_ticket_loss_when_captured: template
+                    .get_f32("enemyticketlosswhencaptured")
+                    .unwrap_or(0.0),
             }),
             "spawnpoint" => layout.spawn_points.push(SpawnPointDesc {
                 control_point: template

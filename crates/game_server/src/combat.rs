@@ -26,14 +26,26 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.add_message::<Died>().add_systems(
             FixedUpdate,
-            (fire_weapons, simulate_projectiles)
+            (fire_weapons, simulate_projectiles, kill_the_dead)
                 .chain()
+                .in_set(CombatSystems)
                 .after(ServerSimSystems::ApplyInputs)
                 .run_if(in_state(ClientState::Disconnected)),
         );
     }
+}
+
+/// Weapons, projectiles and deaths, after inputs are applied.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CombatSystems;
+
+/// Server-side: a player's soldier died (for tickets and other rules).
+#[derive(Message, Clone, Copy, Debug)]
+pub struct Died {
+    pub player: Entity,
+    pub team: Team,
 }
 
 /// Damage multiplier for hits above the neck.
@@ -221,6 +233,7 @@ fn simulate_projectiles(
     mut players: Query<(&mut Score, &Player)>,
     mut hits: MessageWriter<ToClients<HitConfirmed>>,
     mut kills: MessageWriter<ToClients<KillFeed>>,
+    mut died: MessageWriter<Died>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut projectile, mut transform) in &mut projectiles {
@@ -312,8 +325,45 @@ fn simulate_projectiles(
                     &mut players,
                     &mut kills,
                 );
+                died.write(Died {
+                    player: victim_player,
+                    team: victim_team,
+                });
             }
         }
+    }
+}
+
+/// Soldiers whose health ran out some other way (scripts, and later falls and crashes).
+fn kill_the_dead(
+    mut commands: Commands,
+    settings: Res<ServerSettings>,
+    soldiers: Query<(Entity, &Health, &ControlledBy), With<Soldier>>,
+    teams: Query<&Team>,
+    mut players: Query<(&mut Score, &Player)>,
+    mut kills: MessageWriter<ToClients<KillFeed>>,
+    mut died: MessageWriter<Died>,
+) {
+    for (soldier, health, controlled_by) in &soldiers {
+        if health.current > 0.0 {
+            continue;
+        }
+        let player = controlled_by.0;
+        kill(
+            &mut commands,
+            soldier,
+            player,
+            None,
+            "",
+            false,
+            settings.respawn_seconds,
+            &mut players,
+            &mut kills,
+        );
+        died.write(Died {
+            player,
+            team: teams.get(player).copied().unwrap_or_default(),
+        });
     }
 }
 

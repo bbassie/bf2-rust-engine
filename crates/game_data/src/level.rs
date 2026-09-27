@@ -29,6 +29,14 @@ pub struct LevelDesc {
     /// Team 1 and team 2.
     #[serde(default)]
     pub teams: Vec<TeamDesc>,
+    /// Top-down map image (`.dds`, relative to the imported root) covering the whole
+    /// terrain, north up.
+    #[serde(default)]
+    pub minimap: Option<String>,
+    /// Conquest: tickets per minute a team loses once it holds no control point and has
+    /// nobody alive.
+    #[serde(default = "default_ticket_loss_at_end")]
+    pub ticket_loss_at_end_per_minute: f32,
 }
 
 /// A square heightmap terrain.
@@ -175,7 +183,7 @@ pub struct GameModeDesc {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ControlPointDesc {
     pub id: String,
-    /// Display name (a localization key for imported BF2 levels).
+    /// Display name.
     #[serde(default)]
     pub name: String,
     pub position: [f32; 3],
@@ -185,6 +193,20 @@ pub struct ControlPointDesc {
     /// Main bases can't be captured.
     #[serde(default)]
     pub uncapturable: bool,
+    /// Worth of this point to team 1 and team 2 for ticket bleed (BF2 `areaValueTeam1/2`).
+    #[serde(default)]
+    pub area_value: [f32; 2],
+    /// Seconds for one attacker to raise the flag, and to lower an enemy flag.
+    #[serde(default = "default_capture_time")]
+    pub time_to_get_control: f32,
+    #[serde(default = "default_capture_time")]
+    pub time_to_lose_control: f32,
+    /// Only this team (1/2) may capture it; 0 = both.
+    #[serde(default)]
+    pub only_takeable_by_team: u8,
+    /// Tickets the other team loses at once when this point is captured.
+    #[serde(default)]
+    pub enemy_ticket_loss_when_captured: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -208,6 +230,14 @@ pub struct VehicleSpawnerDesc {
     pub min_respawn_seconds: f32,
     #[serde(default)]
     pub max_respawn_seconds: f32,
+}
+
+fn default_capture_time() -> f32 {
+    10.0
+}
+
+fn default_ticket_loss_at_end() -> f32 {
+    200.0
 }
 
 fn one() -> u32 {

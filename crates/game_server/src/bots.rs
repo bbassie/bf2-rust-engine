@@ -14,6 +14,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use game_shared::{
+    conquest::{ControlPoint, Deployment, FlagState},
     input::{Buttons, InputFrame},
     level::LoadedLevel,
     physics::GameLayer,
@@ -72,6 +73,8 @@ pub struct BotBrain {
     burst: f32,
     strafe: f32,
     goal: Option<Vec3>,
+    /// The control point the goal is at; bots stay until their team holds it.
+    goal_point: Option<Entity>,
     goal_timer: f32,
     yaw: f32,
     last_position: Vec3,
@@ -93,6 +96,7 @@ impl Default for BotBrain {
             burst: 0.0,
             strafe: 1.0,
             goal: None,
+            goal_point: None,
             goal_timer: 0.0,
             yaw: fastrand::f32() * TAU,
             last_position: Vec3::ZERO,
@@ -126,7 +130,10 @@ fn spawn_bots(
             team,
             InputBuffer::default(),
             BotBrain::default(),
-            crate::KitChoice(fastrand::u8(0..7)),
+            Deployment {
+                kit: fastrand::u8(0..7),
+                ..default()
+            },
             Replicated,
         ));
     }
@@ -142,9 +149,10 @@ fn think(
     mut bots: Query<(&mut BotBrain, &mut InputBuffer, &Team, Option<&Controls>)>,
     soldiers: Query<(Entity, &SoldierMotion, &ControlledBy, Option<&Inventory>), With<Soldier>>,
     teams: Query<&Team>,
+    control_points: Query<(Entity, &ControlPoint, &FlagState)>,
 ) {
     let dt = time.delta_secs();
-    let layout = level.game_mode(&match_info.mode, match_info.size);
+    let _ = &match_info;
 
     for (mut brain, mut buffer, team, controls) in &mut bots {
         let Some((own, motion, _, inventory)) = controls.and_then(|c| soldiers.get(c.0).ok()) else {
@@ -229,10 +237,20 @@ fn think(
 
         let reached = brain
             .goal
-            .is_none_or(|goal| flat(goal - motion.position).length() < 5.0);
+            .is_none_or(|goal| flat(goal - motion.position).length() < 3.0);
         brain.goal_timer -= dt;
-        if reached || brain.goal_timer <= 0.0 {
-            brain.goal = Some(choose_goal(&level, layout, *team, motion.position));
+        // At a flag we don't hold yet: keep moving around inside its radius until it's ours.
+        let holding_on = brain.goal_point.and_then(|e| control_points.get(e).ok()).filter(
+            |(_, cp, state)| state.owner != *team && cp.contains(motion.position),
+        );
+        if let Some((_, cp, _)) = holding_on {
+            if reached {
+                brain.goal = Some(point_near(cp.position, cp.radius * 0.6));
+            }
+        } else if reached || brain.goal_timer <= 0.0 {
+            let (goal, point) = choose_goal(&level, &control_points, *team, motion.position);
+            brain.goal = Some(goal);
+            brain.goal_point = point;
             brain.goal_timer = 40.0 + fastrand::f32() * 40.0;
         }
         let to_goal = flat(brain.goal.unwrap_or(motion.position) - motion.position);
@@ -277,36 +295,49 @@ fn think(
     }
 }
 
-/// Picks somewhere worth going: a control point the team doesn't hold, or a random spot.
+/// Picks somewhere worth going: preferably a nearby control point the team doesn't hold,
+/// sometimes one it holds (to defend), otherwise a random spot.
 fn choose_goal(
     level: &LoadedLevel,
-    layout: Option<&game_data::GameModeDesc>,
+    control_points: &Query<(Entity, &ControlPoint, &FlagState)>,
     team: Team,
     from: Vec3,
-) -> Vec3 {
-    let team_id = match team {
-        Team::One => 1,
-        Team::Two => 2,
-        Team::Spectator => 0,
-    };
-    if let Some(layout) = layout {
-        let targets: Vec<_> = layout
-            .control_points
-            .iter()
-            .filter(|cp| cp.initial_team != team_id)
-            .collect();
-        if let Some(cp) = fastrand::choice(&targets) {
-            let angle = fastrand::f32() * TAU;
-            let r = fastrand::f32() * cp.radius * 0.8;
-            return Vec3::from_array(cp.position) + Vec3::new(angle.cos() * r, 0.0, angle.sin() * r);
+) -> (Vec3, Option<Entity>) {
+    let mut targets: Vec<(Entity, &ControlPoint, f32)> = control_points
+        .iter()
+        .filter(|(_, cp, _)| !cp.uncapturable)
+        .map(|(entity, cp, state)| {
+            // Closer and enemy-held points are more attractive.
+            let distance = flat(cp.position - from).length().max(20.0);
+            let interest = if state.owner == team { 0.25 } else { 1.0 };
+            (entity, cp, interest / distance)
+        })
+        .collect();
+    let total: f32 = targets.iter().map(|(.., w)| w).sum();
+    if total > 0.0 {
+        let mut pick = fastrand::f32() * total;
+        targets.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for (entity, cp, weight) in &targets {
+            pick -= weight;
+            if pick <= 0.0 {
+                return (point_near(cp.position, cp.radius * 0.6), Some(*entity));
+            }
         }
     }
     let Some(heightmap) = &level.heightmap else {
-        return from;
+        return (from, None);
     };
     let half = heightmap.world_size() * 0.4;
     let center = heightmap.center();
-    center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half
+    let spot = center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half;
+    (spot, None)
+}
+
+/// A random point within `radius` of `center`, on the same height.
+fn point_near(center: Vec3, radius: f32) -> Vec3 {
+    let angle = fastrand::f32() * TAU;
+    let r = fastrand::f32().sqrt() * radius;
+    center + Vec3::new(angle.cos() * r, 0.0, angle.sin() * r)
 }
 
 fn flat(v: Vec3) -> Vec3 {
