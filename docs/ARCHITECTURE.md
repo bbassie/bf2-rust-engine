@@ -128,7 +128,9 @@ helicopter, sea, stationary) comes from the engine type.
     it flyable. Landing gear retracts above its BF2 height.
   - helicopters: the rotor spins up, the collective regulates the climb rate (holding
     altitude hands off), the cyclic tilts the lift within BF2's regulation angles and the
-    body levels itself when let go; turn rates follow BF2's engine values.
+    body levels itself when let go; turn rates follow BF2's engine values. Near the ground
+    the collective sinks slower (a held-down helicopter touches down at about 2 m/s), and a
+    landed one leans on its skids until the pilot pulls up.
   - jump jets (the F-35B): below 35 m/s, S swings them into hover (also parked on a deck):
     the lift fan (BF2's `c_ETHelicopter` engine on the jet) carries them like a gentle
     helicopter, W/S climb and sink, the stick tilts them to drift; above 50 m/s or with the

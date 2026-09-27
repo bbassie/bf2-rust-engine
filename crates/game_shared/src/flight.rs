@@ -47,12 +47,18 @@ const AIR_BRAKE: f32 = 5.0;
 const FLAP_SPEEDS: [f32; 2] = [45.0, 75.0];
 /// How quickly the collective corrects the vertical speed, 1/s.
 const COLLECTIVE_RESPONSE: f32 = 1.5;
-/// Helicopters regulate their altitude and level out only above this height (m); lower down
-/// they settle onto the ground unless the pilot climbs.
-const HOVER_HEIGHT: f32 = 1.5;
+/// Helicopters regulate their altitude and level out only this high above where they sit on
+/// their skids (m); lower down they settle onto the ground unless the pilot climbs.
+const HOVER_HEIGHT: f32 = 0.6;
 /// Jump jets start hovering below the first airspeed (m/s) and fly as jets again above the
 /// second.
 const VTOL_SPEEDS: [f32; 2] = [35.0, 50.0];
+/// Near the ground the collective sinks at most this fast (m/s), plus this much per meter of
+/// height, so a helicopter held down touches down gently instead of bouncing off its skids.
+const LANDING_SINK: f32 = 1.5;
+const LANDING_SINK_PER_METER: f32 = 0.35;
+/// Share of its weight the rotor carries while a helicopter sits on the ground.
+const GROUNDED_LIFT: f32 = 0.5;
 
 /// A rigid body's motion in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -341,23 +347,34 @@ pub fn flight_forces(
         state.spin += (target - state.spin).clamp(-rate * dt, rate * dt);
         let power = state.spin * state.spin;
         let up = rotation * Vec3::Y;
-        let airborne = around.altitude > HOVER_HEIGHT;
+        // Height above where it sits: its center of mass stands this high over its skids.
+        let resting = desc
+            .wheels
+            .iter()
+            .map(|w| desc.physics.center_of_mass[1] - (w.position[1] - w.radius))
+            .fold(None, |most: Option<f32>, h| Some(most.map_or(h, |m| m.max(h))))
+            .unwrap_or(1.0);
+        let clearance = around.altitude - resting;
+        let airborne = clearance > HOVER_HEIGHT;
         let tilt = up.angle_between(Vec3::Y).to_degrees();
         let span = (rotor.no_regulation_angle - rotor.regulation_angle).max(1.0);
         let regulation = if airborne { 1.0 - ((tilt - rotor.regulation_angle) / span).clamp(0.0, 1.0) } else { 0.0 };
         let climb = if controls.throttle >= 0.0 {
             controls.throttle * rotor.climb_speed[0]
         } else {
-            controls.throttle * rotor.climb_speed[1]
+            let limit = LANDING_SINK + clearance.max(0.0) * LANDING_SINK_PER_METER;
+            controls.throttle * rotor.climb_speed[1].min(limit)
         };
         // Held altitude: whatever push keeps the vertical speed at what the collective asks,
         // making up for what the wings and drag do.
         let others: f32 = push.forces.iter().map(|(f, _)| f.y).sum::<f32>() / mass;
         let regulated = (g - others + (climb - body.velocity.y) * COLLECTIVE_RESPONSE) / up.y.max(0.35);
+        // Sitting on its skids it leans on them (and grips the ground), lifting only once the
+        // pilot pulls up.
         let free = if airborne || controls.throttle > 0.0 {
             g * (1.0 + controls.throttle * rotor.lift_margin)
         } else {
-            g * 0.9
+            g * GROUNDED_LIFT
         };
         let thrust = (free + (regulated - free) * regulation).clamp(0.0, g * (1.0 + rotor.lift_margin)) * power;
         // Tilting further than the regulation reaches doesn't push harder sideways.

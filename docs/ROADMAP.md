@@ -113,7 +113,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   ladder, heading, airspeed, throttle, altitude, climb rate, stall and pull-up warnings)
 - Artillery and commander assets as vehicles
 - [x] F-35B vertical take-off and hover (BF2's lift fan engine)
-- Flight tuning against BF2 (rudder authority, helicopter landing)
+- [x] Helicopter landing: the collective slows the descent near the ground, landed
+  helicopters sit on their skids
+- Flight tuning against BF2 (rudder authority)
 
 ## M4: BF2-style bots
 
