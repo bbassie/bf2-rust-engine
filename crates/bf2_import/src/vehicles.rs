@@ -634,6 +634,10 @@ fn weapon_descs(
             .unwrap_or([0.0; 3]);
         let mut weapon = weapons::weapon_desc(interp, converter, &t, out);
         weapon.display_name = localization.resolve(&weapon.display_name);
+        // Horns are "guns" firing harmless projectiles for their sound.
+        if weapon.projectile.damage <= 0.0 && weapon.projectile.explosion_damage <= 0.0 {
+            continue;
+        }
         // Vehicle guns without a deviation setting are dead accurate (the handheld default
         // doesn't apply).
         if t.get("deviation.mindev").is_none() {

@@ -258,8 +258,8 @@ fn spawn_hud(mut commands: Commands) {
             position_type: PositionType::Absolute,
             bottom: px(28),
             left: percent(50),
-            margin: UiRect::left(px(-250)),
-            width: px(500),
+            margin: UiRect::left(px(-320)),
+            width: px(640),
             justify_content: JustifyContent::Center,
             ..default()
         },

@@ -1,0 +1,30 @@
+// Networked vehicles, the joining side: logs the vehicles the host drives, as replicated and
+// interpolated here. See vehicle_net_host.ron.
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        LogVehicles("remote 0"),
+        Wait(2.0),
+        LogVehicles("remote 2"),
+        Wait(2.0),
+        LogVehicles("remote 4"),
+        Wait(2.0),
+        LogVehicles("remote 6"),
+        Wait(2.0),
+        LogVehicles("remote 8"),
+        Wait(2.0),
+        LogVehicles("remote 10"),
+        Wait(2.0),
+        LogVehicles("remote 12"),
+        Wait(2.0),
+        LogVehicles("remote 14"),
+        Wait(2.0),
+        LogVehicles("remote 16"),
+        Wait(2.0),
+        LogVehicles("remote 18"),
+        Wait(2.0),
+        LogVehicles("remote 20"),
+        Quit,
+    ],
+)

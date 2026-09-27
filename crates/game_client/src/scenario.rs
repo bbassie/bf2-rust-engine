@@ -96,12 +96,17 @@ pub enum Step {
     /// Moves our soldier next to the first entry point of the nearest vehicle with this
     /// template (e.g. `"usjep_hmmwv"`), facing it. Singleplayer and listen server only.
     NearVehicle(String),
+    /// Walks (sprinting, by input like a player) to the first entry point of the nearest
+    /// vehicle with this template; works connected to a remote server. Gives up after 40 s.
+    WalkToVehicle(String),
     /// In a vehicle: moves to this seat (1-based), like pressing F1..F8.
     Seat(u8),
     /// In a vehicle: look direction relative to its heading (yaw, pitch in degrees).
     VehicleLook(f32, f32),
     /// Logs our vehicle's position, speed and orientation, and adds it to the report.
     VehicleInfo(String),
+    /// Logs every moving or occupied vehicle (works connected to a remote server too).
+    LogVehicles(String),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
     Release(Vec<Button>),
@@ -307,6 +312,8 @@ struct PlayerControls<'w, 's> {
 #[derive(bevy::ecs::system::SystemParam)]
 struct Vehicles<'w, 's> {
     vehicles: Query<'w, 's, (&'static Vehicle, &'static VehicleView, &'static VehicleData)>,
+    all: Query<'w, 's, (Entity, &'static Vehicle, &'static VehicleView)>,
+    riders: Query<'w, 's, &'static Seated>,
     seated: Query<'w, 's, &'static Seated, With<LocalSoldier>>,
     seat: ResMut<'w, SeatRequest>,
 }
@@ -423,6 +430,39 @@ fn run_scenario(
                 }
                 Progress::Done
             }
+            Step::WalkToVehicle(template) => {
+                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                let target = vehicles
+                    .vehicles
+                    .iter()
+                    .filter(|(v, ..)| v.template == *template)
+                    .map(|(_, view, data)| {
+                        let entry = data.0.desc.entry_points.first();
+                        let point = entry.map_or(view.transform.translation, |e| {
+                            view.transform.transform_point(Vec3::from_array(e.position))
+                        });
+                        (point, entry.map_or(3.0, |e| e.radius))
+                    })
+                    .min_by(|a, b| a.0.distance(origin).total_cmp(&b.0.distance(origin)));
+                let to = target.map(|(point, radius)| (point - (origin + Vec3::Y), radius));
+                match to {
+                    Some((to, radius)) if Vec2::new(to.x, to.z).length() > radius * 0.6 && elapsed < 40.0 => {
+                        look.yaw = (-to.x).atan2(-to.z);
+                        look.pitch = 0.0;
+                        input.movement = Some(Vec2::Y);
+                        input.buttons.insert(Buttons::SPRINT);
+                        Progress::Waiting
+                    }
+                    _ => {
+                        if to.is_none() {
+                            warn!("scenario: no {template} to walk to");
+                        }
+                        input.movement = None;
+                        input.buttons.remove(Buttons::SPRINT);
+                        Progress::Done
+                    }
+                }
+            }
             Step::Seat(seat) => {
                 vehicles.seat.0 = *seat;
                 Progress::Done
@@ -436,6 +476,28 @@ fn run_scenario(
                     .map_or(0.0, |(_, view, _)| crate::vehicles::heading(view.transform.rotation));
                 look.yaw = heading + yaw.to_radians();
                 look.pitch = pitch.to_radians();
+                Progress::Done
+            }
+            Step::LogVehicles(label) => {
+                let mut lines = Vec::new();
+                for (entity, vehicle, view) in &vehicles.all {
+                    let riders = vehicles.riders.iter().filter(|s| s.vehicle == entity).count();
+                    if riders == 0 && view.speed.abs() < 0.5 {
+                        continue;
+                    }
+                    let p = view.transform.translation;
+                    lines.push(format!(
+                        "{} at ({:.1}, {:.1}, {:.1}) {:.1} km/h, {riders} aboard",
+                        vehicle.template,
+                        p.x,
+                        p.y,
+                        p.z,
+                        view.speed * 3.6
+                    ));
+                }
+                let line = format!("{label}: {} vehicles; {}", vehicles.all.iter().count(), lines.join("; "));
+                info!("scenario: {line}");
+                writeln!(runner.report, "{line}").ok();
                 Progress::Done
             }
             Step::VehicleInfo(label) => {
