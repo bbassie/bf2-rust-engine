@@ -120,13 +120,19 @@ impl<'a> MeshConverter<'a> {
     /// Converts one geom of a mesh to `x{suffix}.glb` (weapons: geom 0 is first person,
     /// geom 1 third person).
     pub fn convert_mesh_geom(&self, mesh_path: &str, geom: usize, suffix: &str) -> Result<String> {
-        let key = normalize(mesh_path);
-        let job = format!("{key}#{geom}{suffix}");
-        let suffix = suffix.to_string();
-        self.once(&job, || self.convert_mesh_inner(key, geom, &suffix))
+        self.convert_mesh_lod(mesh_path, geom, 0, suffix)
     }
 
-    fn convert_mesh_inner(&self, key: String, geom: usize, suffix: &str) -> Result<String> {
+    /// Converts one LOD of one geom to `x{suffix}.glb` (weapons: first-person LOD 1 is the
+    /// zoomed view).
+    pub fn convert_mesh_lod(&self, mesh_path: &str, geom: usize, lod: usize, suffix: &str) -> Result<String> {
+        let key = normalize(mesh_path);
+        let job = format!("{key}#{geom}.{lod}{suffix}");
+        let suffix = suffix.to_string();
+        self.once(&job, || self.convert_mesh_inner(key, geom, lod, &suffix))
+    }
+
+    fn convert_mesh_inner(&self, key: String, geom: usize, lod: usize, suffix: &str) -> Result<String> {
         let kind = MeshKind::from_path(&key).context("not a mesh file")?;
         let out_rel = format!("{}{suffix}.glb", key.rsplit_once('.').map_or(key.as_str(), |(s, _)| s));
         if self.out.join(&out_rel).exists() {
@@ -134,14 +140,17 @@ impl<'a> MeshConverter<'a> {
         }
         let data = self.vfs.read(&key)?;
         let mesh = VisMesh::parse(&data, kind).with_context(|| format!("parsing {key}"))?;
-        anyhow::ensure!(geom < mesh.geoms.len(), "{key} has no geom {geom}");
-        let doc = self.build_document(&mesh, geom, &out_rel);
+        anyhow::ensure!(
+            mesh.geoms.get(geom).is_some_and(|g| lod < g.lods.len()),
+            "{key} has no geom {geom} LOD {lod}"
+        );
+        let doc = self.build_document(&mesh, geom, lod, &out_rel);
         doc.write(&self.out.join(&out_rel))
             .with_context(|| format!("writing {out_rel}"))?;
         Ok(out_rel)
     }
 
-    fn build_document(&self, mesh: &VisMesh, geom: usize, out_rel: &str) -> Document {
+    fn build_document(&self, mesh: &VisMesh, geom: usize, lod: usize, out_rel: &str) -> Document {
         let mut doc = Document::default();
         let mut image_index: HashMap<String, usize> = HashMap::new();
         let mut image = |doc: &mut Document, texture: &str| -> usize {
@@ -159,8 +168,7 @@ impl<'a> MeshConverter<'a> {
             .map(|i| mesh.attribute::<2>(Usage::TexCoord, i).unwrap_or_default())
             .collect();
 
-        // The most detailed LOD of the requested geom.
-        let Some(lod) = mesh.geoms.get(geom).and_then(|g| g.lods.first()) else {
+        let Some(lod) = mesh.geoms.get(geom).and_then(|g| g.lods.get(lod)) else {
             return doc;
         };
 

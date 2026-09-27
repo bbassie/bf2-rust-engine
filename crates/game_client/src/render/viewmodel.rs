@@ -308,6 +308,7 @@ fn attach_weapon(
                 .unwrap_or_default();
             let part = commands
                 .spawn((
+                    super::scope::WeaponPart(index),
                     Mesh3d(primitive.mesh.clone()),
                     MeshMaterial3d(material),
                     RenderLayers::layer(VIEW_MODEL_LAYER),

@@ -62,7 +62,28 @@ pub struct WeaponDesc {
     #[serde(default)]
     pub zoom_factors: Vec<f32>,
     #[serde(default)]
+    pub zoom: ZoomDesc,
+    #[serde(default)]
     pub sounds: WeaponSounds,
+}
+
+/// How zooming looks (BF2 `DefaultZoomComp`).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ZoomDesc {
+    /// First-person model that replaces `mesh_1p` while zoomed (BF2 `zoomLod`): the view
+    /// through the scope, or the sights with a blurred rear sight. One part, on bone `mesh1`
+    /// in the zoom pose. It is modelled for the unzoomed view model field of view.
+    #[serde(default)]
+    pub mesh_1p: Option<String>,
+    /// Seconds from pressing zoom until `mesh_1p` replaces the weapon.
+    #[serde(default)]
+    pub delay: f32,
+    /// Seconds from pressing zoom until the field of view narrows.
+    #[serde(default)]
+    pub fov_delay: f32,
+    /// Bolt-action rifles leave the zoom after every shot.
+    #[serde(default)]
+    pub out_after_fire: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

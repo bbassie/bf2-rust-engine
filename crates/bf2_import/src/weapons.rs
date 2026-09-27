@@ -10,6 +10,7 @@ use bf2_formats::{
 };
 use game_data::{
     DeviationDesc, FireMode, KitDesc, ProjectileDesc, RecoilDesc, WeaponDesc, WeaponSounds,
+    ZoomDesc,
 };
 
 use crate::meshes::MeshConverter;
@@ -154,16 +155,25 @@ fn weapon_desc(
         .as_deref()
         .and_then(|g| interp.world.geometry(g))
         .and_then(|g| g.mesh_path());
-    let convert = |geom: usize, suffix: &str| {
+    let convert = |geom: usize, lod: usize, suffix: &str| {
         mesh_path.as_deref().and_then(|p| {
             converter
-                .convert_mesh_geom(p, geom, suffix)
-                .map_err(|e| log::debug!("weapon {name} geom {geom}: {e:#}"))
+                .convert_mesh_lod(p, geom, lod, suffix)
+                .map_err(|e| log::debug!("weapon {name} geom {geom} LOD {lod}: {e:#}"))
                 .ok()
         })
     };
-    let mesh_1p = convert(0, "_1p");
-    let mesh_3p = convert(1, "_3p");
+    let mesh_1p = convert(0, 0, "_1p");
+    let mesh_3p = convert(1, 0, "_3p");
+    // While zoomed the game draws another LOD of the first-person geom: scoped weapons
+    // model the view through the scope there, the others their sights up close.
+    let zoom_lod = f("zoom.zoomlod", 0.0) as usize;
+    let zoom = ZoomDesc {
+        mesh_1p: (zoom_lod > 0).then(|| convert(0, zoom_lod, "_1p_zoom")).flatten(),
+        delay: f("zoom.zoomdelay", 0.0),
+        fov_delay: f("zoom.changefovdelay", 0.0),
+        out_after_fire: f("zoom.zoomoutafterfire", 0.0) != 0.0,
+    };
 
     // Third-person animations were exported per weapon folder by the soldier import.
     let dir = t.source.split(':').next().unwrap_or_default();
@@ -232,6 +242,7 @@ fn weapon_desc(
             .get_all("zoom.addzoomfactor")
             .filter_map(|a| a.first()?.parse().ok())
             .collect(),
+        zoom,
         sounds,
     }
 }

@@ -19,6 +19,7 @@ use game_shared::{
 };
 
 use crate::{
+    render::scope::Zoom,
     camera::PlayerCamera,
     local_input::{InputHistory, LocalInputSystems, LookState},
     net::{LocalPlayer, LocalSoldier},
@@ -454,12 +455,16 @@ fn update_impacts(mut commands: Commands, time: Res<Time>, mut impacts: Query<(E
     }
 }
 
-/// Right mouse zooms by the weapon's zoom factor (BF2 stores it as a field-of-view scale).
-fn apply_zoom(
+/// Right mouse zooms by the weapon's zoom factor (BF2 stores it as a field-of-view scale)
+/// after its field-of-view delay. The world snaps in and out with the zoom model (a scope
+/// view must not show the zoom easing in, nor the hip weapon a magnified world).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_zoom(
     time: Res<Time>,
-    history: Res<InputHistory>,
+    zoom: Res<Zoom>,
     armory: Res<Armory>,
     soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, With<SoldierRender>)>,
+    mut was_scoped: Local<bool>,
     mut look: ResMut<LookState>,
     mut feedback: ResMut<CombatFeedback>,
     mut camera: Single<&mut Projection, With<PlayerCamera>>,
@@ -467,13 +472,18 @@ fn apply_zoom(
     let target = soldier
         .single()
         .ok()
-        .filter(|_| history.latest().is_some_and(|input| input.pressed(Buttons::AIM)))
         .and_then(|(loadout, inventory)| loadout.weapons.get(inventory.active as usize))
         .and_then(|w| armory.weapon(w))
+        .filter(|w| zoom.held > 0.0 && zoom.held >= w.zoom.fov_delay)
         .and_then(|w| w.zoom_factors.iter().copied().find(|&f| f > 0.0))
         .unwrap_or(1.0);
-    let zoom = feedback.zoom;
-    feedback.zoom = zoom + (target - zoom) * (1.0 - (-18.0 * time.delta_secs()).exp());
+    let current = feedback.zoom;
+    feedback.zoom = if zoom.scoped || *was_scoped {
+        target
+    } else {
+        current + (target - current) * (1.0 - (-18.0 * time.delta_secs()).exp())
+    };
+    *was_scoped = zoom.scoped;
     look.zoom_scale = feedback.zoom;
     if let Projection::Perspective(perspective) = camera.as_mut() {
         perspective.fov = 75f32.to_radians() * feedback.zoom;

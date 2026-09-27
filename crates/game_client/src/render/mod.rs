@@ -7,6 +7,7 @@ pub mod environment;
 mod flags;
 pub mod materials;
 mod props;
+pub mod scope;
 mod soldiers;
 mod statics;
 mod terrain;
@@ -25,6 +26,7 @@ impl Plugin for RenderPlugin {
             soldiers::SoldierRenderPlugin,
             statics::StaticRenderPlugin,
             viewmodel::ViewModelPlugin,
+            scope::ScopePlugin,
         ));
     }
 }

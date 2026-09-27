@@ -142,6 +142,7 @@ fn test_rifle() -> WeaponDesc {
             zoom_modifier: 0.8,
         },
         zoom_factors: vec![0.0, 0.6],
+        zoom: Default::default(),
         sounds: WeaponSounds::default(),
     }
 }
