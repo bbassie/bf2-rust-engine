@@ -32,7 +32,7 @@ use game_shared::{
     revive::{Downed, WRECK_HIT_POINTS},
     soldier::{Health, Hitbox, Soldier, SoldierMotion},
     statics::Destructible,
-    vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
+    vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, VehicleState, armor_damage_modifier},
     weapons::{Armory, Fired, Inventory, Loadout, Trigger, WeaponState, damage_at, spread_direction},
 };
 
@@ -579,7 +579,7 @@ fn simulate_projectiles(
         (Entity, &SoldierMotion, &Loadout, Option<&PoseHistory>, Option<&Seated>),
         (With<Soldier>, Without<Downed>),
     >,
-    vehicles: Query<(&VehicleData, &Position, &LinearVelocity)>,
+    vehicles: Query<(&VehicleData, &Position, &LinearVelocity, &Rotation, Option<&VehicleState>)>,
     materials: Option<Res<Materials>>,
     destructibles: Query<(), With<Destructible>>,
     mut soldier_hits: MessageWriter<SoldierHit>,
@@ -671,7 +671,7 @@ fn simulate_projectiles(
         if let Some(target) = live.target {
             // Heat seeking: towards where the aircraft will be, until it slips out of view.
             match vehicles.get(target) {
-                Ok((_, position, velocity)) => {
+                Ok((_, position, velocity, ..)) => {
                     let to = position.0 - next.position;
                     if to.length() < HEAT_PROXIMITY {
                         detonations.write(Detonation {
@@ -731,6 +731,7 @@ fn simulate_projectiles(
                     (hit.distance, contact)
                 })
         };
+        let incoming = next.velocity;
         let step = projectile::step(&spatial, &filter, desc, &mut next, live.age, dt, soldier_along);
         if next != *motion {
             *motion = next;
@@ -769,9 +770,22 @@ fn simulate_projectiles(
                     attacker: attacker.clone(),
                 });
             }
-        } else if let Ok((vehicle, ..)) = vehicles.get(body) {
-            let armor = damage_mod(materials.as_deref(), desc.material, vehicle.0.desc.armor_material);
+        } else if let Ok((vehicle, position, _, rotation, state)) = vehicles.get(body) {
+            // The face it hits: front, side or rear armour, tracks, glass.
+            let inverse = rotation.0.inverse();
+            let joints = state.map_or(&[][..], |s| s.joints.as_slice());
+            let face = vehicle
+                .0
+                .armor_material_at(joints, inverse * (hit.point - position.0), inverse * incoming);
+            let material = face.unwrap_or(vehicle.0.desc.armor_material);
+            let armor = damage_mod(materials.as_deref(), desc.material, material);
             let damage = damage_at(desc, live.travelled) * armor;
+            debug!(
+                "{} hit {} on material {material}{} (x{armor}) for {damage:.1}",
+                weapon.name,
+                vehicle.0.desc.name,
+                if face.is_none() { " (no armour face)" } else { "" }
+            );
             if damage > 0.0 {
                 vehicle_hits.write(VehicleHit {
                     vehicle: body,

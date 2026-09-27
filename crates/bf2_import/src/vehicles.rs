@@ -19,8 +19,8 @@ use bf2_formats::{
     mesh::{MeshKind, Usage, VisMesh},
 };
 use game_data::{
-    AeroDesc, AfterburnerDesc, Attachment, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc, JointAxis,
-    JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera, SeatDesc, ThrusterDesc,
+    AeroDesc, AfterburnerDesc, Attachment, DriveKind, EngineDesc, EntryPointDesc, FloaterDesc, GearDesc,
+    GearboxDesc, JointAxis, JointDesc, JointInput, LandingGearDesc, Placement, RotorDesc, SeatCamera, SeatDesc, ThrusterDesc,
     VehicleArmorEffect, VehicleCategory, VehicleDesc, VehiclePart, VehiclePhysics, VehicleWeaponDesc, WheelDesc,
     WingDesc,
 };
@@ -52,6 +52,14 @@ const LIFT_PER_WING_LIFT: f32 = 0.01;
 const LIFT_PER_FLAP_LIFT: f32 = 0.003;
 const THRUST_PER_POWER: f32 = 0.004;
 const DRAG_PER_DRAG: f32 = 0.003;
+/// BF2's land engine numbers in newtons (fitted, see [`tune_engine`]): drive force per
+/// `setTorque` × `setDifferential` × gear ratio / wheel radius, brake force per
+/// `brakeTorque` / radius, engine braking per `engineBrakeTorque` / radius; tanks push with
+/// `setTorque` × `setDifferential` times their own factor.
+const FORCE_PER_TORQUE: f32 = 4.5;
+const BRAKE_PER_TORQUE: f32 = 2.5;
+const ENGINE_BRAKE_PER_TORQUE: f32 = 0.4;
+const TRACK_FORCE_PER_POWER: f32 = 125.0;
 /// Landing flaps' lift (`setFlapLift 3`) would lift a jet off at a walking pace.
 const LANDING_FLAP_SHARE: f32 = 0.3;
 /// Rudders in the water need more bite than BF2's numbers give against our water drag.
@@ -75,7 +83,7 @@ pub fn import(
     for name in names {
         interp.ensure_template(name);
         load_tree(interp, name, 0);
-        let Some(mut desc) = build(interp, converter, name) else {
+        let Some((mut desc, drivetrain)) = build(interp, converter, name) else {
             continue;
         };
         desc.display_name = localization.resolve(&desc.display_name);
@@ -83,7 +91,7 @@ pub fn import(
             .map(|s| s * 1.1)
             .unwrap_or(desc.engine.top_speed);
         if matches!(desc.drive, DriveKind::Wheeled | DriveKind::Tracked) {
-            tune_engine(&mut desc);
+            tune_engine(&mut desc, drivetrain.as_ref());
         }
         desc.weapons = weapon_descs(interp, converter, localization, &huds, &desc, out);
         desc.sounds = crate::sounds::SoundConverter::new(converter.vfs, out).vehicle(&interp.world, name);
@@ -149,6 +157,8 @@ struct Node {
     seat: Option<u32>,
     /// BF2 mesh file and part index, for measuring wheels.
     source_mesh: Option<(String, u32)>,
+    /// BF2 collision mesh file and the template whose `mapMaterial`s name its materials.
+    source_collision: Option<(String, String)>,
 }
 
 struct Builder<'a> {
@@ -174,6 +184,7 @@ struct PartMesh {
 struct Inherited {
     mesh: Option<PartMesh>,
     collision: Option<String>,
+    source_collision: Option<(String, String)>,
 }
 
 impl Builder<'_> {
@@ -240,16 +251,19 @@ impl Builder<'_> {
                     interior,
                 })
             });
-        let own_collision = template
+        let own_source_collision = template
             .collision_mesh
             .as_deref()
-            .and_then(|c| self.world.collision_meshes.get(&c.to_ascii_lowercase()))
-            .and_then(|path| {
-                self.converter
-                    .convert_collision(path)
-                    .map_err(|e| log::debug!("vehicle collision {path}: {e:#}"))
-                    .ok()
-            });
+            .and_then(|c| self.world.collision_meshes.get(&c.to_ascii_lowercase()));
+        let own_collision = own_source_collision.and_then(|path| {
+            self.converter
+                .convert_collision(path)
+                .map_err(|e| log::debug!("vehicle collision {path}: {e:#}"))
+                .ok()
+        });
+        let own_source_collision = own_source_collision
+            .filter(|_| own_collision.is_some())
+            .map(|path| (path.clone(), template.name.to_ascii_lowercase()));
         let geometry_part = template.get_f32("geometrypart").map(|p| p as u32);
         let collision_part = template.get_f32("collisionpart").map(|p| p as u32);
         let mesh = own_mesh
@@ -258,6 +272,9 @@ impl Builder<'_> {
         let collision = own_collision
             .clone()
             .or_else(|| collision_part.and(inherited.collision.clone()));
+        let source_collision = own_source_collision
+            .clone()
+            .or_else(|| collision_part.and(inherited.source_collision.clone()));
 
         let index = self.parts.len() as u32;
         let seat = if ty == "playercontrolobject" {
@@ -295,11 +312,13 @@ impl Builder<'_> {
             hull,
             seat,
             source_mesh: mesh.map(|m| (m.source, geometry_part.unwrap_or(0))),
+            source_collision,
         });
 
         let inherited = Inherited {
             mesh: own_mesh.or(inherited.mesh),
             collision: own_collision.or(inherited.collision),
+            source_collision: own_source_collision.or(inherited.source_collision),
         };
         for child in &template.children {
             let local = Affine3A::from_rotation_translation(
@@ -405,7 +424,7 @@ fn spin_joint(t: &Template) -> Option<JointDesc> {
     Some(JointDesc { axes, seat: 0 })
 }
 
-fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<VehicleDesc> {
+fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<(VehicleDesc, Option<Drivetrain>)> {
     let world = &interp.world;
     let root = world.template(name)?;
     if !root.ty.eq_ignore_ascii_case("PlayerControlObject") {
@@ -663,8 +682,8 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         .then(|| aero_desc(category, root.get_f32("drag").unwrap_or(1.0)))
         .filter(|_| category != VehicleCategory::Stationary);
 
-    // Direct hits land on per-face collision materials in BF2 (front, sides, rear, tracks);
-    // until those are imported, one typical hull material per class.
+    // Direct hits land on per-face collision materials (`armor_mesh`); this one is for hits
+    // that miss them: a typical hull material per class.
     let armor_material = match (drive, category) {
         (DriveKind::Tracked, _) => 29,
         (_, VehicleCategory::Air | VehicleCategory::Helicopter) => {
@@ -716,6 +735,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         hit_points: root.get_f32("armor.maxhitpoints").unwrap_or(1000.0),
         armor_material,
         blast_material: root.get_f32("armor.defaultmaterial").unwrap_or(72.0) as u32,
+        armor_mesh: write_armor_mesh(world, converter, name, &nodes),
         wreck_mesh,
         wreck_pieces,
         armor_effects: Vec::new(),
@@ -740,7 +760,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
     };
     desc.physics.bounds = bounds;
     orient_control_surfaces(&mut desc);
-    Some(desc)
+    Some((desc, engine.map(Drivetrain::new)))
 }
 
 /// Where a jet's center of mass goes: on the wings' neutral point, so it keeps its attitude
@@ -913,19 +933,100 @@ fn rest_transforms(parts: &[VehiclePart]) -> Vec<(Vec3, Quat)> {
     out
 }
 
-/// Forces from the top speed and mass: full speed in five (wheels) to seven (tracks)
-/// seconds, braking at a little under 1 g. BF2's engine formulas aren't known
-/// (gameplay-data.md §3.2).
-fn tune_engine(desc: &mut VehicleDesc) {
+/// BF2's numbers of a land vehicle's `Engine` (gameplay-data.md §3.2).
+struct Drivetrain {
+    torque: f32,
+    differential: f32,
+    /// Forward gear ratios: the first `setNumberOfGears` of `setGearRatios`.
+    ratios: Vec<f32>,
+    shift_up: f32,
+    shift_down: f32,
+    shift_time: f32,
+    idle: f32,
+    brake_torque: Option<f32>,
+    engine_brake_torque: Option<f32>,
+    slide_grip: Option<f32>,
+}
+
+impl Drivetrain {
+    fn new(t: &Template) -> Self {
+        let ratios: Vec<f32> = t
+            .get("setgearratios")
+            .map(|args| args.iter().filter_map(|a| a.parse().ok()).collect())
+            .unwrap_or_default();
+        let gears = t.get_f32("setnumberofgears").map_or(ratios.len(), |n| n as usize).min(ratios.len());
+        let rpm = |method: &str, default: f32| t.get_f32(method).unwrap_or(default);
+        Self {
+            torque: t.get_f32("settorque").unwrap_or(0.0),
+            differential: t.get_f32("setdifferential").unwrap_or(0.0),
+            ratios: ratios[..gears].iter().copied().filter(|r| *r > 0.0).collect(),
+            shift_up: t.get_f32("setgearup").unwrap_or(0.85),
+            shift_down: t.get_f32("setgeardown").unwrap_or(0.4),
+            shift_time: t.get_f32("setgearchangetime").unwrap_or(0.5),
+            idle: rpm("newcar2.minrpm", 1000.0) / rpm("newcar2.maxrpm", 4000.0).max(1.0),
+            brake_torque: t.get_f32("newcar2.braketorque"),
+            engine_brake_torque: t.get_f32("newcar2.enginebraketorque"),
+            slide_grip: t.get_f32("newcar2.wheellatmindynamicfriction"),
+        }
+    }
+}
+
+/// Engine and brakes from BF2's drivetrain numbers, fitted to BF2's AI top speeds with one
+/// factor each (BF2's own formulas aren't known):
+///
+/// - wheeled (`c_ETNewCar2`): each gear pulls `setTorque` × `setDifferential` × its ratio /
+///   the wheel radius and tops out where the top gear reaches the top speed; reverse uses the
+///   first gear. On Karkand's flat road a HMMWV reaches 50 km/h in 4 s and 88 km/h in 10 s,
+///   a LAV-25 its 77 km/h in 8.5 s (vehicle2_drive). Brakes and engine braking follow
+///   `brakeTorque` and `engineBrakeTorque` (a HMMWV brakes at 0.8 g and coasts down at
+///   1 m/s² plus drag).
+/// - tracked (`c_ETTank`): `setTorque` × `setDifferential` pushes up to the top speed, so an
+///   M1A2 or T-90 needs 7 s to its top speed, the lighter M6 and Type 95 half that.
+fn tune_engine(desc: &mut VehicleDesc, drivetrain: Option<&Drivetrain>) {
     let mass = desc.physics.mass;
+    let radius = {
+        let driven: Vec<f32> = desc.wheels.iter().filter(|w| w.contact).map(|w| w.radius).collect();
+        if driven.is_empty() { 0.45 } else { driven.iter().sum::<f32>() / driven.len() as f32 }
+    };
     let engine = &mut desc.engine;
     engine.reverse_speed = engine.top_speed * 0.35;
-    let seconds_to_top = match desc.drive {
-        DriveKind::Tracked => 7.0,
-        _ => 4.5,
-    };
-    engine.drive_force = mass * engine.top_speed / seconds_to_top;
     engine.brake_force = mass * 8.0;
+    let power = drivetrain.map_or(0.0, |d| d.torque * d.differential);
+    match (desc.drive, drivetrain) {
+        (DriveKind::Tracked, _) if power > 0.0 => engine.drive_force = TRACK_FORCE_PER_POWER * power,
+        (DriveKind::Wheeled, Some(d)) if power > 0.0 && !d.ratios.is_empty() => {
+            let top_ratio = d.ratios[d.ratios.len() - 1];
+            let gears: Vec<GearDesc> = d
+                .ratios
+                .iter()
+                .map(|ratio| GearDesc {
+                    top_speed: engine.top_speed * top_ratio / ratio,
+                    force: FORCE_PER_TORQUE * power * ratio / radius,
+                })
+                .collect();
+            engine.drive_force = gears[0].force;
+            engine.reverse_speed = gears[0].top_speed;
+            if let Some(brake) = d.brake_torque {
+                engine.brake_force = BRAKE_PER_TORQUE * brake / radius;
+            }
+            if let Some(slide) = d.slide_grip {
+                engine.slide_grip = slide.clamp(0.3, 1.0);
+            }
+            engine.gearbox = Some(GearboxDesc {
+                reverse: gears[0],
+                gears,
+                shift_up: d.shift_up,
+                shift_down: d.shift_down,
+                shift_time: d.shift_time,
+                idle: d.idle.clamp(0.0, 0.9),
+                engine_brake: ENGINE_BRAKE_PER_TORQUE * d.engine_brake_torque.unwrap_or(0.0) / radius,
+            });
+        }
+        (drive, _) => {
+            let seconds_to_top = if drive == DriveKind::Tracked { 7.0 } else { 4.5 };
+            engine.drive_force = mass * engine.top_speed / seconds_to_top;
+        }
+    }
 }
 
 /// The clip a seat's occupant plays: the sitting (or still) animation of its BF2 animation
@@ -1038,6 +1139,118 @@ fn hull_bounds(world: &World, converter: &MeshConverter, nodes: &[Node], desc: &
         return VehiclePhysics::default().bounds;
     }
     [min.to_array(), max.to_array()]
+}
+
+/// Writes the faces direct hits land on (`VehicleDesc::armor_mesh`): each part's outside
+/// projectile collision, its faces grouped by the material `mapMaterial` gives their index
+/// (the part's own template's, else the collision mesh owner's), as
+/// `vehicles/<name>.armor.glb`. Penetrable materials (canvas, thin sheet metal, windows the
+/// shots go through) are left out. Returns the path relative to the output root.
+fn write_armor_mesh(world: &World, converter: &MeshConverter, name: &str, nodes: &[Node]) -> Option<String> {
+    let map_of = |template: &str| -> HashMap<u16, Option<u32>> {
+        world
+            .template(template)
+            .map(|t| {
+                t.get_all("mapmaterial")
+                    .filter_map(|args| {
+                        let name = args.get(1)?.to_ascii_lowercase();
+                        let solid = !name.contains("penetrable") && !name.contains("pentrable");
+                        Some((args.first()?.parse().ok()?, args.get(2)?.parse().ok().filter(|_| solid)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut meshes: HashMap<String, Option<CollisionMesh>> = HashMap::new();
+    let mut doc = crate::glb::Document::default();
+    let mut material_slots: HashMap<u32, usize> = HashMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let Some((path, owner)) = &node.source_collision else {
+            continue;
+        };
+        let mesh = meshes
+            .entry(path.clone())
+            .or_insert_with(|| converter.vfs.read(path).ok().and_then(|data| CollisionMesh::parse(&data).ok()));
+        let Some(mesh) = mesh else { continue };
+        let collision_part = world
+            .template(&node.template)
+            .and_then(|t| t.get_f32("collisionpart"))
+            .unwrap_or(0.0) as usize;
+        let Some(part) = mesh.parts.get(collision_part) else { continue };
+        // Geom 1 is the outside of vehicles, geom 0 the only one of the rest.
+        let geom = part
+            .geoms
+            .get(1)
+            .filter(|g| !g.cols.is_empty())
+            .or_else(|| part.geoms.iter().find(|g| !g.cols.is_empty()));
+        let Some(col) = geom.and_then(|g| g.cols.iter().find(|c| c.col_type == ColType::Projectile)) else {
+            continue;
+        };
+        let mut map = map_of(&node.template);
+        if map.is_empty() {
+            map = map_of(owner);
+        }
+        let mut by_material: HashMap<u32, Vec<[u16; 3]>> = HashMap::new();
+        for face in &col.faces {
+            if let Some(Some(material)) = map.get(&face[3]) {
+                by_material.entry(*material).or_default().push([face[0], face[1], face[2]]);
+            }
+        }
+        if by_material.is_empty() {
+            continue;
+        }
+        let positions: Vec<[f32; 3]> = col.vertices.iter().map(|&v| coords::position(v)).collect();
+        let mut materials: Vec<(u32, Vec<[u16; 3]>)> = by_material.into_iter().collect();
+        materials.sort_by_key(|(m, _)| *m);
+        let primitives = materials
+            .into_iter()
+            .map(|(material, faces)| {
+                let slot = *material_slots.entry(material).or_insert_with(|| {
+                    doc.materials.push(crate::glb::Material {
+                        name: material.to_string(),
+                        base_color: None,
+                        base_color_uv: 0,
+                        normal: None,
+                        alpha: crate::glb::AlphaMode::Opaque,
+                        double_sided: true,
+                        extras: serde_json::Value::Null,
+                    });
+                    doc.materials.len() - 1
+                });
+                let mut remap: HashMap<u16, u32> = HashMap::new();
+                let mut primitive = crate::glb::Primitive {
+                    material: Some(slot),
+                    ..Default::default()
+                };
+                for &v in faces.iter().flatten() {
+                    let index = *remap.entry(v).or_insert_with(|| {
+                        primitive.positions.push(positions.get(v as usize).copied().unwrap_or_default());
+                        primitive.positions.len() as u32 - 1
+                    });
+                    primitive.indices.push(index);
+                }
+                primitive
+            })
+            .collect();
+        doc.meshes.push(crate::glb::Mesh {
+            name: format!("part{index}"),
+            primitives,
+        });
+        doc.nodes.push(crate::glb::Node {
+            name: format!("part{index}"),
+            mesh: Some(doc.meshes.len() - 1),
+            ..Default::default()
+        });
+        doc.scene.push(doc.nodes.len() - 1);
+    }
+    if doc.meshes.is_empty() {
+        return None;
+    }
+    let rel = format!("vehicles/{}.armor.glb", name.to_ascii_lowercase());
+    doc.write(&converter.out.join(&rel))
+        .map_err(|e| log::warn!("{rel}: {e:#}"))
+        .ok()?;
+    Some(rel)
 }
 
 /// Measures meshes (wheels, wreck pieces).

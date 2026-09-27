@@ -440,7 +440,7 @@ impl Vehicles<'_, '_> {
         let forward = t.rotation * Vec3::NEG_Z;
         let right = t.rotation * Vec3::X;
         format!(
-            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2}, replayed {} corrected {:.3}",
+            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2} gear {}, replayed {} corrected {:.3}",
             t.translation.x,
             t.translation.y,
             t.translation.z,
@@ -450,6 +450,7 @@ impl Vehicles<'_, '_> {
             forward.y.clamp(-1.0, 1.0).asin().to_degrees(),
             (-right.y).clamp(-1.0, 1.0).asin().to_degrees(),
             state.engine,
+            state.gear + 1,
             self.prediction.replayed,
             self.prediction.last_correction,
         )
@@ -808,8 +809,9 @@ fn run_scenario(
                         continue;
                     }
                     let p = view.transform.translation;
+                    let hp = vehicles.health.get(entity).map_or(f32::NAN, |(_, h)| h.current);
                     lines.push(format!(
-                        "{} at ({:.1}, {:.1}, {:.1}) heading {:.0}, {:.1} km/h, {riders} aboard",
+                        "{} at ({:.1}, {:.1}, {:.1}) heading {:.0}, {:.1} km/h, {hp:.0} hp, {riders} aboard",
                         vehicle.template,
                         p.x,
                         p.y,

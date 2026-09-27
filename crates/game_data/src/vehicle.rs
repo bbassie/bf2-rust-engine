@@ -57,6 +57,11 @@ pub struct VehicleDesc {
     pub armor_material: u32,
     #[serde(default)]
     pub blast_material: u32,
+    /// The faces direct hits land on, by material (front, sides, rear, tracks, glass): a
+    /// `.glb` with a mesh `part{N}` for part N (part space) and a primitive per material,
+    /// whose glTF material is named by its id. Hits missing them take `armor_material`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armor_mesh: Option<String>,
     /// What's left after destruction: one mesh per piece, piece `n` in place of the part
     /// drawn with mesh index `n` of the hull's model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +350,13 @@ pub struct EngineDesc {
     pub turn_rate: f32,
     /// Friction coefficients of the tyres or tracks: along and across the rolling direction.
     pub grip: [f32; 2],
+    /// Share of the grip left to a sliding tyre (BF2 `wheelLatMinDynamicFriction`).
+    #[serde(default = "one")]
+    pub slide_grip: f32,
+    /// BF2's automatic gearbox (`c_ETNewCar2` engines); without one the engine pushes with
+    /// `drive_force`, falling off towards the top speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gearbox: Option<GearboxDesc>,
 }
 
 impl Default for EngineDesc {
@@ -356,8 +368,39 @@ impl Default for EngineDesc {
             brake_force: 10000.0,
             turn_rate: 0.8,
             grip: [1.0, 1.0],
+            slide_grip: 1.0,
+            gearbox: None,
         }
     }
+}
+
+/// An automatic gearbox after BF2's `c_ETNewCar2`: the engine turns with the wheels through
+/// each gear's ratio, changes up and down at fixed shares of its top revs and pulls nothing
+/// while changing.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GearboxDesc {
+    /// Forward gears, first to top.
+    pub gears: Vec<GearDesc>,
+    pub reverse: GearDesc,
+    /// Changes up above this share of the top revs, down below this one (`setGearUp`,
+    /// `setGearDown`).
+    pub shift_up: f32,
+    pub shift_down: f32,
+    /// Seconds without drive while changing gear (`setGearChangeTime`).
+    pub shift_time: f32,
+    /// Idle revs as a share of the top revs (`newCar2.minRpm` / `maxRpm`).
+    pub idle: f32,
+    /// Force holding the vehicle back with the throttle closed, newtons
+    /// (`newCar2.engineBrakeTorque`).
+    pub engine_brake: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct GearDesc {
+    /// Speed at the top revs, m/s.
+    pub top_speed: f32,
+    /// Drive force at full throttle, newtons (all wheels).
+    pub force: f32,
 }
 
 /// One node of the vehicle's part tree.

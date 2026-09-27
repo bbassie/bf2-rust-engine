@@ -103,8 +103,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   interiors (geom 0); BF2 vehicle sights (reticles, periscope frames); vehicle HUD (guns,
   ammo, heat, lock, speed, altitude, throttle); damage smoke, explosions and wreck fires
   (BF2's armor effects)
-- Engine/gearbox/tyre model fitted to the original (`newCar2.*`, gear ratios); per-face armour
-  materials (front/side/rear/tracks) for direct hits
+- [x] Engine/gearbox/tyre model from BF2's `newCar2.*` numbers (gear ratios and shift points,
+  gear changes, rev limiter, brake and engine brake torques, dynamic friction), fitted to BF2's
+  AI top speeds; per-face armour materials (front/side/rear/top/tracks) for direct hits
 - Passenger/pilot HUD overlays (`hudPass`, aircraft instruments), countermeasures, bombs,
   track texture scrolling, smoke launchers, artillery and commander assets
 - Flight tuning against BF2 (rudder authority, VTOL F-35B hover, helicopter landing)
