@@ -2,9 +2,13 @@
 //! weapon in hand, or a team-colored capsule when no model is available (test range).
 //!
 //! Animation is layered like BF2: the legs play the soldier's movement clips, the upper
-//! body plays the matching clip of the current weapon's animation set.
+//! body plays the matching clip of the current weapon's animation set. Every change
+//! crossfades: movement blends the four directional clips by direction and plays them at
+//! the ground speed, jumps go through take-off, airborne and landing clips, and a weapon
+//! switch fades the upper body into the new weapon's deploy clip.
 
 use bevy::{
+    app::AnimationSystems,
     gltf::{Gltf, GltfMesh},
     platform::collections::HashMap,
     prelude::*,
@@ -19,6 +23,7 @@ use game_shared::{
     weapons::{Armory, Inventory, Loadout},
 };
 
+use super::blend::{BlendLayer, Clip, Play};
 use crate::{
     net::LocalSoldier,
     prediction::{RenderStateSystems, SoldierRender},
@@ -44,37 +49,89 @@ impl Plugin for SoldierRenderPlugin {
                 PostUpdate,
                 (update_visuals, animate)
                     .after(RenderStateSystems)
+                    .before(AnimationSystems)
                     .before(TransformSystems::Propagate),
             );
     }
 }
 
-/// Movement clips, by lowercase BF2 file name.
+/// Clips by lowercase BF2 file name: the body's movement clips (legs) and the weapon sets'
+/// upper-body clips.
 mod clips {
     pub const STAND: &str = "3p_stand";
-    pub const RUN_FORWARD: &str = "3p_runforward";
-    pub const RUN_BACKWARD: &str = "3p_runbackward";
-    pub const STRAFE_LEFT: &str = "3p_walkleft";
-    pub const STRAFE_RIGHT: &str = "3p_walkright";
-    pub const SPRINT: &str = "3p_sprint";
     pub const CROUCH: &str = "3p_crouchstill";
-    pub const CROUCH_FORWARD: &str = "3p_crouchforward";
-    pub const CROUCH_BACKWARD: &str = "3p_crouchbackward";
-    pub const CROUCH_LEFT: &str = "3p_crouchstrafeleft";
-    pub const CROUCH_RIGHT: &str = "3p_crouchstraferight";
     pub const PRONE: &str = "3p_pronestill";
-    pub const PRONE_FORWARD: &str = "3p_proneforward";
-    pub const PRONE_BACKWARD: &str = "3p_pronebackward";
-    pub const PRONE_LEFT: &str = "3p_pronestrafeleft";
-    pub const PRONE_RIGHT: &str = "3p_pronestraferight";
-    pub const AIRBORNE: &str = "3p_runforwardjumploop";
-
-    pub const ALL: &[&str] = &[
-        STAND, RUN_FORWARD, RUN_BACKWARD, STRAFE_LEFT, STRAFE_RIGHT, SPRINT, CROUCH,
-        CROUCH_FORWARD, CROUCH_BACKWARD, CROUCH_LEFT, CROUCH_RIGHT, PRONE, PRONE_FORWARD,
-        PRONE_BACKWARD, PRONE_LEFT, PRONE_RIGHT, AIRBORNE,
+    pub const SPRINT: &str = "3p_sprint";
+    /// Directional sets, BF2's movement bundles: forward, backward, left, right.
+    pub const WALK: [&str; 4] = ["3p_walkforward", "3p_walkbackward", "3p_walkleft", "3p_walkright"];
+    pub const RUN: [&str; 4] = ["3p_runforward", "3p_runbackward", "3p_strafeleft", "3p_straferight"];
+    pub const CROUCH_MOVE: [&str; 4] =
+        ["3p_crouchforward", "3p_crouchbackward", "3p_crouchstrafeleft", "3p_crouchstraferight"];
+    pub const PRONE_MOVE: [&str; 4] =
+        ["3p_proneforward", "3p_pronebackward", "3p_pronestrafeleft", "3p_pronestraferight"];
+    /// Take-off, airborne loop and landing per jump direction (see [`super::jump_direction`]).
+    pub const JUMP: [[&str; 3]; 5] = [
+        ["3p_stilljumpstart", "3p_stilljumploop", "3p_stilljumpend"],
+        ["3p_runforwardjumpstart", "3p_runforwardjumploop", "3p_runforwardjumpend"],
+        ["3p_runbackwardjumpstart", "3p_runbackwardjumploop", "3p_runbackwardjumpend"],
+        ["3p_strafeleftjumpstart", "3p_strafeleftjumploop", "3p_strafeleftjumpend"],
+        ["3p_straferightjumpstart", "3p_straferightjumploop", "3p_straferightjumpend"],
     ];
+
+    /// Walk, run, sprint and crawl cycles: they all start with the left foot forward, so
+    /// switching between them keeps the step phase.
+    pub fn cycles() -> impl Iterator<Item = &'static str> {
+        WALK.into_iter().chain(RUN).chain(CROUCH_MOVE).chain(PRONE_MOVE).chain([SPRINT])
+    }
+
+    pub fn legs() -> impl Iterator<Item = &'static str> {
+        [STAND, CROUCH, PRONE].into_iter().chain(cycles()).chain(JUMP.into_iter().flatten())
+    }
+
+    /// Upper-body clips named like the movement clip they pair with (`3p_crouchstill` with
+    /// `crouchstill`); anything else (jumps) pairs with `stand`.
+    pub const UPPER: &[&str] = &[
+        "stand", "crouchstill", "pronestill", "sprint",
+        "walkforward", "walkbackward", "walkleft", "walkright",
+        "runforward", "runbackward", "strafeleft", "straferight",
+        "crouchforward", "crouchbackward", "crouchstrafeleft", "crouchstraferight",
+        "proneforward", "pronebackward", "pronestrafeleft", "pronestraferight",
+    ];
+    pub const STAND_DEPLOY: &str = "standdeploy";
+    pub const PRONE_DEPLOY: &str = "pronedeploy";
+
+    pub fn upper_for(legs: &str) -> &'static str {
+        let state = legs.trim_start_matches("3p_");
+        UPPER.iter().copied().find(|&u| u == state).unwrap_or("stand")
+    }
 }
+
+/// Ground speeds (m/s) at which the movement clips play at normal speed, from BF2's
+/// animation value holders (they match the foot speed in the clips).
+const WALK_SPEED: f32 = 1.5;
+const RUN_SPEED: f32 = 3.9;
+const SPRINT_SPEED: f32 = 6.3;
+const CROUCH_SPEED: f32 = 1.7;
+const PRONE_SPEED: f32 = 0.7;
+
+/// Crossfade times (seconds), roughly BF2's bundle fade times.
+const FADE: f32 = 0.2;
+const FADE_START_MOVING: f32 = 0.15;
+const FADE_STANCE: f32 = 0.3;
+const FADE_PRONE: f32 = 0.4;
+const FADE_JUMP: f32 = 0.1;
+const FADE_DEPLOY_IN: f32 = 0.12;
+const FADE_DEPLOY_OUT: f32 = 0.25;
+
+/// Upward speed that means the soldier jumped rather than stepped off something.
+const TAKE_OFF_SPEED: f32 = 1.0;
+/// Time off the ground before a fall (not a jump) plays the airborne loop.
+const FALL_TIME: f32 = 0.25;
+/// Shorter jumps end without a landing.
+const MIN_AIR_TIME: f32 = 0.15;
+/// How long a landing plays before movement takes over, standing still and moving.
+const LAND_TIME: f32 = 0.35;
+const LAND_TIME_MOVING: f32 = 0.12;
 
 /// Upper-body set for weapons without their own.
 const DEFAULT_WEAPON_ANIMATIONS: &str = "objects/weapons/handheld/rurif_ak47/animations/3p.glb";
@@ -86,15 +143,19 @@ struct SoldierModels {
     teams: [Option<Handle<Gltf>>; 2],
     /// Weapon upper-body animation sets by path.
     weapon_sets: HashMap<String, Handle<Gltf>>,
-    /// One graph per (team model, weapon set).
-    graphs: HashMap<(usize, String), ModelAnimations>,
+    /// One graph per team model.
+    graphs: [Option<ModelAnimations>; 2],
 }
 
-#[derive(Clone)]
+/// A team model's animation graph: its movement clips plus the upper-body clips of every
+/// weapon set used so far, so a weapon switch crossfades within one graph.
 struct ModelAnimations {
     graph: Handle<AnimationGraph>,
-    /// Per movement clip: the legs clip and the matching upper-body clip.
-    nodes: HashMap<&'static str, (AnimationNodeIndex, Option<AnimationNodeIndex>)>,
+    legs: HashMap<&'static str, Clip>,
+    /// Nodes of [`clips::cycles`].
+    cycles: Vec<AnimationNodeIndex>,
+    /// Per weapon set path, its clips of [`clips::UPPER`] and the deploy clips.
+    upper: HashMap<String, HashMap<&'static str, Clip>>,
 }
 
 #[derive(Resource)]
@@ -128,8 +189,43 @@ struct ModelRig {
 /// Animation state of a visual.
 #[derive(Component, Default)]
 struct SoldierAnimator {
-    graph: Option<(usize, String)>,
-    playing: &'static str,
+    /// Graph given to the player.
+    graph: Option<AssetId<AnimationGraph>>,
+    /// Weapon set the upper body plays.
+    set: String,
+    legs: BlendLayer,
+    upper: BlendLayer,
+    state: Option<Legs>,
+    /// Seconds in `state`.
+    state_time: f32,
+    /// Seconds since the soldier last stood on the ground.
+    airborne: f32,
+    /// Weapon switch clip playing on the upper body.
+    deploy: Option<Clip>,
+}
+
+/// What the legs do.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Legs {
+    Still(Stance),
+    /// Standing, slower than a run.
+    Walk,
+    Move(Stance),
+    Sprint,
+    /// Take-off, then the airborne loop (by [`jump_direction`]).
+    Jump(usize),
+    /// Stepped off something: straight into the airborne loop.
+    Fall(usize),
+    Land(usize),
+}
+
+impl Legs {
+    fn stance(self) -> Stance {
+        match self {
+            Legs::Still(stance) | Legs::Move(stance) => stance,
+            _ => Stance::Standing,
+        }
+    }
 }
 
 /// The weapon model currently in the soldier's hands.
@@ -175,7 +271,7 @@ fn load_team_models(
     asset_server: Res<AssetServer>,
     mut models: ResMut<SoldierModels>,
 ) {
-    models.graphs.clear();
+    models.graphs = default();
     for (index, slot) in models.teams.iter_mut().enumerate() {
         *slot = level
             .desc
@@ -192,54 +288,60 @@ fn load_team_models(
     }
 }
 
-/// The graph for a team model holding a weapon with this animation set, built on first use
-/// once both files are loaded.
-fn graph_for(
-    models: &mut SoldierModels,
+/// The team model's animations, built once its file has loaded. The weapon set is added to
+/// the graph once its file has loaded too (check `upper` for it).
+#[allow(clippy::too_many_arguments)]
+fn team_animations<'a>(
+    models: &'a mut SoldierModels,
     team: usize,
     set: &str,
     asset_server: &AssetServer,
     gltfs: &Assets<Gltf>,
+    clip_assets: &Assets<AnimationClip>,
     graphs: &mut Assets<AnimationGraph>,
-) -> Option<ModelAnimations> {
-    let key = (team, set.to_string());
-    if let Some(found) = models.graphs.get(&key) {
-        return Some(found.clone());
+) -> Option<&'a ModelAnimations> {
+    if models.graphs[team].is_none() {
+        let body = gltfs.get(models.teams[team].as_ref()?)?;
+        let mut graph = AnimationGraph::new();
+        let mut legs = HashMap::default();
+        for name in clips::legs() {
+            if let Some(handle) = body.named_animations.get(name) {
+                legs.insert(name, add_clip(&mut graph, handle, clip_assets));
+            }
+        }
+        let cycles = clips::cycles().filter_map(|name| legs.get(name)).map(|c| c.node).collect();
+        models.graphs[team] = Some(ModelAnimations {
+            graph: graphs.add(graph),
+            legs,
+            cycles,
+            upper: HashMap::default(),
+        });
     }
-    let body = gltfs.get(models.teams[team].as_ref()?)?;
-    let set_handle = models
-        .weapon_sets
-        .entry(set.to_string())
-        .or_insert_with(|| asset_server.load(format!("imported://{set}")))
-        .clone();
-    let weapon = gltfs.get(&set_handle)?;
-
-    let mut graph = AnimationGraph::new();
-    let mut nodes = HashMap::new();
-    for &name in clips::ALL {
-        let Some(legs) = body.named_animations.get(name) else {
-            continue;
-        };
-        let legs = graph.add_clip(legs.clone(), 1.0, graph.root);
-        // Weapon clips are named by state: `3p_crouchstill` pairs with `crouchstill`.
-        let state = match name.trim_start_matches("3p_") {
-            "runforwardjumploop" => "runforward",
-            "walkleft" => "strafeleft",
-            "walkright" => "straferight",
-            other => other,
-        };
-        let upper = [state, name.trim_start_matches("3p_"), "stand"]
-            .iter()
-            .find_map(|s| weapon.named_animations.get(*s))
-            .map(|clip| graph.add_clip(clip.clone(), 1.0, graph.root));
-        nodes.insert(name, (legs, upper));
+    let animations = models.graphs[team].as_mut()?;
+    if !animations.upper.contains_key(set) {
+        if !models.weapon_sets.contains_key(set) {
+            models.weapon_sets.insert(set.to_string(), asset_server.load(format!("imported://{set}")));
+        }
+        let handle = &models.weapon_sets[set];
+        if let (Some(weapon), Some(mut graph)) = (gltfs.get(handle), graphs.get_mut(&animations.graph)) {
+            let mut upper = HashMap::default();
+            for &name in clips::UPPER.iter().chain(&[clips::STAND_DEPLOY, clips::PRONE_DEPLOY]) {
+                if let Some(handle) = weapon.named_animations.get(name) {
+                    upper.insert(name, add_clip(&mut graph, handle, clip_assets));
+                }
+            }
+            animations.upper.insert(set.to_string(), upper);
+        }
     }
-    let animations = ModelAnimations {
-        graph: graphs.add(graph),
-        nodes,
-    };
-    models.graphs.insert(key, animations.clone());
     Some(animations)
+}
+
+fn add_clip(graph: &mut AnimationGraph, handle: &Handle<AnimationClip>, clips: &Assets<AnimationClip>) -> Clip {
+    let root = graph.root;
+    Clip {
+        node: graph.add_clip(handle.clone(), 1.0, root),
+        duration: clips.get(handle).map_or(1.0, |clip| clip.duration()),
+    }
 }
 
 fn spawn_visual(add: On<Add, Soldier>, mut commands: Commands) {
@@ -472,38 +574,224 @@ fn update_visuals(
     }
 }
 
-/// Picks the movement clip from speed, direction and stance.
-fn movement_clip(render: &SoldierRender) -> &'static str {
+
+/// Horizontal velocity in the soldier's frame: (right, forward).
+fn local_velocity(render: &SoldierRender) -> Vec2 {
     let local = Quat::from_rotation_y(-render.yaw) * render.velocity;
-    let (right, forward) = (local.x, -local.z);
-    let speed = Vec2::new(right, forward).length();
-    if !render.grounded && render.velocity.y.abs() > 1.0 {
-        return clips::AIRBORNE;
+    Vec2::new(local.x, -local.z)
+}
+
+/// Weights of the forward, backward, left and right clips for a movement direction.
+fn direction_weights(velocity: Vec2) -> [f32; 4] {
+    let sum = velocity.x.abs() + velocity.y.abs();
+    if sum < 1e-4 {
+        return [1.0, 0.0, 0.0, 0.0];
     }
-    let moving = speed > 0.4;
-    let sideways = right.abs() > forward.abs();
-    use clips::*;
+    [velocity.y, -velocity.y, -velocity.x, velocity.x].map(|w| w.max(0.0) / sum)
+}
+
+/// Index into [`clips::JUMP`]: still, forward, backward, left, right.
+fn jump_direction(velocity: Vec2) -> usize {
+    match velocity {
+        v if v.length() < 1.0 => 0,
+        v if v.y.abs() >= v.x.abs() => {
+            if v.y > 0.0 { 1 } else { 2 }
+        }
+        v => {
+            if v.x < 0.0 { 3 } else { 4 }
+        }
+    }
+}
+
+/// The legs state for this frame. Thresholds have some hysteresis so noisy speeds don't
+/// flicker between states.
+fn next_legs(state: Option<Legs>, time: f32, airborne: f32, render: &SoldierRender) -> Legs {
+    let velocity = local_velocity(render);
+    let speed = velocity.length();
+    match state {
+        // A blip off the ground (a step or slope edge) is no jump worth landing from.
+        Some(Legs::Jump(dir) | Legs::Fall(dir)) if render.grounded => {
+            if time > MIN_AIR_TIME {
+                return Legs::Land(dir);
+            }
+        }
+        Some(jump @ (Legs::Jump(_) | Legs::Fall(_))) => return jump,
+        _ if !render.grounded && render.velocity.y > TAKE_OFF_SPEED => {
+            return Legs::Jump(jump_direction(velocity));
+        }
+        _ if airborne > FALL_TIME => return Legs::Fall(jump_direction(velocity)),
+        Some(Legs::Land(dir)) if time < if speed > 1.0 { LAND_TIME_MOVING } else { LAND_TIME } => {
+            return Legs::Land(dir);
+        }
+        _ => {}
+    }
+    let moving = speed > if matches!(state, None | Some(Legs::Still(_))) { 0.5 } else { 0.3 };
+    let sprint_above = if state == Some(Legs::Sprint) { 4.8 } else { 5.2 };
+    let walk_below = if state == Some(Legs::Walk) { 2.4 } else { 2.0 };
     match render.stance {
-        Stance::Standing if !moving => STAND,
-        Stance::Standing if speed > 5.0 && forward > 0.0 => SPRINT,
-        Stance::Standing if sideways => if right > 0.0 { STRAFE_RIGHT } else { STRAFE_LEFT },
-        Stance::Standing => if forward >= 0.0 { RUN_FORWARD } else { RUN_BACKWARD },
-        Stance::Crouching if !moving => CROUCH,
-        Stance::Crouching if sideways => if right > 0.0 { CROUCH_RIGHT } else { CROUCH_LEFT },
-        Stance::Crouching => if forward >= 0.0 { CROUCH_FORWARD } else { CROUCH_BACKWARD },
-        Stance::Prone if !moving => PRONE,
-        Stance::Prone if sideways => if right > 0.0 { PRONE_RIGHT } else { PRONE_LEFT },
-        Stance::Prone => if forward >= 0.0 { PRONE_FORWARD } else { PRONE_BACKWARD },
+        stance if !moving => Legs::Still(stance),
+        Stance::Standing if speed > sprint_above && velocity.y > 0.0 => Legs::Sprint,
+        Stance::Standing if speed < walk_below => Legs::Walk,
+        stance => Legs::Move(stance),
+    }
+}
+
+fn fade_time(from: Option<Legs>, to: Legs) -> f32 {
+    let Some(from) = from else {
+        return 0.0;
+    };
+    match (from, to) {
+        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_)) => FADE_JUMP,
+        _ if from.stance() != to.stance() => {
+            if from.stance() == Stance::Prone || to.stance() == Stance::Prone {
+                FADE_PRONE
+            } else {
+                FADE_STANCE
+            }
+        }
+        (Legs::Still(_), _) => FADE_START_MOVING,
+        _ => FADE,
+    }
+}
+
+impl SoldierAnimator {
+    /// Picks this frame's clips and weights and advances the crossfades.
+    fn update(
+        &mut self,
+        player: &mut AnimationPlayer,
+        animations: &ModelAnimations,
+        render: &SoldierRender,
+        set: &str,
+        dt: f32,
+    ) {
+        self.airborne = if render.grounded { 0.0 } else { self.airborne + dt };
+        let state = next_legs(self.state, self.state_time, self.airborne, render);
+        let entered = self.state != Some(state);
+        if entered {
+            let fade = fade_time(self.state, state);
+            self.legs.set_fade(fade);
+            if self.deploy.is_none() {
+                self.upper.set_fade(fade);
+            }
+            self.state = Some(state);
+            self.state_time = 0.0;
+        } else {
+            self.state_time += dt;
+        }
+
+        // Legs: up to four clips with weights, all at one speed.
+        let velocity = local_velocity(render);
+        let mut targets = [("", 0.0); 4];
+        let mut speed = 1.0;
+        let mut once = None;
+        match state {
+            Legs::Still(stance) => {
+                let clip = match stance {
+                    Stance::Standing => clips::STAND,
+                    Stance::Crouching => clips::CROUCH,
+                    Stance::Prone => clips::PRONE,
+                };
+                targets[0] = (clip, 1.0);
+            }
+            Legs::Walk | Legs::Move(_) => {
+                let (set, normal) = match state {
+                    Legs::Move(Stance::Standing) => (clips::RUN, RUN_SPEED),
+                    Legs::Move(Stance::Crouching) => (clips::CROUCH_MOVE, CROUCH_SPEED),
+                    Legs::Move(Stance::Prone) => (clips::PRONE_MOVE, PRONE_SPEED),
+                    _ => (clips::WALK, WALK_SPEED),
+                };
+                for (target, entry) in targets.iter_mut().zip(set.into_iter().zip(direction_weights(velocity))) {
+                    *target = entry;
+                }
+                speed = (velocity.length() / normal).clamp(0.3, 2.0);
+            }
+            Legs::Sprint => {
+                targets[0] = (clips::SPRINT, 1.0);
+                speed = (velocity.length() / SPRINT_SPEED).clamp(0.3, 2.0);
+            }
+            Legs::Jump(dir) => {
+                let [take_off, air, _] = clips::JUMP[dir];
+                let take_off_time = animations.legs.get(take_off).map_or(0.0, |c| c.duration);
+                if self.state_time < take_off_time {
+                    targets[0] = (take_off, 1.0);
+                    once = Some(entered);
+                } else {
+                    targets[0] = (air, 1.0);
+                }
+            }
+            Legs::Fall(dir) => targets[0] = (clips::JUMP[dir][1], 1.0),
+            Legs::Land(dir) => {
+                targets[0] = (clips::JUMP[dir][2], 1.0);
+                once = Some(entered);
+            }
+        }
+        let targets = targets.iter().filter(|(_, weight)| *weight > 0.02);
+
+        // Cycles starting now pick up the step phase of the cycle playing.
+        let cycle_phase = self
+            .legs
+            .heaviest(|node| animations.cycles.contains(&node))
+            .and_then(|clip| clip.phase(player))
+            .unwrap_or(0.0);
+        self.legs.begin();
+        for &(name, weight) in targets.clone() {
+            let Some(&clip) = animations.legs.get(name) else {
+                continue;
+            };
+            let play = match once {
+                Some(restart) => Play::once(restart),
+                None if animations.cycles.contains(&clip.node) => {
+                    Play::looping(weight).speed(speed).phase(cycle_phase)
+                }
+                None => Play::looping(weight),
+            };
+            self.legs.play(player, clip, play);
+        }
+        self.legs.update(player, dt);
+
+        // Upper body: the weapon set's clips paired with the legs clips, in step with them.
+        let first_set = self.set.is_empty();
+        let switched = self.set != set && animations.upper.contains_key(set);
+        if switched {
+            self.set = set.to_string();
+        }
+        let Some(upper) = animations.upper.get(&self.set) else {
+            return;
+        };
+        if switched && !first_set {
+            let deploy = if render.stance == Stance::Prone { clips::PRONE_DEPLOY } else { clips::STAND_DEPLOY };
+            self.deploy = upper.get(deploy).copied();
+            self.upper.set_fade(if self.deploy.is_some() { FADE_DEPLOY_IN } else { FADE_DEPLOY_OUT });
+        } else if self.deploy.is_some_and(|clip| clip.finished(player)) {
+            self.deploy = None;
+            self.upper.set_fade(FADE_DEPLOY_OUT);
+        }
+        self.upper.begin();
+        if let Some(deploy) = self.deploy {
+            self.upper.play(player, deploy, Play::once(switched));
+        } else {
+            for &(name, weight) in targets {
+                let Some(&clip) = upper.get(clips::upper_for(name)).or_else(|| upper.get("stand")) else {
+                    continue;
+                };
+                let phase = animations.legs.get(name).and_then(|legs| legs.phase(player)).unwrap_or(0.0);
+                let speed = if once.is_some() { 1.0 } else { speed };
+                self.upper.play(player, clip, Play::looping(weight).speed(speed).phase(phase));
+            }
+        }
+        self.upper.update(player, dt);
     }
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn animate(
     mut commands: Commands,
+    time: Res<Time>,
     mut models: ResMut<SoldierModels>,
     armory: Res<Armory>,
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
+    clip_assets: Res<Assets<AnimationClip>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     soldiers: Query<(&SoldierRender, Option<&Loadout>, Option<&Inventory>)>,
     mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
@@ -514,32 +802,20 @@ fn animate(
             continue;
         };
         let set = active_weapon(&armory, loadout, inventory)
-            .and_then(|w| w.animations_3p.clone())
-            .unwrap_or_else(|| DEFAULT_WEAPON_ANIMATIONS.to_string());
-        let Some(animations) = graph_for(&mut models, team, &set, &asset_server, &gltfs, &mut graphs) else {
+            .and_then(|w| w.animations_3p.as_deref())
+            .unwrap_or(DEFAULT_WEAPON_ANIMATIONS);
+        let animations = team_animations(&mut models, team, set, &asset_server, &gltfs, &clip_assets, &mut graphs);
+        let (Some(animations), Ok(mut player)) = (animations, players.get_mut(rig.player)) else {
             continue;
         };
-        let key = (team, set);
-        if animator.graph.as_ref() != Some(&key) {
-            // New weapon set: swap graphs and restart the clips.
+        if animator.graph != Some(animations.graph.id()) {
             commands.entity(rig.player).insert(AnimationGraphHandle(animations.graph.clone()));
-            animator.graph = Some(key);
-            animator.playing = "";
-            continue;
+            player.stop_all();
+            *animator = SoldierAnimator {
+                graph: Some(animations.graph.id()),
+                ..default()
+            };
         }
-        let wanted = movement_clip(render);
-        if animator.playing == wanted {
-            continue;
-        }
-        let (Some(&(legs, upper)), Ok(mut player)) = (animations.nodes.get(wanted), players.get_mut(rig.player)) else {
-            continue;
-        };
-        // Legs and upper body animate disjoint bones, so both play at full weight.
-        player.stop_all();
-        player.play(legs).repeat();
-        if let Some(upper) = upper {
-            player.play(upper).repeat();
-        }
-        animator.playing = wanted;
+        animator.update(&mut player, animations, render, set, time.delta_secs());
     }
 }

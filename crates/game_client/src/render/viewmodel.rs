@@ -22,7 +22,10 @@ use game_shared::{
     weapons::{Armory, Inventory, Loadout},
 };
 
-use super::environment::Sun;
+use super::{
+    blend::{BlendLayer, Clip, Play},
+    environment::Sun,
+};
 use crate::{
     camera::{PlayerCamera, ThirdPerson},
     combat::CombatFeedback,
@@ -71,7 +74,7 @@ struct ViewModelAssets {
 #[derive(Clone)]
 struct ViewAnimations {
     graph: Handle<AnimationGraph>,
-    clips: HashMap<String, AnimationNodeIndex>,
+    clips: HashMap<String, Clip>,
 }
 
 #[derive(Component)]
@@ -100,9 +103,11 @@ struct ViewState {
     /// Weapon and animation set the animations are for.
     animated_weapon: String,
     set: String,
-    base: String,
-    /// One-shot clip playing (fire, reload, deploy) and its node.
-    one_shot: Option<AnimationNodeIndex>,
+    /// Loop playing when no one-shot is (stand, run, zoom_stand...).
+    base: &'static str,
+    /// One-shot playing (fire, reload, deploy) and how fast to blend back from it.
+    one_shot: Option<(Clip, f32)>,
+    layer: BlendLayer,
     shots_seen: u32,
     was_reloading: bool,
 }
@@ -316,43 +321,55 @@ fn attach_weapon(
     state.parts_ready = true;
 }
 
-fn view_animations(
-    assets: &mut ViewModelAssets,
+fn view_animations<'a>(
+    assets: &'a mut ViewModelAssets,
     set: &str,
     asset_server: &AssetServer,
     gltfs: &Assets<Gltf>,
+    clip_assets: &Assets<AnimationClip>,
     graphs: &mut Assets<AnimationGraph>,
-) -> Option<ViewAnimations> {
-    if let Some(found) = assets.graphs.get(set) {
-        return Some(found.clone());
+) -> Option<&'a ViewAnimations> {
+    if !assets.graphs.contains_key(set) {
+        if !assets.sets.contains_key(set) {
+            assets.sets.insert(set.to_string(), asset_server.load(format!("imported://{set}")));
+        }
+        let gltf = gltfs.get(&assets.sets[set])?;
+        let mut graph = AnimationGraph::new();
+        let root = graph.root;
+        let clips = gltf
+            .named_animations
+            .iter()
+            .map(|(name, clip)| {
+                let node = graph.add_clip(clip.clone(), 1.0, root);
+                let duration = clip_assets.get(clip).map_or(1.0, |c| c.duration());
+                (name.to_string(), Clip { node, duration })
+            })
+            .collect();
+        let animations = ViewAnimations {
+            graph: graphs.add(graph),
+            clips,
+        };
+        assets.graphs.insert(set.to_string(), animations);
     }
-    let handle = assets
-        .sets
-        .entry(set.to_string())
-        .or_insert_with(|| asset_server.load(format!("imported://{set}")))
-        .clone();
-    let gltf = gltfs.get(&handle)?;
-    let mut graph = AnimationGraph::new();
-    let clips = gltf
-        .named_animations
-        .iter()
-        .map(|(name, clip)| (name.to_string(), graph.add_clip(clip.clone(), 1.0, graph.root)))
-        .collect();
-    let animations = ViewAnimations {
-        graph: graphs.add(graph),
-        clips,
-    };
-    assets.graphs.insert(set.to_string(), animations.clone());
-    Some(animations)
+    assets.graphs.get(set)
 }
+
+/// Crossfade times (seconds), after BF2's first-person bundles: fire cuts in and blends back
+/// quickly, loops and zooming crossfade about as fast as the camera zooms.
+const FADE_LOOP: f32 = 0.2;
+const FADE_FIRE_OUT: f32 = 0.08;
+const FADE_ONE_SHOT_IN: f32 = 0.12;
+const FADE_ONE_SHOT_OUT: f32 = 0.25;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn animate_view_model(
     mut commands: Commands,
+    time: Res<Time>,
     mut assets: ResMut<ViewModelAssets>,
     armory: Res<Armory>,
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
+    clip_assets: Res<Assets<AnimationClip>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     feedback: Res<CombatFeedback>,
     history: Res<InputHistory>,
@@ -376,66 +393,81 @@ fn animate_view_model(
         return;
     };
     visibility.set_if_neq(if third_person.0 { Visibility::Hidden } else { Visibility::Inherited });
-    let Some(animations) = view_animations(&mut assets, &set, &asset_server, &gltfs, &mut graphs) else {
+    let Some(animations) = view_animations(&mut assets, &set, &asset_server, &gltfs, &clip_assets, &mut graphs) else {
         return;
     };
     let Ok(mut player) = players.get_mut(rig.player) else {
         return;
     };
     let clip = |name: &str| animations.clips.get(name).copied();
+    let state = &mut *state;
 
-    let mut one_shot = None;
     if state.set != set {
+        // Each set has its own graph: start over (the deploy clip follows).
         commands.entity(rig.player).insert(AnimationGraphHandle(animations.graph.clone()));
+        player.stop_all();
+        state.layer = BlendLayer::default();
+        state.one_shot = None;
+        state.base = "";
         state.set = set;
     }
+    // One-shot starting now: clip, fade in, fade back out.
+    let mut started = None;
     if state.animated_weapon != weapon.name {
         state.animated_weapon = weapon.name.clone();
         state.shots_seen = feedback.shots_fired;
         state.was_reloading = false;
-        one_shot = clip("deploy");
+        started = clip("deploy").map(|c| (c, 0.0, FADE_ONE_SHOT_OUT));
     }
     let input = history.latest().copied().unwrap_or_default();
     let zoomed = input.pressed(game_shared::input::Buttons::AIM);
     if feedback.shots_fired != state.shots_seen {
         state.shots_seen = feedback.shots_fired;
-        one_shot = if zoomed { clip("zoom_fire").or(clip("fire")) } else { clip("fire") };
+        // Cuts in so every shot shows at once.
+        let fire = if zoomed { clip("zoom_fire").or(clip("fire")) } else { clip("fire") };
+        started = fire.map(|c| (c, 0.0, FADE_FIRE_OUT));
     }
     if feedback.reloading && !state.was_reloading {
-        one_shot = clip("reload");
+        started = clip("reload").map(|c| (c, FADE_ONE_SHOT_IN, FADE_ONE_SHOT_OUT));
     }
     state.was_reloading = feedback.reloading;
 
-    if let Some(node) = one_shot {
-        player.stop_all();
-        player.play(node);
-        state.one_shot = Some(node);
-        state.base.clear();
-        return;
-    }
-    if let Some(node) = state.one_shot {
-        if !player.animation(node).is_none_or(|a| a.is_finished()) {
-            return;
-        }
+    if let Some((one_shot, fade_in, fade_out)) = started {
+        state.one_shot = Some((one_shot, fade_out));
+        state.layer.set_fade(fade_in);
+    } else if let Some((one_shot, fade_out)) = state.one_shot
+        && one_shot.finished(&player)
+    {
+        // Blend back into whichever loop fits now.
         state.one_shot = None;
+        state.base = "";
+        state.layer.set_fade(fade_out);
     }
 
-    let speed = Vec2::new(motion.velocity.x, motion.velocity.z).length();
-    let base = match (zoomed, speed > 5.0, speed > 0.5) {
-        (true, _, true) => "zoom_run",
-        (true, _, false) => "zoom_stand",
-        (false, true, _) => "sprint",
-        (false, false, true) => "run",
-        _ => "stand",
-    };
-    if state.base != base {
-        let node = clip(base).or_else(|| clip("stand"));
-        if let Some(node) = node {
-            player.stop_all();
-            player.play(node).repeat();
+    state.layer.begin();
+    if let Some((one_shot, _)) = state.one_shot {
+        state.layer.play(&mut player, one_shot, Play::once(started.is_some()));
+    } else {
+        // Run and sprint play at the ground speed (BF2's 1p_move and 1p_sprint speeds).
+        let speed = Vec2::new(motion.velocity.x, motion.velocity.z).length();
+        let (base, rate) = match (zoomed, speed > 5.0, speed > 0.5) {
+            (true, _, true) => ("zoom_run", 1.0),
+            (true, _, false) => ("zoom_stand", 1.0),
+            (false, true, _) => ("sprint", (speed / 6.3).clamp(0.5, 1.5)),
+            (false, false, true) => ("run", (speed / 4.2).clamp(0.5, 1.5)),
+            _ => ("stand", 1.0),
+        };
+        if state.base != base {
+            if !state.base.is_empty() {
+                state.layer.set_fade(FADE_LOOP);
+            }
+            state.base = base;
         }
-        state.base = base.to_string();
+        if let Some(loop_clip) = clip(base).or_else(|| clip("stand")) {
+            state.layer.play(&mut player, loop_clip, Play::looping(1.0).speed(rate));
+        }
     }
+    state.layer.update(&mut player, time.delta_secs());
 }
 
 /// Keeps BF2's camera bone at the eye: the arms move so `Camerabone` sits at the camera.

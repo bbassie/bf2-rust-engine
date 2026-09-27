@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 
+mod blend;
 pub mod environment;
 mod flags;
 pub mod materials;
