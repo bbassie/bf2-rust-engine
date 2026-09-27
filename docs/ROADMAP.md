@@ -28,7 +28,7 @@ Milestones are ordered so that each one ends with something playable.
 Still to do for BF2 fidelity: baked lightmaps (statics and terrain), dirt/crack layers,
 surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
-## M1: Infantry combat (in progress)
+## M1: Infantry combat
 
 - [x] Soldier meshes and animations (skinned mesh + `.ske`/`.baf` import), per-team models
 - [x] Third-person movement animations: legs from the soldier set, upper body from weapon sets
@@ -52,11 +52,13 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Scopes: BF2's zoom models with reticles, bolt-action rifles leave the scope
 - [x] Destructible objects (barricades, barrels, signs, wrecks, chain explosions) and
   BF2's material damage table
-- Thrown and launched projectiles (in progress): hand grenades (cooking, bouncing, fuse), smoke grenades
+- [x] Thrown and launched projectiles: hand grenades (cooking, bouncing, fuse), smoke grenades
   with smoke that blocks sight, under-barrel grenade launchers, rocket launchers, C4 and
   claymores, shotgun pellets
-- Lag compensation
-- Per-bone hit zones
+- [x] Lag compensation: the server judges hits against where targets were on the shooter's
+  screen (up to 250 ms)
+- [x] Per-bone hit zones: BF2's skeleton collision capsules and damage table columns (head,
+  body, body armour, limbs)
 - [x] Man-down (BF2's 15 s, 320 HP wreck threshold) and revive with shock paddles
 - [x] Medic, support and engineer abilities: medic/ammo bags (held or thrown), wrench repairs
   of vehicles and objects, kit ability charge, BF2 scoring
@@ -120,10 +122,13 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   altitude), BF2's distant tree stand-ins
 - Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
 - Effects: particles for muzzle flashes, impacts, explosions, smoke (in progress)
-- Audio: footsteps, distance falloff, flybys, ambience (in progress)
+- [x] Audio: BF2's sounds with its distance model, weapons (near/far, cracks), footsteps per
+  surface, vehicles, ambience, voices, announcements ducking the rest
 - [x] Main menu (play/host/join, level and mode selection), server browser, settings (graphics,
   audio, controls, key bindings, mouse sensitivity, field of view) saved to disk, pause menu:
   a modern design of our own, not a copy of BF2's UI
+- [x] BF2's team flags and vehicle icons across the HUD, maps and menus; the level page previews
+  each layout's objectives
 - [x] Server browser (LAN discovery, favourites), text chat (all/team/squad), end-of-round
   summary with career stats
 

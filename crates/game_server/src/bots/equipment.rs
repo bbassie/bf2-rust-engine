@@ -87,6 +87,7 @@ impl BotBrain {
             let stronger = self
                 .flash
                 .is_none_or(|(old, s, age)| !flash_effect(&old, s, age).1 || strength > s);
+            debug!("ai: flashbang {:.1} m away, strength {strength:.2}", eye.distance(at));
             if strength > 0.15 && stronger {
                 self.flash = Some((desc, strength, 0.0));
                 team_stats.flashed += 1;

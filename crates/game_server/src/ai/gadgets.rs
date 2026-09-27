@@ -59,6 +59,7 @@ pub fn watch_detonations(
 ) {
     for effect in effects.read() {
         if let Some(desc) = data.gadgets.flashbangs.get(&effect.message.name) {
+            debug!("ai: flashbang at {:.1}", effect.message.position);
             flashes.0.push((effect.message.position, *desc));
         }
     }
