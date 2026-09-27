@@ -43,6 +43,7 @@ use bevy::{
         view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk},
     },
 };
+use game_data::JointInput;
 use game_shared::{
     input::Buttons,
     level::LoadedLevel,
@@ -444,16 +445,36 @@ fn run_scenario(
                     Some((seated, view, data)) => {
                         let t = view.transform;
                         let up = (t.rotation * Vec3::Y).angle_between(Vec3::Y).to_degrees();
+                        let model = &data.0;
+                        // Aimed joints as yaw/pitch in degrees.
+                        let aims: Vec<String> = model
+                            .desc
+                            .parts
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| {
+                                p.joint.as_ref().is_some_and(|j| {
+                                    j.axes.iter().any(|a| {
+                                        matches!(a.input, Some(JointInput::AimYaw | JointInput::AimPitch))
+                                    })
+                                })
+                            })
+                            .filter_map(|(i, p)| {
+                                let a = view.joints.get(model.joint_index[i]?)?;
+                                Some(format!("{} {:.0}/{:.0}", p.name, a[0].to_degrees(), a[1].to_degrees()))
+                            })
+                            .collect();
                         format!(
-                            "{label}: {} seat {} at ({:.1}, {:.1}, {:.1}), {:.1} km/h, heading {:.0} deg, tilt {:.0} deg",
-                            data.0.desc.name,
+                            "{label}: {} seat {} at ({:.1}, {:.1}, {:.1}), {:.1} km/h, heading {:.0} deg, tilt {:.0} deg, aim [{}]",
+                            model.desc.name,
                             seated.seat + 1,
                             t.translation.x,
                             t.translation.y,
                             t.translation.z,
                             view.speed * 3.6,
                             crate::vehicles::heading(t.rotation).to_degrees(),
-                            up
+                            up,
+                            aims.join(", ")
                         )
                     }
                     None => format!("{label}: not in a vehicle"),

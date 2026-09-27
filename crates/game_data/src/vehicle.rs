@@ -22,6 +22,19 @@ pub struct VehicleDesc {
     pub engine: EngineDesc,
     #[serde(default = "default_hit_points")]
     pub hit_points: f32,
+    /// Material of the hull for direct hits, and for blast damage (ids of the material
+    /// damage table, e.g. 26 metal plating, 27 light armour, 29 tank sides; 71 soft, 72 hard,
+    /// 110 light vehicle).
+    #[serde(default)]
+    pub armor_material: u32,
+    #[serde(default)]
+    pub blast_material: u32,
+    /// What's left after destruction: one mesh per piece, piece `n` in place of the part
+    /// drawn with mesh index `n` of the hull's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wreck_mesh: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub wreck_pieces: u32,
     /// Parent parts come before their children; part 0 is the hull.
     pub parts: Vec<VehiclePart>,
     #[serde(default)]

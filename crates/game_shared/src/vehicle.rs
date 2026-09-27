@@ -13,9 +13,9 @@ use std::{
 };
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{ecs::entity::MapEntities, prelude::*};
 use bevy_replicon::prelude::*;
-use game_data::{DriveKind, JointInput, VehicleDesc};
+use game_data::{DriveKind, JointInput, VehicleDesc, WeaponDesc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -102,12 +102,73 @@ pub struct VehicleState {
     pub wheels: Vec<f32>,
 }
 
+/// Hit points. Replicated. At 0 the vehicle is a wreck.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct VehicleHealth {
+    pub current: f32,
+    pub max: f32,
+}
+
+impl VehicleHealth {
+    pub fn wrecked(&self) -> bool {
+        self.current <= 0.0
+    }
+}
+
+/// How much of a projectile's damage a vehicle material takes, from BF2's damage table
+/// (`materialManagerSettings.con`, see gameplay-data.md §7.2): projectile materials 38..113
+/// against hull armour 26..30 and blast sensitivity 71/72/110. Cells marked "default" in the
+/// table are 1, missing ones 0. A stopgap until the whole table is imported.
+pub fn armor_damage_modifier(projectile: u32, target: u32) -> f32 {
+    const TARGETS: [u32; 8] = [26, 27, 28, 29, 30, 71, 72, 110];
+    let row: [f32; 8] = match projectile {
+        38 => [0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        39 => [0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        40 => [0.5, 0.25, 0.0, 0.0, 0.0, 0.05, 0.0, 0.05],
+        41 => [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4],
+        42 => [1.34, 0.75, 0.6, 0.2, 0.15, 0.04, 0.025, 2.0],
+        87 | 113 => [0.8, 0.35, 0.05, 0.005, 0.0, 1.0, 0.05, 0.0],
+        57 => [1.79, 0.1, 0.1, 0.1, 0.0, 1.0, 0.2, 0.0],
+        88 => [1.0, 0.5, 0.5, 0.25, 0.15, 1.0, 1.0, 0.0],
+        43 => [1.6, 0.9, 0.9, 0.7, 0.52, 0.0, 0.0, 0.0],
+        45 => [1.34, 1.0, 0.5, 0.25, 0.1, 1.0, 1.0, 0.0],
+        46 => [0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.1],
+        49 => [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        50 => [0.5, 0.25, 0.25, 1.0, 1.0, 0.5, 0.0, 2.0],
+        52 => [1.59, 0.93, 0.93, 0.62, 0.475, 0.0, 0.0, 0.0],
+        53 => [0.25, 0.25, 0.25, 0.15, 0.1, 0.25, 0.15, 0.5],
+        55 => [1.2, 0.975, 0.6, 0.6, 0.6, 0.0, 0.0, 0.5],
+        56 => [1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.4, 2.0],
+        69 => [1.0, 1.0, 1.0, 1.0, 1.0, 2.6, 0.4, 5.0],
+        70 => [0.25, 0.25, 0.25, 0.0, 0.0, 1.0, 0.05, 2.0],
+        80 => [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.7, 0.0],
+        109 => [0.5, 0.5, 0.5, 0.0, 0.0, 0.4, 0.2, 2.0],
+        _ => return 0.0,
+    };
+    TARGETS.iter().position(|t| *t == target).map_or(0.0, |i| row[i])
+}
+
+/// Blast damage uses this material (BF2's `Explosion_blastwave`, what tank shells and most
+/// rockets detonate with).
+pub const BLAST_MATERIAL: u32 = 70;
+
 /// A soldier riding in a vehicle. Replicated.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Seated {
     #[entities]
     pub vehicle: Entity,
     pub seat: u8,
+}
+
+/// Server -> clients: a vehicle's gun fired (for the tracer and the sound).
+#[derive(Message, Serialize, Deserialize, Clone, Debug, MapEntities)]
+pub struct VehicleShot {
+    #[entities]
+    pub vehicle: Entity,
+    /// Index into the vehicle's guns.
+    pub gun: u8,
+    pub origin: Vec3,
+    pub direction: Vec3,
 }
 
 /// Server-side: this tick's input of each seat's occupant (`None` for empty seats).
@@ -124,6 +185,8 @@ pub struct VehicleModel {
     pub rest: Vec<Transform>,
     /// Hull collision (convex hulls of the hull and turret parts), if it has any.
     pub collider: Option<Collider>,
+    /// The guns' weapon descriptions, shared with the projectiles they fire.
+    pub guns: Vec<Arc<WeaponDesc>>,
 }
 
 impl VehicleModel {
@@ -141,12 +204,14 @@ impl VehicleModel {
             .iter()
             .map(|p| crate::level::placement_transform(&p.placement))
             .collect();
+        let guns = desc.weapons.iter().map(|w| Arc::new(w.weapon.clone())).collect();
         let mut model = Self {
             desc,
             joint_index,
             joint_count,
             rest,
             collider: None,
+            guns,
         };
         model.collider = model.build_collider(root);
         model
@@ -182,6 +247,23 @@ impl VehicleModel {
             (Some(soldier), _) => self.attachment(transforms, soldier),
             (None, Some(camera)) => self.attachment(transforms, &camera.attachment),
             _ => transforms.get(desc.part as usize).copied().unwrap_or_default(),
+        }
+    }
+
+    /// A gun's muzzle in hull space, facing where it fires (-Z).
+    pub fn muzzle(&self, transforms: &[Transform], gun: usize) -> Transform {
+        let Some(weapon) = self.desc.weapons.get(gun) else {
+            return Transform::IDENTITY;
+        };
+        let part = transforms.get(weapon.part as usize).copied().unwrap_or_default();
+        part * Transform::from_translation(Vec3::from_array(weapon.muzzle))
+    }
+
+    /// Where a seat looks from, in hull space: its camera, else just above the seat.
+    pub fn eye(&self, transforms: &[Transform], seat: usize) -> Vec3 {
+        match self.desc.seats.get(seat).and_then(|s| s.camera.as_ref()) {
+            Some(camera) => self.attachment(transforms, &camera.attachment).translation,
+            None => self.seat_transform(transforms, seat).translation + Vec3::Y * 0.6,
         }
     }
 
@@ -351,6 +433,10 @@ fn add_vehicle_physics(
             compression: vec![0.0; desc.wheels.len()],
         },
         SeatInputs(vec![None; desc.seats.len()]),
+        VehicleHealth {
+            current: desc.hit_points,
+            max: desc.hit_points,
+        },
     ));
 }
 
@@ -361,6 +447,10 @@ fn bump_travel(drive: DriveKind) -> f32 {
         DriveKind::Tracked => 0.2,
     }
 }
+
+/// How far guns look for something to converge on, and the nearest point they converge to.
+const AIM_RANGE: f32 = 800.0;
+const MIN_AIM_DISTANCE: f32 = 8.0;
 
 /// Share of the per-tick velocity error the tyres correct (lower is softer).
 const TYRE_STIFFNESS: f32 = 0.4;
@@ -405,6 +495,25 @@ fn simulate_vehicles(
         let forward_speed = velocity.dot(forward);
         let top = desc.engine.top_speed.max(1.0);
 
+        // What each gunner looks at: guns converge on the point under their crosshair.
+        let aim_filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
+            .with_excluded_entities([entity]);
+        let previous = model.part_transforms(&state.joints);
+        let aim_points: Vec<Option<Vec3>> = inputs
+            .0
+            .iter()
+            .enumerate()
+            .map(|(seat, input)| {
+                let input = input.as_ref().filter(|_| model.seat_aims(seat))?;
+                let eye = body_pos + body_rot * model.eye(&previous, seat);
+                let dir = Dir3::new(Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0) * Vec3::NEG_Z).ok()?;
+                let distance = spatial
+                    .cast_ray(eye, dir, AIM_RANGE, true, &aim_filter)
+                    .map_or(AIM_RANGE, |hit| hit.distance.max(MIN_AIM_DISTANCE));
+                Some(eye + *dir * distance)
+            })
+            .collect();
+
         // Joints: turrets follow their gunner's aim, steering follows the driver.
         let mut joints = state.joints.clone();
         joints.resize(model.joint_count, [0.0; 3]);
@@ -412,10 +521,17 @@ fn simulate_vehicles(
         for (i, part) in desc.parts.iter().enumerate() {
             let parent = part.parent.map_or(Transform::IDENTITY, |p| hull[p as usize]);
             if let (Some(joint), Some(j)) = (&part.joint, model.joint_index[i]) {
-                let input = inputs.0.get(joint.seat as usize).copied().flatten();
-                let frame = body_rot * (parent * model.rest[i]).rotation;
+                let seat = joint.seat as usize;
+                let rest = parent * model.rest[i];
+                let frame = body_rot * rest.rotation;
+                let pivot = body_pos + body_rot * rest.translation;
+                let aim = aim_points
+                    .get(seat)
+                    .copied()
+                    .flatten()
+                    .and_then(|point| (point - pivot).try_normalize());
                 let steer_scale = 1.0 - 0.6 * (forward_speed.abs() / top).min(1.0);
-                joints[j] = step_joint(joint, joints[j], input, frame, steer * steer_scale, dt);
+                joints[j] = step_joint(joint, joints[j], aim, frame, steer * steer_scale, dt);
             }
             let mut local = model.rest[i];
             if let Some(angles) = model.joint_index[i].map(|j| joints[j]) {
@@ -511,7 +627,7 @@ fn simulate_vehicles(
                 let limit = if driver.is_none() || handbrake {
                     brake
                 } else if accelerating {
-                    drive * 1.5
+                    drive
                 } else if throttle == 0.0 && steer == 0.0 {
                     brake * 0.3
                 } else {
@@ -578,13 +694,13 @@ fn simulate_vehicles(
 fn step_joint(
     joint: &game_data::JointDesc,
     mut angles: [f32; 3],
-    input: Option<InputFrame>,
+    aim: Option<Vec3>,
     frame: Quat,
     steer: f32,
     dt: f32,
 ) -> [f32; 3] {
-    // The aim in the joint's frame.
-    let aim = input.map(|i| frame.inverse() * (Quat::from_euler(EulerRot::YXZ, i.yaw, i.pitch, 0.0) * Vec3::NEG_Z));
+    // The aim direction in the joint's frame.
+    let aim = aim.map(|d| frame.inverse() * d);
     for axis in 0..3 {
         let a = &joint.axes[axis];
         let Some(kind) = a.input else {

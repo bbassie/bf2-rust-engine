@@ -103,7 +103,7 @@ struct LocalShot {
 }
 
 #[derive(Resource)]
-struct EffectAssets {
+pub(crate) struct EffectAssets {
     tracer: Handle<Mesh>,
     tracer_material: Handle<StandardMaterial>,
     impact: Handle<Mesh>,
@@ -292,7 +292,7 @@ fn predict_local_shots(
     look.yaw -= range(recoil.left_right).to_radians() * scale;
 }
 
-fn play(commands: &mut Commands, asset_server: &AssetServer, path: Option<&String>, at: Option<Vec3>, volume: f32) {
+pub(crate) fn play(commands: &mut Commands, asset_server: &AssetServer, path: Option<&String>, at: Option<Vec3>, volume: f32) {
     let Some(path) = path else {
         return;
     };
@@ -308,7 +308,7 @@ fn play(commands: &mut Commands, asset_server: &AssetServer, path: Option<&Strin
     }
 }
 
-fn spawn_tracer(commands: &mut Commands, assets: &EffectAssets, origin: Vec3, direction: Vec3, weapon: &WeaponDesc) {
+pub(crate) fn spawn_tracer(commands: &mut Commands, assets: &EffectAssets, origin: Vec3, direction: Vec3, weapon: &WeaponDesc) {
     if weapon.projectile.velocity <= 0.0 {
         return;
     }

@@ -151,11 +151,13 @@ impl Builder<'_> {
             _ => {}
         }
 
-        // Meshes: vehicles and guns keep the third-person model in geom 1.
+        // Meshes: vehicles and guns keep the third-person model in geom 1. Skinned parts
+        // (swaying antennas) need their skeleton, which isn't imported for vehicles yet.
         let own_mesh = template
             .geometry
             .as_deref()
             .and_then(|g| self.world.geometry(g))
+            .filter(|g| !g.ty.eq_ignore_ascii_case("SkinnedMesh"))
             .and_then(|g| g.mesh_path())
             .and_then(|path| {
                 let converted = self
@@ -395,6 +397,27 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         ..Default::default()
     };
 
+    // Direct hits land on per-face collision materials in BF2 (front, sides, rear, tracks);
+    // until those are imported, one typical hull material per class.
+    let armor_material = match drive {
+        DriveKind::Tracked => 29,
+        _ if root.get_str("setvehicletype").is_some_and(|t| t.eq_ignore_ascii_case("VTApc")) => 27,
+        _ => 26,
+    };
+    let hull_mesh = root
+        .geometry
+        .as_deref()
+        .and_then(|g| world.geometry(g))
+        .and_then(|g| g.mesh_path());
+    let wreck_mesh = hull_mesh
+        .as_deref()
+        .and_then(|path| converter.convert_mesh_geom(path, 2, "_wreck").ok());
+    let wreck_pieces = hull_mesh
+        .as_deref()
+        .filter(|_| wreck_mesh.is_some())
+        .and_then(|path| meshes.part_count(converter, path, 2))
+        .unwrap_or(0);
+
     let mut desc = VehicleDesc {
         name: name.to_ascii_lowercase(),
         display_name: root
@@ -410,6 +433,10 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         },
         engine: engine_desc,
         hit_points: root.get_f32("armor.maxhitpoints").unwrap_or(1000.0),
+        armor_material,
+        blast_material: root.get_f32("armor.defaultmaterial").unwrap_or(72.0) as u32,
+        wreck_mesh,
+        wreck_pieces,
         parts,
         wheels,
         seats: seat_descs,
@@ -424,15 +451,16 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
     Some(desc)
 }
 
-/// Forces from the top speed and mass: full speed in roughly five seconds, braking at a
-/// little under 1 g. BF2's engine formulas aren't known (gameplay-data.md §3.2).
+/// Forces from the top speed and mass: full speed in five (wheels) to seven (tracks)
+/// seconds, braking at a little under 1 g. BF2's engine formulas aren't known
+/// (gameplay-data.md §3.2).
 fn tune_engine(desc: &mut VehicleDesc) {
     let mass = desc.physics.mass;
     let engine = &mut desc.engine;
     engine.reverse_speed = engine.top_speed * 0.35;
     let seconds_to_top = match desc.drive {
         DriveKind::Wheeled => 4.5,
-        DriveKind::Tracked => 5.0,
+        DriveKind::Tracked => 7.0,
     };
     engine.drive_force = mass * engine.top_speed / seconds_to_top;
     engine.brake_force = mass * 8.0;
@@ -507,21 +535,29 @@ fn hull_bounds(world: &World, converter: &MeshConverter, nodes: &[Node], desc: &
     [min.to_array(), max.to_array()]
 }
 
-/// Measures wheels from their meshes.
+/// Measures meshes (wheels, wreck pieces).
 #[derive(Default)]
 struct MeshCache(HashMap<String, Option<VisMesh>>);
 
 impl MeshCache {
-    /// Half the largest extent of a bundled mesh part across its rolling plane (Y/Z).
-    fn part_radius(&mut self, converter: &MeshConverter, path: &str, part: u32) -> Option<f32> {
-        let mesh = self
-            .0
+    fn mesh(&mut self, converter: &MeshConverter, path: &str) -> Option<&VisMesh> {
+        self.0
             .entry(path.to_string())
             .or_insert_with(|| {
                 let data = converter.vfs.read(path).ok()?;
                 VisMesh::parse(&data, MeshKind::from_path(path)?).ok()
             })
-            .as_ref()?;
+            .as_ref()
+    }
+
+    /// Number of parts of a bundled mesh geom.
+    fn part_count(&mut self, converter: &MeshConverter, path: &str, geom: usize) -> Option<u32> {
+        Some(self.mesh(converter, path)?.geoms.get(geom)?.lods.first()?.part_count)
+    }
+
+    /// Half the largest extent of a bundled mesh part across its rolling plane (Y/Z).
+    fn part_radius(&mut self, converter: &MeshConverter, path: &str, part: u32) -> Option<f32> {
+        let mesh = self.mesh(converter, path)?;
         let positions = mesh.attribute::<3>(Usage::Position, 0)?;
         let blend = mesh.blend_indices()?;
         let geom = mesh.geoms.get(1).or_else(|| mesh.geoms.first())?;
@@ -598,6 +634,11 @@ fn weapon_descs(
             .unwrap_or([0.0; 3]);
         let mut weapon = weapons::weapon_desc(interp, converter, &t, out);
         weapon.display_name = localization.resolve(&weapon.display_name);
+        // Vehicle guns without a deviation setting are dead accurate (the handheld default
+        // doesn't apply).
+        if t.get("deviation.mindev").is_none() {
+            weapon.deviation.min = 0.0;
+        }
         weapons.push(VehicleWeaponDesc {
             part: index as u32,
             muzzle,

@@ -10,9 +10,10 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use game_shared::vehicle::{Seated, Vehicle, VehicleData, VehicleMotion, VehicleState};
+use game_shared::vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleMotion, VehicleShot, VehicleState};
 
 use crate::{
+    combat::{EffectAssets, play, spawn_tracer},
     local_input::LookState,
     net::LocalSoldier,
 };
@@ -33,7 +34,7 @@ impl Plugin for ClientVehiclesPlugin {
                     .after(ClientSystems::Receive)
                     .run_if(in_state(ClientState::Connected)),
             )
-            .add_systems(Update, (read_seat_keys, update_hud))
+            .add_systems(Update, (read_seat_keys, update_hud, receive_shots))
             .add_systems(
                 PostUpdate,
                 (place_vehicles, follow_vehicle_heading)
@@ -268,14 +269,14 @@ fn spawn_hud(mut commands: Commands) {
 
 fn update_hud(
     seated: Query<&Seated, With<LocalSoldier>>,
-    vehicles: Query<(&VehicleView, &VehicleData)>,
+    vehicles: Query<(&VehicleView, &VehicleData, Option<&VehicleHealth>)>,
     mut text: Single<&mut Text, With<VehicleHudText>>,
 ) {
     let line = seated
         .single()
         .ok()
-        .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d)| (s, v, d)))
-        .map(|(seated, view, data)| {
+        .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d, h)| (s, v, d, h)))
+        .map(|(seated, view, data, health)| {
             let model = &data.0;
             let seat = seated.seat as usize;
             let role = if seat == 0 {
@@ -285,16 +286,35 @@ fn update_hud(
             } else {
                 "Passenger"
             };
+            let hit_points = health.map_or(model.desc.hit_points, |h| h.current);
             format!(
-                "{}   |   {role} ({}/{})   |   {:.0} km/h",
+                "{}   |   {role} ({}/{})   |   {:.0} km/h   |   {:.0} HP",
                 model.desc.display_name,
                 seat + 1,
                 model.desc.seats.len(),
-                view.speed.abs() * 3.6
+                view.speed.abs() * 3.6,
+                hit_points.ceil()
             )
         })
         .unwrap_or_default();
     if text.0 != line {
         text.0 = line;
+    }
+}
+
+/// Tracers and sounds of vehicle guns.
+fn receive_shots(
+    mut commands: Commands,
+    mut shots: MessageReader<VehicleShot>,
+    assets: Res<EffectAssets>,
+    asset_server: Res<AssetServer>,
+    vehicles: Query<&VehicleData>,
+) {
+    for shot in shots.read() {
+        let Some(weapon) = vehicles.get(shot.vehicle).ok().and_then(|d| d.0.guns.get(shot.gun as usize)) else {
+            continue;
+        };
+        spawn_tracer(&mut commands, &assets, shot.origin, shot.direction, weapon);
+        play(&mut commands, &asset_server, weapon.sounds.fire_3p.as_ref(), Some(shot.origin), 1.0);
     }
 }

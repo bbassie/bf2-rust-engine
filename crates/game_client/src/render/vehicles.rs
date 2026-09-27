@@ -5,10 +5,14 @@
 use bevy::prelude::*;
 use game_shared::{
     statics::StaticMesh,
-    vehicle::{VehicleData, joint_rotation},
+    vehicle::{Seated, VehicleData, VehicleHealth, joint_rotation},
 };
 
-use crate::vehicles::{VehicleView, VehicleViewSystems};
+use crate::{
+    camera::ThirdPerson,
+    net::LocalSoldier,
+    vehicles::{VehicleView, VehicleViewSystems},
+};
 
 pub struct VehicleRenderPlugin;
 
@@ -16,10 +20,69 @@ impl Plugin for VehicleRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(spawn_parts).add_systems(
             PostUpdate,
-            pose_parts
+            (pose_parts, hide_own_hull, show_wrecks)
                 .after(VehicleViewSystems)
                 .before(TransformSystems::Propagate),
         );
+    }
+}
+
+/// A destroyed vehicle whose wreck model is showing.
+#[derive(Component)]
+struct ShowsWreck;
+
+/// Swaps a destroyed vehicle's parts for its wreck model: piece `n` where the part drawn with
+/// hull mesh index `n` is.
+fn show_wrecks(
+    mut commands: Commands,
+    vehicles: Query<(Entity, &VehicleData, &VehicleView, &VehicleHealth, &VehicleParts), Without<ShowsWreck>>,
+) {
+    for (entity, data, view, health, parts) in &vehicles {
+        if !health.wrecked() {
+            continue;
+        }
+        let model = &data.0;
+        let desc = &model.desc;
+        commands.entity(entity).insert(ShowsWreck);
+        let (Some(wreck), Some(hull_mesh)) = (&desc.wreck_mesh, desc.parts.first().and_then(|p| p.mesh.as_ref())) else {
+            continue;
+        };
+        if let Some(&hull) = parts.parts.first() {
+            commands.entity(hull).insert(Visibility::Hidden);
+        }
+        let transforms = model.part_transforms(&view.joints);
+        for piece in 0..desc.wreck_pieces {
+            let at = desc
+                .parts
+                .iter()
+                .position(|p| p.mesh.as_ref() == Some(hull_mesh) && p.mesh_index == piece)
+                .map_or(Transform::IDENTITY, |i| transforms[i]);
+            commands.spawn((
+                at,
+                Visibility::default(),
+                StaticMesh {
+                    path: wreck.clone(),
+                    index: piece,
+                },
+                ChildOf(entity),
+            ));
+        }
+    }
+}
+
+/// Looking out of a closed hull in first person, the outside model would only block the
+/// view (BF2 draws a separate cockpit model there, which we don't import yet).
+fn hide_own_hull(
+    third_person: Res<ThirdPerson>,
+    seated: Query<&Seated, With<LocalSoldier>>,
+    mut vehicles: Query<(Entity, &VehicleData, &mut Visibility), With<VehicleParts>>,
+) {
+    let inside = seated.single().ok().filter(|_| !third_person.0);
+    for (entity, data, mut visibility) in &mut vehicles {
+        let hidden = inside.is_some_and(|s| {
+            s.vehicle == entity && data.0.desc.seats.get(s.seat as usize).is_some_and(|seat| !seat.open)
+        });
+        visibility.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
     }
 }
 

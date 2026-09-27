@@ -18,10 +18,15 @@ use game_shared::{
     physics::GameLayer,
     protocol::{ControlledBy, MatchInfo, Team},
     soldier::{Hitbox, InputAck, SOLDIER_CENTER, Soldier, SoldierMotion, SoldierShapes, Stance},
-    vehicle::{SeatInputs, Seated, Vehicle, VehicleData, VehicleLibrary, VehicleMotion, VehicleModel, VehicleState, VehicleSystems},
+    soldier::Health,
+    vehicle::{
+        SeatInputs, Seated, Vehicle, VehicleData, VehicleHealth, VehicleLibrary, VehicleModel, VehicleMotion,
+        VehicleShot, VehicleState, VehicleSystems,
+    },
+    weapons::spread_direction,
 };
 
-use crate::{AppliedInput, InputBuffer, ServerSimSystems, conquest::ControlPointRules};
+use crate::{AppliedInput, InputBuffer, ServerSimSystems, combat, conquest::ControlPointRules};
 
 pub struct VehiclesPlugin;
 
@@ -45,9 +50,11 @@ impl Plugin for VehiclesPlugin {
             FixedUpdate,
             (
                 ride_vehicles.in_set(ServerSimSystems::ApplyInputs),
-                enter_vehicles
+                (enter_vehicles, wreck_vehicles)
+                    .chain()
                     .after(ServerSimSystems::ApplyInputs)
                     .before(VehicleSystems::Simulate),
+                fire_vehicle_guns.after(VehicleSystems::Simulate),
             )
                 .run_if(in_state(ClientState::Disconnected)),
         )
@@ -66,6 +73,24 @@ const ABANDON_SECONDS: f32 = 60.0;
 const FLIPPED_SECONDS: f32 = 8.0;
 /// Respawn delay when the spawner doesn't set one.
 const DEFAULT_RESPAWN_SECONDS: f32 = 10.0;
+/// How long a destroyed vehicle stays (BF2's `armor.timeToStayAsWreck`).
+const WRECK_SECONDS: f32 = 10.0;
+
+/// Server-side: per gun, seconds until it may fire again, rounds left in the magazine and
+/// seconds of reloading left.
+#[derive(Component)]
+struct VehicleGuns(Vec<GunState>);
+
+#[derive(Clone, Copy, Default)]
+struct GunState {
+    cooldown: f32,
+    rounds: u32,
+    reload: f32,
+}
+
+/// Server-side: a destroyed vehicle, removed when the timer runs out.
+#[derive(Component)]
+struct Wreck(f32);
 
 /// Server-side: one of the layout's vehicle spawners.
 #[derive(Component)]
@@ -193,9 +218,18 @@ fn run_spawners(
         };
         let rotation = Quat::from_array(spawner.desc.placement.rotation);
         let position = resting_position(&model, home, &spatial);
+        let guns = model
+            .guns
+            .iter()
+            .map(|w| GunState {
+                rounds: w.magazine_size.max(1),
+                ..default()
+            })
+            .collect();
         let entity = commands
             .spawn((
                 Vehicle { template },
+                VehicleGuns(guns),
                 Transform::from_translation(position).with_rotation(rotation),
                 VehicleMotion {
                     position,
@@ -393,7 +427,7 @@ fn enter_vehicles(
         (With<Soldier>, Without<Seated>),
     >,
     seated: Query<(Entity, &Seated, &ControlledBy)>,
-    vehicles: Query<(Entity, &VehicleData, &Position, &Rotation)>,
+    vehicles: Query<(Entity, &VehicleData, &Position, &Rotation, &VehicleHealth)>,
     teams: Query<&Team>,
 ) {
     let mut taken = occupancy(seated.iter().map(|(e, s, _)| (e, s)));
@@ -417,7 +451,8 @@ fn enter_vehicles(
         let chest = motion.position + Vec3::Y * 1.0;
         let nearest = vehicles
             .iter()
-            .filter_map(|(entity, data, position, rotation)| {
+            .filter(|(.., health)| !health.wrecked())
+            .filter_map(|(entity, data, position, rotation, _)| {
                 let transform = Transform::from_translation(position.0).with_rotation(rotation.0);
                 let entries = &data.0.desc.entry_points;
                 let distance = if entries.is_empty() {
@@ -480,5 +515,121 @@ fn carry_occupants(
         if transform.translation != body.translation || transform.rotation != body.rotation {
             *transform = body;
         }
+    }
+}
+
+/// Guns fire while their seat holds the trigger (the secondary button for secondary guns),
+/// at their rate of fire, reloading when the magazine is empty.
+#[allow(clippy::type_complexity)]
+fn fire_vehicle_guns(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut vehicles: Query<(
+        Entity,
+        &VehicleData,
+        &VehicleState,
+        &Position,
+        &Rotation,
+        &SeatInputs,
+        &VehicleHealth,
+        &mut VehicleGuns,
+    )>,
+    seated: Query<(Entity, &Seated, &ControlledBy)>,
+    mut shots: MessageWriter<ToClients<VehicleShot>>,
+) {
+    let dt = time.delta_secs();
+    let occupants: HashMap<(Entity, u8), (Entity, Entity)> = seated
+        .iter()
+        .map(|(soldier, s, c)| ((s.vehicle, s.seat), (soldier, c.0)))
+        .collect();
+    for (vehicle, data, state, position, rotation, inputs, health, mut guns) in &mut vehicles {
+        if health.wrecked() {
+            continue;
+        }
+        let model = &data.0;
+        let mut transforms = None;
+        for (index, weapon) in model.desc.weapons.iter().enumerate() {
+            let (Some(gun), Some(desc)) = (guns.0.get_mut(index), model.guns.get(index)) else {
+                continue;
+            };
+            gun.cooldown = (gun.cooldown - dt).max(0.0);
+            if gun.reload > 0.0 {
+                gun.reload -= dt;
+                if gun.reload <= 0.0 {
+                    gun.rounds = desc.magazine_size.max(1);
+                }
+                continue;
+            }
+            let Some(input) = inputs.0.get(weapon.seat as usize).copied().flatten() else {
+                continue;
+            };
+            let trigger = input.pressed(if weapon.alt_fire { Buttons::AIM } else { Buttons::FIRE });
+            if !trigger || gun.cooldown > 0.0 || desc.projectile.velocity <= 0.0 {
+                continue;
+            }
+            let Some(&(soldier, player)) = occupants.get(&(vehicle, weapon.seat as u8)) else {
+                continue;
+            };
+            gun.cooldown = 60.0 / desc.rounds_per_minute.max(1.0);
+            gun.rounds = gun.rounds.saturating_sub(1);
+            if gun.rounds == 0 {
+                gun.reload = desc.reload_time.max(0.5);
+            }
+            let transforms = transforms.get_or_insert_with(|| model.part_transforms(&state.joints));
+            let muzzle =
+                Transform::from_translation(position.0).with_rotation(rotation.0) * model.muzzle(transforms, index);
+            let forward = muzzle.rotation * Vec3::NEG_Z;
+            let direction = spread_direction(forward, desc.deviation.min, (fastrand::f32(), fastrand::f32()));
+            combat::spawn_projectile(
+                &mut commands,
+                desc.clone(),
+                soldier,
+                player,
+                Some(vehicle),
+                muzzle.translation,
+                direction,
+            );
+            shots.write(ToClients {
+                targets: SendTargets::All,
+                message: VehicleShot {
+                    vehicle,
+                    gun: index as u8,
+                    origin: muzzle.translation,
+                    direction,
+                },
+            });
+        }
+    }
+}
+
+/// A vehicle out of hit points kills everyone inside and stays as a wreck for a while.
+fn wreck_vehicles(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut vehicles: Query<(Entity, &Vehicle, &Position, &VehicleHealth, Option<&mut Wreck>, &mut SeatInputs)>,
+    mut soldiers: Query<(&Seated, &mut Health), With<Soldier>>,
+) {
+    for (vehicle, desc, position, health, wreck, mut inputs) in &mut vehicles {
+        if !health.wrecked() {
+            continue;
+        }
+        match wreck {
+            None => {
+                info!("{} destroyed at {:.1}", desc.template, position.0);
+                commands.entity(vehicle).insert(Wreck(WRECK_SECONDS));
+                for (seated, mut soldier) in &mut soldiers {
+                    if seated.vehicle == vehicle {
+                        soldier.current = 0.0;
+                    }
+                }
+            }
+            Some(mut wreck) => {
+                wreck.0 -= time.delta_secs();
+                if wreck.0 <= 0.0 {
+                    commands.entity(vehicle).despawn();
+                }
+            }
+        }
+        inputs.0.iter_mut().for_each(|seat| *seat = None);
     }
 }

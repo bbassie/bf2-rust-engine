@@ -8,12 +8,14 @@ use std::sync::Arc;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use game_data::{FireMode, WeaponDesc};
+use bevy::ecs::system::SystemParam;
+use game_data::{FireMode, ProjectileDesc, WeaponDesc};
 use game_shared::{
     input::Buttons,
     physics::GameLayer,
     protocol::{ControlledBy, HitConfirmed, KillFeed, Player, Score, ShotFired, Team},
     soldier::{Health, Hitbox, Soldier, SoldierMotion, Stance, stance_height},
+    vehicle::{BLAST_MATERIAL, Seated, VehicleData, VehicleHealth, armor_damage_modifier},
     weapons::{Armory, Inventory, Loadout, WeaponState, damage_at, spread_direction},
 };
 
@@ -58,7 +60,9 @@ struct Projectile {
     weapon: Arc<WeaponDesc>,
     shooter: Entity,
     shooter_player: Entity,
-    hitbox: Option<Entity>,
+    /// Collider the projectile starts inside and must not hit (the shooter's hitbox or
+    /// vehicle).
+    ignore: Option<Entity>,
     velocity: Vec3,
     travelled: f32,
     age: f32,
@@ -193,7 +197,7 @@ fn fire_weapons(
                     weapon: weapon.clone(),
                     shooter: soldier,
                     shooter_player: controlled_by.0,
-                    hitbox: hitbox.map(|h| h.entity),
+                    ignore: hitbox.map(|h| h.entity),
                     velocity: direction * weapon.projectile.velocity,
                     travelled: 0.0,
                     age: 0.0,
@@ -228,12 +232,13 @@ fn simulate_projectiles(
     clients: Query<&PlayerClient>,
     mut projectiles: Query<(Entity, &mut Projectile, &mut Transform)>,
     colliders: Query<&ColliderOf>,
-    mut soldiers: Query<(Entity, &mut Health, &SoldierMotion, &ControlledBy), With<Soldier>>,
+    mut soldiers: Query<(Entity, &mut Health, &SoldierMotion, &ControlledBy, Has<Seated>), With<Soldier>>,
     teams: Query<&Team>,
     mut players: Query<(&mut Score, &Player)>,
     mut hits: MessageWriter<ToClients<HitConfirmed>>,
     mut kills: MessageWriter<ToClients<KillFeed>>,
     mut died: MessageWriter<Died>,
+    mut vehicles: VehicleTargets,
 ) {
     let dt = time.delta_secs();
     for (entity, mut projectile, mut transform) in &mut projectiles {
@@ -251,9 +256,10 @@ fn simulate_projectiles(
             continue;
         };
 
-        let mut filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier]);
-        if let Some(hitbox) = projectile.hitbox {
-            filter = filter.with_excluded_entities([hitbox]);
+        let mut filter =
+            SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier, GameLayer::Vehicle]);
+        if let Some(ignore) = projectile.ignore {
+            filter = filter.with_excluded_entities([ignore]);
         }
         let Some(hit) = spatial.cast_ray(transform.translation, direction, length, true, &filter)
         else {
@@ -271,15 +277,18 @@ fn simulate_projectiles(
 
         // Direct hit on a soldier.
         let body = colliders.get(hit.entity).map(|c| c.body).unwrap_or(hit.entity);
-        if let Ok((_, _, motion, _)) = soldiers.get(body) {
+        if let Ok((_, _, motion, ..)) = soldiers.get(body) {
             let head = point.y - motion.position.y > stance_height(motion.stance) - 0.3
                 && motion.stance != Stance::Prone;
             let damage = damage_at(desc, travelled) * if head { HEADSHOT_MULTIPLIER } else { 1.0 };
             victims.push((body, damage, head));
         }
-        // Explosions hurt everyone nearby, less with distance.
+        // Explosions hurt everyone nearby, less with distance (the hull shields those inside).
         if desc.explosion_damage > 0.0 && desc.explosion_radius > 0.0 {
-            for (soldier, _, motion, _) in &soldiers {
+            for (soldier, _, motion, _, seated) in &soldiers {
+                if seated {
+                    continue;
+                }
                 let distance = (motion.position + Vec3::Y * 0.9).distance(point);
                 if distance < desc.explosion_radius {
                     let falloff = 1.0 - distance / desc.explosion_radius;
@@ -288,8 +297,24 @@ fn simulate_projectiles(
             }
         }
 
+        for (victim, damage, destroyed) in
+            vehicles.damage(body, point, travelled, desc, shooter_team, settings.friendly_fire, &teams)
+        {
+            if let Some(client) = player_client(projectile.shooter_player, &clients, host.as_deref()) {
+                hits.write(ToClients {
+                    targets: SendTargets::Single(client),
+                    message: HitConfirmed {
+                        victim,
+                        damage,
+                        headshot: false,
+                        killed: destroyed,
+                    },
+                });
+            }
+        }
+
         for (victim, damage, head) in victims {
-            let Ok((_, mut health, _, controlled_by)) = soldiers.get_mut(victim) else {
+            let Ok((_, mut health, _, controlled_by, _)) = soldiers.get_mut(victim) else {
                 continue;
             };
             let victim_player = controlled_by.0;
@@ -332,6 +357,91 @@ fn simulate_projectiles(
             }
         }
     }
+}
+
+/// Vehicles projectiles can damage.
+#[derive(SystemParam)]
+struct VehicleTargets<'w, 's> {
+    vehicles: Query<'w, 's, (Entity, &'static Position, &'static VehicleData, &'static mut VehicleHealth)>,
+    seated: Query<'w, 's, (&'static Seated, &'static ControlledBy)>,
+}
+
+impl VehicleTargets<'_, '_> {
+    /// Applies a projectile's direct hit on `body` (if it is a vehicle) and its blast to
+    /// vehicles, through the armour damage table. Returns (vehicle, damage, destroyed).
+    #[allow(clippy::too_many_arguments)]
+    fn damage(
+        &mut self,
+        body: Entity,
+        point: Vec3,
+        travelled: f32,
+        projectile: &ProjectileDesc,
+        shooter_team: Team,
+        friendly_fire: bool,
+        teams: &Query<&Team>,
+    ) -> Vec<(Entity, f32, bool)> {
+        let mut damaged = Vec::new();
+        for (vehicle, position, data, mut health) in &mut self.vehicles {
+            if health.wrecked() {
+                continue;
+            }
+            let desc = &data.0.desc;
+            let mut damage = 0.0;
+            if vehicle == body {
+                damage += damage_at(projectile, travelled) * armor_damage_modifier(projectile.material, desc.armor_material);
+            }
+            if projectile.explosion_damage > 0.0 && projectile.explosion_radius > 0.0 {
+                // Measured to the hull's surface, roughly.
+                let reach = Vec3::from_array(desc.physics.bounds[1]).length().min(4.0);
+                let distance = (position.0.distance(point) - reach).max(0.0);
+                if distance < projectile.explosion_radius {
+                    let falloff = 1.0 - distance / projectile.explosion_radius;
+                    damage += projectile.explosion_damage
+                        * falloff
+                        * armor_damage_modifier(BLAST_MATERIAL, desc.blast_material);
+                }
+            }
+            if damage <= 0.0 {
+                continue;
+            }
+            let friendly = self
+                .seated
+                .iter()
+                .filter(|(s, _)| s.vehicle == vehicle)
+                .any(|(_, c)| teams.get(c.0).is_ok_and(|t| *t == shooter_team));
+            if friendly && !friendly_fire {
+                continue;
+            }
+            health.current = (health.current - damage).max(0.0);
+            damaged.push((vehicle, damage, health.wrecked()));
+        }
+        damaged
+    }
+}
+
+/// Spawns a projectile fired by `shooter` (a soldier, possibly manning a vehicle gun).
+pub fn spawn_projectile(
+    commands: &mut Commands,
+    weapon: Arc<WeaponDesc>,
+    shooter: Entity,
+    shooter_player: Entity,
+    ignore: Option<Entity>,
+    origin: Vec3,
+    direction: Vec3,
+) {
+    let velocity = direction * weapon.projectile.velocity;
+    commands.spawn((
+        Projectile {
+            weapon,
+            shooter,
+            shooter_player,
+            ignore,
+            velocity,
+            travelled: 0.0,
+            age: 0.0,
+        },
+        Transform::from_translation(origin),
+    ));
 }
 
 /// Soldiers whose health ran out some other way (scripts, and later falls and crashes).
