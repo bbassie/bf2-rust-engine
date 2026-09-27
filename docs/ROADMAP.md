@@ -133,7 +133,9 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - Lighting depth (in progress): per-map world lighting from BF2's values (night maps), directional
   sky ambient, BF2's baked sky visibility as ambient occlusion (the sun stays dynamic), light
   probes for soldiers and vehicles, tonemapping and bloom
-- Mesh LODs with BF2's LOD distances and cull radii for statics, vehicles and soldiers (in progress)
+- [x] Static mesh LODs with BF2's switch distances (`setSubGeometryLodDistance`) and draw distances
+  (cull radius), dithered cross-fades, zoom-aware like BF2
+- Vehicle and soldier LODs
 - [x] Effects: BF2's particle effects for muzzle flashes, impacts per surface, explosions with
   their material-manager dust columns, smoke, destruction, scorch decals
 - [x] Audio: BF2's sounds with its distance model, weapons (near/far, cracks), footsteps per
