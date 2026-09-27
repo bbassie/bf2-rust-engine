@@ -41,11 +41,16 @@ game_server = { path = "crates/game_server" }
 
 # Bevy compiles slowly without optimizations and runs far too slowly in debug.
 # Optimize dependencies, keep our own code quick to build.
+#
+# Debug info: full debug info in every dependency made each client link write a 2 GB PDB.
+# Line tables keep file:line in our backtraces; dependencies keep their function names.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 # Shipping builds: `cargo build --profile dist`. Slower to compile than `--release`.
 [profile.dist]

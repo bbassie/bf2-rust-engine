@@ -75,6 +75,11 @@ pub struct TeamStats {
     pub vehicle_kills: u32,
     pub flights: u32,
     pub crashes: u32,
+    /// Anti-tank mines laid and C4 attacks on vehicles.
+    pub mines: u32,
+    pub demolitions: u32,
+    /// Flares and smoke fired at incoming missiles.
+    pub countermeasures: u32,
 }
 
 impl TeamStats {
@@ -112,6 +117,9 @@ impl TeamStats {
         self.vehicle_kills += other.vehicle_kills;
         self.flights += other.flights;
         self.crashes += other.crashes;
+        self.mines += other.mines;
+        self.demolitions += other.demolitions;
+        self.countermeasures += other.countermeasures;
     }
 }
 
@@ -230,7 +238,7 @@ pub fn log_stats(
              {} rockets, {} repairs, {} flashed, {:.0} s gassed; commander: {} orders, {} artillery, {} UAVs, \
              {} scans, {} supply drops; {} of {} spawns on the squad leader; \
              vehicles: {} entered ({} stationary), {:.2} km driven, {} stuck, {} shots, {} vehicle kills, \
-             {} takeoffs, {} crashes; kits {}; {:?}, {} squads attacking, {} defending: {}",
+             {} takeoffs, {} crashes, {} countermeasures, {} AT mines, {} C4 attacks; kits {}; {:?}, {} squads attacking, {} defending: {}",
             t + 1,
             minute.captures,
             minute.neutralized,
@@ -269,6 +277,9 @@ pub fn log_stats(
             minute.vehicle_kills,
             minute.flights,
             minute.crashes,
+            minute.countermeasures,
+            minute.mines,
+            minute.demolitions,
             kits.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "),
             strategy.posture[t],
             attacking,

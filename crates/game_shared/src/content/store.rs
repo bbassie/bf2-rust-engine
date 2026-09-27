@@ -106,6 +106,29 @@ fn join_checked(root: &Path, relative: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Links (or copies) every `(from, to)`. A link takes a few milliseconds on Windows (the file
+/// system's filters) and a BF2 level has thousands of files: on several threads.
+fn link_all(links: &[(PathBuf, PathBuf)]) -> io::Result<()> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed: std::sync::Mutex<Option<io::Error>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..8.min(links.len()) {
+            scope.spawn(|| {
+                while let Some((from, to)) = links.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                    if let Err(err) = link_or_copy(from, to) {
+                        failed.lock().unwrap().get_or_insert(io::Error::new(err.kind(), format!("{}: {err}", to.display())));
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    match failed.into_inner().unwrap() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
 /// Makes `to` the same file as `from`: a hard link, else a copy.
 fn link_or_copy(from: &Path, to: &Path) -> io::Result<bool> {
     if std::fs::hard_link(from, to).is_ok() {
@@ -196,7 +219,8 @@ impl ContentStore {
                         .is_ok_and(|m| m.len() == file.size)
                 })
         };
-        if !complete(&base) {
+        // A map change keeps most files: update the old view if there is one.
+        if !complete(&base) && !(matches!(self.update_view(&base, &listing, &sorted), Ok(true)) && complete(&base)) {
             // A folder still in use (Windows) gets a sibling.
             let mut n = 1;
             while base.exists() && std::fs::remove_dir_all(&base).is_err() {
@@ -209,14 +233,18 @@ impl ContentStore {
             for i in 0..manifest.layers.len() {
                 std::fs::create_dir_all(base.join(i.to_string()))?;
             }
+            let mut links = Vec::with_capacity(sorted.len());
+            let mut dirs = HashSet::new();
             for (layer, file) in &sorted {
                 let target = join_checked(&base.join(layer.to_string()), &file.path)?;
-                if let Some(dir) = target.parent() {
+                if let Some(dir) = target.parent()
+                    && dirs.insert(dir.to_path_buf())
+                {
                     std::fs::create_dir_all(dir)?;
                 }
-                link_or_copy(&self.file(&file.hash), &target)
-                    .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", target.display())))?;
+                links.push((self.file(&file.hash), target));
             }
+            link_all(&links)?;
             std::fs::write(base.join("view.txt"), &listing)?;
         }
         self.touch(sorted.iter().map(|(_, f)| f.hash.as_str()));
@@ -241,6 +269,55 @@ impl ContentStore {
             files: needed.len(),
             bytes: needed.iter().map(|(_, f)| f.size).sum(),
         })
+    }
+
+    /// Brings the view in `base` to `listing` by removing and linking only the files that
+    /// changed. `Ok(false)`: there is no old view with the same layers.
+    fn update_view(&self, base: &Path, listing: &str, sorted: &[&(usize, FileEntry)]) -> io::Result<bool> {
+        let Ok(old) = std::fs::read_to_string(base.join("view.txt")) else {
+            return Ok(false);
+        };
+        let header = |text: &str| -> Vec<String> { text.lines().filter(|l| l.starts_with("layer\t")).map(str::to_string).collect() };
+        if header(&old) != header(listing) {
+            return Ok(false);
+        }
+        let entries = |text: &str| -> HashMap<(usize, String), String> {
+            text.lines()
+                .filter(|l| !l.starts_with("layer\t"))
+                .filter_map(|line| {
+                    let mut parts = line.splitn(3, '\t');
+                    Some(((parts.next()?.parse().ok()?, parts.next()?.to_string()), parts.next()?.to_string()))
+                })
+                .collect()
+        };
+        let (old, new) = (entries(&old), entries(listing));
+        // Not reused until it is consistent again.
+        std::fs::remove_file(base.join("view.txt"))?;
+        for ((layer, path), hash) in &old {
+            if new.get(&(*layer, path.clone())) != Some(hash) {
+                match std::fs::remove_file(join_checked(&base.join(layer.to_string()), path)?) {
+                    Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+                    _ => {}
+                }
+            }
+        }
+        let mut links = Vec::new();
+        let mut dirs = HashSet::new();
+        for (layer, file) in sorted {
+            if old.get(&(*layer, file.path.clone())) == Some(&file.hash) {
+                continue;
+            }
+            let target = join_checked(&base.join(layer.to_string()), &file.path)?;
+            if let Some(dir) = target.parent()
+                && dirs.insert(dir.to_path_buf())
+            {
+                std::fs::create_dir_all(dir)?;
+            }
+            links.push((self.file(&file.hash), target));
+        }
+        link_all(&links)?;
+        std::fs::write(base.join("view.txt"), listing)?;
+        Ok(true)
     }
 
     fn used_file(&self) -> PathBuf {
@@ -405,6 +482,14 @@ mod tests {
         // The same again: reused.
         let again = store.build_view("127.0.0.1-1", &manifest, &needed, &["x".into()]).unwrap();
         assert_eq!(again.layers[0].dir, mounted.layers[0].dir);
+        // Another level: updated in place, the file no longer needed gone.
+        let fewer = vec![(0, entries[0].clone()), (1, entries[2].clone())];
+        let updated = store.build_view("127.0.0.1-1", &manifest, &fewer, &["x".into()]).unwrap();
+        assert_eq!(updated.layers[0].dir, mounted.layers[0].dir);
+        assert!(!updated.layers[0].dir.join("objects/x.glb").exists());
+        assert!(updated.layers[1].dir.join("objects/t.dds").exists());
+        let back = store.build_view("127.0.0.1-1", &manifest, &needed, &["x".into()]).unwrap();
+        assert_eq!(std::fs::read(back.layers[0].dir.join("objects/x.glb")).unwrap(), data[1]);
         // Over the limit: the least recently used file goes, the kept ones stay.
         let keep: HashSet<String> = [entries[0].hash.clone()].into();
         let (count, _) = store.cleanup(data[0].len() as u64, &keep, None);

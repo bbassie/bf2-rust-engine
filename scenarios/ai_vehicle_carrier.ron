@@ -1,0 +1,29 @@
+// The US carrier on Dalian Plant (64): the US team holds only the carrier, so its bots can only
+// leave by boat or helicopter. The camera looks down on the flight deck and the well deck; run
+// with RUST_LOG=info,game_server::bots=debug for the bots' "goes for" and "can't walk" lines.
+// client --scenario scenarios/ai_vehicle_carrier.ron
+(
+    level: "dalian_plant",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((786.0, 235.0, 10.0), 0.0, -89.0),
+        Wait(5.0),
+        Screenshot("top_5s"),
+        Wait(10.0),
+        Screenshot("top_15s"),
+        Camera((740.0, 155.0, 60.0), -110.0, -20.0),
+        Wait(5.0),
+        Screenshot("well_20s"),
+        Camera((786.0, 235.0, 10.0), 0.0, -89.0),
+        Wait(20.0),
+        Screenshot("top_40s"),
+        LogVehicles("after 40 s"),
+        Wait(25.0),
+        Screenshot("top_65s"),
+        LogVehicles("after 65 s"),
+        Quit,
+    ],
+)

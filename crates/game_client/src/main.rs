@@ -241,11 +241,13 @@ fn main() -> AppExit {
             .set(ImagePlugin {
                 default_sampler: render::materials::default_sampler(),
             })
-            // Static meshes' lightmap UVs.
-            .set(bevy::gltf::GltfPlugin::default().add_custom_vertex_attribute(
-                "_LIGHTMAP_UV",
-                render::materials::ATTRIBUTE_LIGHTMAP_UV,
-            )),
+            // Static meshes' lightmap UVs (glTF `_LIGHTMAP_UV`; the glTF crate drops the
+            // underscore before Bevy looks the name up).
+            .set(
+                bevy::gltf::GltfPlugin::default()
+                    .add_custom_vertex_attribute("LIGHTMAP_UV", render::materials::ATTRIBUTE_LIGHTMAP_UV)
+                    .add_custom_vertex_attribute("_LIGHTMAP_UV", render::materials::ATTRIBUTE_LIGHTMAP_UV),
+            ),
     )
     .add_plugins((
         FrameTimeDiagnosticsPlugin::default(),

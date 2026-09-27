@@ -119,8 +119,9 @@ pub(super) struct Ride {
     purpose: Purpose,
     /// Seconds seated.
     time: f32,
-    /// The seat it wants, if not the one it has.
+    /// The seat it wants, if not the one it has, until when (seconds of `time`) it tries.
     want_seat: Option<u8>,
+    want_until: f32,
     /// Pressing use to get out.
     leaving: bool,
     /// Why it gets out (for the log).
@@ -146,6 +147,17 @@ pub(super) struct Ride {
     flipped: f32,
     /// Seconds without a target (stationary gunners leave when nothing happens).
     idle: f32,
+    /// Seconds something has been in the way.
+    obstructed: f32,
+    /// Its squad leader rode along at some point (riders get out when he does).
+    with_leader: bool,
+    /// Closest it got to its goal (the length of the path left), and seconds since it got
+    /// closer: circling or shuffling without getting anywhere.
+    best_remaining: f32,
+    no_progress: f32,
+    /// Where it's driving to for its current order (kept while the order is), and how close
+    /// counts as there.
+    hold: Option<(OrderKind, usize, Vec3, f32)>,
 
     aim: Option<Aim>,
     scan: f32,
@@ -158,6 +170,8 @@ pub(super) struct Ride {
 
     flight: Flight,
     orbit: f32,
+    /// Seconds until flares or smoke may go again.
+    countermeasure_cooldown: f32,
     last_velocity: Vec3,
     airborne: bool,
 }
@@ -170,6 +184,7 @@ impl Ride {
             purpose,
             time: 0.0,
             want_seat: None,
+            want_until: 3.0,
             leaving: false,
             reason: "",
             use_down: false,
@@ -190,6 +205,11 @@ impl Ride {
             no_driver: 0.0,
             flipped: 0.0,
             idle: 0.0,
+            obstructed: 0.0,
+            with_leader: false,
+            best_remaining: f32::MAX,
+            no_progress: 0.0,
+            hold: None,
             aim: None,
             scan: 0.0,
             burst: 0.0,
@@ -199,6 +219,7 @@ impl Ride {
             pitch: 0.0,
             flight: Flight::Ground,
             orbit: fastrand::f32() * TAU,
+            countermeasure_cooldown: 0.0,
             last_velocity: Vec3::ZERO,
             airborne: false,
         }
@@ -235,7 +256,7 @@ impl Seen<'_> {
         self.health.map_or(1.0, |h| (h.current / h.max.max(1.0)).clamp(0.0, 1.0))
     }
 
-    fn wrecked(&self) -> bool {
+    pub(super) fn wrecked(&self) -> bool {
         self.health.is_some_and(|h| h.wrecked())
     }
 
@@ -284,6 +305,23 @@ impl Senses<'_, '_> {
     }
 }
 
+/// Whether a jet has a runway in front of it: ground at its level and nothing in the way for
+/// a few hundred meters (not a carrier deck: jump jets don't hover yet).
+fn runway_ahead(w: &Senses, motion: &VehicleMotion) -> bool {
+    let forward = flat(motion.rotation * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
+    let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+    let start = motion.position + Vec3::Y * 2.0;
+    let length = 320.0;
+    if w.spatial.cast_ray(start, Dir3::new(forward).unwrap_or(Dir3::NEG_Z), length, true, &filter).is_some() {
+        return false;
+    }
+    let ground = |at: Vec3| w.spatial.cast_ray(at, Dir3::NEG_Y, 12.0, true, &filter).map(|hit| at.y - hit.distance);
+    let Some(level) = ground(start) else {
+        return false;
+    };
+    (1..=8).all(|i| ground(start + forward * (length * i as f32 / 8.0)).is_some_and(|y| (y - level).abs() < 4.0))
+}
+
 /// The world yaw a direction points at (0 = -Z, positive turns left).
 fn heading(v: Vec3) -> f32 {
     (-v.x).atan2(-v.z)
@@ -300,6 +338,27 @@ impl BotBrain {
     /// The vehicle the bot is in, for debug views.
     pub fn ride_path(&self) -> &[Vec3] {
         self.ride.as_ref().map_or(&[], |r| r.remaining_path())
+    }
+
+    /// What it does in its vehicle, for the statistics.
+    pub(super) fn ride_kind(&self, w: &Senses) -> &'static str {
+        let Some(ride) = &self.ride else {
+            return "getting in";
+        };
+        let role = w.vehicle(ride.vehicle).and_then(|v| w.profile(v.template)).map_or("?", |p| p.role.name());
+        match (ride.purpose, role) {
+            (Purpose::Drive, "transport") => "transport driver",
+            (Purpose::Drive, "APC") => "APC driver",
+            (Purpose::Drive, "tank") => "tank driver",
+            (Purpose::Drive, "boat") => "boat driver",
+            (Purpose::Drive, "attack helicopter") => "gunship pilot",
+            (Purpose::Drive, "transport helicopter") => "helicopter pilot",
+            (Purpose::Drive, "jet") => "jet pilot",
+            (Purpose::Drive, _) => "driver",
+            (Purpose::Gun, "stationary") => "stationary gunner",
+            (Purpose::Gun, _) => "gunner",
+            (Purpose::Ride, _) => "passenger",
+        }
     }
 
     /// Called on foot: a ride that ended (the bot got out, or its vehicle is gone).
@@ -350,15 +409,41 @@ impl BotBrain {
         let far = objective.map_or(0.0, |o| o.xz().distance(position.xz()));
         let attacking = order.is_some_and(|(k, _)| k == OrderKind::Attack);
         let skill = self.personality.skill(w.settings.bot_skill).0;
+        // Cut off: walking can't get to the objective from here (a carrier, an island).
+        let here = w.nav().and_then(|nav| nav.locate(position, 2.0, None)).map(|c| w.nav().unwrap().cell(c).region);
+        let cut_off = self.stranded > 0.0
+            || order.is_some_and(|(_, area)| {
+                let goal = w.map.walk_regions.get(area).copied().flatten();
+                goal.is_some() && here.is_some() && goal != here
+            });
+        // Whether it can walk up to a vehicle's door (a boat below a carrier's deck isn't).
+        let walkable = |data: &game_shared::vehicle::VehicleData, motion: &VehicleMotion| {
+            let (Some(nav), Some(region)) = (w.nav(), here) else {
+                return true;
+            };
+            let transform = motion.transform();
+            let entries = &data.0.desc.entry_points;
+            if entries.is_empty() {
+                return nav.locate(motion.position, 5.0, Some(region)).is_some();
+            }
+            entries.iter().any(|e| {
+                let at = transform.transform_point(Vec3::from_array(e.position));
+                nav.locate(at, e.radius + 1.5, Some(region)).is_some()
+            })
+        };
 
         let offer = |best: &mut (f32, Activity), utility: f32, vehicle: Entity, wish: SeatWish| {
             if utility > best.0 {
                 *best = (utility, Activity::Mount { vehicle, wish, time: 0.0 });
             }
         };
-        for (entity, vehicle, _data, motion, _state, health, _) in &w.rides {
+        for (entity, vehicle, data, motion, _state, health, _) in &w.rides {
             let distance = motion.position.distance(position);
-            let search = if leader_player.is_some() { BOARD_DISTANCE } else { VEHICLE_SEARCH };
+            let search = match (cut_off, leader_player.is_some()) {
+                (true, _) => VEHICLE_SEARCH * 2.5,
+                (false, true) => BOARD_DISTANCE,
+                (false, false) => VEHICLE_SEARCH,
+            };
             if distance > search.max(35.0) || health.is_some_and(|h| h.wrecked() || h.current < h.max * 0.5) {
                 continue;
             }
@@ -368,8 +453,8 @@ impl BotBrain {
             let Some(profile) = w.profile(&vehicle.template) else {
                 continue;
             };
-            // Upside down, or sunk.
-            if (motion.rotation * Vec3::Y).y < 0.5 {
+            // Upside down, or sunk, or out of walking reach.
+            if (motion.rotation * Vec3::Y).y < 0.5 || (distance > 12.0 && !walkable(data, motion)) {
                 continue;
             }
             let crew = vcx.crews.get(&entity).map_or(&[][..], |c| &c[..]);
@@ -397,7 +482,13 @@ impl BotBrain {
                 offer(best, 6.0, entity, wish);
                 continue;
             }
-            if distance > VEHICLE_SEARCH {
+            // Cut off: any teammate's vehicle with room that's about to go somewhere.
+            if cut_off && driven && room && profile.role != Role::Stationary && speed < 4.0 {
+                let wish = if free_gunner { SeatWish::Gunner } else { SeatWish::Passenger };
+                offer(best, 5.5, entity, wish);
+                continue;
+            }
+            if distance > VEHICLE_SEARCH && !cut_off {
                 continue;
             }
             // A stationary weapon when enemies are about.
@@ -434,7 +525,10 @@ impl BotBrain {
                 offer(best, 4.0 + self.personality.teamwork, entity, SeatWish::Gunner);
                 continue;
             }
-            if driven || !driver_free || leader_player.is_some() {
+            // Squad members leave the driving to their leader, unless they're cut off and he
+            // isn't around to take them.
+            let leader_near = squad.and_then(|s| s.leader_soldier).is_some_and(|l| l.position.distance(position) < 100.0);
+            if driven || !driver_free || (leader_player.is_some() && (!cut_off || leader_near)) {
                 continue;
             }
             // Driving one ourselves, when the objective is far enough to be worth it.
@@ -443,14 +537,14 @@ impl BotBrain {
                 Role::Apc => (far > MOUNT_DISTANCE, 4.6),
                 Role::Tank => (far > MOUNT_DISTANCE && (attacking || far > 300.0) && squad_size <= 3, 4.4),
                 Role::AntiAir => (far > MOUNT_DISTANCE && hash01(self.seed, 11) < 0.5, 3.8),
-                Role::Boat => (far > MOUNT_DISTANCE && self.stranded > 0.0 || far > 250.0 && distance < 40.0, 4.6),
+                Role::Boat => ((far > MOUNT_DISTANCE && cut_off) || (far > 250.0 && distance < 40.0), 4.6),
                 Role::TransportHeli => (far > 300.0 && is_leader && squad_size >= 3 && skill > 0.35, 4.0),
                 Role::AttackHeli => (skill > 0.3 && hash01(self.seed, 12) < 0.6, 4.3),
-                Role::Jet => (skill > 0.3 && hash01(self.seed, 13) < 0.6, 4.3),
+                Role::Jet => (skill > 0.3 && hash01(self.seed, 13) < 0.6 && runway_ahead(w, motion), 4.3),
                 Role::Stationary => (false, 0.0),
             };
-            // Stranded (a carrier, an island): anything that gets it off.
-            let worth = worth || (self.stranded > 0.0 && profile.role != Role::Stationary);
+            // Cut off (a carrier, an island): anything that gets it off.
+            let worth = worth || (cut_off && profile.role != Role::Stationary && (profile.role != Role::Jet || runway_ahead(w, motion)));
             if !worth || (profile.role == Role::Boat && w.vehicle_nav().is_none_or(|n| n.water.is_none())) {
                 continue;
             }
@@ -476,7 +570,8 @@ impl BotBrain {
         let seen = w.vehicle(vehicle).filter(|v| !v.wrecked());
         let crew = vcx.crews.get(&vehicle).map_or(&[][..], |c| &c[..]);
         let hostile = crew.iter().any(|c| c.team != me.team);
-        let (Some(seen), false, true) = (seen, hostile, time < 30.0) else {
+        let far = seen.as_ref().map_or(0.0, |v| v.motion.position.distance(me.motion.position));
+        let (Some(seen), false, true) = (seen, hostile, time < 30.0 + far / 3.0) else {
             vcx.claims.release(me.player);
             self.activity = Activity::Objective;
             self.vehicle_cooldown = VEHICLE_COOLDOWN;
@@ -597,7 +692,7 @@ impl BotBrain {
                 _ => Purpose::Ride,
             };
         }
-        if ride.want_seat == Some(seated.seat) || ride.time > 3.0 {
+        if ride.want_seat == Some(seated.seat) || ride.time > ride.want_until {
             ride.want_seat = None;
         }
         let mut frame = InputFrame {
@@ -614,7 +709,9 @@ impl BotBrain {
 
         // Reasons to get out.
         let health = seen.health_fraction();
-        if health < BAIL_OUT && profile.role != Role::Stationary {
+        // Without parachutes, aircrews only get out on the ground.
+        let grounded = !profile.role.flies() || w.height_above_ground(seen.motion.position, 10.0) < 3.0;
+        if health < BAIL_OUT && profile.role != Role::Stationary && grounded {
             ride.leave("damaged");
         }
         let up = (seen.motion.rotation * Vec3::Y).y;
@@ -629,14 +726,15 @@ impl BotBrain {
             // to drive take the wheel if they can.
             if ride.purpose == Purpose::Gun && !profile.role.flies() && ride.no_driver < 4.5 && profile.role != Role::Boat {
                 ride.want_seat = Some(0);
-            } else {
+                ride.want_until = ride.time + 2.0;
+            } else if ride.want_seat.is_none() {
                 ride.leave("no driver");
             }
         }
 
         let skill = self.personality.skill(w.settings.bot_skill);
         let eye_seat = seated.seat as usize;
-        let mounted = Mounted::new(&seen.data.0, seen.motion.transform(), &seen.state.joints);
+        let mounted = Mounted::new(&seen.data.0, seen.motion.transform());
         let order = self.current_order(w, me);
 
         match ride.purpose {
@@ -667,6 +765,26 @@ impl BotBrain {
             }
         }
 
+        // Flares or smoke when an enemy rocket or missile is coming at the vehicle.
+        ride.countermeasure_cooldown -= dt;
+        if profile.countermeasures.contains(&seated.seat) && ride.countermeasure_cooldown <= 0.0 {
+            let at = seen.motion.position;
+            let incoming = w.projectiles.iter().any(|(projectile, motion)| {
+                let to = at - motion.position;
+                let speed = motion.velocity.length();
+                !motion.resting
+                    && speed > 25.0
+                    && to.length() < 500.0
+                    && motion.velocity.dot(to) > 0.97 * speed * to.length()
+                    && w.is_enemy(projectile.player, me.team)
+                    && w.armory.weapon(&projectile.weapon).is_some_and(|d| d.projectile.explodes())
+            });
+            if incoming {
+                frame.buttons |= Buttons::COUNTERMEASURE;
+                ride.countermeasure_cooldown = 8.0;
+                team_stats.countermeasures += 1;
+            }
+        }
         if ride.leaving {
             // Pressed and let go on alternate ticks until out.
             ride.use_down = !ride.use_down;
@@ -700,9 +818,14 @@ impl BotBrain {
         let position = seen.motion.position;
         let height = if profile.role.flies() { w.height_above_ground(position, 50.0) } else { 0.0 };
         let landed = height < 2.5;
-        // A human leader decides: out when he gets out.
+        // Riding with the squad leader: out when he gets out.
         let squad = me.member.and_then(|m| w.snapshot.squads.get(&(me.team, m.squad)));
-        if let Some(leader) = squad.and_then(|s| s.leader).filter(|_| !me.member.is_some_and(|m| m.leader))
+        let leader = squad.and_then(|s| s.leader).filter(|_| !me.member.is_some_and(|m| m.leader));
+        if leader.is_some_and(|l| crew.iter().any(|c| c.player == l)) {
+            ride.with_leader = true;
+        }
+        if let Some(leader) = leader
+            && ride.with_leader
             && squad.is_some_and(|s| s.leader_soldier.is_some())
             && !crew.iter().any(|c| c.player == leader)
             && speed < 4.0
@@ -794,7 +917,7 @@ impl BotBrain {
         let Some(gun) = profile.guns.get(aim.gun) else {
             return false;
         };
-        let muzzle = mounted.muzzle(gun.index);
+        let muzzle = mounted.muzzle(&seen.state.joints, gun.index);
         let own_velocity = seen.motion.velocity;
         let point = match gun.kind {
             // Guided: straight at it; the missile does the leading.
@@ -829,6 +952,20 @@ impl BotBrain {
         let ready = status.is_none_or(|s| !s.reloading && s.rounds > 0 && s.heat < 220);
         let locked = gun.kind != GunKind::AntiAir || status.is_some_and(|s| s.lock == 255);
         let trigger = if gun.alt_fire { Buttons::AIM } else { Buttons::FIRE };
+        if every(ride.time, dt, 3.0) {
+            debug!(
+                "{} aims {} gun {} ({:?}) at a {} {distance:.0} m away: off by {:.1} (fires within {:.1}), ready {ready}, lock {}, reaction {:.1}",
+                w.name(me.player),
+                seen.template,
+                gun.index,
+                gun.kind,
+                if aim.vehicle { "vehicle" } else { "soldier" },
+                off.to_degrees(),
+                tolerance.to_degrees(),
+                status.map_or(0, |s| s.lock),
+                ride.reaction,
+            );
+        }
         ride.burst -= dt;
         if ride.guiding > 0.0 {
             // A guided missile in the air: keep the sight on the target.
@@ -992,9 +1129,15 @@ impl BotBrain {
         seen: &Seen,
         profile: &VehicleProfile,
         order: Option<(OrderKind, usize)>,
+        hold: Option<(OrderKind, usize, Vec3, f32)>,
     ) -> Option<(Vec3, f32)> {
         let position = seen.motion.position;
         let (kind, index) = order?;
+        if let Some((held_kind, held, spot, arrive)) = hold
+            && (held_kind, held) == (kind, index)
+        {
+            return Some((spot, arrive));
+        }
         let area = &w.map.areas[index];
         let target = area.position;
         let from = flat(position - target).normalize_or(Vec3::X);
@@ -1006,18 +1149,59 @@ impl BotBrain {
                 Some((landing, 12.0))
             }
             Role::Tank | Role::Apc | Role::AntiAir => {
-                let spot = match kind {
-                    OrderKind::Attack => target + from * area.radius * 0.35,
+                let toward = match kind {
+                    OrderKind::Attack => from,
                     // Hold in front of the flag, towards the enemy.
-                    OrderKind::Defend => {
-                        let facing = self.facing(w, me.team, index);
-                        target + Quat::from_rotation_y(facing) * Vec3::NEG_Z * (area.radius * 0.5 + 10.0)
-                    }
+                    OrderKind::Defend => Quat::from_rotation_y(self.facing(w, me.team, index)) * Vec3::NEG_Z,
                 };
-                Some((spot, area.radius * 0.5))
+                Some((self.hold_spot(w, seen, profile, index, toward), 6.0))
             }
             _ => Some((target + from * (area.radius * 0.6 + 10.0), area.radius * 0.5 + 10.0)),
         }
+    }
+
+    /// Where a fighting vehicle holds at an area: inside the capture radius, towards `toward`,
+    /// under open sky (flags are sometimes indoors) and where it fits. Chosen once per area.
+    fn hold_spot(&self, w: &Senses, seen: &Seen, profile: &VehicleProfile, index: usize, toward: Vec3) -> Vec3 {
+        let area = &w.map.areas[index];
+        let fallback = area.position + toward * area.radius * 0.4;
+        let (Some(nav), Some(spec)) = (w.vehicle_nav(), profile.spec) else {
+            return fallback;
+        };
+        let base = heading(toward);
+        let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+        let mut best: Option<(f32, Vec3)> = None;
+        // Vehicles from different places at the same flag shouldn't all go for one spot.
+        let shift = (hash01(self.seed, 21) - 0.5) * 1.2;
+        let taken = |at: Vec3| {
+            w.rides
+                .iter()
+                .any(|(entity, _, _, other, ..)| entity != seen.entity && flat(other.position - at).length() < 10.0)
+        };
+        for ring in [0.4, 0.7, 1.0] {
+            for i in 0..10 {
+                let offset = (i as f32 - 4.5) * 0.35 + shift;
+                let direction = Quat::from_rotation_y(base + offset) * Vec3::NEG_Z;
+                let candidate = area.position + direction * (area.radius * ring).max(6.0);
+                let ground = w.level.heightmap.as_ref().map_or(candidate.y, |h| h.height_at(candidate.x, candidate.z));
+                let at = candidate.with_y(ground.max(candidate.y - 3.0) + 1.0);
+                if !nav.passable(&spec, at) || taken(at) {
+                    continue;
+                }
+                let indoors = w.spatial.cast_ray(at + Vec3::Y, Dir3::Y, 25.0, true, &filter).is_some();
+                if indoors {
+                    continue;
+                }
+                let score = offset.abs() + ring;
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, at));
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        best.map_or(fallback, |(_, at)| at)
     }
 
     /// Drives land vehicles and boats: path, pure pursuit, speed, stuck recovery, waiting for
@@ -1069,12 +1253,20 @@ impl BotBrain {
             return;
         }
 
-        let goal = self.drive_goal(w, me, seen, profile, order);
+        let goal = self.drive_goal(w, me, seen, profile, order, ride.hold);
         let Some((goal, arrive)) = goal else {
             frame.buttons |= Buttons::JUMP;
             return;
         };
-        let at_goal = flat(goal - position).length() < arrive.max(8.0);
+        if let Some((kind, index)) = order {
+            ride.hold = Some((kind, index, goal, arrive));
+        }
+        // There: close to the spot, or at the end of a path that gets there (the spot may have
+        // been moved to where the vehicle fits).
+        let path_done = ride.path.as_ref().is_some_and(|p| {
+            p.complete && ride.waypoint + 1 >= p.points.len() && p.points.last().is_some_and(|end| flat(*end - position).length() < 6.0)
+        });
+        let at_goal = flat(goal - position).length() < arrive.max(8.0) || (path_done && ride.path_goal == Some(goal));
         if at_goal {
             ride.arrived += dt;
             // Transports drop their riders and the driver gets out too.
@@ -1174,18 +1366,32 @@ impl BotBrain {
             if !profile.role.fights() && speed.abs() < 3.0 {
                 ride.leave("as close as it gets");
             }
-            ride.repath = true;
+            if !ride.repath && ride.path_task.is_none() {
+                ride.repath = true;
+                ride.repath_cooldown = ride.repath_cooldown.max(10.0);
+            }
         }
         let to = target - position;
         let alpha = bearing(motion.rotation, to);
 
         // Speed: top speed, less for curves ahead, steep headings, the end of the path.
-        let top = profile.top_speed * if profile.role == Role::Boat { 0.9 } else { 0.8 };
+        let boat = profile.role == Role::Boat;
+        let top = profile.top_speed * if boat { 0.9 } else { 0.8 };
         let mut wanted = top.min(corners);
         if alpha.abs() > 0.5 {
             wanted = wanted.min((top * (1.0 - alpha.abs() / FRAC_PI_2)).max(3.0));
         }
         wanted = wanted.min((2.0 * BRAKING * remaining).sqrt() + 1.0);
+        // Leaning over on a side slope: slow down before it rolls.
+        let roll = (-(motion.rotation * Vec3::X).y).clamp(-1.0, 1.0).asin().abs();
+        if !boat && roll > 0.2 {
+            wanted = wanted.min((top * (1.0 - (roll - 0.2) * 3.0)).max(3.0));
+        }
+        if boat {
+            // Rudders only turn a boat moving through the water: keep going while turning,
+            // slow down only at the end.
+            wanted = wanted.max(if remaining > 50.0 { 11.0 } else { 4.0 }).min(top);
+        }
         // Fighting: tanks stop for vehicles, slow down for soldiers; others slow down.
         if fighting && let Some(aim) = ride.aim {
             let close = aim.position.distance(position);
@@ -1199,33 +1405,40 @@ impl BotBrain {
         let right = Vec3::new(-forward.z, 0.0, forward.x);
         let lane = profile.half_width + 1.5;
         let nose = profile.length * 0.5;
-        let mut blocked_at = f32::MAX;
-        let mut check = |p: Vec3| {
+        // How far ahead something at `p` is in the vehicle's lane.
+        let in_lane = |p: Vec3| {
             let d = p - position;
             let (ahead, side) = (d.dot(forward), d.dot(right).abs());
-            if ahead > 0.0 && ahead < nose + 25.0 && side < lane && d.y.abs() < 4.0 {
-                blocked_at = blocked_at.min(ahead - nose);
-            }
+            (ahead > 0.0 && ahead < nose + 25.0 && side < lane && d.y.abs() < 4.0).then_some(ahead - nose)
         };
+        let mut soldiers_at = f32::MAX;
         if let Some(t) = me.team_index() {
             for s in &w.snapshot.soldiers[t] {
                 if s.player != me.player && !vcx.crews.get(&seen.entity).is_some_and(|c| c.iter().any(|c| c.player == s.player)) {
-                    check(s.position);
+                    soldiers_at = soldiers_at.min(in_lane(s.position).unwrap_or(f32::MAX));
                 }
             }
         }
+        // Parked vehicles are driven around (the path planner knows them); moving ones are
+        // followed.
+        let mut blocked_at = soldiers_at;
         for (entity, _, _, other, ..) in &w.rides {
-            if entity != seen.entity && other.position.distance(position) < 40.0 {
-                check(other.position);
+            if entity != seen.entity && other.position.distance(position) < 40.0 && other.velocity.length() > 1.5 {
+                blocked_at = blocked_at.min(in_lane(other.position).unwrap_or(f32::MAX));
             }
         }
         let obstructed = blocked_at < f32::MAX;
+        ride.obstructed = if obstructed { ride.obstructed + dt } else { 0.0 };
         if obstructed {
             wanted = wanted.min(((blocked_at - 3.0) * 0.7).max(0.0));
+            // Teammates who stay in the way get nudged aside at walking pace.
+            if ride.obstructed > 6.0 && soldiers_at <= blocked_at {
+                wanted = wanted.max(2.0);
+            }
         }
 
         // Stuck: pushing without moving. Back up, turning the other way, then find a new path.
-        let pushing = wanted > 1.0 && !obstructed;
+        let pushing = wanted > 1.0 && (!obstructed || ride.obstructed > 6.0);
         if ride.reverse > 0.0 {
             ride.reverse -= dt;
             frame.set_movement(Vec2::new(ride.reverse_steer, -1.0));
@@ -1240,6 +1453,10 @@ impl BotBrain {
         } else {
             ride.stuck = 0.0;
         }
+        if ride.stuck > 2.0 && boat && remaining < 60.0 {
+            // Aground by the landing: close enough to wade ashore.
+            ride.leave("arrived");
+        }
         if ride.stuck > 2.0 {
             ride.stuck = 0.0;
             ride.reverse = 1.5 + fastrand::f32();
@@ -1249,11 +1466,61 @@ impl BotBrain {
             team_stats.vehicle_stuck += 1;
             let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
             *stats.vehicle_stuck_spots.entry(square).or_default() += 1;
+            debug!(
+                "{} stuck in {} at {position:.0} (bearing {:.0} to {target:.0}, {:.0} m left, wanted {wanted:.1} m/s)",
+                w.name(me.player),
+                seen.template,
+                alpha.to_degrees(),
+                remaining
+            );
             return;
         }
 
+        // Getting nowhere (circling a goal inside its turning circle, shuffling back and
+        // forth): counts as stuck.
+        if remaining < ride.best_remaining - 3.0 {
+            ride.best_remaining = remaining;
+            ride.no_progress = 0.0;
+        } else if pushing {
+            ride.no_progress += dt;
+        }
+        // Boats take a while to come about.
+        if ride.no_progress > if boat { 25.0 } else { 12.0 } {
+            debug!(
+                "{} gets nowhere in {} at {position:.0} (bearing {:.0} to {target:.0}, {:.0} m left)",
+                w.name(me.player),
+                seen.template,
+                alpha.to_degrees(),
+                remaining
+            );
+            ride.no_progress = 0.0;
+            ride.best_remaining = remaining;
+            ride.reverse = 1.5 + fastrand::f32();
+            ride.reverse_steer = if alpha > 0.0 { -1.0 } else { 1.0 };
+            ride.strikes += 1.0;
+            stats.vehicle_stuck += 1;
+            team_stats.vehicle_stuck += 1;
+            let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
+            *stats.vehicle_stuck_spots.entry(square).or_default() += 1;
+            return;
+        }
+        // Wheels: a target inside the turning circle can't be reached going forwards. Back up
+        // turning the other way, then try again.
+        if !profile.tracked && profile.role != Role::Boat {
+            let radius = profile.wheelbase / (profile.max_steer * 0.85).tan().max(0.1) * 1.2;
+            let local = motion.rotation.inverse() * to;
+            let center = Vec2::new(radius * alpha.signum(), 0.0);
+            if Vec2::new(local.x, local.z).distance(center) < radius * 0.9 && speed < 6.0 {
+                ride.reverse = 1.2;
+                ride.reverse_steer = -alpha.signum();
+                return;
+            }
+        }
+
         // Steering.
-        let steer = if profile.tracked {
+        let steer = if boat {
+            (alpha * 2.0).clamp(-1.0, 1.0)
+        } else if profile.tracked {
             // Skid steering: turn in place for sharp turns, else the pure pursuit curvature.
             let rate = 2.0 * speed.abs().max(2.0) * alpha.sin() / to.length().max(1.0);
             (rate / profile.turn_rate + alpha * 0.8).clamp(-1.0, 1.0)
@@ -1279,6 +1546,19 @@ impl BotBrain {
             frame.buttons |= Buttons::JUMP;
         }
         frame.set_movement(Vec2::new(steer, throttle));
+        if profile.role == Role::Boat && every(ride.time, dt, 10.0) {
+            debug!(
+                "{} sails {}: at {position:.0}, {speed:.1} m/s (wants {wanted:.1}), goal {goal:.0} {:.0} m away, {:.0} m of path left, \
+                 bearing {:.0}, depth {:.1}, shore {:.0} m",
+                w.name(me.player),
+                seen.template,
+                flat(goal - position).length(),
+                remaining,
+                alpha.to_degrees(),
+                nav.water.as_ref().and_then(|g| g.depth_at(position)).unwrap_or(f32::NAN),
+                nav.water.as_ref().map_or(0.0, |g| g.shore_distance(position)),
+            );
+        }
     }
 
     /// Flies a helicopter: climb out, cruise over the air map to the objective, land there
@@ -1368,9 +1648,14 @@ impl BotBrain {
                     ride.flight = Flight::Land;
                 }
             }
+            // A new landing spot far away (new orders): up and over there first.
+            Flight::Land if destination.is_some_and(|g| flat(g - position).length() > 90.0) => {
+                ride.flight = Flight::Climb;
+                ride.arrived = 0.0;
+            }
             _ => {}
         }
-        if ride.flight == Flight::Land && height < 2.0 && motion.velocity.length() < 3.0 {
+        if ride.flight == Flight::Land && height < 3.5 && motion.velocity.length() < 2.0 {
             // Down: everyone out, the pilot too once they are.
             ride.arrived += dt;
             let riders = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());
@@ -1402,13 +1687,8 @@ impl BotBrain {
                 wanted_velocity = to.normalize_or_zero() * speed;
                 face = if distance > 15.0 { heading(to) } else { face };
                 wanted_height = match ride.flight {
-                    Flight::Land => {
-                        if distance < 15.0 {
-                            (height - 3.0).max(0.0)
-                        } else {
-                            height.min(cruise * 0.6)
-                        }
-                    }
+                    // Down the approach, touching down over the spot.
+                    Flight::Land => (distance * 0.35 - 2.0).clamp(0.0, cruise * 0.6),
                     _ => cruise,
                 };
             }
@@ -1422,6 +1702,12 @@ impl BotBrain {
         let mut wanted_altitude = floor_now + wanted_height;
         if ride.flight != Flight::Land {
             wanted_altitude = wanted_altitude.max(floor_ahead + 20.0);
+        } else if let Some(goal) = destination
+            && flat(goal - position).length() > 25.0
+        {
+            // Coming in to land: over the roofs until close to the spot.
+            let near = nav.and_then(|n| n.flight_floor(position + motion.velocity * 2.0, 12.0)).unwrap_or(floor_now);
+            wanted_altitude = wanted_altitude.max(near + 6.0);
         }
         // Attack: turn the nose onto a target in front and fire the rockets.
         if attack && ride.flight == Flight::Orbit
@@ -1452,12 +1738,32 @@ impl BotBrain {
         let steer = (-yaw_error * 1.5 - omega.y * -0.4).clamp(-1.0, 1.0);
         frame.set_movement(Vec2::new(steer, collective));
         frame.set_stick(Vec2::new(stick_roll, stick_pitch));
+        if every(ride.time, dt, 5.0) {
+            debug!(
+                "{} flies {} ({:?}): at {:.0}, {:.0} m up (wants {:.0}), {:.0} m/s (wants {:.0}), heading off by {:.0}, pitch {:.0}, roll {:.0}; stick {:.2} {:.2}, collective {:.2}, pedal {:.2}",
+                w.name(me.player),
+                seen.template,
+                ride.flight,
+                position,
+                height,
+                wanted_altitude - (position.y - height),
+                flat(motion.velocity).length(),
+                wanted_velocity.length(),
+                yaw_error.to_degrees(),
+                pitch.to_degrees(),
+                roll.to_degrees(),
+                stick_roll,
+                stick_pitch,
+                collective,
+                steer,
+            );
+        }
 
         // The pilot's own guns (rocket pods) fire forward.
         if attack && let Some(aim) = ride.aim {
             let guns: Vec<&GunInfo> = profile.seat_guns(0).collect();
             if let Some(gun) = guns.first() {
-                let muzzle = mounted.muzzle(gun.index);
+                let muzzle = mounted.muzzle(&seen.state.joints, gun.index);
                 let wanted = (lead(muzzle.translation, aim.position, aim.velocity - motion.velocity, gun.speed, gun.gravity) - muzzle.translation)
                     .normalize_or_zero();
                 let off = (muzzle.rotation * Vec3::NEG_Z).angle_between(wanted);
@@ -1560,9 +1866,27 @@ impl BotBrain {
         let throttle = if speed < profile.top_speed * 0.6 { 1.0 } else { 0.0 };
         frame.set_movement(Vec2::new(0.0, throttle));
         frame.set_stick(Vec2::new(stick_roll, stick_pitch));
+        if every(ride.time, dt, 5.0) {
+            debug!(
+                "{} flies {} ({:?}): at {:.0}, {:.0} m up (wants {:.0}), {:.0} m/s, heading off by {:.0}, climb {:.0}, roll {:.0} (wants {:.0}); stick {:.2} {:.2}",
+                w.name(me.player),
+                seen.template,
+                ride.flight,
+                position,
+                height,
+                wanted_altitude - (position.y - height),
+                speed,
+                heading_error.to_degrees(),
+                path_angle.to_degrees(),
+                roll.to_degrees(),
+                wanted_roll.to_degrees(),
+                stick_roll,
+                stick_pitch,
+            );
+        }
         if let Some(aim) = firing {
             for gun in profile.seat_guns(0) {
-                let muzzle = mounted.muzzle(gun.index);
+                let muzzle = mounted.muzzle(&seen.state.joints, gun.index);
                 let wanted = (lead(muzzle.translation, aim.position, aim.velocity - motion.velocity, gun.speed, gun.gravity) - muzzle.translation)
                     .normalize_or_zero();
                 let distance = aim.position.distance(position);
@@ -1575,6 +1899,11 @@ impl BotBrain {
         }
         let _ = (me, dt);
     }
+}
+
+/// Whether `period` seconds went by at `time` (seconds, advancing by `dt`).
+fn every(time: f32, dt: f32, period: f32) -> bool {
+    (time / period).floor() != ((time - dt) / period).floor()
 }
 
 /// Braking deceleration drivers plan with, m/s².

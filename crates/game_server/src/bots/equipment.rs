@@ -43,6 +43,8 @@ impl BotBrain {
         self.rocket = None;
         self.gas_launcher = None;
         self.flashbang = None;
+        self.c4 = None;
+        self.at_mine = None;
         self.wrench = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Wrench));
         let Some(loadout) = me.loadout else {
             return;
@@ -62,6 +64,14 @@ impl BotBrain {
             }
             if desc.fire.kind == FireKind::Gun && desc.projectile.smoke.is_some() {
                 self.gas_launcher = Some(i);
+            }
+            if desc.fire.kind == FireKind::Explosives {
+                self.c4 = Some(i);
+            }
+            if desc.fire.kind == FireKind::Thrown
+                && desc.projectile.trigger.as_ref().is_some_and(|t| t.by == game_data::TriggerBy::Vehicles)
+            {
+                self.at_mine = Some(i);
             }
             let explosive_gun = desc.fire.kind == FireKind::Gun
                 && desc.projectile.explodes()
@@ -239,6 +249,49 @@ impl BotBrain {
                 let shots = ammo_left(me, gas);
                 let target = LaunchTarget::Point(at);
                 offer(best, 6.0, Activity::Launch { target, time: 0.0, weapon: gas, shots, fired: -1.0 });
+            }
+        }
+
+        // C4 on an enemy vehicle close by that stands or crawls.
+        if let Some(c4) = self.c4
+            && ammo_left(me, c4) > 0
+            && target.is_none_or(|t| t.position.distance(position) > 20.0)
+            && let Some((vehicle, _)) = self.armor_near(w, me, 40.0, 4.0)
+        {
+            offer(best, 7.2, Activity::Demolish { vehicle, time: 0.0, placed: 0 });
+        }
+        // Anti-tank mines: in front of an enemy vehicle coming at us, or on the roads by a flag
+        // we hold, towards the enemy.
+        if let Some(mine) = self.at_mine
+            && ammo_left(me, mine) > 0
+            && self.mine_cooldown <= 0.0
+        {
+            let coming = w.rides.iter().find_map(|(vehicle, _, _, motion, ..)| {
+                let to = flat(position - motion.position);
+                let closing = motion.velocity.dot(to.normalize_or_zero());
+                (to.length() < 45.0
+                    && to.length() > 12.0
+                    && closing > 3.0
+                    && crew_team(w, vehicle).is_some_and(|t| t != me.team && t != Team::Spectator))
+                .then(|| position - to.normalize_or_zero() * 6.0)
+            });
+            if let Some(at) = coming {
+                offer(best, 6.5, Activity::Throw { at, time: 0.0, weapon: mine });
+            } else if target.is_none()
+                && let Some((OrderKind::Defend, area)) = self.order
+                && let Some(area) = w.map.areas.get(area)
+                && area.position.distance(position) < area.radius + 30.0
+                && let Some(nav) = w.vehicle_nav.as_deref()
+            {
+                let facing = self.facing(w, me.team, self.order.map_or(0, |(_, a)| a));
+                let road = (0..6).find_map(|i| {
+                    let yaw = facing + (i as f32 - 2.5) * 0.4;
+                    let at = position + Quat::from_rotation_y(yaw) * Vec3::NEG_Z * (6.0 + 2.0 * (i % 2) as f32);
+                    nav.0.on_road(at).then_some(at)
+                });
+                if let Some(at) = road {
+                    offer(best, 3.0, Activity::Throw { at, time: 0.0, weapon: mine });
+                }
             }
         }
 
@@ -441,6 +494,87 @@ impl BotBrain {
             intent.look = Look::At(at + Vec3::Y * 0.8);
         }
         self.activity = Activity::Repair { target, time: time - dt };
+    }
+}
+
+impl BotBrain {
+    /// The nearest enemy land vehicle within `range` it can see, slower than `max_speed`.
+    fn armor_near(&self, w: &Senses, me: &Me, range: f32, max_speed: f32) -> Option<(Entity, Vec3)> {
+        let eye = me.motion.eye_position();
+        let mut best: Option<(f32, Entity, Vec3)> = None;
+        for (vehicle, template, _, motion, _, health, _) in &w.rides {
+            let at = motion.position + Vec3::Y;
+            let distance = at.distance(eye);
+            if distance > range
+                || motion.velocity.length() > max_speed
+                || health.is_some_and(|h| h.wrecked())
+                || w.profile(&template.template).is_none_or(|p| p.role.flies() || p.role == crate::ai::vehicles::Role::Stationary)
+                || crew_team(w, vehicle).is_none_or(|t| t == me.team || t == Team::Spectator)
+                || best.is_some_and(|(d, ..)| distance > d)
+                || !tactics::line_of_sight(&w.spatial, eye, at)
+            {
+                continue;
+            }
+            best = Some((distance, vehicle, at));
+        }
+        best.map(|(_, vehicle, at)| (vehicle, at))
+    }
+
+    /// C4: up to the vehicle, charges on it, away from it, and off.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn demolish(&mut self, w: &Senses, me: &Me, vehicle: Entity, time: f32, placed: u8, intent: &mut Intent, dt: f32) {
+        let seen = w.vehicle(vehicle).filter(|v| !v.wrecked()).map(|v| v.motion.position);
+        let (Some(c4), Some(at), true) = (self.c4, seen, time < 40.0) else {
+            self.activity = Activity::Objective;
+            intent.weapon = Some(self.primary);
+            return;
+        };
+        let position = me.motion.position;
+        let distance = flat(at - position).length();
+        let left = ammo_left(me, c4);
+        intent.weapon = Some(c4);
+        let mut placed = placed;
+        let time = time + dt;
+        if placed == 0 || (placed < 2 && left > 0 && distance < 7.0 && time < 20.0) {
+            // Up to it and the charges on it.
+            if distance > 4.5 {
+                intent.goal = Some(Goal { position: at, tolerance: 2.0, sprint: distance > 10.0 });
+            } else {
+                intent.look = Look::At(at + Vec3::Y * 0.5);
+                self.use_toggle = !self.use_toggle;
+                if self.use_toggle {
+                    intent.buttons |= Buttons::FIRE;
+                }
+            }
+            // A charge left the hand when the count went down.
+            if self.c4_left.is_some_and(|before| left < before) {
+                placed += 1;
+            }
+            self.c4_left = Some(left);
+        } else {
+            // Away from it, then the detonator.
+            let away = position + flat(position - at).normalize_or(Vec3::X) * 20.0;
+            if distance < 16.0 && time < 30.0 {
+                intent.goal = Some(Goal { position: away, tolerance: 3.0, sprint: true });
+            } else {
+                intent.look = Look::At(at);
+                // The alternative fire button takes the detonator out, the trigger sets it off.
+                self.burst -= dt;
+                if self.burst <= 0.0 {
+                    intent.buttons |= if self.c4_detonator { Buttons::FIRE } else { Buttons::AIM };
+                    self.c4_detonator = !self.c4_detonator;
+                    self.burst = 0.3;
+                    if !self.c4_detonator {
+                        // Pressed the trigger with the detonator out: done.
+                        self.activity = Activity::Objective;
+                        self.c4_left = None;
+                        self.launch_cooldown = 10.0;
+                        return;
+                    }
+                }
+            }
+        }
+        self.activity = Activity::Demolish { vehicle, time, placed };
     }
 }
 

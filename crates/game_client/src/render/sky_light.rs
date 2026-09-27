@@ -239,8 +239,9 @@ mod tests {
     fn cube_face_heights() {
         assert!(texel_height(2, 8, 8, 16) > 0.99);
         assert!(texel_height(3, 8, 8, 16) < -0.99);
-        // Side faces: row 0 is up.
-        assert!(texel_height(0, 8, 0, 16) > 0.9);
-        assert!(texel_height(4, 8, 15, 16) < -0.9);
+        // Side faces: row 0 is up (the edge texels point about 43 degrees up or down).
+        assert!(texel_height(0, 8, 0, 16) > 0.6);
+        assert!(texel_height(4, 8, 15, 16) < -0.6);
+        assert!(texel_height(1, 8, 8, 16).abs() < 0.1);
     }
 }

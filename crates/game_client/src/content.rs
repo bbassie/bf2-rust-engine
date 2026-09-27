@@ -49,8 +49,8 @@ use crate::{
 
 /// Refuse to download more than this for one server, whatever it claims.
 const MAX_DOWNLOAD_BYTES: u64 = 24_000_000_000;
-/// Downloads at a time.
-const WORKERS: usize = 4;
+/// Downloads at a time (per file the file system costs a few milliseconds on Windows).
+const WORKERS: usize = 8;
 /// How long to wait for a server that is still hashing its content.
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -173,6 +173,9 @@ pub struct ContentMount {
     pub mounted: Option<MountedContent>,
     /// The server moved to a level we lack files for: join again (next frame).
     rejoin: bool,
+    /// Left for rejoining: join this next frame, once the connection's end went through
+    /// (joining in the same frame would count as a failed connection).
+    rejoin_next: Option<net::MatchSetup>,
 }
 
 /// The cache folder: `--content-cache`, `$GAME_CONTENT_CACHE`, else `cache` next to the
@@ -244,10 +247,14 @@ pub fn leave(world: &mut World) {
 }
 
 fn poll_job(world: &mut World) {
+    if let Some(setup) = world.resource_mut::<ContentMount>().rejoin_next.take() {
+        net::start_match(world, setup);
+    }
     if std::mem::take(&mut world.resource_mut::<ContentMount>().rejoin)
         && let Some(setup) = world.resource::<ActiveMatch>().setup.clone()
     {
-        net::start_match(world, setup);
+        net::leave_match(world);
+        world.resource_mut::<ContentMount>().rejoin_next = Some(setup);
     }
     let Some(job) = world.resource::<ContentJob>().0.as_ref() else {
         return;
@@ -456,6 +463,43 @@ fn validate(entry: &FileEntry, file: &Path) -> Result<(), String> {
     decodes.map_err(|_| format!("{}: a sound the game can't play", entry.path))
 }
 
+/// The server's manifest: `None` if it shares nothing (or has no endpoint and didn't say it
+/// shares anything). Waits while the server is preparing it.
+fn get_manifest(
+    agent: &ureq::Agent,
+    base: &str,
+    server: SocketAddr,
+    advertised: bool,
+    shared: &JobShared,
+) -> Result<Option<Box<Manifest>>, String> {
+    let started = Instant::now();
+    loop {
+        if shared.progress.cancelled() {
+            return Err("cancelled".into());
+        }
+        match fetch_manifest(agent, base) {
+            Ok(ManifestAnswer::Manifest(manifest)) => return Ok(Some(manifest)),
+            Ok(ManifestAnswer::None) => return Ok(None),
+            Ok(ManifestAnswer::Preparing(message)) => {
+                if started.elapsed() > PREPARE_TIMEOUT {
+                    return Err(format!("{server} has been preparing its content for too long."));
+                }
+                shared.set(Phase::Preparing(message));
+                std::thread::sleep(Duration::from_millis(700));
+            }
+            // Nothing there: a server that doesn't share (or an older one). Join as before.
+            Err(err) if !advertised => {
+                info!("content: no content endpoint at {base} ({err}); joining with our own content");
+                return Ok(None);
+            }
+            Err(err) => return Err(format!("Can't get {server}'s content: {err}")),
+        }
+    }
+}
+
+/// Attempts at fetching the manifest and downloading, for a server whose files change meanwhile.
+const JOB_ATTEMPTS: u32 = 3;
+
 fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>, String> {
     let server = job.server;
     // Where the endpoint is, if the server says.
@@ -469,126 +513,133 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
     let port = info.as_ref().and_then(|i| i.content.as_ref()).map_or(server.port(), |c| c.port);
     let base = format!("http://{}", SocketAddr::new(server.ip(), port));
     let agent = agent();
-    let started = Instant::now();
-    let manifest = loop {
-        if shared.progress.cancelled() {
-            return Err("cancelled".into());
-        }
-        match fetch_manifest(&agent, &base) {
-            Ok(ManifestAnswer::Manifest(manifest)) => break manifest,
-            Ok(ManifestAnswer::None) => return Ok(None),
-            Ok(ManifestAnswer::Preparing(message)) => {
-                if started.elapsed() > PREPARE_TIMEOUT {
-                    return Err(format!("{server} has been preparing its content for too long."));
-                }
-                shared.set(Phase::Preparing(message));
-                std::thread::sleep(Duration::from_millis(700));
-            }
-            // Nothing there: a server that doesn't share (or an older one). Join as before.
-            Err(err) if info.is_none() => {
-                info!("content: no content endpoint at {base} ({err}); joining with our own content");
-                return Ok(None);
-            }
-            Err(err) => return Err(format!("Can't get {server}'s content: {err}")),
-        }
-    };
-    manifest.check_compatible()?;
-    info!(
-        "content: {} shares {} ({} files, {} in {} layers), playing {:?}",
-        manifest.server_name,
-        manifest.mode,
-        manifest.files().count(),
-        content::format_bytes(manifest.total_bytes()),
-        manifest.layers.len(),
-        manifest.playing
-    );
-
-    shared.set(Phase::Checking);
     let store = ContentStore::open(&job.cache).map_err(|err| format!("content cache {}: {err}", job.cache.display()))?;
     let mut index = HashIndex::load(Some(store.index_file()));
     let local_roots: Vec<PathBuf> = job.local.roots().into_iter().map(Path::to_path_buf).collect();
-    let checked = Instant::now();
-    let plan = download::plan(&manifest, &manifest.playing, &store, &local_roots, &mut index, &shared.progress)?;
-    info!(
-        "content: need {} files ({}); {} to download ({}), {} from our own files; checked in {:.1} s",
-        plan.needed.len(),
-        content::format_bytes(plan.needed_bytes),
-        plan.download.len(),
-        content::format_bytes(plan.download_bytes),
-        plan.adopt.len(),
-        checked.elapsed().as_secs_f32()
-    );
-    // The current level must be there after mounting.
-    if let Some(current) = manifest.playing.first().filter(|l| *l != TEST_RANGE) {
-        let level_file = format!("levels/{current}/level.ron");
-        let shared_level = manifest.files().any(|(_, f)| f.path.eq_ignore_ascii_case(&level_file));
-        let ours = !manifest.has_imported() && job.local.imported.join(&level_file).is_file();
-        if !shared_level && !ours {
-            return Err(format!(
-                "{} plays {current}, which you don't have: it isn't in your imported BF2 assets and the server doesn't share it.",
-                manifest.server_name
-            ));
-        }
-    }
-    if plan.download_bytes > MAX_DOWNLOAD_BYTES {
-        return Err(format!(
-            "{} wants {} downloaded, which is implausibly much.",
-            manifest.server_name,
-            content::format_bytes(plan.download_bytes)
-        ));
-    }
-    let offer = Offer {
-        server_name: manifest.server_name.clone(),
-        mode: manifest.mode,
-        mods: manifest
-            .layers
-            .iter()
-            .filter(|l| !l.imported)
-            .map(|l| if l.title.is_empty() { l.name.clone() } else { l.title.clone() })
-            .collect(),
-        imported: manifest.has_imported(),
-        files: plan.download.len(),
-        bytes: plan.download_bytes,
-        have_bytes: plan.needed_bytes.saturating_sub(plan.download_bytes),
-    };
-    if !plan.download.is_empty() && job.ask {
-        shared.set(Phase::Ask(offer.clone()));
-        loop {
-            if shared.progress.cancelled() {
-                return Err("cancelled".into());
-            }
-            match shared.decision.lock().unwrap().take() {
-                Some(true) => break,
-                Some(false) => return Err("cancelled".into()),
-                None => {}
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    shared.set(Phase::Downloading(offer));
-    let copied = download::adopt_all(&plan, &store, &shared.progress)?;
-    if copied > 0 {
-        info!("content: copied {} of our own files into the cache", content::format_bytes(copied));
-    }
-    if !plan.download.is_empty() {
-        let bases: Vec<String> = manifest
-            .download_url
-            .iter()
-            .cloned()
-            .chain([format!("{base}/content")])
-            .collect();
-        let downloading = Instant::now();
-        download::download_all(&HttpFetch(agent), &bases, &plan.download, &store, &shared.progress, WORKERS, &validate)?;
-        let seconds = downloading.elapsed().as_secs_f64();
+    let mut accepted = !job.ask;
+    let mut attempt = 0;
+    let (manifest, plan) = loop {
+        attempt += 1;
+        let Some(manifest) = get_manifest(&agent, &base, server, info.is_some(), shared)? else {
+            return Ok(None);
+        };
+        manifest.check_compatible()?;
         info!(
-            "content: downloaded {} files ({}) in {seconds:.1} s ({}/s)",
+            "content: {} shares {} ({} files, {} in {} layers), playing {:?}",
+            manifest.server_name,
+            manifest.mode,
+            manifest.files().count(),
+            content::format_bytes(manifest.total_bytes()),
+            manifest.layers.len(),
+            manifest.playing
+        );
+
+        shared.set(Phase::Checking);
+        let checked = Instant::now();
+        let plan = download::plan(&manifest, &manifest.playing, &store, &local_roots, &mut index, &shared.progress)?;
+        info!(
+            "content: need {} files ({}); {} to download ({}), {} from our own files; checked in {:.1} s",
+            plan.needed.len(),
+            content::format_bytes(plan.needed_bytes),
             plan.download.len(),
             content::format_bytes(plan.download_bytes),
-            content::format_bytes((plan.download_bytes as f64 / seconds.max(0.001)) as u64)
+            plan.adopt.len(),
+            checked.elapsed().as_secs_f32()
         );
-    }
+        // The current level must be there after mounting.
+        if let Some(current) = manifest.playing.first().filter(|l| *l != TEST_RANGE) {
+            let level_file = format!("levels/{current}/level.ron");
+            let shared_level = manifest.files().any(|(_, f)| f.path.eq_ignore_ascii_case(&level_file));
+            let ours = !manifest.has_imported() && job.local.imported.join(&level_file).is_file();
+            if !shared_level && !ours {
+                return Err(format!(
+                    "{} plays {current}, which you don't have: it isn't in your imported BF2 assets and the server doesn't share it.",
+                    manifest.server_name
+                ));
+            }
+        }
+        if plan.download_bytes > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "{} wants {} downloaded, which is implausibly much.",
+                manifest.server_name,
+                content::format_bytes(plan.download_bytes)
+            ));
+        }
+        let offer = Offer {
+            server_name: manifest.server_name.clone(),
+            mode: manifest.mode,
+            mods: manifest
+                .layers
+                .iter()
+                .filter(|l| !l.imported)
+                .map(|l| if l.title.is_empty() { l.name.clone() } else { l.title.clone() })
+                .collect(),
+            imported: manifest.has_imported(),
+            files: plan.download.len(),
+            bytes: plan.download_bytes,
+            have_bytes: plan.needed_bytes.saturating_sub(plan.download_bytes),
+        };
+        if !plan.download.is_empty() && !accepted {
+            shared.set(Phase::Ask(offer.clone()));
+            loop {
+                if shared.progress.cancelled() {
+                    return Err("cancelled".into());
+                }
+                match shared.decision.lock().unwrap().take() {
+                    Some(true) => break,
+                    Some(false) => return Err("cancelled".into()),
+                    None => {}
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            accepted = true;
+        }
+        shared.set(Phase::Downloading(offer));
+        let copied = download::adopt_all(&plan, &store, &shared.progress)?;
+        if copied > 0 {
+            info!("content: copied {} of our own files into the cache", content::format_bytes(copied));
+        }
+        if !plan.download.is_empty() {
+            let bases: Vec<String> = manifest
+                .download_url
+                .iter()
+                .cloned()
+                .chain([format!("{base}/content")])
+                .collect();
+            let downloading = Instant::now();
+            let fetch = HttpFetch(agent.clone());
+            match download::download_all(&fetch, &bases, &plan.download, &store, &shared.progress, WORKERS, &validate) {
+                Ok(()) => {}
+                Err(err) if err == "cancelled" => return Err(err),
+                // The server's files changed (it builds its manifest again): start over with
+                // the new manifest; what arrived stays in the cache.
+                Err(err) if attempt < JOB_ATTEMPTS => {
+                    warn!("content: {err}; asking {server} for its manifest again");
+                    continue;
+                }
+                Err(err) => return Err(format!("Downloading {}'s content failed: {err}", manifest.server_name)),
+            }
+            let seconds = downloading.elapsed().as_secs_f64();
+            info!(
+                "content: downloaded {} files ({}) in {seconds:.1} s ({}/s)",
+                plan.download.len(),
+                content::format_bytes(plan.download_bytes),
+                content::format_bytes((plan.download_bytes as f64 / seconds.max(0.001)) as u64)
+            );
+        }
+        // Verified on the way in: remembered, so the next join doesn't hash them again.
+        for entry in plan.download.iter().chain(plan.adopt.iter().map(|(entry, _)| entry)) {
+            let file = store.file(&entry.hash);
+            if let Ok(meta) = std::fs::metadata(&file) {
+                index.insert(&file, &meta, entry.hash.clone());
+            }
+        }
+        index.save();
+        break (manifest, plan);
+    };
 
     shared.set(Phase::Mounting);
+    let mounting = Instant::now();
     let key = server_key(&server.to_string());
     let mounted = store
         .build_view(&key, &manifest, &plan.needed, &manifest.playing)
@@ -598,6 +649,7 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
     if removed > 0 {
         info!("content: cache over its limit, removed {removed} old files ({})", content::format_bytes(freed));
     }
+    info!("content: laid out {} files in {:.1} s", plan.needed.len(), mounting.elapsed().as_secs_f32());
     Ok(Some(mounted))
 }
 

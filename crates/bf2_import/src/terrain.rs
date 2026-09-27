@@ -459,8 +459,11 @@ fn water(vfs: &Vfs, world: &World, converter: &MeshConverter, level_name: &str, 
         _ => [1.0, 0.95, 0.85, 1.0],
     };
     // BF2 advances its water clock by `waterAnimSpeed / 1000` per second [I]; the normal map
-    // repeats every ~30 m and scrolls by `waterScroll` repeats per clock unit, and the 8
-    // slices of the volume loop every 0.1 units.
+    // repeats every ~30 m and scrolls by `waterScroll` repeats per clock unit. BF2's shader
+    // loops the volume's 8 slices every 0.1 units, but the slices are unrelated wave patterns
+    // (neighbouring slices correlate at ~0), so blending through them at that rate (6-12
+    // slices a second) replaces the whole pattern several times a second and flickers; one
+    // loop per clock unit reads as waves that change shape [I].
     let clock = number("renderer.wateranimspeed").unwrap_or(50.0) / 1000.0;
     let scroll = vec("renderer.waterscroll").unwrap_or_default();
     let (sx, sz) = (scroll.first().copied().unwrap_or(0.0), scroll.get(1).copied().unwrap_or(0.0));
@@ -471,7 +474,7 @@ fn water(vfs: &Vfs, world: &World, converter: &MeshConverter, level_name: &str, 
         specular,
         specular_power: number("renderer.waterspecularpower").filter(|p| *p > 0.0).unwrap_or(40.0),
         wave_drift: [sx * 29.13 * clock, -sz * 31.81 * clock],
-        wave_speed: clock * 10.0 * 8.0,
+        wave_speed: clock * 8.0,
         normal_map: water_normal_map(vfs, converter),
         reflection_map: converter.file(&format!("levels/{level_name}/water/envmap.dds")),
     }

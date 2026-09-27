@@ -122,7 +122,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 
 - [x] Infantry navigation from our collision data: layered walkability grid, cached,
   background A*; stuck events down from ~250/min to 1-3/min
-- Path costs per vehicle class (in progress)
+- [x] Vehicle navigation from our collision data: a 1 m vehicle grid with path costs per vehicle
+  class (wheeled, tracked, amphibious: slopes, water depth, clearance for the vehicle's width,
+  BF2's road meshes), other vehicles driven around, connected areas per class; a water grid for
+  boats and an air map for aircraft; paths in 17-29 ms on background threads
 - [x] Strategy after BF2's StrategicAreas.ai and AI strategies (commander AI per team), squad
   orders and wedge formations, utility behaviours (cover, flank, grenades, revive, bags), skill
   settings, ladders in navigation
@@ -131,7 +134,14 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   flashbangs, tear gas and gas masks, repair vehicles and assets, throw bags
 - [x] Utility behaviours weighted like `AIBehaviours.ai`, BF2's weapon AI templates (ranges,
   firing poses)
-- Bots driving vehicles and flying through the same input channels as players (in progress)
+- [x] Bots in vehicles through the same use button, seat keys and inputs as players: squads take
+  transports, APCs and tanks to distant objectives (claimed seats, drivers wait for riders),
+  gunners join teammates' vehicles, stationary weapons are manned; pure pursuit driving with
+  stuck recovery, tanks stop to fight, gunners lead their targets; boats, transport helicopters
+  that land squads, attack helicopters that circle and fire, jets that take off and patrol;
+  countermeasures, getting out at the objective, when wrecked or stuck; infantry shoot exposed
+  crews, lay AT mines and use C4. Still rough: tight streets (2-5 stuck events per vehicle-minute
+  on Karkand), carrier jump jets, jet dogfights
 
 ## M5: Presentation
 
@@ -139,9 +149,10 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   meshes, environment maps
 - [x] Water, undergrowth/overgrowth, surrounding terrain, view distance setting (grows with
   altitude), BF2's distant tree stand-ins
-- Lighting depth (in progress): per-map world lighting from BF2's values (night maps), directional
-  sky ambient, BF2's baked sky visibility as ambient occlusion (the sun stays dynamic), light
-  probes for soldiers and vehicles, tonemapping and bloom
+- [x] Lighting depth: per-map world lighting from BF2's shader math and values (night maps are
+  night), directional sky light, BF2's baked sky visibility as occlusion on statics and terrain
+  (the sun stays dynamic), ray-traced sky occlusion for soldiers and vehicles, tonemapping and
+  optional bloom
 - [x] Static mesh LODs with BF2's switch distances (`setSubGeometryLodDistance`) and draw distances
   (cull radius), dithered cross-fades, zoom-aware like BF2
 - Vehicle and soldier LODs
@@ -165,6 +176,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Modding workflow: mods authored directly in glTF + RON (`mods/`, see docs/MODDING.md)
 - [x] Admin tools: BF2-compatible RCON, chat admin commands, kick/ban; map rotation with live
   map changes; server config file; persistent player stats
-- Content download (in progress): clients download a server's mods (and, if its admin opts in,
-  the converted BF2 assets) on join, cached by hash, so modded servers need no install step
+- [x] Content download: clients download a server's mods (and, if its admin opts in, the
+  converted BF2 assets) for the maps being played, cached by hash, so modded servers need no
+  install step and clients without BF2 can join `all` servers
 - [x] Master server: servers register and heartbeat, the browser lists internet servers

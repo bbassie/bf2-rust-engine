@@ -181,8 +181,43 @@ V chase camera, F1..F8 seats, E enter/exit.
 ### Bots
 
 Bots are `Player`s whose `InputBuffer` is filled by a `BotBrain` instead of the network.
-They therefore obey exactly the same movement rules and will later use the same weapons and
-vehicles code. The roadmap has the BF2-style layers (strategic areas, squads, behaviours).
+They therefore obey exactly the same movement rules and use the same weapons and vehicles
+code. The roadmap has the BF2-style layers (strategic areas, squads, behaviours).
+
+**Bots in vehicles** (`game_server::bots::vehicle`, `ai::vehicles`, `nav::vehicle`) use the
+use button, the seat keys and ordinary `InputFrame`s like players:
+
+- *Getting in* is a utility option like the others: squad leaders and lone bots take a
+  transport, APC or tank near them when their objective is far (tanks when attacking), squad
+  members get into their leader's vehicle, bots join a teammate's vehicle as gunners and man
+  stationary weapons when enemies are about, and bots cut off from their objective (a carrier)
+  take any boat or aircraft that gets them off. Seats they walk to are claimed, so they don't
+  all run for one jeep; drivers wait for claimed riders. A vehicle's role (transport, APC,
+  tank, AA, boat, transport or attack helicopter, jet, stationary) and its guns' kinds follow
+  from its data.
+- *Driving* follows a path on the vehicle grid with pure pursuit (steering for a point ahead,
+  aiming at sharp corners rather than cutting them), slows for corners, the end of the path
+  and teammates in the way, backs out of dead ends (a target inside the turning circle, no
+  progress, stuck) and gives up after repeated failures. Transports stop short of the flag and
+  everyone gets out; tanks and APCs hold an open spot by the flag (never indoors) and stop or
+  slow down to fight. Boats sail the water grid to the shore nearest the objective.
+- *Gunners* (and tank drivers) aim through their view with lead for the round's flight time
+  and drop, main guns and missiles at vehicles and groups, machine guns at soldiers, and fire
+  once the turret, which turns at its own speed, is on target; heat seekers wait for a lock.
+- *Pilots*: helicopters climb out, cruise above the air map's obstacles, transports land
+  their squad by the objective, attack helicopters circle it and fire; jets with a runway take
+  off, climb and circle, diving on targets.
+- *Getting out*: at the objective, when the vehicle is badly damaged (aircrews only on the
+  ground: there are no parachutes), on its roof, stuck for good, or when the driver left.
+
+The **vehicle grid** is built like the infantry grid from our collision, with vehicle limits
+(1 m cells, 3 m head room, 0.5 m steps, 40° slopes); BF2's own `AIPathFinding/Vehicle.qtr` is
+an undocumented runtime dump and Wake Island ships none. Per vehicle class (wheeled, tracked,
+amphibious, boat) cells cost more on slopes, in water deeper than the wheels, near walls (the
+clearance a vehicle's width needs), and less on the level's road meshes; other vehicles are
+driven around. Connected areas per class let paths snap to goals they can reach. Boats use a
+4 m water grid (depth from the heightmap, nothing solid at the surface), aircraft an air map of
+the highest obstacle per 16 m cell (BF2's aerial height map).
 
 ### Levels
 

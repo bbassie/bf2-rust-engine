@@ -40,7 +40,11 @@ impl Plugin for VegetationRenderPlugin {
                 Update,
                 (
                     load_vegetation.run_if(resource_exists_and_changed::<LoadedLevel>),
-                    stream_undergrowth.run_if(resource_exists::<Undergrowth>),
+                    // Undergrowth outlives the level when a match is left.
+                    stream_undergrowth
+                        .run_if(resource_exists::<Undergrowth>)
+                        .run_if(resource_exists::<LoadedLevel>),
+                    clear_undergrowth.run_if(resource_removed::<LoadedLevel>),
                 )
                     .chain(),
             );
@@ -154,6 +158,15 @@ struct PlantData {
 
 #[derive(Component)]
 struct UndergrowthChunk;
+
+/// Leaving a match removes the level: its undergrowth goes too (chunks, and the plants that
+/// would otherwise be streamed in again for the old level).
+fn clear_undergrowth(mut commands: Commands, chunks: Query<Entity, With<UndergrowthChunk>>) {
+    commands.remove_resource::<Undergrowth>();
+    for chunk in &chunks {
+        commands.entity(chunk).try_despawn();
+    }
+}
 
 fn load_vegetation(
     mut commands: Commands,

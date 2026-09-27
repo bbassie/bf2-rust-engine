@@ -75,9 +75,14 @@ fn wave_normal(xz: vec2<f32>, t: f32, distance: f32) -> vec3<f32> {
     if water.flags.y > 0.5 {
         let drift = water.waves.xy * t;
         let z = t * water.waves.z / 8.0;
-        // Two layers at different scales and directions hide the tiling.
-        let a = textureSample(normal_map, normal_sampler, vec3((xz + drift) / TILE, z)).xyz * 2.0 - 1.0;
-        let b = textureSample(normal_map, normal_sampler, vec3((xz * 0.37 - drift.yx * 0.6) / TILE + 0.5, z * 0.7 + 0.31)).xyz * 2.0 - 1.0;
+        // Two layers at different scales and directions hide the tiling. Like BF2
+        // (RaShaderWaterBase.fx: `tex.z = cycle * 10 + tex.x * 0.7 + tex.y * 1.13`), the volume's
+        // animation phase shifts across the surface: neighbouring patches are at different
+        // frames, so waves travel instead of the whole surface flipping frames at once.
+        let uv_a = (xz + drift) / TILE;
+        let uv_b = (xz * 0.37 - drift.yx * 0.6) / TILE + 0.5;
+        let a = textureSample(normal_map, normal_sampler, vec3(uv_a, z + uv_a.x * 0.7 + uv_a.y * 1.13)).xyz * 2.0 - 1.0;
+        let b = textureSample(normal_map, normal_sampler, vec3(uv_b, z * 0.7 + 0.31 + uv_b.x * 1.13 + uv_b.y * 0.7)).xyz * 2.0 - 1.0;
         // BF2 stores world-space normals in its left-handed space: mirror Z.
         n = vec3(a.x + b.x * 0.6, a.y + b.y * 0.6, -(a.z + b.z * 0.6));
     } else {

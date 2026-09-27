@@ -105,6 +105,7 @@ impl Plugin for BotPlugin {
             (
                 squad::snapshot,
                 strategy::update_map,
+                strategy::update_regions,
                 strategy::plan,
                 ai::commander::yield_to_humans,
                 ai::commander::command,
@@ -199,8 +200,9 @@ pub struct BotStats {
     vehicle_stuck_spots: bevy::platform::collections::HashMap<(i32, i32), u32>,
     flights: u32,
     crashes: u32,
-    /// Milliseconds of `think` spent on seated bots.
+    /// Milliseconds of `think` spent on seated bots, and per what they do (role and seat).
     seated_ms: f32,
+    seated_by: bevy::platform::collections::HashMap<&'static str, (f32, u32)>,
 }
 
 /// A finished path request.
@@ -232,6 +234,8 @@ enum Activity {
     Launch { target: LaunchTarget, time: f32, weapon: u8, shots: u16, fired: f32 },
     /// Engineers: to something of the team's that is damaged, and the wrench at it.
     Repair { target: RepairTarget, time: f32 },
+    /// C4 on an enemy vehicle: up to it, charges on it (`placed`), away, and off.
+    Demolish { vehicle: Entity, time: f32, placed: u8 },
     /// To a vehicle's entry point and in, for a seat of this kind (see [`vehicle`]).
     Mount { vehicle: Entity, wish: SeatWish, time: f32 },
 }
@@ -270,6 +274,14 @@ pub struct BotBrain {
     wrench: Option<u8>,
     /// Rocket bots: the enemy vehicle in sight, and where.
     armor: Option<(Entity, Vec3)>,
+    /// C4 and anti-tank mines (loadout indices), and seconds until the next mine.
+    c4: Option<u8>,
+    at_mine: Option<u8>,
+    mine_cooldown: f32,
+    /// C4 charges left at the last look (a charge was placed when it goes down), and whether
+    /// the detonator is out.
+    c4_left: Option<u16>,
+    c4_detonator: bool,
     launch_cooldown: f32,
     bag_cooldown: f32,
     repair_cooldown: f32,
@@ -400,6 +412,11 @@ impl Default for BotBrain {
             flashbang: None,
             wrench: None,
             armor: None,
+            c4: None,
+            at_mine: None,
+            mine_cooldown: 20.0,
+            c4_left: None,
+            c4_detonator: false,
             launch_cooldown: 5.0,
             bag_cooldown: 0.0,
             repair_cooldown: 0.0,
@@ -569,6 +586,8 @@ struct Senses<'w, 's> {
     profiles: Res<'w, VehicleProfiles>,
     vehicle_nav: Option<Res<'w, VehicleNavigation>>,
     players: Query<'w, 's, &'static Player>,
+    /// Rockets, missiles and grenades in flight (crews fire countermeasures at them).
+    projectiles: Query<'w, 's, (&'static game_shared::projectile::Projectile, &'static game_shared::projectile::ProjectileMotion)>,
 }
 
 impl Senses<'_, '_> {
@@ -795,6 +814,7 @@ impl BotBrain {
                 self.launch(w, me, skill, target, time, weapon, shots, fired, &mut intent, dt)
             }
             Activity::Repair { target, time } => self.repair(w, me, target, time, &mut intent, dt),
+            Activity::Demolish { vehicle, time, placed } => self.demolish(w, me, vehicle, time, placed, &mut intent, dt),
             Activity::Mount { vehicle, wish, time } => self.mount(w, me, vcx, vehicle, wish, time, &mut intent, dt),
             Activity::Objective => {
                 self.objective(w, me, &mut intent, dt);
@@ -802,6 +822,14 @@ impl BotBrain {
             }
         }
 
+        // Rockets and C4 at a vehicle: a wreck soon after counts as the team's.
+        match self.activity {
+            Activity::Launch { target: LaunchTarget::Vehicle(vehicle), fired, .. } if fired >= 0.0 => {
+                vcx.claims.engage(vehicle, me.team)
+            }
+            Activity::Demolish { vehicle, placed, .. } if placed > 0 => vcx.claims.engage(vehicle, me.team),
+            _ => {}
+        }
         team_stats.alive += dt;
         if self.activity == Activity::Engage {
             team_stats.fighting += dt;
@@ -822,6 +850,7 @@ impl BotBrain {
         self.grenade_cooldown -= dt;
         self.flank_cooldown -= dt;
         self.launch_cooldown -= dt;
+        self.mine_cooldown -= dt;
         self.bag_cooldown -= dt;
         self.repair_cooldown -= dt;
         if self.feel_gadgets(w, me, team_stats, dt) {
@@ -994,7 +1023,9 @@ impl BotBrain {
             }
             return;
         }
-        if matches!(self.activity, Activity::Throw { .. } | Activity::Launch { .. }) {
+        if matches!(self.activity, Activity::Throw { .. } | Activity::Launch { .. })
+            || matches!(self.activity, Activity::Demolish { placed, .. } if placed > 0)
+        {
             return;
         }
         let position = me.motion.position;
@@ -1017,7 +1048,8 @@ impl BotBrain {
             Activity::Search { time, .. } if time > 0.0 => best = (2.5, self.activity),
             Activity::Revive { time, .. } if time > 0.0 => best = (REVIVE_UTILITY, self.activity),
             Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
-            Activity::Mount { time, .. } if time < 30.0 => best = (5.0, self.activity),
+            Activity::Mount { time, .. } if time < 90.0 => best = (5.0, self.activity),
+            Activity::Demolish { time, .. } if time < 40.0 => best = (7.0, self.activity),
             _ => {}
         }
         let consider = |best: &mut (f32, Activity), utility: f32, activity: Activity| {
@@ -1168,11 +1200,13 @@ impl BotBrain {
                     team_stats.flanks += 1;
                     self.flank_cooldown = 20.0;
                 }
+                Activity::Throw { weapon, .. } if Some(weapon) == self.at_mine => team_stats.mines += 1,
                 Activity::Throw { weapon, .. } if Some(weapon) == self.grenade || Some(weapon) == self.flashbang => {
                     team_stats.grenades += 1
                 }
                 Activity::Throw { .. } => team_stats.bags += 1,
                 Activity::Launch { target: LaunchTarget::Vehicle(_), .. } => team_stats.rockets += 1,
+                Activity::Demolish { .. } => team_stats.demolitions += 1,
                 Activity::Launch { .. } => team_stats.launches += 1,
                 Activity::Repair { target, .. } if self.last_repair != Some(target) => {
                     self.last_repair = Some(target);
@@ -1329,7 +1363,9 @@ impl BotBrain {
         }
         if time > wound + desc.fire.launch_delay + 0.4 {
             self.activity = Activity::Objective;
-            if Some(weapon) == self.grenade || Some(weapon) == self.flashbang {
+            if Some(weapon) == self.at_mine {
+                self.mine_cooldown = 30.0 + 30.0 * fastrand::f32();
+            } else if Some(weapon) == self.grenade || Some(weapon) == self.flashbang {
                 self.grenade_cooldown = 20.0 + 20.0 * fastrand::f32();
             } else {
                 self.bag_cooldown = 8.0;
@@ -1723,6 +1759,7 @@ impl BotBrain {
                     Steer::Stranded => {
                         stats.stranded += 1;
                         self.stranded = 10.0;
+                        debug!("{} can't walk from {position:.0} to {:.0}", w.name(me.player), goal.position);
                         (position, false, None)
                     }
                 },
@@ -2089,14 +2126,22 @@ impl BotBrain {
             Some(l) if squad.is_some_and(|s| !s.leader_is_bot) => Some(l.position),
             _ => area.and_then(|a| w.map.areas.get(a)).map(|a| a.position),
         };
-        let spawns: Vec<(u8, Vec3)> = w
+        let held: Vec<(usize, u8, Vec3)> = w
             .map
             .areas
             .iter()
             .enumerate()
             .filter(|(i, a)| a.has_spawns && w.holds(*i, team))
-            .filter_map(|(_, a)| Some((a.control_point?, a.position)))
+            .filter_map(|(i, a)| Some((i, a.control_point?, a.position)))
             .collect();
+        // Not at a base walking can't get anywhere from (a carrier) while there's another.
+        let goal_region = area.and_then(|a| w.map.walk_regions.get(a).copied().flatten());
+        let connected = |i: usize| w.map.walk_regions.get(i).copied().flatten() == goal_region;
+        let spawns: Vec<(u8, Vec3)> = if goal_region.is_some() && held.iter().any(|(i, ..)| connected(*i)) {
+            held.iter().filter(|(i, ..)| connected(*i)).map(|(_, cp, p)| (*cp, *p)).collect()
+        } else {
+            held.iter().map(|(_, cp, p)| (*cp, *p)).collect()
+        };
         let (control_point, on_leader) = squad::choose_spawn(objective, leader.as_ref(), &spawns);
         self.spawn_on_leader = on_leader;
         if deployment.control_point != control_point {
@@ -2229,7 +2274,11 @@ fn think(
             Some(seated) => {
                 let started = Instant::now();
                 let frame = brain.tick_seated(&w, &me, seated, &mut vcx, &mut intel, &mut stats, team_stats);
-                seated_ms += started.elapsed().as_secs_f32() * 1000.0;
+                let ms = started.elapsed().as_secs_f32() * 1000.0;
+                seated_ms += ms;
+                let entry = stats.seated_by.entry(brain.ride_kind(&w)).or_default();
+                entry.0 += ms;
+                entry.1 += 1;
                 frame
             }
             None => brain.tick(&w, &me, &mut intel, &mut stats, team_stats, &mut covers, &mut vcx),
@@ -2278,7 +2327,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
         info!(
             "bots in vehicles: {} seats taken, {} left; {:.2} km driven in {:.0} s at the wheel ({:.1} m/s); \
              {} vehicle stuck events ({:.1} per vehicle-minute, most at {}); {} vehicle paths ({} partial, {} failed); \
-             {} takeoffs, {} crashes; seated bots {:.3} ms per tick",
+             {} takeoffs, {} crashes; seated bots {:.3} ms per tick ({})",
             stats.vehicle_entries,
             stats.vehicle_exits,
             stats.driven / 1000.0,
@@ -2293,6 +2342,15 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.flights,
             stats.crashes,
             stats.seated_ms / stats.ticks.max(1) as f32,
+            {
+                let mut by: Vec<_> = stats.seated_by.iter().collect();
+                by.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+                by.iter()
+                    .take(4)
+                    .map(|(kind, (ms, n))| format!("{kind} {:.1} us", ms * 1000.0 / (*n).max(1) as f32))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
         );
     }
     *stats = BotStats::default();

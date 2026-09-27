@@ -83,6 +83,14 @@ pub fn load(path: &Path, key: u64, params: NavParams) -> Option<NavGrid> {
         .ok()
 }
 
+/// A cached grid whatever geometry it was built from (tests with imported levels).
+#[cfg(test)]
+pub fn load_unchecked(path: &Path, params: NavParams) -> Option<NavGrid> {
+    let bytes = fs::read(path).ok()?;
+    (bytes.len() >= 16 && &bytes[..8] == MAGIC).then_some(())?;
+    parse(&bytes[16..], params).ok()
+}
+
 fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
     const HEADER: usize = 24;
     let mut data = Vec::new();

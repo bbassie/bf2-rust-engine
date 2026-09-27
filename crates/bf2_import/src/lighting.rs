@@ -262,32 +262,52 @@ fn atlas_size(atlases: usize) -> usize {
 /// `lightmaps/objects_sky.dds` and `lightmaps/objects.ron` ([`StaticLightmaps`]). Returns the
 /// RON's path relative to the level folder, `None` if the level has no object lightmaps.
 pub fn static_lightmaps(vfs: &Vfs, level: &str, level_dir: &Path) -> Result<Option<String>> {
+    let dir = level_dir.join("lightmaps");
+    // Without usable lightmaps, no files from an earlier import stay behind.
+    let none = || {
+        for file in ["objects_sky.dds", "objects.ron"] {
+            let _ = std::fs::remove_file(dir.join(file));
+        }
+        Ok(None)
+    };
     let base = format!("levels/{level}/lightmaps/objects");
     let Ok(tai) = vfs.read_text(&format!("{base}/lightmapatlas.tai")) else {
-        return Ok(None);
+        return none();
     };
     let (entries, atlases) = parse_atlas_index(&tai);
     if entries.is_empty() {
-        return Ok(None);
+        return none();
     }
     let size = atlas_size(atlases.len());
     let mut layers = Vec::with_capacity(atlases.len());
+    let (mut sunlit_without_sky, mut texels) = (0usize, 0usize);
     for atlas in &atlases {
-        let sky = vfs
-            .read(atlas)
-            .ok()
-            .and_then(|data| decode_rgb(&data))
-            .map(|(w, h, rgb)| resample(&rgb.iter().map(|p| p[2]).collect::<Vec<_>>(), w, h, size));
-        if sky.is_none() {
+        let decoded = vfs.read(atlas).ok().and_then(|data| decode_rgb(&data));
+        let Some((w, h, rgb)) = decoded else {
             log::warn!("{atlas}: missing or unreadable");
+            layers.push(vec![255; size * size]);
+            continue;
+        };
+        for &[r, g, b] in rgb.iter().step_by(5) {
+            if sky_texel([r, g, b]) != 255 || b == 255 {
+                texels += 1;
+                sunlit_without_sky += usize::from(g > 100 && b < 20);
+            }
         }
-        layers.push(sky.unwrap_or_else(|| vec![217; size * size]));
+        layers.push(resample(&rgb.iter().map(|p| sky_texel(*p)).collect::<Vec<_>>(), w, h, size));
+    }
+    // Day levels' lightmaps never have sunlit surfaces without sky; the Special Forces night
+    // levels' were baked otherwise (open squares with no sky light at all, lit by lamps), so
+    // their blue channel isn't how much sky a surface sees.
+    let odd = sunlit_without_sky as f32 / texels.max(1) as f32;
+    if odd > 0.02 {
+        log::info!("{level}: object lightmaps have no usable sky visibility ({:.0}% sunlit without sky)", odd * 100.0);
+        return none();
     }
     // A single layer would load as a plain 2D texture; shaders expect an array.
     if layers.len() == 1 {
         layers.push(layers[0].clone());
     }
-    let dir = level_dir.join("lightmaps");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("objects_sky.dds"), r8_array_dds(&layers, size))?;
     let desc = StaticLightmaps {
@@ -296,6 +316,14 @@ pub fn static_lightmaps(vfs: &Vfs, level: &str, level_dir: &Path) -> Result<Opti
     };
     game_data::write_ron(&dir.join("objects.ron"), &desc)?;
     Ok(Some("lightmaps/objects.ron".into()))
+}
+
+/// The sky visibility of an object lightmap texel (its blue channel). Unused atlas space is
+/// filled with black or pure green (no sky, full sun), and some meshes' lightmap UVs point
+/// into it: those read as open sky, not as a black hole.
+fn sky_texel([r, g, b]: [u8; 3]) -> u8 {
+    let empty = r == 0 && b == 0 && (g == 0 || g >= 250);
+    if empty { 255 } else { b }
 }
 
 /// Entries of a `LightmapAtlas.tai` (lines `<dir>/<name>=<geometry><lod>=<x>=<y>=<z>.dds
@@ -465,6 +493,14 @@ mod tests {
                 scale: [0.125, 0.125],
             }]
         );
+    }
+
+    #[test]
+    fn empty_atlas_space_is_open_sky() {
+        assert_eq!(sky_texel([0, 0, 0]), 255);
+        assert_eq!(sky_texel([0, 255, 0]), 255);
+        assert_eq!(sky_texel([0, 255, 40]), 40);
+        assert_eq!(sky_texel([10, 0, 0]), 0);
     }
 
     #[test]
