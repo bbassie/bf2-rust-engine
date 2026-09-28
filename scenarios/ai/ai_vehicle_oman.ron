@@ -1,0 +1,32 @@
+// Bots in vehicles on Gulf of Oman (64): APCs and tanks drive from the airfield and the beaches,
+// boats leave the carrier, helicopters fly. The camera chases bot-driven vehicles.
+// client --scenario scenarios/ai/ai_vehicle_oman.ron
+(
+    level: "gulf_of_oman",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Wait(15.0),
+        ChaseDriven("land", 16.0, 7.0),
+        Screenshot("land_1"),
+        ChaseDriven("sea", 18.0, 6.0),
+        Screenshot("boat_1"),
+        Wait(15.0),
+        ChaseDriven("land", 16.0, 7.0),
+        Screenshot("land_2"),
+        ChaseDriven("helicopter", 25.0, 8.0),
+        Screenshot("heli_1"),
+        Wait(20.0),
+        ChaseDriven("sea", 18.0, 6.0),
+        Screenshot("boat_2"),
+        ChaseDriven("land", 18.0, 8.0),
+        Screenshot("land_3"),
+        LogVehicles("after 55 s"),
+        Wait(30.0),
+        ChaseDriven("", 25.0, 8.0),
+        Screenshot("any_1"),
+        Quit,
+    ],
+)

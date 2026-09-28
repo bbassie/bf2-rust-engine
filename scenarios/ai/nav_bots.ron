@@ -1,0 +1,19 @@
+// Bot navigation: 16 bots play Karkand for three minutes. The log has a line per minute
+// with the bots' stuck events. Add `--debug-nav` to draw bot paths and the walkable grid.
+// client --scenario scenarios/ai/nav_bots.ron --debug-nav
+(
+    level: "strike_at_karkand",
+    bots: 16,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-190.0, 260.0, -40.0), 0.0, -60.0),
+        Wait(20.0),
+        Screenshot("overview_20s"),
+        Wait(90.0),
+        Screenshot("overview_110s"),
+        Wait(75.0),
+        Screenshot("overview_185s"),
+        Quit,
+    ],
+)

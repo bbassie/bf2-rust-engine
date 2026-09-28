@@ -1,0 +1,19 @@
+// Frame time of the BF2 materials: two fixed views on Karkand, long enough for the
+// `--diagnostics` GPU pass timings (logged every 5 s). Compare with
+// `BF2_MATERIAL_DEBUG=nolayers` (base color only) for the cost of the layers.
+// client --scenario scenarios/lighting/mat_perf.ron --diagnostics --out target/scenarios/mat/<name>
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-184.0, 157.5, -80.0), 20.0, -8.0),
+        Wait(2.0),
+        Measure("square", 11.0),
+        Camera((-184.0, 158.0, -60.0), 0.0, -2.0),
+        Wait(2.0),
+        Measure("street", 11.0),
+        Quit,
+    ],
+)

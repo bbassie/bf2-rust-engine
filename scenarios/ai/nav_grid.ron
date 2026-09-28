@@ -1,0 +1,27 @@
+// Bot navigation grid and paths on Karkand, for checking them by eye.
+// client --scenario scenarios/ai/nav_grid.ron --debug-nav
+// Grid colors: green open, orange near walls, red at the edge, blue jumps and drops,
+// magenta unlinked.
+(
+    level: "strike_at_karkand",
+    bots: 16,
+    spectate: true,
+    steps: [
+        WaitReady,
+        // The first run builds the grid in the background; later runs load it from the cache.
+        Wait(15.0),
+        Camera((-184.0, 175.0, -60.0), 0.0, -45.0),
+        Wait(0.5),
+        Screenshot("square"),
+        Camera((-196.0, 168.0, -160.0), 0.0, -50.0),
+        Wait(0.5),
+        Screenshot("market"),
+        Camera((-194.0, 176.0, 10.0), 0.0, -50.0),
+        Wait(0.5),
+        Screenshot("hotel"),
+        Camera((-190.0, 260.0, -40.0), 0.0, -60.0),
+        Wait(0.5),
+        Screenshot("paths"),
+        Quit,
+    ],
+)

@@ -1,0 +1,27 @@
+// Singleplayer host changes the map from the chat (the host may use admin commands).
+// client --scenario scenarios/infra/infra_host.ron --out target/scenarios/infra/host
+(
+    level: "test_range",
+    bots: 3,
+    steps: [
+        WaitReady,
+        Key(KeyT),
+        Frames(2),
+        Type("/map karkand 16"),
+        Frames(2),
+        Key(Enter),
+        Frames(3),
+        Screenshot("loading"),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("karkand"),
+        Key(KeyT),
+        Frames(2),
+        Type("/info"),
+        Frames(2),
+        Key(Enter),
+        Wait(0.5),
+        Screenshot("info"),
+        Quit,
+    ],
+)

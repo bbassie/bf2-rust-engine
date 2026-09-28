@@ -1,0 +1,43 @@
+// Vehicle and soldier LODs on Karkand's 64 player layout with 32 bots: views over both
+// main bases (parked vehicles, soldiers spawning and running out) and over the city from
+// high up once the fighting has spread, with many soldiers and vehicles in view at a
+// distance. Measures each view.
+// Before/after: run once with BF2_UNIT_LODS=off (full detail everywhere, no culling).
+// client --scenario scenarios/lod/lod_units_karkand.ron --out target/scenarios/lod_units/on
+// BF2_UNIT_LODS=off client --scenario scenarios/lod/lod_units_karkand.ron --out target/scenarios/lod_units/off
+(
+    level: "strike_at_karkand",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        // US main base (Gas Station): its vehicles and the soldiers spawning.
+        Camera((-120.0, 190.0, 310.0), 41.0, -22.0),
+        Wait(3.0),
+        Screenshot("us_base"),
+        Measure("us base", 5.0),
+        // MEC main base (Factory).
+        Camera((230.0, 185.0, -110.0), 40.0, -22.0),
+        Wait(2.0),
+        Screenshot("mec_base"),
+        Measure("mec base", 5.0),
+        Wait(15.0),
+        // High over the Hotel, looking across the city to the Square.
+        Camera((-120.0, 260.0, 60.0), 32.0, -29.0),
+        Wait(2.0),
+        Screenshot("city_high"),
+        Measure("city high", 5.0),
+        // From the east over the Cement Factory towards the Gatehouse and the Warehouse.
+        Camera((100.0, 230.0, -100.0), 37.6, -26.0),
+        Wait(2.0),
+        Screenshot("east_high"),
+        Measure("east high", 5.0),
+        // Street level in the city.
+        Camera((-184.0, 158.0, -40.0), 0.0, -3.0),
+        Wait(2.0),
+        Screenshot("street"),
+        Measure("street", 5.0),
+        Quit,
+    ],
+)

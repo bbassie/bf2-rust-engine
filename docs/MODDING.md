@@ -305,6 +305,6 @@ game reads), never code, and every file is checked against its hash before it is
 - `client --level my_level` starts it directly. Use `--mods <dir>` for mods kept elsewhere.
 - `server --level my_level --mods <dir>` serves it. Rotation entries in a server config can
   name mod levels.
-- Scenarios (`scenarios/mod_sample.ron`) take screenshots without anyone at the keyboard.
+- Scenarios (`scenarios/infra/mod_sample.ron`) take screenshots without anyone at the keyboard.
 - The log says which mods are on, and names every file that fails to parse (patches
   included) with the reason.

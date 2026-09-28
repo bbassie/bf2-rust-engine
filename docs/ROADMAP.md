@@ -25,8 +25,8 @@ Milestones are ordered so that each one ends with something playable.
 - [x] Bindless static materials (4x frame rate: ~270 fps on Karkand in release)
 - [x] Screen-space ambient occlusion (with SMAA instead of MSAA; `--no-ssao` to compare)
 
-Still to do for BF2 fidelity: baked lightmaps (statics and terrain), dirt/crack layers,
-surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
+(Dirt/crack layers, surrounding terrain, undergrowth, water, LODs and baked sky occlusion followed
+in M5.)
 
 ## M1: Infantry combat
 
@@ -79,7 +79,7 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
 - [x] Commander: post, mutiny, squad orders, artillery, UAV, satellite scan, supply drops,
   commander screen (Caps Lock)
 
-## M3: Vehicles (in progress)
+## M3: Vehicles
 
 - [x] Vehicle template trees imported (`vehicles/<name>.ron`): part tree, joints (turrets,
   barrels, steering), wheels, seats with soldier/camera/exit points, entry points, guns
@@ -119,7 +119,6 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   aircraft (BF2's canopy)
 - [x] Helicopter landing: the collective slows the descent near the ground, landed
   helicopters sit on their skids
-- Flight tuning against BF2 (rudder authority)
 
 ## M4: BF2-style bots
 
@@ -186,3 +185,23 @@ surrounding (outer) terrain, undergrowth/overgrowth, water shader, LODs.
   converted BF2 assets) for the maps being played, cached by hash, so modded servers need no
   install step and clients without BF2 can join `all` servers
 - [x] Master server: servers register and heartbeat, the browser lists internet servers
+
+## M6: Beyond BF2 (next)
+
+Requests from 2026-09-29, in priority order.
+
+- Iteration speed: shader and asset hot reload, Bevy system hot-patching, the Debian machine
+  for Linux builds, tests and soaks
+- Lighting: less warm shade than BF2's full tint; real dynamic lights at lamp objects on night
+  maps
+- Carriers: navigation over the whole ship (catwalks, hangar, deck) so bots use them fully
+- Vehicles: small plants must not stop vehicles; climbing slopes
+- Game modes beyond conquest (e.g. Rush and Breakthrough) that bots can play
+- Import of BF2 mods such as AIX 2 (levels, vehicles, weapons)
+- Content verification: the server checks the client's content hashes before it lets a player
+  in and sends what is missing or outdated; the client confirms downloads from unknown servers
+- Optional accounts: a master server with accounts, tokens that game servers verify, stats,
+  levels/ranks and a website; LAN play never needs it
+- Settings: more graphics options, key bindings for everything, controller support
+- UI polish
+- Rudder authority tuning (needs someone to fly and compare with BF2)

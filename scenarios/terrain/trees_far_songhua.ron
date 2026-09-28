@@ -1,0 +1,28 @@
+// Frame times over tree-heavy terrain at long view distances (run with a settings file
+// that sets `view_distance: Extreme`), from the ground and from the air.
+// client --scenario scenarios/terrain/trees_far.ron --settings <file> --out target/scenarios/veg/trees_far
+(
+    level: "songhua_stalemate",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((0.0, 110.0, 0.0), 45.0, -6.0),
+        Wait(2.0),
+        Screenshot("ground_45"),
+        Measure("ground a", 4.0),
+        Camera((-300.0, 120.0, 300.0), 200.0, -6.0),
+        Wait(1.0),
+        Screenshot("ground_200"),
+        Measure("ground b", 4.0),
+        Camera((0.0, 400.0, 0.0), 30.0, -18.0),
+        Wait(2.0),
+        Screenshot("air_400"),
+        Measure("air 400", 4.0),
+        Camera((600.0, 700.0, -600.0), 300.0, -22.0),
+        Wait(2.0),
+        Screenshot("air_700"),
+        Measure("air 700", 4.0),
+        Quit,
+    ],
+)

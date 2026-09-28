@@ -1,0 +1,13 @@
+// Loads a level with all its vehicles and takes one screenshot (for load problems).
+// client --scenario scenarios/vehicles/vehicle2_load.ron --level gulf_of_oman --out target/scenarios/vehicle2/load
+(
+    size: 64,
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Wait(3.0),
+        LogVehicles("loaded"),
+        Quit,
+    ],
+)

@@ -1,6 +1,6 @@
 //! Scripted runs for testing and screenshots without a human at the keyboard.
 //!
-//! `client --scenario scenarios/viewmodel.ron` loads the level once, waits until it has
+//! `client --scenario scenarios/animation/viewmodel.ron` loads the level once, waits until it has
 //! streamed in and every shader is compiled, then runs the steps in order: place the
 //! camera, hold buttons, toggle render features, take screenshots, measure frame times.
 //! Screenshots and `report.txt` go to `--out` (default `target/scenarios/<name>/`).
@@ -1329,4 +1329,34 @@ fn frame_stats(name: &str, samples: &mut [f32]) -> String {
         samples[samples.len() - 1],
         samples.len()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every scenario in the repo still parses: a renamed or removed step breaks old scenarios
+    /// only at run time otherwise.
+    #[test]
+    fn all_scenarios_parse() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+        let mut files = Vec::new();
+        let mut dirs = vec![root];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "ron") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(files.len() > 100, "found only {} scenarios", files.len());
+        let failures: Vec<String> = files
+            .iter()
+            .filter_map(|path| Scenario::load(path).err().map(|e| format!("{}: {e}", path.display())))
+            .collect();
+        assert!(failures.is_empty(), "{} scenarios don't parse:\n{}", failures.len(), failures.join("\n"));
+    }
 }

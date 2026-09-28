@@ -1,0 +1,27 @@
+// Static mesh LODs while zoomed: through the sniper scope the switch distances grow with the
+// zoom and the draw distances with its square root (as in BF2), so small objects 100-300 m
+// down the street stay drawn. Compare with BF2_STATIC_LODS=off (full detail, no culling).
+// client --scenario scenarios/lod/lod_zoom.ron --out target/scenarios/lod/zoom_on
+// BF2_STATIC_LODS=off client --scenario scenarios/lod/lod_zoom.ron --out target/scenarios/lod/zoom_off
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Kill,
+        Wait(1.0),
+        Click("kit:1"),
+        Wait(16.0),
+        Teleport((-184.0, 157.0, -60.0), 0.0, -1.0),
+        Weapon(4),
+        Wait(2.5),
+        Screenshot("hip"),
+        Hold([Aim]),
+        Wait(1.5),
+        Screenshot("zoom"),
+        Release([Aim]),
+        Wait(1.0),
+        Screenshot("unzoomed"),
+        Quit,
+    ],
+)

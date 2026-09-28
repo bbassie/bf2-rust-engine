@@ -1,0 +1,32 @@
+// A co-op server found through the master server, joined from the browser: humans all on
+// the co-op team (the server's `coop_team`), bots on both. Then the admin moves on to a
+// conquest map, where humans share out over both teams again.
+// master & server --config <dir>/server.ron   (master_server "127.0.0.1:16580", port 16641)
+// client --scenario scenarios/conquest/coop_net.ron --settings <dir>/settings.ron   (master_server set)
+// server rcon --port <rcon> --password <pw> players next     (meanwhile)
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:join"),
+        Wait(1.5),
+        Screenshot("browser"),
+        Click("server:127.0.0.1:16641"),
+        Wait(0.3),
+        Click("connect"),
+        WaitReady,
+        Wait(4.0),
+        HoldKey(Tab),
+        Wait(0.3),
+        Screenshot("scoreboard_coop"),
+        ReleaseKey(Tab),
+        Wait(12.0),
+        WaitReady,
+        Wait(3.0),
+        HoldKey(Tab),
+        Wait(0.3),
+        Screenshot("scoreboard_conquest"),
+        ReleaseKey(Tab),
+        Quit,
+    ],
+)

@@ -1,0 +1,40 @@
+// Vehicle damage states (BF2's armor effects) on Karkand's M1A2: light smoke and sparks under
+// 50 % hit points, medium smoke under 25 %, heavy smoke under 10 %, then the explosion with
+// the wreck fires, and the wreck's last explosion when it has burnt down (-100 %, 10 s later).
+// client --scenario scenarios/vehicles/vehicle2_damage.ron --out target/scenarios/vehicle2/damage
+(
+    level: "strike_at_karkand",
+    size: 64,
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Wait(4.0),
+        Camera((-166.0, 165.0, 321.0), 30.0, -12.0),
+        Wait(1.0),
+        Screenshot("m1a2_100"),
+        DamageVehicleAt((-172.9, 161.3, 309.1), 600.0),
+        Wait(3.0),
+        Screenshot("m1a2_40"),
+        DamageVehicleAt((-172.9, 161.3, 309.1), 200.0),
+        Wait(3.0),
+        Screenshot("m1a2_20"),
+        DamageVehicleAt((-172.9, 161.3, 309.1), 150.0),
+        Wait(3.0),
+        Screenshot("m1a2_5"),
+        DamageVehicleAt((-172.9, 161.3, 309.1), 100.0),
+        Wait(0.15),
+        Screenshot("m1a2_boom1"),
+        Wait(0.5),
+        Screenshot("m1a2_boom2"),
+        Wait(3.0),
+        Screenshot("m1a2_wreck"),
+        Wait(6.2),
+        Screenshot("m1a2_last1"),
+        Wait(0.4),
+        Screenshot("m1a2_last2"),
+        Wait(2.0),
+        Screenshot("m1a2_gone"),
+        Quit,
+    ],
+)

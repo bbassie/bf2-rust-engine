@@ -1,0 +1,32 @@
+// Esc with the deploy screen: alive, Esc closes the deploy screen before it opens the game
+// menu; dead, it opens the game menu over the deploy screen and closes it again.
+// client --scenario scenarios/menu/menu_esc.ron --out target/scenarios/menu/esc
+(
+    level: "test_range",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Key(Enter),
+        Wait(0.3),
+        Screenshot("deploy_open"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("deploy_closed"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("paused"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("resumed"),
+        Kill,
+        Wait(1.0),
+        Screenshot("dead"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("dead_paused"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("dead_resumed"),
+        Quit,
+    ],
+)

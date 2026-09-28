@@ -1,0 +1,43 @@
+// Soldier LODs: a (critically wounded, so lying still) teammate on the road by Karkand's Gas
+// Station seen from 8 m to 150 m along the road. BF2 switches the body at 11.2 and 21.2 m
+// (3148, 1540, 360 triangles), a carried weapon fades out at 40 m and the soldier at 137 m.
+// Compare with BF2_UNIT_LODS=off (full detail, no culling).
+// client --scenario scenarios/lod/lod_soldiers.ron --out target/scenarios/lod_soldiers/on
+// BF2_UNIT_LODS=off client --scenario scenarios/lod/lod_soldiers.ron --out target/scenarios/lod_soldiers/off
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 4,
+    steps: [
+        WaitReady,
+        Wait(4.0),
+        Teleport((-172.8, 161.5, 315.0), -90.0, -5.0),
+        Wait(0.5),
+        Summon(0.0),
+        Wait(0.5),
+        Teleport((-179.3, 161.5, 315.0), -90.0, -6.0),
+        Wait(0.6),
+        Screenshot("soldier_008m"),
+        Teleport((-186.3, 161.5, 315.0), -90.0, -4.0),
+        Wait(0.6),
+        Screenshot("soldier_015m"),
+        Teleport((-201.3, 161.0, 315.0), -90.0, -2.0),
+        Wait(0.6),
+        Screenshot("soldier_030m"),
+        Teleport((-231.3, 160.8, 315.0), -90.0, -1.0),
+        Wait(0.6),
+        Screenshot("soldier_060m"),
+        Hold([Aim]),
+        Wait(0.8),
+        Screenshot("soldier_060m_aim"),
+        Release([Aim]),
+        Teleport((-301.3, 162.3, 315.0), -90.0, -0.5),
+        Wait(0.6),
+        Screenshot("soldier_130m"),
+        Teleport((-321.3, 162.5, 315.0), -90.0, -0.5),
+        Wait(0.6),
+        Screenshot("soldier_150m"),
+        Quit,
+    ],
+)

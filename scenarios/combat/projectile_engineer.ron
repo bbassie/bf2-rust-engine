@@ -1,0 +1,52 @@
+// Engineer and sniper gadgets on Strike at Karkand: the Saiga-12 fires 8 pellets per shot
+// (BF2 `fire.batchSize`), each spread 3 degrees around the shot (`subProjectileDev`); an
+// anti-tank mine is placed (it arms after 3 s and only goes off under something heavy),
+// then, with the sniper kit, a claymore facing south (arms after 3 s; enemies walking into
+// its 30 degree, 7 m trigger cone set it off).
+// client --scenario scenarios/combat/projectile_engineer.ron --out target/scenarios/projectile/engineer
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Kill,
+        Wait(1.0),
+        Click("kit:4"),
+        Wait(16.0),
+        // Shotgun at the house across the square.
+        Teleport((-184.0, 157.0, -85.0), 180.0, 1.0),
+        Weapon(5),
+        Wait(2.0),
+        Hold([Fire]),
+        Wait(0.1),
+        Release([Fire]),
+        Wait(0.12),
+        Screenshot("saiga_pellets"),
+        Wait(1.0),
+        // Anti-tank mine, dropped ahead.
+        Look(180.0, -30.0),
+        Weapon(2),
+        Wait(1.6),
+        Hold([Fire]),
+        Wait(0.1),
+        Release([Fire]),
+        Wait(2.0),
+        Screenshot("at_mine"),
+        Kill,
+        Wait(1.0),
+        Click("kit:1"),
+        Wait(16.0),
+        Teleport((-184.0, 157.0, -85.0), 180.0, -30.0),
+        Weapon(0),
+        Wait(1.5),
+        Hold([Fire]),
+        Wait(0.1),
+        Release([Fire]),
+        Wait(1.5),
+        Screenshot("claymore"),
+        Teleport((-181.0, 157.0, -80.0), 40.0, -25.0),
+        Wait(0.5),
+        Screenshot("claymore_side"),
+        Quit,
+    ],
+)

@@ -1,0 +1,31 @@
+// Co-op from the menu: Strike at Karkand's co-op layout, everyone on our team, bots on both
+// teams (7 bots and us: 4 against 4).
+// client --scenario scenarios/conquest/coop_menu.ron --out target/scenarios/coop/menu
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:play"),
+        Wait(0.3),
+        Click("level:strike_at_karkand"),
+        Wait(0.3),
+        Click("layout:gpm_coop:16"),
+        Wait(0.5),
+        Screenshot("play_page"),
+        Click("level:sample_valley"),
+        Wait(0.5),
+        Screenshot("sample_valley"),
+        Click("level:strike_at_karkand"),
+        Wait(0.3),
+        Click("layout:gpm_coop:16"),
+        Wait(0.3),
+        Click("start"),
+        WaitReady,
+        Wait(3.0),
+        HoldKey(Tab),
+        Wait(0.3),
+        Screenshot("scoreboard"),
+        ReleaseKey(Tab),
+        Quit,
+    ],
+)

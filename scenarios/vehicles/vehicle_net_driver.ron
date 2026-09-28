@@ -1,0 +1,40 @@
+// Driving on a remote server: walk to the nearest Vodnik (MEC holds most flags on Karkand and
+// most of them have one), get in, drive, get out. Pair with a spectating host:
+// client --host --spectate --port 16671 --level strike_at_karkand --size 64 --bots 0
+// client --connect 127.0.0.1 --port 16671 --scenario scenarios/vehicles/vehicle_net_driver.ron --out target/scenarios/vehicle/net_driver
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        WalkToVehicle("jep_vodnik"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(1.0),
+        VehicleInfo("entered"),
+        ThirdPerson(true),
+        VehicleLook(0.0, -10.0),
+        Wait(0.5),
+        Screenshot("entered"),
+        Move(0.0, 1.0),
+        Wait(1.0),
+        VehicleInfo("throttle 1 s"),
+        Wait(2.0),
+        VehicleInfo("throttle 3 s"),
+        Screenshot("driving"),
+        Move(0.0, -1.0),
+        Wait(1.5),
+        VehicleInfo("braking"),
+        Move(0.0, 0.0),
+        Wait(1.0),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(1.0),
+        VehicleInfo("got out"),
+        Screenshot("exited"),
+        Quit,
+    ],
+)

@@ -1,0 +1,49 @@
+// World sounds through the audio system, checked through the log: a fuel barrel shot until
+// it explodes (destruction sounds), a long sprint until our soldier is out of breath, then
+// capturing the Square alone (the flag's flapping loop near the pole, the commander's
+// announcement with everything else ducked under it).
+// RUST_LOG=info,audio=debug target/debug/deps/client.exe --scenario scenarios/audio/audio_world.ron --out target/scenarios/audio/world
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    team: 2,
+    steps: [
+        WaitReady,
+        Log("barrel"),
+        Teleport((-188.99, 156.2, 41.3), 180.0, -8.9),
+        Wait(1.5),
+        Hold([Aim]),
+        Wait(0.6),
+        // Bursts of three.
+        Hold([Fire]),
+        Wait(0.3),
+        Release([Fire]),
+        Wait(0.3),
+        Hold([Fire]),
+        Wait(0.3),
+        Release([Fire]),
+        Wait(0.3),
+        Hold([Fire]),
+        Wait(0.3),
+        Release([Fire]),
+        Wait(0.3),
+        Hold([Fire]),
+        Wait(0.3),
+        Release([Fire]),
+        Release([Aim]),
+        Wait(2.0),
+        Log("sprint"),
+        Teleport((-184.0, 157.0, -85.0), 90.0, 0.0),
+        Wait(1.0),
+        Hold([Sprint]),
+        Move(0.0, 1.0),
+        Wait(14.0),
+        Release([Sprint]),
+        Move(0.0, 0.0),
+        Log("capture"),
+        Teleport((-180.0, 157.0, -93.0), 48.0, 12.0),
+        Wait(46.0),
+        Screenshot("captured"),
+        Quit,
+    ],
+)

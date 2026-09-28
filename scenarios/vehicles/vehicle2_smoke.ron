@@ -1,0 +1,38 @@
+// The T-90's smoke launchers on Karkand: the countermeasure key fires both barrels, the
+// grenades land to the front left and right and lay their smoke; then the driver's HUD
+// lists the launcher with its key and its reload.
+// client --scenario scenarios/vehicles/vehicle2_smoke.ron --out target/scenarios/vehicle2/smoke
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        NearVehicle("rutnk_t90"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(1.0),
+        ThirdPerson(true),
+        VehicleLook(150.0, -12.0),
+        Wait(1.0),
+        Screenshot("01_before"),
+        Hold([Countermeasure]),
+        Wait(0.2),
+        Release([Countermeasure]),
+        Wait(1.0),
+        Screenshot("02_launched"),
+        Wait(2.5),
+        Screenshot("03_smoke"),
+        Wait(5.0),
+        Screenshot("04_smoke_8s"),
+        ThirdPerson(false),
+        VehicleLook(0.0, 0.0),
+        Wait(1.0),
+        Screenshot("05_driver_view"),
+        Quit,
+    ],
+)

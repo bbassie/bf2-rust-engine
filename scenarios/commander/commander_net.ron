@@ -1,0 +1,40 @@
+// The commander over the network, the joining side: apply, order squad 1 on the commander
+// screen, call in a UAV, a scan and a supply drop; the server logs each, the screenshots show
+// the replicated state (assets recharging, orders, the UAV and the crate).
+// target/debug/deps/server.exe --level strike_at_karkand --bots 8 --port 27777 --rcon-port 0
+// RUST_LOG=info target/debug/deps/client.exe --connect 127.0.0.1 --port 27777 --scenario scenarios/commander/commander_net.ron
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        Log("apply"),
+        Commander(Apply),
+        Wait(1.5),
+        Key(CapsLock),
+        Wait(0.8),
+        Screenshot("net_screen"),
+        Click("cmd:squad:1"),
+        Wait(0.3),
+        Click("cmd:order:defend"),
+        Wait(0.3),
+        CommanderClick((-80.0, 0.0, 120.0)),
+        Wait(1.0),
+        Click("cmd:asset:uav"),
+        Wait(0.3),
+        CommanderClick((-100.0, 0.0, 100.0)),
+        Wait(0.5),
+        Click("cmd:asset:scan"),
+        Wait(0.5),
+        Click("cmd:asset:supply"),
+        Wait(0.3),
+        CommanderClick((-120.0, 0.0, 200.0)),
+        Wait(1.5),
+        Screenshot("net_screen_after"),
+        Key(CapsLock),
+        Wait(0.5),
+        Commander(Resign),
+        Wait(1.5),
+        Quit,
+    ],
+)

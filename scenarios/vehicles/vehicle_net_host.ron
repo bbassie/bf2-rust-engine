@@ -1,0 +1,38 @@
+// Networked vehicles, the hosting side: waits for the remote client (vehicle_net_remote.ron)
+// to join, then drives the HMMWV out of the US base.
+// client --host --port 16671 --scenario scenarios/vehicles/vehicle_net_host.ron --out target/scenarios/vehicle/net_host
+// client --connect 127.0.0.1 --port 16671 --scenario scenarios/vehicles/vehicle_net_remote.ron --out target/scenarios/vehicle/net_remote
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(12.0),
+        NearVehicle("usjep_hmmwv"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("host entered"),
+        ThirdPerson(true),
+        VehicleLook(0.0, -10.0),
+        Move(0.0, 1.0),
+        Wait(1.5),
+        Move(1.0, 0.6),
+        Wait(1.6),
+        Move(0.0, 1.0),
+        Wait(4.0),
+        VehicleInfo("host driving"),
+        Screenshot("driving"),
+        Move(0.0, -1.0),
+        Wait(1.5),
+        Move(0.0, 0.0),
+        Wait(2.0),
+        VehicleInfo("host stopped"),
+        Wait(2.0),
+        Quit,
+    ],
+)

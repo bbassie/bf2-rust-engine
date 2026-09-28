@@ -1,0 +1,19 @@
+// The minimap: flags, teammates and our heading. It turns with us; N switches to north up.
+// client --scenario scenarios/conquest/minimap.ron
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    steps: [
+        WaitReady,
+        Teleport((-184.0, 157.0, -85.0), 0.0, -4.0),
+        Wait(1.5),
+        Screenshot("rotating_north"),
+        Look(-90.0, -4.0),
+        Wait(0.3),
+        Screenshot("rotating_east"),
+        Key(KeyN),
+        Wait(0.3),
+        Screenshot("north_up_east"),
+        Quit,
+    ],
+)

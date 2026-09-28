@@ -1,0 +1,20 @@
+// Bots with the vehicles on Karkand: 16 bots play for 40 s while we watch from above; the
+// report lists the vehicles they took and where (a check that vehicle changes leave the bots'
+// driving working).
+// client --scenario scenarios/vehicles/vehicle2_bots.ron --out target/scenarios/vehicle2/bots
+(
+    level: "strike_at_karkand",
+    size: 64,
+    bots: 16,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((0.0, 260.0, 0.0), 0.0, -60.0),
+        Wait(20.0),
+        LogVehicles("after 20 s"),
+        Wait(20.0),
+        LogVehicles("after 40 s"),
+        Screenshot("overview"),
+        Quit,
+    ],
+)

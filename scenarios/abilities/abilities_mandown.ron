@@ -1,0 +1,29 @@
+// Man down on Strike at Karkand: critically wounded, the overlay counts down the 15 s a
+// medic has (BF2 `sv.manDownTime`), the camera looks at the collapsed body, the give-up
+// key (X) goes to the deploy screen. The second time nobody comes and he bleeds out.
+// client --scenario scenarios/abilities/abilities_mandown.ron --out target/scenarios/abilities/mandown
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Teleport((-184.0, 157.0, -85.0), 180.0, -10.0),
+        Wait(0.5),
+        Down,
+        Wait(2.0),
+        Screenshot("wounded"),
+        Look(100.0, -35.0),
+        Wait(0.5),
+        Screenshot("wounded_turned"),
+        Vitals("wounded"),
+        Key(KeyX),
+        Wait(1.0),
+        Screenshot("gave_up"),
+        Wait(9.0),
+        Vitals("respawned"),
+        Down,
+        Wait(16.0),
+        Screenshot("bled_out"),
+        Quit,
+    ],
+)

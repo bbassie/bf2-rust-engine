@@ -1,0 +1,17 @@
+// The full-screen map while M is held.
+// client --scenario scenarios/conquest/bigmap.ron
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    steps: [
+        WaitReady,
+        Wait(3.0),
+        HoldKey(KeyM),
+        Wait(0.5),
+        Screenshot("map"),
+        ReleaseKey(KeyM),
+        Wait(0.3),
+        Screenshot("released"),
+        Quit,
+    ],
+)

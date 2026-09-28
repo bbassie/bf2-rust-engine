@@ -5,7 +5,7 @@
 # bots and the clients' prediction corrections and frame times.
 #
 #   scripts/soak.sh [--minutes 10] [--port 27777] [--client-runs 2] [--client-gap 30]
-#                   [--scenario scenarios/soak_client.ron] [--out DIR] [--above-normal]
+#                   [--scenario scenarios/infra/soak_client.ron] [--out DIR] [--above-normal]
 #                   [-- server options]
 #   scripts/soak.sh --summarize DIR     # summarize an earlier run again
 #
@@ -44,7 +44,7 @@ minutes=10
 port=27777
 client_runs=2
 client_gap=30
-scenario=scenarios/soak_client.ron
+scenario=scenarios/infra/soak_client.ron
 out=""
 summarize=0
 above_normal=0

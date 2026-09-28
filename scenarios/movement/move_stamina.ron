@@ -1,0 +1,31 @@
+// Sprint stamina and the stamina bar under the health bar: sprint until it runs out, keep
+// holding sprint (restarts after a short recovery), jump (costs stamina, no firing for 0.7 s),
+// go prone and get up (0.8 s switching delays). `Trace` lines show stamina per frame.
+// client --scenario scenarios/movement/move_stamina.ron --out target/scenarios/move/stamina
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        // South along the street from the square, where there is room to run.
+        Teleport((-184.0, 157.0, -85.0), 180.0, -5.0),
+        Wait(1.0),
+        Screenshot("full"),
+        Hold([Sprint]),
+        Move(0.0, 1.0),
+        Trace("sprint", 5.0),
+        Screenshot("half"),
+        Trace("sprint_out", 7.0),
+        Screenshot("empty"),
+        Release([Sprint]),
+        Move(0.0, 0.0),
+        Hold([Jump]),
+        Trace("jump", 1.0),
+        Release([Jump]),
+        Hold([Prone]),
+        Trace("prone_tap", 0.1),
+        Release([Prone]),
+        Trace("prone_hold", 1.5),
+        Quit,
+    ],
+)

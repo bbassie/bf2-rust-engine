@@ -1,0 +1,38 @@
+// BF2 static mesh materials: detail, dirt, crack, detail normals and parallax up close,
+// plus the frame time over the square.
+// client --scenario scenarios/lighting/mat_statics.ron --out target/scenarios/mat/<name>
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        // The square (same view as render_ab).
+        Camera((-184.0, 157.5, -80.0), 20.0, -8.0),
+        Wait(1.0),
+        Screenshot("square"),
+        Measure("square", 5.0),
+        // house_medium_05: dirt and cracks, lit by the sun.
+        Camera((-197.0, 158.5, -89.0), 80.0, 2.0),
+        Wait(1.0),
+        Screenshot("house_dirt_crack"),
+        // cityblock_square_30x30: paving with cracks.
+        Camera((-181.0, 158.0, -84.0), 10.0, -40.0),
+        Wait(1.0),
+        Screenshot("paving_crack"),
+        // house_high_02_v2: dirt and cracks on its west face (in shade).
+        Camera((-160.0, 158.5, -96.0), -90.0, 8.0),
+        Wait(1.0),
+        Screenshot("house_shade"),
+        // stonefence_l: parallax detail.
+        Camera((-313.0, 168.8, -117.0), 24.0, -16.0),
+        Wait(1.0),
+        Screenshot("fence_parallax"),
+        // Street view with many objects.
+        Camera((-184.0, 158.0, -60.0), 0.0, -2.0),
+        Wait(1.0),
+        Screenshot("street"),
+        Measure("street", 5.0),
+        Quit,
+    ],
+)

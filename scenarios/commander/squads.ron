@@ -1,0 +1,24 @@
+// Squads: join a bot squad on the deploy screen and spawn on its leader.
+// client --scenario scenarios/commander/squads.ron
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    steps: [
+        WaitReady,
+        Wait(3.0),
+        Kill,
+        Wait(1.0),
+        Screenshot("deploy_squads"),
+        Click("squad:join:1"),
+        Wait(0.5),
+        Screenshot("joined"),
+        Click("spawn:leader"),
+        Wait(0.5),
+        Screenshot("spawn_on_leader"),
+        Wait(10.0),
+        ThirdPerson(true),
+        Wait(0.5),
+        Screenshot("respawned"),
+        Quit,
+    ],
+)

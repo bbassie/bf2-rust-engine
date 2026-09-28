@@ -11,24 +11,29 @@ committed or redistributed.
 
 ## Status
 
-Playable infantry conquest. What works today:
+All 30 BF2 levels (including Special Forces and the booster packs) import and play:
 
-- Dedicated server (headless) and client, plus listen server and singleplayer from the client.
-- Server-authoritative soldier movement with client-side prediction and reconciliation.
-- Remote players are interpolated; everything is rendered smoothly independent of the 60 Hz tick.
-- Conquest after BF2's rules: capturing flags, ticket bleed, rounds. A deploy screen with the
-  level's map for picking a kit and a spawn point.
-- Infantry combat: BF2's kits and weapons with their fire rates, deviation, recoil and
-  projectiles; first-person arms and weapons with BF2's animations; third-person soldiers.
-- Bots that use the same input path as humans: they capture flags and fight.
-- Importer for BF2 levels: terrain with detail texture blending, roads, sky, water, ~1800
-  static objects on Strike at Karkand (meshes as glTF with BF2's layered materials, collision
-  as trimeshes), conquest/co-op layouts, teams, kits, weapons, soldiers and animations,
-  English names. All 30 levels import.
-- Real-time lighting (sun shadows, SSAO), so maps can be relit (e.g. night versions).
-- A procedural test range so everything can be tested without BF2 data.
+- **Conquest and co-op** after BF2's rules: flags, ticket bleed, squads, the commander (orders,
+  artillery guns, UAV, satellite scan, supply drops), commo rose and spotting, BF2's voice-overs.
+- **Infantry:** BF2's kits and weapons (fire rates, deviation, recoil, scopes), per-bone hit
+  zones, lag compensation, grenades, launchers, C4 and mines, man-down and revive, medic,
+  support and engineer abilities, Special Forces gadgets (night vision, tear gas, flashbangs,
+  grappling hooks, ziplines), BF2's movement values, ladders.
+- **Vehicles:** jeeps, APCs, tanks, jets, helicopters, boats and stationary weapons with BF2's
+  handling data, gearbox and per-face armour, seats, interiors and sights, a vehicle HUD,
+  guided missiles, countermeasures, parachutes, and driver prediction.
+- **Bots** that use the same inputs as players: BF2's strategy, squads, an AI commander, and
+  vehicles on land, water and in the air.
+- **Presentation:** real-time lighting from BF2's per-map values (the sun stays dynamic, so maps
+  can be relit), sky light, BF2's baked sky occlusion, SSAO, BF2's materials, particle effects,
+  audio, undergrowth, water, LODs, and a modern UI of our own.
+- **Servers:** dedicated server, listen server and singleplayer; map rotation, RCON, chat
+  admin commands, stats, LAN and internet server browser (master server), and clients that
+  download a server's mods (or, if its admin allows, all content) when joining.
+- **Modding:** new content authored directly in glTF + RON ([docs/MODDING.md](docs/MODDING.md)).
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it fits together.
 
 ## Layout
 
@@ -37,48 +42,48 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
 | [`bf2_formats`](crates/bf2_formats) | Reads BF2 files: archives/VFS, `.con` scripts, meshes, terrain. No engine dependency. |
 | [`bf2_import`](crates/bf2_import) | CLI: converts a BF2 install into the game's own formats. |
 | [`game_data`](crates/game_data) | The game's own open data formats (RON). Written by the importer, hand-editable by modders. |
-| [`game_shared`](crates/game_shared) | Code both sides need: network protocol, simulation (movement), level loading. |
-| [`game_server`](crates/game_server) | Server authority: connections, spawning, rules, bots. Library + `server` binary. |
-| [`game_client`](crates/game_client) | Rendering, input, prediction, HUD. `client` binary; can also host. |
+| [`game_shared`](crates/game_shared) | Code both sides need: network protocol, simulation (soldiers, vehicles, projectiles), level loading. |
+| [`game_server`](crates/game_server) | Server authority: connections, rules, bots and navigation. Library + `server` binary. |
+| [`game_client`](crates/game_client) | Rendering, audio, input, prediction, UI. `client` binary; can also host. |
+| [`master_server`](crates/master_server) | Lists internet servers for the server browser. |
+
+Scripted checks of the client live in [`scenarios/`](scenarios/README.md).
 
 ## Running
 
-Requires a recent stable Rust toolchain. The first build takes a while (Bevy).
+Requires a recent stable Rust toolchain. The first build takes a while (Bevy); later builds
+take seconds.
 
 ```sh
-# Singleplayer on the built-in test range with 7 bots
-cargo run -p game_client
-
-# Strike at Karkand (after importing, see below) with 15 bots
+cargo run -p game_client                         # main menu (singleplayer, host, join, settings)
 cargo run -p game_client -- --level strike_at_karkand --bots 15
 
-# Dedicated server + two clients
+# Dedicated server + clients
 cargo run -p game_server -- --level strike_at_karkand --bots 10
 cargo run -p game_client -- --connect 127.0.0.1 --name Alice
-cargo run -p game_client -- --connect 127.0.0.1 --name Bob
-
-# Listen server
-cargo run -p game_client -- --host --bots 8
 ```
 
-Controls: click to capture the mouse, `Esc` to release. `WASD` move, `Shift` sprint, `Space`
-jump, `Ctrl` crouch, `Z` prone. `LMB` fire, `RMB` zoom, `R` reload, `B` fire mode, `1`-`6` or
-the mouse wheel switch weapons. `Enter` opens the deploy screen, `Tab` the scoreboard, `V`
-toggles third person.
+Servers listen on localhost only unless started with `--public`.
 
-For day-to-day development use the dev profile (`cargo run -p game_client`): dependencies are
-fully optimized there too, so it runs nearly as fast as `--release` and rebuilds much faster.
-`cargo build --profile dist` makes the fully optimized (slow to compile) shipping build.
+Default controls (all rebindable in Settings): `WASD` move, `Shift` sprint, `Space` jump, `Ctrl`
+crouch, `Z` prone, mouse fire and zoom, `R` reload, `B` fire mode, `1`-`9` or the wheel switch
+weapons, `E` enter and leave vehicles (`F1`-`F8` switch seats), `G` countermeasures, `V` third
+person, `Q` commo rose, `M` map, `N` minimap rotation, `Caps Lock` commander screen, `Enter`
+deploy screen, `Tab` scoreboard, `T`/`Y`/`U` chat, `Esc` menu.
+
+For day-to-day development use the dev profile: dependencies are fully optimized there too, so
+it runs nearly as fast as `--release` and rebuilds much faster. `cargo build --profile dist`
+makes the fully optimized shipping build.
 
 ### Importing BF2 content
 
 ```sh
-cargo run -p bf2_import --release -- --bf2 "C:\Program Files (x86)\EA Games\Battlefield 2"
-cargo run -p game_client --release -- --level strike_at_karkand
+cargo run -p bf2_import -- --bf2 "C:\Program Files (x86)\EA Games\Battlefield 2" level --all
 ```
 
-Converted files go to `./imported` (override with `--out`, and point the game at it with
-`--imported` or the `GAME_IMPORTED_DIR` environment variable).
+This converts every level of every installed mod (a few minutes) into `./imported` (override
+with `--out`, and point the game at it with `--imported` or `GAME_IMPORTED_DIR`). `level
+<name>...` imports single levels; `list` shows what is installed.
 
 ## Legal
 

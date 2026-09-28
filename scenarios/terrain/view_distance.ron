@@ -1,0 +1,23 @@
+// View distance with the altitude boost: the same spot from the ground, at 150 m and at
+// 400 m (fog, far plane and shadow range grow with height above the terrain).
+// client --scenario scenarios/terrain/view_distance.ron --out target/scenarios/veg/view_distance
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-204.0, 168.0, 192.0), 90.0, -4.0),
+        Wait(2.0),
+        Screenshot("ground"),
+        Camera((-204.0, 315.0, 192.0), 90.0, -20.0),
+        Wait(3.0),
+        Screenshot("air_150"),
+        Measure("air 150", 3.0),
+        Camera((-204.0, 565.0, 192.0), 90.0, -30.0),
+        Wait(3.0),
+        Screenshot("air_400"),
+        Measure("air 400", 3.0),
+        Quit,
+    ],
+)

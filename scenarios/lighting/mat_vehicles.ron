@@ -1,0 +1,28 @@
+// BF2 bundled materials on vehicles at the US main base: normal maps, gloss, environment
+// map reflections and alpha-blended glass.
+// client --scenario scenarios/lighting/mat_vehicles.ron --tp-offset 1.5,0.4,4.5 --out target/scenarios/mat/<name>
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        NearVehicle("usjep_hmmwv"),
+        ThirdPerson(true),
+        Wait(2.5),
+        Screenshot("hmmwv"),
+        Look(160.0, -10.0),
+        Wait(0.5),
+        Screenshot("hmmwv_back"),
+        NearVehicle("usapc_lav25"),
+        Wait(2.5),
+        Screenshot("lav25"),
+        NearVehicle("ustnk_m1a2"),
+        Wait(2.5),
+        Screenshot("m1a2"),
+        Measure("vehicles", 4.0),
+        Quit,
+    ],
+)

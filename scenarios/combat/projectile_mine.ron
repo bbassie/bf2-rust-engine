@@ -1,0 +1,38 @@
+// An anti-tank mine dropped against a LAV-25 at the US main base on Strike at Karkand; it
+// arms after 3 s and goes off when we drive the LAV off (BF2 `triggerType MTYVehicle`:
+// anything heavier than a ton moving faster than `triggerVictimMinSpeed`). Without friendly
+// fire our own mine then spares the LAV we sit in: the log shows the trigger.
+// client --scenario scenarios/combat/projectile_mine.ron --out target/scenarios/projectile/mine
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Kill,
+        Wait(1.0),
+        Click("kit:4"),
+        Wait(16.0),
+        NearVehicle("usapc_lav25"),
+        Weapon(4),
+        Wait(1.8),
+        Hold([Fire]),
+        Wait(0.1),
+        Release([Fire]),
+        Wait(3.5),
+        Screenshot("mine_armed"),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("in the lav"),
+        Move(0.0, 1.0),
+        Wait(2.0),
+        Move(0.0, 0.0),
+        ThirdPerson(true),
+        Wait(0.5),
+        Screenshot("mine_boom"),
+        Quit,
+    ],
+)

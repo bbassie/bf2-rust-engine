@@ -1,0 +1,33 @@
+// Two yellow barrels 7 m apart by the rail yard (statics #856, #857): the far one is hit
+// once, then the near one is shot until it explodes and its blast sets off the other.
+// client --scenario scenarios/combat/destruction_chain.ron --out target/scenarios/destruction/chain
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Teleport((-124.59, 150.2, -266.3), -151.9, -5.0),
+        Wait(1.5),
+        Screenshot("before"),
+        Hold([Aim]),
+        Wait(0.6),
+        Hold([Fire]),
+        Wait(0.15),
+        Release([Fire]),
+        Wait(0.5),
+        Look(180.0, -8.1),
+        Wait(0.5),
+        Screenshot("aim"),
+        Hold([Fire]),
+        Wait(0.6),
+        Screenshot("blast"),
+        Wait(0.15),
+        Screenshot("chain"),
+        Release([Fire, Aim]),
+        Wait(0.3),
+        Screenshot("smoke"),
+        Wait(3.0),
+        Screenshot("after"),
+        Quit,
+    ],
+)
