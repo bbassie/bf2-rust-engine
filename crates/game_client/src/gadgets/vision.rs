@@ -5,7 +5,6 @@
 //! `WaveDistortion`, `Flashbang`, `Tinnitus`).
 
 use bevy::{
-    asset::embedded_asset,
     core_pipeline::{Core3dSystems, FullscreenShader, schedule::Core3d, tonemapping::tonemapping},
     prelude::*,
     render::{
@@ -36,7 +35,7 @@ pub struct VisionPlugin;
 
 impl Plugin for VisionPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "vision.wgsl");
+        embedded_shader!(app, "vision.wgsl");
         app.add_plugins((
             ExtractComponentPlugin::<VisionSettings>::default(),
             UniformComponentPlugin::<VisionSettings>::default(),

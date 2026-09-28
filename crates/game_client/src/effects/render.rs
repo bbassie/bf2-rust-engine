@@ -3,7 +3,7 @@
 //! meshes never change, so nothing but the buffers is uploaded each frame.
 
 use bevy::{
-    asset::{RenderAssetUsages, embedded_asset},
+    asset::RenderAssetUsages,
     camera::visibility::{NoFrustumCulling, RenderLayers},
     light::{NotShadowCaster, NotShadowReceiver},
     mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology},
@@ -21,7 +21,7 @@ pub struct ParticleRenderPlugin;
 
 impl Plugin for ParticleRenderPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "particles.wgsl");
+        embedded_shader!(app, "particles.wgsl");
         app.add_plugins(MaterialPlugin::<ParticleMaterial>::default())
             .init_resource::<Batches>();
     }

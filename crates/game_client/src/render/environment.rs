@@ -47,7 +47,7 @@
 //! class, class_sun, moon, terrain_moon, tint, sky_up, horizon, bounce).
 
 use bevy::{
-    asset::{LoadState, embedded_asset},
+    asset::LoadState,
     gltf::{GltfAssetLabel, GltfMesh},
     light::{
         AmbientLight, CascadeShadowConfig, CascadeShadowConfigBuilder, EnvironmentMapLight, NotShadowCaster,
@@ -68,7 +68,7 @@ pub struct EnvironmentPlugin;
 
 impl Plugin for EnvironmentPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/sky.wgsl");
+        embedded_shader!(app, "shaders/sky.wgsl");
         app.insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.85)))
             .add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_systems(

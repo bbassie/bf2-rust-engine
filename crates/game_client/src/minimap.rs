@@ -4,7 +4,6 @@
 //! up).
 
 use bevy::{
-    asset::embedded_asset,
     prelude::*,
     render::render_resource::AsBindGroup,
     shader::ShaderRef,
@@ -30,7 +29,7 @@ pub struct MinimapPlugin;
 
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "minimap.wgsl");
+        embedded_shader!(app, "minimap.wgsl");
         app.add_plugins(UiMaterialPlugin::<MinimapMaterial>::default())
             .init_resource::<MinimapSettings>()
             .add_systems(Startup, spawn_minimap)

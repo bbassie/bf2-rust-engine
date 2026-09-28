@@ -3,7 +3,7 @@
 //! merged into one mesh per 256 m cell, so thousands of distant trees are a handful of draws.
 
 use bevy::{
-    asset::{RenderAssetUsages, embedded_asset},
+    asset::RenderAssetUsages,
     camera::visibility::VisibilityRange,
     light::NotShadowCaster,
     math::Affine3A,
@@ -26,7 +26,7 @@ pub struct FarTreesPlugin;
 
 impl Plugin for FarTreesPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/far_trees.wgsl");
+        embedded_shader!(app, "shaders/far_trees.wgsl");
         app.add_plugins(MaterialPlugin::<FarTreeMaterial>::default()).add_systems(
             Update,
             (

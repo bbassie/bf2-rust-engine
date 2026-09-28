@@ -25,6 +25,32 @@ use menu::Screen;
 use net::MatchSetup;
 use settings::{Settings, SettingsFile};
 
+/// Like Bevy's `embedded_asset!` (for shaders), but a dev build uses the shader's source file
+/// when it exists, so editing a shader only needs a restart of the game, not a rebuild.
+macro_rules! embedded_shader {
+    ($app: expr, $path: expr) => {{
+        bevy::asset::embedded_asset!($app, $path);
+        #[cfg(debug_assertions)]
+        {
+            // `file!()` is relative to the workspace root (or absolute).
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(file!())
+                .parent()
+                .unwrap()
+                .join($path);
+            if let Ok(bytes) = std::fs::read(&source) {
+                let embedded = $app
+                    .world_mut()
+                    .resource_mut::<bevy::asset::io::embedded::EmbeddedAssetRegistry>();
+                let path = bevy::asset::embedded_path!("src", $path);
+                let watched = bevy::asset::io::embedded::watched_path(file!(), $path);
+                embedded.insert_asset(watched, &path, bytes);
+            }
+        }
+    }};
+}
+
 mod announcer;
 mod audio;
 mod bigmap;

@@ -13,7 +13,6 @@
 //! icon back when the one label in the way can move to another spot next to its own.
 
 use bevy::{
-    asset::embedded_asset,
     ecs::system::SystemParam,
     platform::collections::HashMap,
     prelude::*,
@@ -29,7 +28,7 @@ pub struct MapMarkersPlugin;
 
 impl Plugin for MapMarkersPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "map_icon.wgsl");
+        embedded_shader!(app, "map_icon.wgsl");
         app.add_plugins(UiMaterialPlugin::<IconMaterial>::default())
             .init_resource::<MapMarkers>()
             .configure_sets(

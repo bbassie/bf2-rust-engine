@@ -2,7 +2,7 @@
 //! depth-aware surface (see `shaders/water.wgsl`).
 
 use bevy::{
-    asset::{RenderAssetUsages, embedded_asset},
+    asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
     light::{NotShadowCaster, NotShadowReceiver},
     mesh::MeshVertexBufferLayoutRef,
@@ -20,7 +20,7 @@ pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/water.wgsl");
+        embedded_shader!(app, "shaders/water.wgsl");
         app.add_plugins(MaterialPlugin::<WaterMaterial>::default()).add_systems(
             Update,
             spawn_water.run_if(resource_exists_and_changed::<LoadedLevel>),

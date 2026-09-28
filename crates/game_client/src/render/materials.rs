@@ -2,7 +2,7 @@
 //! shadows and fog.
 
 use bevy::{
-    asset::{AssetPath, embedded_asset},
+    asset::AssetPath,
     ecs::system::SystemParam,
     gltf::{GltfMaterialExtras, GltfPrimitive},
     image::{ImageAddressMode, ImageLoaderSettings, ImageSamplerDescriptor},
@@ -19,8 +19,8 @@ pub struct MaterialsPlugin;
 
 impl Plugin for MaterialsPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/bf2_material.wgsl");
-        embedded_asset!(app, "shaders/terrain_layers.wgsl");
+        embedded_shader!(app, "shaders/bf2_material.wgsl");
+        embedded_shader!(app, "shaders/terrain_layers.wgsl");
         app.add_plugins((
             MaterialPlugin::<Bf2Material>::default(),
             MaterialPlugin::<TerrainMaterial>::default(),

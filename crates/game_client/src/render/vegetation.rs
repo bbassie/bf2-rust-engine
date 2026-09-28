@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use bevy::{
-    asset::{RenderAssetUsages, embedded_asset},
+    asset::RenderAssetUsages,
     image::{ImageLoaderSettings, ImageSampler},
     light::NotShadowCaster,
     mesh::{Indices, MeshVertexBufferLayoutRef},
@@ -34,7 +34,7 @@ pub struct VegetationRenderPlugin;
 
 impl Plugin for VegetationRenderPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/undergrowth.wgsl");
+        embedded_shader!(app, "shaders/undergrowth.wgsl");
         app.add_plugins(MaterialPlugin::<UndergrowthMaterial>::default())
             .add_systems(
                 Update,

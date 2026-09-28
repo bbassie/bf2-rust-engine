@@ -22,6 +22,12 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
   Build only the packages you run (`game_client` already contains the server library).
 - The target dir is shared by everyone working in this tree and cargo serializes builds
   ("Blocking waiting for file lock"). Batch edits so each build is worth it.
+- `scripts/remote.sh <command>` runs a command on the Linux build machine (14 threads) against
+  this working tree, uncommitted edits included: use it for `cargo test`, server/importer
+  builds and dedicated-server soaks so they don't compete with client builds here. It has the
+  imported content and the BF2 install (`BF2_DIR`); it can't build or run the client.
+- Shaders: register them with `embedded_shader!` (not `embedded_asset!`). Dev builds then read
+  the `.wgsl` source file at startup, so a shader edit needs only a restart, no rebuild.
 - Changing `[profile.*]` settings, Bevy features or rustflags rebuilds every dependency
   (about 20 minutes for everyone); avoid it unless it's the point of the change.
 
