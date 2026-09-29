@@ -377,11 +377,29 @@ pub fn team_factions(armory: &Armory, team: usize) -> Vec<String> {
     factions
 }
 
-/// Every kit file (`kits/<name>.ron`) in the mods and `imported`, by name.
-fn kit_names(paths: &GamePaths) -> Vec<String> {
-    let mut names: Vec<String> = paths
-        .roots()
-        .into_iter()
+/// The content folders whose kits make the pools: `imported` (BF2, Special Forces, the
+/// booster packs) and the **active** mods. A mod is active when the level being played comes
+/// from it (AIX 2's weapons on AIX 2's levels only), or when it has no levels of its own (a
+/// mod that changes the game everywhere). Server and clients decide alike: they play the
+/// same level. Highest priority first, like [`GamePaths::roots`].
+pub fn active_roots(paths: &GamePaths, level: &LoadedLevel) -> Vec<PathBuf> {
+    let level_dir = level.dir.as_deref();
+    paths
+        .mods
+        .iter()
+        .filter(|m| {
+            let has_levels = std::fs::read_dir(m.dir.join("levels")).is_ok_and(|mut d| d.next().is_some());
+            !has_levels || level_dir.is_some_and(|dir| dir.starts_with(&m.dir))
+        })
+        .map(|m| m.dir.clone())
+        .chain([paths.imported.clone()])
+        .collect()
+}
+
+/// Every kit file (`kits/<name>.ron`) in `roots`, by name.
+fn kit_names(roots: &[PathBuf]) -> Vec<String> {
+    let mut names: Vec<String> = roots
+        .iter()
         .flat_map(|root| std::fs::read_dir(root.join("kits")).into_iter().flatten().flatten())
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -399,16 +417,21 @@ fn kit_names(paths: &GamePaths) -> Vec<String> {
 /// folders), lends the weapons to the [`Armory`] (`Armory::pool`) and builds the pools.
 fn load_arsenal(
     paths: Res<GamePaths>,
+    level: Res<LoadedLevel>,
     mut armory: ResMut<Armory>,
     mut arsenal: ResMut<Arsenal>,
     mut cache: Local<Option<(Vec<PathBuf>, Arsenal, HashMap<String, Arc<WeaponDesc>>)>>,
 ) {
-    let roots: Vec<PathBuf> = paths.roots().into_iter().map(PathBuf::from).collect();
+    let roots = active_roots(&paths, &level);
     if cache.as_ref().is_none_or(|(cached, ..)| *cached != roots) {
         let started = std::time::Instant::now();
-        let kits: Vec<KitDesc> = kit_names(&paths)
+        let layers: Vec<&std::path::Path> = roots.iter().map(PathBuf::as_path).collect();
+        fn read<T: Serialize + serde::de::DeserializeOwned>(layers: &[&std::path::Path], relative: String) -> anyhow::Result<T> {
+            crate::mods::read_layered(layers, std::path::Path::new(&relative))
+        }
+        let kits: Vec<KitDesc> = kit_names(&roots)
             .iter()
-            .filter_map(|name| paths.read_ron::<KitDesc>(format!("kits/{name}.ron")).ok())
+            .filter_map(|name| read::<KitDesc>(&layers, format!("kits/{name}.ron")).ok())
             .collect();
         let mut weapons: HashMap<String, Arc<WeaponDesc>> = HashMap::new();
         let mut missing = BTreeSet::new();
@@ -418,7 +441,7 @@ fn load_arsenal(
                 if weapons.contains_key(name) || missing.contains(name) {
                     continue;
                 }
-                match paths.read_ron::<WeaponDesc>(format!("weapons/{name}.ron")) {
+                match read::<WeaponDesc>(&layers, format!("weapons/{name}.ron")) {
                     Ok(desc) => {
                         weapons.insert(name.clone(), Arc::new(desc));
                     }
@@ -430,9 +453,16 @@ fn load_arsenal(
         }
         let built = Arsenal::build(&kits, |name| weapons.get(name).cloned());
         let summary: Vec<String> = built.classes.iter().map(|(class, pool)| format!("{class} {}", pool.len())).collect();
+        let mods: Vec<String> = paths
+            .mods
+            .iter()
+            .filter(|m| roots.contains(&m.dir))
+            .map(|m| m.info.name.clone())
+            .collect();
         info!(
-            "arsenal: {} kits, {} weapons; primaries per class: {}; {} sidearms ({:.0} ms)",
+            "arsenal: {} kits (mods: {}), {} weapons; primaries per class: {}; {} sidearms ({:.0} ms)",
             kits.len(),
+            if mods.is_empty() { "none".to_string() } else { mods.join(", ") },
             weapons.len(),
             summary.join(", "),
             built.sidearms.len(),

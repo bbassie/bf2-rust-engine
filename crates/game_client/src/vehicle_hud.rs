@@ -4,8 +4,10 @@
 //! instruments around the crosshair: a horizon with a pitch ladder that banks with the
 //! aircraft, the heading above, airspeed and throttle on the left, altitude and climb rate on
 //! the right (the speed lit up in the jet's best turning band), and stall and pull-up
-//! warnings. Markers over the view show where a jet is going (its flight path) and, while a
-//! gunner's turret or gun is still turning after his aim, where the gun points.
+//! warnings. Markers over the view show where a jet is going (its flight path), while a
+//! gunner's turret or gun is still turning after his aim, where the gun points, and with bombs
+//! selected where they would land (a CCIP-like dot, waiting at the screen's edge while the
+//! impact point is off screen).
 
 use std::fmt::Write as _;
 
@@ -769,8 +771,7 @@ fn update_instruments(
     warning_color.0 = color;
 }
 
-/// Places the flight path and gun markers over the view.
-#[allow(clippy::type_complexity)]
+/// Places the flight path, gun and bomb markers over the view.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_markers(
     seated: Query<&Seated, With<LocalSoldier>>,

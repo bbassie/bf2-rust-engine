@@ -1,0 +1,31 @@
+// Quick chat smoke test in singleplayer (chat.rs, migrated to a real `EditableText` field):
+// opening on T, typing, Enter to send, and Escape to cancel, all with the new caret/selection
+// widget instead of the old character-by-character buffer.
+// client --scenario scenarios/infra/chat_smoke.ron --out target/scenarios/infra/chat_smoke
+(
+    level: "test_range",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(0.5),
+        Key(KeyT),
+        Frames(2),
+        Screenshot("opened"),
+        Type("hello from the scenario"),
+        Frames(2),
+        Screenshot("typed"),
+        Key(Enter),
+        Wait(0.3),
+        ExpectLog("chat [All] Player: hello from the scenario", 3.0),
+        Screenshot("sent"),
+        Key(KeyT),
+        Frames(2),
+        Type("cancelled message"),
+        Frames(2),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("cancelled"),
+        ForbidLog("cancelled message"),
+        Quit,
+    ],
+)

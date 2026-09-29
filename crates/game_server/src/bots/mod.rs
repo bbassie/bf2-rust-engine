@@ -1411,7 +1411,7 @@ impl BotBrain {
                     && self.suppression < 0.8
                     && hp > 0.4
                     && distance.is_none_or(|d| d > 12.0);
-                best = (if committed { 8.6 } else { REVIVE_UTILITY }, self.activity);
+                best = (if committed { crate::ai::tune::knob("revive_keep", 8.6) } else { REVIVE_UTILITY }, self.activity);
             }
             Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
             Activity::Mount { time, .. } if time < 90.0 => best = (5.0, self.activity),

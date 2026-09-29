@@ -321,11 +321,16 @@ fn select_weapon(
     scroll: Res<AccumulatedMouseScroll>,
     armory: Res<Armory>,
     soldier: Query<&Loadout, With<LocalSoldier>>,
+    overlays: crate::weapon_list::Overlays,
     mut selection: ResMut<WeaponSelection>,
 ) {
     let Ok(loadout) = soldier.single() else {
         return;
     };
+    // The wheel zooms the deploy map, number keys type in menus.
+    if overlays.covered() {
+        return;
+    }
     // What can be taken in hand, in slot order (the weapon list's order): no worn gear (night
     // vision, gas mask: keys of their own), no parachute.
     let order = crate::weapon_list::weapon_order(loadout, &armory);
@@ -524,7 +529,8 @@ fn spawn_tracer_from(
     ignore: Option<Entity>,
     shooter: Option<Entity>,
 ) -> Option<Entity> {
-    if weapon.projectile.velocity <= 0.0 {
+    // The knife's "shot" is a short reach (`game_shared::weapons`), not a bullet to draw.
+    if weapon.projectile.velocity <= 0.0 || weapon.is_melee() {
         return None;
     }
     let tracer = commands.spawn((

@@ -9,7 +9,8 @@
     team: 1,
     steps: [
         WaitReady,
-        ExpectLog("arsenal: ", 5.0),
+        // Vanilla level: the AIX 2 and sample mods' weapons stay out of the pools.
+        ExpectLog("(mods: none)", 5.0),
         Kill,
         Wait(1.0),
         Click("kit:2"),
@@ -30,15 +31,18 @@
         ReleaseKey(Digit3),
         Wait(0.5),
         Screenshot("spawned_m16"),
-        // Not a weapon of the class: refused.
-        SendLoadout("assault", "usrif_m24"),
-        ExpectLog("loadout refused: ", 3.0),
-        // The sniper kit's panel.
+        // The deploy screen again: the assault kit's button lists the M16A2 and the M203, and
+        // the weapon list stays hidden behind it.
         Key(Enter),
-        Wait(0.3),
+        Wait(0.5),
+        Screenshot("panel_kits_picked"),
+        // The sniper kit's panel.
         Click("kit:1"),
         Wait(0.5),
         Screenshot("panel_sniper"),
+        // Not a weapon of the class: refused.
+        SendLoadout("assault", "usrif_m24"),
+        ExpectLog("loadout refused: ", 3.0),
         Quit,
     ],
 )

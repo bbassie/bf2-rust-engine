@@ -551,8 +551,8 @@ const HELI_CHASE_LEVEL: f32 = 0.33;
 /// The pitch a helicopter's chase camera takes from the helicopter's.
 fn heli_chase_pitch(pitch: f32) -> f32 {
     // The part of the pitch the camera leaves out, at most what level flight needs.
-    let held_level = (pitch * (1.0 - HELI_CHASE_PITCH)).clamp(-HELI_CHASE_LEVEL * (1.0 - HELI_CHASE_PITCH), HELI_CHASE_LEVEL * (1.0 - HELI_CHASE_PITCH));
-    pitch - held_level
+    let most = HELI_CHASE_LEVEL * (1.0 - HELI_CHASE_PITCH);
+    pitch - (pitch * (1.0 - HELI_CHASE_PITCH)).clamp(-most, most)
 }
 
 /// The pilot camera's memory from frame to frame.

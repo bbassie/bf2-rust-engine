@@ -350,7 +350,13 @@ impl BotBrain {
                 // With an enemy in sight, running for cover means not shooting back: only for
                 // cover close by, unless pinned down or hurt.
                 let pressed = self.suppression > 0.5 || hp < 0.6 || self.magazine_low(w, me, 0.15);
-                let reach = if target.is_some() && !pressed { crate::ai::tune::knob("tc_reach", 6.0) } else { 14.0 };
+                let reach = match (target.is_some(), pressed) {
+                    // With the enemy in sight, a run for cover is a run without shooting back
+                    // (or walking, shooting): only to cover a few steps away.
+                    (true, _) if crate::ai::tune::knob("cover_run", 0.0) > 0.5 => 5.0,
+                    (true, false) => crate::ai::tune::knob("tc_reach", 6.0),
+                    _ => 14.0,
+                };
                 let query = CoverQuery { radius: reach, ..query };
                 match cover::find(nav, &w.spatial, &query, cx.rays) {
                     Some(cover) => {

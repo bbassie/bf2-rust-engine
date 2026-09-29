@@ -77,6 +77,7 @@ fn quick_actions(
     feedback: Res<CombatFeedback>,
     cursor: Single<&CursorOptions>,
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
+    overlays: crate::weapon_list::Overlays,
     soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, Without<Seated>, Without<Downed>)>,
     mut selection: ResMut<WeaponSelection>,
     mut state: ResMut<QuickAction>,
@@ -91,7 +92,7 @@ fn quick_actions(
         return;
     };
     let dt = time.delta_secs();
-    let listening = cursor_locked(&cursor) || scenario.is_some();
+    let listening = (cursor_locked(&cursor) || scenario.is_some()) && !overlays.covered();
     let melee = listening && actions.pressed(Action::Melee);
     let grenade = listening && actions.pressed(Action::Grenade);
     let (melee_was, grenade_was) = state.keys_were_down;

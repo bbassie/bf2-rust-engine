@@ -123,6 +123,20 @@ fn faction_title(faction: &str) -> String {
     }
 }
 
+/// The weapons a soldier of `kit` carries with the picks the server accepted for its class
+/// (the deploy screen's kit buttons list them).
+pub fn kit_weapons_with_picks(
+    kit: &game_data::KitDesc,
+    picks: Option<&LoadoutPicks>,
+    armory: &Armory,
+    arsenal: &Arsenal,
+) -> Vec<String> {
+    match picks.and_then(|p| p.0.get(&kit.kind.to_ascii_lowercase())) {
+        Some(pick) => arsenal.kit_weapons(kit, pick, armory),
+        None => kit.weapons.clone(),
+    }
+}
+
 /// Says what our new soldier carries (scenarios check it).
 fn log_spawn(soldier: Query<&game_shared::weapons::Loadout, Added<crate::net::LocalSoldier>>) {
     for loadout in &soldier {

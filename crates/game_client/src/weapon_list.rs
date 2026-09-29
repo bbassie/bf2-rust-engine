@@ -38,6 +38,28 @@ const ACCENT: Color = Color::srgb(0.95, 0.75, 0.3);
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
 const DIM: Color = Color::srgba(0.85, 0.87, 0.9, 0.6);
 
+/// Screens over the game (deploy, commander, the Esc menu, the main menu and loading) and
+/// typing in the chat: the weapon list hides and the weapon keys, the wheel and the quick keys
+/// leave the weapon alone meanwhile.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Overlays<'w> {
+    deploy: Res<'w, crate::deploy::DeployScreen>,
+    commander: Option<Res<'w, crate::commander::CommanderScreen>>,
+    menu: Option<Res<'w, crate::menu::Menu>>,
+    screen: Option<Res<'w, State<crate::menu::Screen>>>,
+    chat: Option<Res<'w, crate::chat::ChatBox>>,
+}
+
+impl Overlays<'_> {
+    pub fn covered(&self) -> bool {
+        self.deploy.open
+            || self.commander.as_ref().is_some_and(|c| c.open)
+            || self.menu.as_ref().is_some_and(|m| m.paused)
+            || self.screen.as_ref().is_some_and(|s| *s.get() != crate::menu::Screen::InGame)
+            || self.chat.as_ref().is_some_and(|c| c.typing.is_some())
+    }
+}
+
 /// What can be taken in hand, in slot order (then kit order): the list's rows and the
 /// wheel's steps. Worn gear and the parachute are left out.
 pub fn weapon_order(loadout: &Loadout, armory: &Armory) -> Vec<(u8, Arc<WeaponDesc>)> {
@@ -221,6 +243,7 @@ fn update_rows(
     selection: Res<WeaponSelection>,
     soldier: Query<(&Loadout, &Inventory, Has<Seated>), With<LocalSoldier>>,
     armory: Res<Armory>,
+    overlays: Overlays,
     mut list: Single<&mut Visibility, With<WeaponList>>,
     mut parts: Query<
         (&Row, &Part, Option<&mut BackgroundColor>, Option<&mut TextColor>, Option<&mut ImageNode>, Option<&Count>, Option<&mut Text>),
@@ -236,7 +259,7 @@ fn update_rows(
         return;
     };
     let age = now - shown.1;
-    let alpha = if shown.1 == 0.0 || seated {
+    let alpha = if shown.1 == 0.0 || seated || overlays.covered() {
         0.0
     } else {
         (1.0 - (age - SHOW) / FADE).clamp(0.0, 1.0)

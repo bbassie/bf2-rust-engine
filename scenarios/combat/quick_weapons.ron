@@ -50,6 +50,23 @@
         ExpectLog("back to rurif_gp30 after a quick action", 2.0),
         Wait(0.5),
         Screenshot("melee_back"),
+        // In third person too: a swing, no tracer or flash in front of the knife.
+        ThirdPerson(true),
+        Wait(1.0),
+        HoldKey(KeyC),
+        Wait(0.1),
+        ReleaseKey(KeyC),
+        ExpectLog("quick action: kni_knife swung", 2.0),
+        Screenshot("melee_3p"),
+        ExpectLog("quick action over: back to rurif_gp30", 2.0),
+        // The weapon list stays hidden behind the deploy screen.
+        HoldKey(Digit2),
+        Wait(0.1),
+        ReleaseKey(Digit2),
+        Wait(0.3),
+        Key(Enter),
+        Wait(0.5),
+        Screenshot("deploy_hides_list"),
         Quit,
     ],
 )

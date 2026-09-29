@@ -311,7 +311,7 @@ fn update_tags(
     if !gates.active() || team.is_none() {
         *last_reveal = None;
         for (entity, ..) in &pool.roots {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
         }
         return;
     }
@@ -441,7 +441,7 @@ fn apply(
 
     for (root_entity, mut tag, mut transform, children) in roots.iter_mut() {
         let Some(index) = projected.iter().position(|(w, ..)| w.entity == tag.of) else {
-            commands.entity(root_entity).despawn();
+            commands.entity(root_entity).try_despawn();
             continue;
         };
         let (wanted, at, distance) = projected.swap_remove(index);

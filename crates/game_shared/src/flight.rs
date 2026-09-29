@@ -36,10 +36,13 @@
 //!   nose into the airflow ([`JET_WEATHERVANE`]), so rudder yaw and banked turns stay
 //!   coordinated. Too slow or past the stall angle the jet stalls ([`jet_stall`]): the stick
 //!   loses authority and the nose drops towards where it is going, until it has speed again.
-//! * Helicopters: the stick's pitch and roll rates fade out towards [`HELI_MAX_TILT`], the
-//!   helicopter levels itself when the stick is let go ([`HELI_LEVELING`]), it turns into its
-//!   bank and the tail keeps it into the airflow at speed, flies backwards and sideways only
-//!   slowly, and hovers steadily hands off ([`HELI_HOVER_ASSIST`]).
+//! * Helicopters: the stick and pedals get their rates BF3-quick ([`HELI_RESPONSE`]); the
+//!   stick's pitch and roll rates fade out towards [`HELI_MAX_TILT`] (far nose down, for
+//!   rocket runs: it dives), the helicopter levels itself when the stick is let go
+//!   ([`HELI_LEVELING`]), it turns into its bank and the tail keeps it into the airflow at
+//!   speed, while a pedal turn banks it a little and the fuselage carries the flight path
+//!   round after the nose, flies backwards and sideways only slowly, and hovers steadily hands
+//!   off ([`HELI_HOVER_ASSIST`]).
 
 use bevy::prelude::*;
 use game_data::VehicleCategory;

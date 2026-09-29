@@ -562,15 +562,19 @@ fn rebuild_kits(
     armory: Res<Armory>,
     players: Query<(&Team, &Deployment), With<LocalPlayer>>,
     list: Single<(Entity, Option<&Children>), With<KitList>>,
-    mut built_for: Local<Option<(Team, usize)>>,
+    // Loadouts (`loadout`): the weapons the server accepted for each class.
+    picked: (Res<game_shared::arsenal::Arsenal>, Query<&game_shared::arsenal::LoadoutPicks, With<LocalPlayer>>),
+    mut built_for: Local<Option<(Team, usize, Option<game_shared::arsenal::LoadoutPicks>)>>,
 ) {
     let team = local_team(&players);
     let index = if team == Team::Two { 1 } else { 0 };
-    let key = (team, armory.team_kits[index].len());
-    if armory.is_changed() {
+    let (arsenal, picks) = &picked;
+    let picks = picks.single().ok();
+    let key = (team, armory.team_kits[index].len(), picks.cloned());
+    if armory.is_changed() || arsenal.is_changed() {
         *built_for = None;
     }
-    if *built_for == Some(key) {
+    if built_for.as_ref() == Some(&key) {
         return;
     }
     *built_for = Some(key);
@@ -582,9 +586,10 @@ fn rebuild_kits(
         let Some(kit) = armory.kits.get(kit_name) else {
             continue;
         };
-        // The weapons worth listing: primary and sidearm first, no knives or parachutes.
-        let mut weapons: Vec<_> = kit
-            .weapons
+        // The weapons worth listing: primary and sidearm first, no knives or parachutes. The
+        // kit's own, or those picked for its class (`loadout`).
+        let carried = crate::loadout::kit_weapons_with_picks(kit, picks, &armory, arsenal);
+        let mut weapons: Vec<_> = carried
             .iter()
             .filter_map(|w| armory.weapon(w))
             .filter(|w| w.slot >= 2 && w.magazine_size > 0)
