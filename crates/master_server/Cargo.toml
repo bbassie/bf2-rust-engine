@@ -23,3 +23,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Password hashing (Argon2id).
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 blake3 = { version = "1.8", default-features = false }
+# Two-factor authentication for master admins: TOTP (RFC 6238, HMAC-SHA1), the TOTP secrets
+# encrypted at rest (ChaCha20-Poly1305, key derived from master.key), and the enrolment QR
+# code drawn as inline SVG (no scripts, no image requests).
+hmac = "0.12"
+sha1 = { version = "0.10", default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+qrcodegen = "1.8"

@@ -104,6 +104,14 @@ impl Identity {
         fingerprint(&self.public_key())
     }
 
+    /// A 32-byte key for `context`, derived from this private key with BLAKE3's `derive_key`
+    /// (a one-way function: the result reveals nothing about the private key, and keys for
+    /// different contexts are independent). The master uses it to encrypt secrets at rest
+    /// with the key material it already keeps safe, without a second key file.
+    pub fn derive_key(&self, context: &str) -> [u8; 32] {
+        blake3::derive_key(context, self.key.as_bytes())
+    }
+
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.key.sign(message).to_bytes()
     }

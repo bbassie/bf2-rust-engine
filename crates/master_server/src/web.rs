@@ -8,8 +8,15 @@
 //! /servers           servers online
 //! /ranks             the ranks and the XP they need
 //! /login /register   forms (POST: a session cookie)
+//! /login/2fa         the second login step for master admins (see `account`)
 //! /logout            POST
+//! /account...        your account: password, log out everywhere, two-factor (`account`)
+//! /admin...          master admins with two-factor authentication (`admin`)
 //! ```
+//!
+//! Forms: every POST checks the `Origin` header and a CSRF token. Logged out (login,
+//! registration) the token is a double-submit cookie; logged in it is bound to the session
+//! ([`csrf_token`]), so it works in several tabs and no other site can know it.
 
 use std::{collections::HashMap, fmt::Write as _};
 
@@ -19,16 +26,25 @@ use game_auth::{
 };
 
 use crate::{
-    api::{WEB, authenticate, create_account},
+    api::{MFA_PENDING, WEB, authenticate, create_account},
     auth::new_secret,
-    db::Account,
+    db::{Account, Actor, Target},
     http::{Master, Method, Req, Resp, lock, url_encode},
+    totp::constant_time_eq,
 };
 
 /// The web session cookie.
-const COOKIE: &str = "bf2r_session";
+pub const COOKIE: &str = "bf2r_session";
+/// A login waiting for its two-factor code (see `account`).
+pub const MFA_COOKIE: &str = "bf2r_mfa";
+/// How long the two-factor step of a login may take.
+pub const MFA_PENDING_SECS: u64 = 5 * 60;
 /// Web sessions last a week.
 const WEB_SESSION_SECS: u64 = 7 * 86_400;
+/// Sessions that passed two-factor authentication (admin powers) last 12 hours.
+pub const ADMIN_SESSION_SECS: u64 = 12 * 3600;
+/// The `derive_key` context for session-bound CSRF tokens.
+const CSRF_CONTEXT: &str = "bf2r master 2026-09 web csrf v1";
 /// The CSRF double-submit cookie: set alongside a form, and compared against a hidden field
 /// of the same value on the POST (S38). No JavaScript is needed since the server sets and
 /// checks both sides itself.
@@ -87,22 +103,116 @@ button, .button { display: inline-block; padding: 10px 26px; border: 0; border-r
 button:hover, .button:hover { background: #62a2ff; color: var(--text); } button.plain { background: var(--button); font-size: 15px; padding: 8px 14px; } button.plain:hover { background: var(--hover); }
 .notice { padding: 10px 14px; border-left: 3px solid var(--enemy); background: rgba(242,84,71,.14); border-radius: 6px; margin-bottom: 14px; max-width: 640px; }
 .chips a { display: inline-block; padding: 6px 12px; border-radius: 6px; background: var(--button); margin: 0 6px 6px 0; font-size: 14px; } .chips a.on { background: rgba(77,148,255,.45); }
+.ok { padding: 10px 14px; border-left: 3px solid var(--accent); background: rgba(77,148,255,.14); border-radius: 6px; margin-bottom: 14px; max-width: 640px; }
+.secret { font: 15px/1.6 ui-monospace, "Cascadia Mono", Consolas, monospace; background: #1f2229; padding: 10px 14px; border-radius: 6px; word-break: break-all; user-select: all; }
+.codes { display: grid; grid-template-columns: repeat(2, max-content); gap: 6px 28px; font: 16px ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.qr { background: #fff; padding: 8px; border-radius: 8px; display: inline-block; line-height: 0; }
+form.inline { flex-direction: row; flex-wrap: wrap; align-items: end; max-width: none; gap: 8px; margin: 0; } .inline input, .inline select { width: auto; }
+select { padding: 9px 11px; border-radius: 6px; border: 1px solid transparent; background: #1f2229; color: var(--text); font: inherit; }
+button.danger { background: #b8392f; } button.danger:hover { background: #d4463b; } button.small { font-size: 14px; padding: 6px 12px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; } .actions form { margin: 0; } .muted { color: var(--dim); font-size: 13px; }
+td form { margin: 0; } .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--button); } .pill.red { background: rgba(242,84,71,.35); } .pill.blue { background: rgba(77,148,255,.35); }
 @media (max-width: 760px) { .shell { flex-direction: column; } nav { width: auto; flex-direction: row; flex-wrap: wrap; padding: 16px; } .brand { display: none; } nav .grow { display: none; } main { padding: 16px; } }
 "#;
 
+/// A logged-in browser.
+pub struct WebSession {
+    pub account: Account,
+    /// The session cookie's value.
+    pub secret: String,
+    /// The session passed two-factor authentication at login.
+    pub mfa: bool,
+}
+
+impl WebSession {
+    /// Admin powers: an admin, with two-factor authentication set up, whose session passed it.
+    pub fn admin(&self) -> bool {
+        self.account.is_admin() && self.account.totp_enabled && self.mfa
+    }
+
+    /// The CSRF token for this session's forms.
+    pub fn csrf(&self, master: &Master) -> String {
+        csrf_token(master, &self.secret)
+    }
+
+    /// Who, for the audit log.
+    pub fn actor(&self, req: &Req) -> Actor {
+        Actor::account(&self.account, req.ip)
+    }
+}
+
+/// The CSRF token for forms of the session (or pending login) whose cookie holds `secret`: a
+/// keyed hash under a key derived from `master.key`, so only the master can make one, and
+/// only for a cookie it can see (HttpOnly, SameSite=Strict).
+pub fn csrf_token(master: &Master, secret: &str) -> String {
+    let hash = blake3::keyed_hash(&master.key.derive_key(CSRF_CONTEXT), secret.as_bytes());
+    game_auth::hex(&hash.as_bytes()[..16])
+}
+
+/// Whether a logged-in form is genuine: same origin, and the session's CSRF token.
+pub fn form_ok(master: &Master, req: &Req, form: &HashMap<String, String>, secret: &str) -> bool {
+    origin_ok(req) && form.get("csrf").is_some_and(|token| constant_time_eq(token.as_bytes(), csrf_token(master, secret).as_bytes()))
+}
+
+/// The hidden CSRF field of a logged-in form.
+pub fn csrf_field(master: &Master, session: &WebSession) -> String {
+    format!(r#"<input type="hidden" name="csrf" value="{}">"#, session.csrf(master))
+}
+
+/// `2026-09-29 14:57 UTC`.
+pub fn format_time(unix: u64) -> String {
+    if unix == 0 {
+        return "never".into();
+    }
+    let days = (unix / 86_400) as i64;
+    let secs = unix % 86_400;
+    // Days since 1970 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02} UTC", secs / 3600, secs % 3600 / 60)
+}
+
+/// `5 min ago`, `3 h ago`, `2 days ago`.
+pub fn ago(unix: u64, now: u64) -> String {
+    if unix == 0 {
+        return "never".into();
+    }
+    let secs = now.saturating_sub(unix);
+    match secs {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", secs / 60),
+        3600..86_400 => format!("{} h ago", secs / 3600),
+        _ => format!("{} days ago", secs / 86_400),
+    }
+}
+
 /// A whole page.
-fn page(master: &Master, title: &str, active: &str, user: Option<&Account>, body: &str) -> Resp {
+pub fn page(master: &Master, title: &str, active: &str, user: Option<&WebSession>, body: &str) -> Resp {
     let mut nav = String::new();
-    for (path, label) in [("/", "Overview"), ("/leaderboard", "Leaderboard"), ("/servers", "Servers"), ("/ranks", "Ranks")] {
+    let mut links = vec![("/", "Overview"), ("/leaderboard", "Leaderboard"), ("/servers", "Servers"), ("/ranks", "Ranks")];
+    if user.is_some_and(WebSession::admin) {
+        links.push(("/admin", "Admin"));
+    }
+    for (path, label) in links {
         let _ = write!(nav, r#"<a href="{path}"{}>{label}</a>"#, if active == path { r#" class="on""# } else { "" });
     }
     nav.push_str(r#"<div class="grow"></div>"#);
     match user {
-        Some(user) => {
+        Some(session) => {
+            let user = &session.account;
             let _ = write!(
                 nav,
-                r#"<a href="/players/{}">My profile</a><form method="post" action="/logout" style="margin:0"><button class="plain" type="submit" style="margin:4px 14px">Log out</button></form><div class="who">Logged in as {}</div>"#,
+                r#"<a href="/players/{}">My profile</a><a href="/account"{}>Account</a><form method="post" action="/logout" style="margin:0">{}<button class="plain" type="submit" style="margin:4px 14px">Log out</button></form><div class="who">Logged in as {}</div>"#,
                 url_encode(&user.name),
+                if active == "/account" { r#" class="on""# } else { "" },
+                csrf_field(master, session),
                 escape(&user.name)
             );
         }
@@ -118,17 +228,25 @@ fn page(master: &Master, title: &str, active: &str, user: Option<&Account>, body
     )
 }
 
-/// The logged-in account of a web session cookie.
-fn web_user(master: &Master, req: &Req) -> Option<Account> {
+/// The logged-in account of a web session cookie. Banned and disabled accounts are logged
+/// out (checked on every request, so a ban works at once).
+fn web_session(master: &Master, req: &Req) -> Option<WebSession> {
     let secret = req.cookie(COOKIE)?;
+    let now = unix_now();
     let db = lock(&master.db);
-    let id = db.token_account(&secret, WEB, unix_now()).ok()??;
-    db.account(id).ok()?.filter(|a| !a.disabled)
+    let (id, mfa) = db.session(&secret, WEB, now).ok()??;
+    let account = db.account(id).ok()?.filter(|a| a.refusal(now).is_none())?;
+    Some(WebSession { account, secret, mfa })
 }
 
-fn session_cookie(master: &Master, secret: &str, max_age: u64) -> String {
+pub fn session_cookie(master: &Master, secret: &str, max_age: u64) -> String {
+    cookie(master, COOKIE, secret, max_age)
+}
+
+/// An HttpOnly, SameSite=Strict cookie (Secure behind https).
+pub fn cookie(master: &Master, name: &str, value: &str, max_age: u64) -> String {
     format!(
-        "{COOKIE}={secret}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
+        "{name}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
         if master.config.secure_cookies() { "; Secure" } else { "" }
     )
 }
@@ -144,7 +262,7 @@ fn csrf_cookie(master: &Master, value: &str) -> String {
 /// and `SameSite=Strict` cookies). Browsers always send `Origin` on a cross-origin POST, and
 /// on same-origin ones too for a plain form submission; when it's missing we don't block, so
 /// this never becomes the only thing standing between a form and a forged request.
-fn origin_ok(req: &Req) -> bool {
+pub fn origin_ok(req: &Req) -> bool {
     let (Some(origin), Some(host)) = (req.header("origin"), req.header("host")) else {
         return true;
     };
@@ -158,12 +276,12 @@ fn csrf_ok(req: &Req, form: &HashMap<String, String>) -> bool {
 }
 
 /// `1h 23m`.
-fn duration(seconds: f64) -> String {
+pub fn duration(seconds: f64) -> String {
     let minutes = (seconds / 60.0) as u64;
     if minutes >= 60 { format!("{}h {:02}m", minutes / 60, minutes % 60) } else { format!("{minutes}m") }
 }
 
-fn kd(kills: u32, deaths: u32) -> String {
+pub fn kd(kills: u32, deaths: u32) -> String {
     format!("{:.2}", kills as f64 / deaths.max(1) as f64)
 }
 
@@ -171,13 +289,13 @@ fn rank_badge(rank: &RankInfo) -> String {
     format!(r#"<span class="badge" title="{}">{}</span>"#, escape(&rank.name), escape(&rank.short))
 }
 
-fn player_link(name: &str) -> String {
+pub fn player_link(name: &str) -> String {
     format!(r#"<a href="/players/{}">{}</a>"#, url_encode(name), escape(name))
 }
 
 pub fn handle(master: &Master, req: &Req) -> Answer {
-    let user = web_user(master, req);
-    let user = user.as_ref();
+    let session = web_session(master, req);
+    let user = session.as_ref();
     match (&req.method, req.path.as_str()) {
         (Method::Get, "/") => Ok(overview(master, user)),
         (Method::Get, "/leaderboard") => Ok(leaderboard(master, req, user)),
@@ -188,13 +306,16 @@ pub fn handle(master: &Master, req: &Req) -> Answer {
         (Method::Post, "/login") => Ok(login(master, req)),
         (Method::Post, "/register") => Ok(register(master, req)),
         (Method::Post, "/logout") => {
-            if origin_ok(req) {
-                if let Some(secret) = req.cookie(COOKIE) {
-                    let _ = lock(&master.db).remove_token(&secret);
-                }
+            if let Some(session) = user
+                && form_ok(master, req, &req.form(), &session.secret)
+            {
+                let _ = lock(&master.db).remove_token(&session.secret);
             }
             Ok(Resp::redirect("/").with_header("Set-Cookie", session_cookie(master, "", 0)))
         }
+        (_, "/login/2fa") => Ok(crate::account::login_2fa(master, req, user)),
+        (_, path) if path == "/account" || path.starts_with("/account/") => Ok(crate::account::handle(master, req, user)),
+        (_, path) if path == "/admin" || path.starts_with("/admin/") => Ok(crate::admin::handle(master, req, user)),
         (Method::Get, "/favicon.ico") => Err(Resp::error(404, "none")),
         (Method::Get, path) if path.starts_with("/players/") => {
             let name = crate::http::url_decode(&path["/players/".len()..]);
@@ -204,13 +325,13 @@ pub fn handle(master: &Master, req: &Req) -> Answer {
     }
 }
 
-fn not_found(master: &Master, user: Option<&Account>) -> Resp {
+pub fn not_found(master: &Master, user: Option<&WebSession>) -> Resp {
     let mut resp = page(master, "Not found", "", user, r#"<h1>Not found</h1><p class="sub">There is no such page.</p>"#);
     resp.status = 404;
     resp
 }
 
-fn overview(master: &Master, user: Option<&Account>) -> Resp {
+fn overview(master: &Master, user: Option<&WebSession>) -> Resp {
     let (accounts, board) = {
         let db = lock(&master.db);
         (db.account_count().unwrap_or(0), db.leaderboard("xp", 10, &master.config.progression).unwrap_or_default())
@@ -258,7 +379,7 @@ fn board_table(board: &[game_auth::api::LeaderboardEntry]) -> String {
     )
 }
 
-fn server_table(servers: &[game_auth::api::ServerEntry]) -> String {
+pub fn server_table(servers: &[game_auth::api::ServerEntry]) -> String {
     if servers.is_empty() {
         return r#"<div class="card dim">No servers online right now.</div>"#.into();
     }
@@ -284,7 +405,7 @@ fn server_table(servers: &[game_auth::api::ServerEntry]) -> String {
     )
 }
 
-fn leaderboard(master: &Master, req: &Req, user: Option<&Account>) -> Resp {
+fn leaderboard(master: &Master, req: &Req, user: Option<&WebSession>) -> Resp {
     let sort = req.query.get("sort").map_or("xp", String::as_str);
     let sort = if ["xp", "score", "kills", "kd", "time"].contains(&sort) { sort } else { "xp" };
     let board = lock(&master.db).leaderboard(sort, 100, &master.config.progression).unwrap_or_default();
@@ -301,7 +422,7 @@ fn leaderboard(master: &Master, req: &Req, user: Option<&Account>) -> Resp {
 /// this is a page for people, not the paginated `/api/v1/servers`.
 const MAX_SERVERS_SHOWN: usize = 200;
 
-fn servers(master: &Master, user: Option<&Account>) -> Resp {
+fn servers(master: &Master, user: Option<&WebSession>) -> Resp {
     let servers = lock(&master.list).entries();
     let shown = servers.len().min(MAX_SERVERS_SHOWN);
     let note = if servers.len() > shown { format!(" Showing the first {shown} of {}.", servers.len()) } else { String::new() };
@@ -312,7 +433,7 @@ fn servers(master: &Master, user: Option<&Account>) -> Resp {
     page(master, "Servers", "/servers", user, &body)
 }
 
-fn ranks(master: &Master, user: Option<&Account>) -> Resp {
+fn ranks(master: &Master, user: Option<&WebSession>) -> Resp {
     let p = &master.config.progression;
     let mut rows = String::new();
     for rank in &p.ranks {
@@ -343,7 +464,7 @@ fn tally_table(title: &str, tallies: &[Tally], kills_first: bool) -> String {
     format!(r#"<div class="card"><h2 style="margin-top:0">{title}</h2><table><tbody>{rows}</tbody></table></div>"#)
 }
 
-fn profile_body(profile: &Profile) -> String {
+pub fn profile_body(profile: &Profile) -> String {
     let s = &profile.stats;
     let rank = &profile.rank;
     let next = match (&rank.next_name, rank.next_xp) {
@@ -385,7 +506,7 @@ fn profile_body(profile: &Profile) -> String {
     body
 }
 
-fn profile_page(master: &Master, name: &str, user: Option<&Account>) -> Resp {
+fn profile_page(master: &Master, name: &str, user: Option<&WebSession>) -> Resp {
     let profile = {
         let db = lock(&master.db);
         db.account_by_name(name)
@@ -400,7 +521,7 @@ fn profile_page(master: &Master, name: &str, user: Option<&Account>) -> Resp {
     }
 }
 
-fn login_form(master: &Master, user: Option<&Account>, notice: Option<&str>, name: &str) -> Resp {
+fn login_form(master: &Master, user: Option<&WebSession>, notice: Option<&str>, name: &str) -> Resp {
     let notice = notice.map(|n| format!(r#"<div class="notice">{}</div>"#, escape(n))).unwrap_or_default();
     let csrf = new_secret();
     let body = format!(
@@ -418,7 +539,7 @@ fn login_form(master: &Master, user: Option<&Account>, notice: Option<&str>, nam
     resp
 }
 
-fn register_form(master: &Master, user: Option<&Account>, notice: Option<&str>, name: &str) -> Resp {
+fn register_form(master: &Master, user: Option<&WebSession>, notice: Option<&str>, name: &str) -> Resp {
     let notice = notice.map(|n| format!(r#"<div class="notice">{}</div>"#, escape(n))).unwrap_or_default();
     let csrf = new_secret();
     let body = format!(
@@ -436,18 +557,51 @@ fn register_form(master: &Master, user: Option<&Account>, notice: Option<&str>, 
     resp
 }
 
-/// Starts a web session: a cookie, and to the profile.
-fn start_session(master: &Master, account: &Account) -> Resp {
+/// Starts a web session (`mfa`: it passed two-factor authentication) and sends the browser
+/// on: an admin without two-factor authentication to set it up, an account with a one-time
+/// password to choose a new one, an admin to the admin pages, anyone else to their profile.
+pub fn start_session(master: &Master, account: &Account, mfa: bool) -> Resp {
     let secret = new_secret();
     let now = unix_now();
-    if let Err(err) = lock(&master.db).add_token(&secret, account.id, WEB, now, now + WEB_SESSION_SECS) {
+    let lifetime = if mfa { ADMIN_SESSION_SECS } else { WEB_SESSION_SECS };
+    if let Err(err) = lock(&master.db).add_session(&secret, account.id, WEB, now, now + lifetime, mfa) {
         eprintln!("error: {err}");
         return Resp::error(500, "internal error");
     }
-    Resp::redirect(&format!("/players/{}", url_encode(&account.name))).with_header("Set-Cookie", session_cookie(master, &secret, WEB_SESSION_SECS))
+    let to = if account.is_admin() && !account.totp_enabled {
+        "/account/2fa".to_string()
+    } else if account.must_change_password {
+        "/account".to_string()
+    } else if mfa {
+        "/admin".to_string()
+    } else {
+        format!("/players/{}", url_encode(&account.name))
+    };
+    Resp::redirect(&to)
+        .with_header("Set-Cookie", session_cookie(master, &secret, lifetime))
+        .with_header("Set-Cookie", cookie(master, MFA_COOKIE, "", 0))
 }
 
-fn message_of(resp: &Resp) -> String {
+/// After the password: an admin with two-factor authentication gets the code step (a
+/// short-lived pending token in its own cookie, no session yet); anyone else a session.
+fn password_passed(master: &Master, req: &Req, account: &Account) -> Resp {
+    let now = unix_now();
+    if !(account.is_admin() && account.totp_enabled) {
+        if account.is_admin() {
+            let actor = Actor::account(account, req.ip);
+            let _ = lock(&master.db).audit(&actor, "login", &Target::account(account), "without two-factor authentication yet: sent to set it up", now);
+        }
+        return start_session(master, account, false);
+    }
+    let secret = new_secret();
+    if let Err(err) = lock(&master.db).add_token(&secret, account.id, MFA_PENDING, now, now + MFA_PENDING_SECS) {
+        eprintln!("error: {err}");
+        return Resp::error(500, "internal error");
+    }
+    Resp::redirect("/login/2fa").with_header("Set-Cookie", cookie(master, MFA_COOKIE, &secret, MFA_PENDING_SECS))
+}
+
+pub fn message_of(resp: &Resp) -> String {
     serde_json::from_slice::<game_auth::api::ApiError>(&resp.body).map_or_else(|_| "Something went wrong.".into(), |e| e.error)
 }
 
@@ -459,7 +613,7 @@ fn login(master: &Master, req: &Req) -> Resp {
     }
     let password = form.get("password").map_or("", String::as_str);
     match authenticate(master, req, name, password) {
-        Ok(account) => start_session(master, &account),
+        Ok(account) => password_passed(master, req, &account),
         Err(resp) => login_form(master, None, Some(&message_of(&resp)), name),
     }
 }
@@ -475,7 +629,7 @@ fn register(master: &Master, req: &Req) -> Resp {
         return register_form(master, None, Some("Your session expired; please try again."), credentials.name.trim());
     }
     match create_account(master, req, &credentials) {
-        Ok(account) => start_session(master, &account),
+        Ok(account) => start_session(master, &account, false),
         Err(resp) => register_form(master, None, Some(&message_of(&resp)), credentials.name.trim()),
     }
 }
@@ -489,5 +643,9 @@ mod tests {
         assert_eq!(escape(r#"<a href="x">'&'</a>"#), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;");
         assert_eq!(duration(3725.0), "1h 02m");
         assert_eq!(kd(3, 0), "3.00");
+        assert_eq!(format_time(0), "never");
+        assert_eq!(format_time(1_000_000_000), "2001-09-09 01:46 UTC");
+        assert_eq!(format_time(1_709_164_800), "2024-02-29 00:00 UTC");
+        assert_eq!(ago(100, 100 + 7200), "2 h ago");
     }
 }

@@ -133,6 +133,17 @@ public key (configured, or fetched once and pinned), and accept each ticket once
 The client keeps a refresh token (never the password) in `account.ron` in the config folder
 and asks for a ticket after the server proved its identity (`game_client::account`).
 
+**Master admins** (`master_server::admin`, `account`, `totp`): accounts have a role (player
+or admin; the first admin comes from `master promote <name>`). Admin powers need
+two-factor authentication (TOTP, RFC 6238) and a web session that passed it at login:
+the web login has a second step (`/login/2fa`) for admins, while the game's API login stays
+password-only and its tokens never reach the admin pages. TOTP secrets are sealed with a key
+derived from `master.key`; recovery codes are hashed. The admin pages manage ranked servers,
+accounts (bans, which are checked on every request, refresh and ticket; one-time passwords;
+renames; roles) and runtime settings, and append to an audit log the database keeps
+append-only. `master_server::db` has a schema version (`PRAGMA user_version`) and upgrades
+older databases in place.
+
 **Admin rights.** `ServerSettings.admin.admins` (config `admins`, CLI `--admin`, see
 `docs/MODDING.md`) lists accounts that get `Admin` as soon as their ticket verifies on join
 (`admin::grant_if_admin`, called from `join::receive_tickets` and

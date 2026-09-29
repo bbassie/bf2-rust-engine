@@ -156,6 +156,9 @@ impl Resp {
                     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'".into(),
                 ),
                 ("Referrer-Policy".into(), "same-origin".into()),
+                // Pages can show secrets once (API keys, one-time passwords, recovery codes)
+                // and depend on who is logged in: never cached.
+                ("Cache-Control".into(), "no-store".into()),
             ],
         }
     }

@@ -37,6 +37,13 @@ pub fn new_secret() -> String {
     hex(&random_bytes::<32>())
 }
 
+/// A one-time password an admin hands to a player (16 characters from an alphabet without
+/// look-alikes): it only works until the next login, which has to choose a new one.
+pub fn new_one_time_password() -> String {
+    const ALPHABET: &[u8; 32] = b"23456789abcdefghjkmnpqrstuvwxyzA";
+    random_bytes::<16>().iter().map(|b| ALPHABET[(b & 31) as usize] as char).collect()
+}
+
 /// A new API key for a ranked server.
 pub fn new_api_key() -> String {
     format!("bf2r_{}", hex(&random_bytes::<32>()))
@@ -52,6 +59,8 @@ pub struct RateLimits {
     failures_by_name: HashMap<String, Vec<Instant>>,
     registrations: HashMap<IpAddr, Vec<Instant>>,
     tickets_by_account: HashMap<u64, Vec<Instant>>,
+    /// Wrong two-factor codes (TOTP or recovery) per account.
+    totp_failures: HashMap<u64, Vec<Instant>>,
 }
 
 /// Failed logins within [`FAILURE_WINDOW`] allowed per address.
@@ -66,6 +75,14 @@ const NAME_DELAY_MAX: Duration = Duration::from_secs(4);
 /// Ticket requests within [`TICKET_WINDOW`] allowed per account.
 pub(crate) const TICKETS_PER_ACCOUNT: usize = 20;
 const TICKET_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Wrong two-factor codes allowed per account within [`TOTP_SHORT_WINDOW`], and within
+/// [`TOTP_LONG_WINDOW`]. A code has a one in 333 333 chance per guess (three steps are
+/// accepted), so even someone who knows the password gets about 20 guesses a day: far from
+/// enough. Only someone past the password check can use these up.
+pub(crate) const TOTP_FAILURES_SHORT: usize = 5;
+const TOTP_SHORT_WINDOW: Duration = Duration::from_secs(15 * 60);
+const TOTP_FAILURES_LONG: usize = 20;
+const TOTP_LONG_WINDOW: Duration = Duration::from_secs(24 * 3600);
 
 fn recent(list: &mut Vec<Instant>, window: Duration) -> usize {
     list.retain(|t| t.elapsed() < window);
@@ -117,12 +134,32 @@ impl RateLimits {
         self.tickets_by_account.entry(account).or_default().push(Instant::now());
     }
 
+    /// `Err(minutes to wait)` if this account entered too many wrong two-factor codes lately.
+    pub fn check_totp(&mut self, account: u64) -> Result<(), u64> {
+        let list = self.totp_failures.entry(account).or_default();
+        let day = recent(list, TOTP_LONG_WINDOW);
+        let short = list.iter().filter(|t| t.elapsed() < TOTP_SHORT_WINDOW).count();
+        if day >= TOTP_FAILURES_LONG {
+            let oldest = list.first().map_or(TOTP_LONG_WINDOW, |t| TOTP_LONG_WINDOW.saturating_sub(t.elapsed()));
+            return Err(oldest.as_secs() / 60 + 1);
+        }
+        if short >= TOTP_FAILURES_SHORT { Err(TOTP_SHORT_WINDOW.as_secs() / 60) } else { Ok(()) }
+    }
+
+    /// A wrong two-factor code: counts against the account, and against the address like a
+    /// failed login.
+    pub fn totp_failed(&mut self, account: u64, ip: IpAddr) {
+        self.totp_failures.entry(account).or_default().push(Instant::now());
+        self.failures_by_ip.entry(ip).or_default().push(Instant::now());
+    }
+
     /// Forgets old entries (called now and then).
     pub fn prune(&mut self) {
         self.failures_by_ip.retain(|_, l| recent(l, FAILURE_WINDOW) > 0);
         self.failures_by_name.retain(|_, l| recent(l, FAILURE_WINDOW) > 0);
         self.registrations.retain(|_, l| recent(l, REGISTRATION_WINDOW) > 0);
         self.tickets_by_account.retain(|_, l| recent(l, TICKET_WINDOW) > 0);
+        self.totp_failures.retain(|_, l| recent(l, TOTP_LONG_WINDOW) > 0);
     }
 }
 
@@ -189,6 +226,15 @@ mod tests {
         }
         assert!(limits.check_ticket(1).is_err());
         assert!(limits.check_ticket(2).is_ok(), "a different account is unaffected");
+        for _ in 0..TOTP_FAILURES_SHORT {
+            assert!(limits.check_totp(5).is_ok());
+            limits.totp_failed(5, other);
+        }
+        assert!(limits.check_totp(5).is_err());
+        assert!(limits.check_totp(6).is_ok(), "per account");
+        let otp = new_one_time_password();
+        assert_eq!(otp.len(), 16);
+        assert!(game_auth::validate_password(&otp).is_ok());
         assert!(validate_email("a@b.example").is_ok());
         assert!(validate_email("a@b@c").is_err());
         assert!(validate_email("<a@b>").is_err());

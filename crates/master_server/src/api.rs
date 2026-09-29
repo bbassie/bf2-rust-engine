@@ -18,6 +18,10 @@ use crate::{
 pub const REFRESH: &str = "refresh";
 /// Web sessions (cookies).
 pub const WEB: &str = "web";
+/// A web login that passed the password and waits for the two-factor code (cookie).
+pub const MFA_PENDING: &str = "mfa";
+/// The `settings` key that overrides `allow_registration` from the config.
+pub const REGISTRATION_SETTING: &str = "allow_registration";
 
 type Answer = Result<Resp, Resp>;
 
@@ -137,11 +141,16 @@ pub fn authenticate(master: &Master, req: &Req, name: &str, password: &str) -> R
     let account = lock(&master.db).account_by_name(name).map_err(internal)?;
     // Hashing takes a while: outside the database lock, and as long for unknown names.
     let hash = account.as_ref().map_or(dummy_hash(), |a| a.password_hash.as_str());
-    let good = check_password(password, hash) && account.as_ref().is_some_and(|a| !a.disabled);
+    let good = check_password(password, hash);
     let mut limits = lock(&master.limits);
     match account {
         Some(account) if good => {
             limits.login_succeeded(name);
+            // Banned (or disabled) accounts are told why, but only once the password proved
+            // it's them.
+            if let Some(refusal) = account.refusal(unix_now()) {
+                return Err(Resp::error(403, &refusal));
+            }
             Ok(account)
         }
         _ => {
@@ -151,9 +160,17 @@ pub fn authenticate(master: &Master, req: &Req, name: &str, password: &str) -> R
     }
 }
 
+/// Whether new accounts are taken: the admin pages' setting, or the config's default.
+pub fn registration_open(master: &Master) -> bool {
+    match lock(&master.db).setting(REGISTRATION_SETTING) {
+        Ok(Some(value)) => value == "on",
+        _ => master.config.allow_registration,
+    }
+}
+
 /// Validates and creates an account.
 pub fn create_account(master: &Master, req: &Req, credentials: &Credentials) -> Result<Account, Resp> {
-    if !master.config.allow_registration {
+    if !registration_open(master) {
         return Err(Resp::error(403, "This master server doesn't take new accounts."));
     }
     let name = credentials.name.trim();
@@ -184,6 +201,12 @@ fn register(master: &Master, req: &Req) -> Answer {
 fn login(master: &Master, req: &Req) -> Answer {
     let credentials: Credentials = req.json()?;
     let account = authenticate(master, req, credentials.name.trim(), &credentials.password)?;
+    // A one-time password from an admin only opens the web page that sets a new one: the game
+    // client just shows this message (its login is unchanged).
+    if account.must_change_password {
+        let at = if master.config.public_url.is_empty() { String::new() } else { format!(" ({}/login)", master.config.public_url) };
+        return Err(Resp::error(403, &format!("An admin reset this password. Log in on the master's web page{at} to choose a new one.")));
+    }
     Ok(Resp::ok(&issue_session(master, &account)?))
 }
 
@@ -195,11 +218,14 @@ fn refresh(master: &Master, req: &Req) -> Answer {
         let id = db.token_account(&body.refresh_token, REFRESH, unix_now()).map_err(internal)?;
         let account = id.map(|id| db.account(id)).transpose().map_err(internal)?.flatten();
         match account {
-            Some(account) if !account.disabled => {
+            Some(account) => {
                 db.remove_token(&body.refresh_token).map_err(internal)?;
+                if let Some(refusal) = account.refusal(unix_now()) {
+                    return Err(Resp::error(403, &refusal));
+                }
                 account
             }
-            _ => return Err(Resp::error(401, "Logged out: log in again.")),
+            None => return Err(Resp::error(401, "Logged out: log in again.")),
         }
     };
     Ok(Resp::ok(&issue_session(master, &account)?))
@@ -210,8 +236,13 @@ fn session_account(master: &Master, req: &Req) -> Result<Account, Resp> {
     let token = req.bearer().ok_or_else(|| Resp::error(401, "log in first"))?;
     let claims = verify_token(&master.public_key(), token, unix_now(), TokenKind::Session, None)
         .map_err(|err| Resp::error(401, &format!("{err}: log in again")))?;
-    let account = lock(&master.db).account(claims.sub).map_err(internal)?;
-    account.filter(|a| !a.disabled).ok_or_else(|| Resp::error(401, "no such account"))
+    let account = lock(&master.db).account(claims.sub).map_err(internal)?.ok_or_else(|| Resp::error(401, "no such account"))?;
+    // Checked on every request, so a ban works at once, before the session token runs out:
+    // no ticket, no profile.
+    if let Some(refusal) = account.refusal(unix_now()) {
+        return Err(Resp::error(403, &refusal));
+    }
+    Ok(account)
 }
 
 /// A ticket for joining one game server (by its key fingerprint).
@@ -251,7 +282,11 @@ fn ticket(master: &Master, req: &Req) -> Answer {
 /// The ranked server of the request's API key.
 fn ranked_server(master: &Master, req: &Req) -> Result<RankedServer, Resp> {
     let key = req.bearer().ok_or_else(|| Resp::error(401, "API key needed"))?;
-    lock(&master.db).server_by_key(key).map_err(internal)?.ok_or_else(|| Resp::error(403, "unknown API key"))
+    let server = lock(&master.db).server_by_key(key).map_err(internal)?.ok_or_else(|| Resp::error(403, "unknown API key"))?;
+    if server.disabled {
+        return Err(Resp::error(403, "this ranked server is disabled on the master"));
+    }
+    Ok(server)
 }
 
 /// Whether `ip` is private, loopback or link-local: the connection to the master didn't come
@@ -294,7 +329,8 @@ fn server_heartbeat(master: &Master, req: &Req) -> Answer {
         region: clean(&beat.region, 24),
         fingerprint: fingerprint(&key),
     };
-    lock(&master.db).server_seen(server.id, &beat.public_key.to_ascii_lowercase(), unix_now()).map_err(internal)?;
+    let address = std::net::SocketAddr::new(ip, beat.port).to_string();
+    lock(&master.db).server_seen(server.id, &beat.public_key.to_ascii_lowercase(), &address, unix_now()).map_err(internal)?;
     if !lock(&master.list).beat(ip, entry) {
         return Err(Resp::error(429, "too many servers at this address"));
     }

@@ -507,7 +507,14 @@ master add-server --name "My server"          # a ranked server's API key (shown
 master list-servers
 master remove-server 3                        # its API key stops working
 master set-password alice                     # reads the new password from standard input
+master promote alice                          # a master admin (see "Master admins" below)
+master demote alice
+master reset-2fa alice                        # an admin who lost the device and the recovery codes
+master list-admins
 ```
+
+The commands work on the data folder directly, also while the master runs (pass the same
+`--config`); a running master sees the change on the next request.
 
 It listens on UDP 16580 (server list) and HTTP 16581 (web pages and API), on 127.0.0.1 by
 default. The data folder holds `master.sqlite` (accounts, stats) and `master.key` (the key
@@ -579,9 +586,72 @@ server just times out after 95 s instead), and throttles `LIST` replies per addr
 list can't be used to amplify a spoofed-source flood.
 
 **Web pages**: `/` (overview), `/leaderboard`, `/players/<name>`, `/servers`, `/ranks`,
-`/login`, `/register`. **API** for the game: see `game_auth::api` (`/api/v1/login`,
+`/login`, `/register`, `/account` (change your password, log out everywhere), and for master
+admins `/admin` (below). **API** for the game: see `game_auth::api` (`/api/v1/login`,
 `/refresh`, `/me`, `/ticket`, `/quickjoin`, `/servers?limit=&offset=`, ...); `/servers` is
 paginated (100 per page by default, 200 at most).
+
+#### Master admins
+
+Master admins run the master from its web pages: ranked servers, accounts, settings and an
+audit log. Every admin needs **two-factor authentication** (an authenticator app); the game's
+own login is unchanged, since admins play too, and a password alone never opens the admin
+pages.
+
+1. **The first admin comes from the command line** on the master's machine:
+   `master --config master.ron promote <account name>` (the account must exist: register it
+   on the web page or in the game first). Later admins can be promoted on the admin pages.
+2. **Enrol**: log in on the master's web page. A newly promoted admin is sent to *Set up
+   two-factor authentication*: scan the QR code with an authenticator app (Aegis, 2FAS,
+   Google Authenticator, 1Password, ...; any time-based "TOTP" app), or type the key shown
+   under it, and enter the app's current code. The page then shows **10 recovery codes,
+   once**: keep them somewhere safe. Until this is done the account has no admin powers, so
+   enrol right after promoting (whoever knows the password could otherwise enrol first).
+3. **Log in**: from then on the web login asks for the app's code after the password. A code
+   works once, within about a minute; wrong codes are limited per account (5 per 15 minutes,
+   20 a day) and count against the address like wrong passwords. Admin sessions last 12
+   hours.
+4. **Lost the device?** Enter a recovery code instead of the app's code: it logs you in and
+   turns two-factor authentication off, so you set it up again with the new device right
+   away. Another admin can also reset yours (*Accounts*, your account, *Reset two-factor*),
+   and `master reset-2fa <name>` does it from the command line if nobody else can. All of
+   these are in the audit log.
+
+The admin pages (`/admin`, with a link in the menu for admins):
+
+- **Overview**: accounts (new in the last 24 h, admins, banned), ranked servers, servers and
+  players online, ranked rounds in the last 24 h, the latest admin actions. Turn
+  **registration** on or off here (this overrides `allow_registration` in `master.ron` until
+  changed again); the rank table and XP rules come from `master.ron` and are shown here and
+  on `/ranks`.
+- **Ranked servers**: each server's address and time of its last heartbeat, its key
+  fingerprint and whether it is online. **Add** one (its API key is shown once, with the line
+  for the game server's config), **rotate** a key (the old one stops working at once),
+  **disable** one (its key is refused and it leaves the server list until enabled again) or
+  **remove** it (also deletes its round history).
+- **Accounts**: search by name or id; a profile with stats, logins and the admin actions on
+  that account. **Ban** with a reason and optionally a number of days (the player sees the
+  reason; a banned account can't log in, refresh its game login or get join tickets, and its
+  sessions end at once; bans also hide it from the leaderboard). **One-time password**: the
+  page shows a password to hand over; it only opens the web page that sets a new one (the game
+  refuses it and says so). **Log out everywhere** ends every web session and game login.
+  **Rename**, for offensive names. **Make master admin** / **Remove master admin**; the last
+  admin can't be removed, and admins can't be banned (remove the role first).
+- **Audit log**: every admin action and admin login with who (and from which address),
+  when, what and the target, newest first. It can't be edited or deleted from the pages, and
+  the database itself refuses to change or delete its rows.
+
+**How the secrets are kept**: the TOTP secret is encrypted in the database
+(ChaCha20-Poly1305) with a key derived from `master.key`, so a copy of `master.sqlite` alone
+(a backup, a leaked file) doesn't reveal it; `master.sqlite` is also made readable by the
+master's own user only. Keep `master.key` safe (as before): restoring the database with a
+different `master.key` makes every admin use a recovery code (or `master reset-2fa`).
+Recovery codes are stored as hashes. Every admin form checks a CSRF token bound to the
+session and the `Origin` header, and pages that show a secret are never cached.
+
+The database has a schema version: a newer master upgrades an older `master.sqlite` in place
+on its first start (the log says `schema upgraded from version 0 to 1`); back it up before
+upgrading if you want to be able to go back, since an older master refuses a newer database.
 
 **XP and ranks**: XP comes from ranked rounds: by default 1 per point of score, 0.5 per
 minute played and 10 for a win, at most 5000 a round; BF2's ranks from Private (0) to
