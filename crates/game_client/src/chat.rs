@@ -7,7 +7,9 @@ use std::collections::VecDeque;
 
 use bevy::{
     input::{InputSystems, keyboard::KeyboardInput},
+    input_focus::{FocusCause, InputFocus},
     prelude::*,
+    text::EditableText,
 };
 use game_shared::{
     chat::{ChatChannel, ChatLine, ChatRequest, MAX_CHAT_LENGTH},
@@ -16,7 +18,10 @@ use game_shared::{
 
 use crate::{
     conquest_hud::{SQUAD, team_color},
-    menu::{Menu, MenuKeys, Screen},
+    menu::{
+        Menu, MenuKeys, Screen,
+        text_input::{TextInputOptions, text_input},
+    },
     net::{ActiveMatch, LocalPlayer},
     settings::{Action, Binding, Settings},
     ui_theme::{font, shadow},
@@ -53,7 +58,10 @@ pub struct ChatBox {
     lines: VecDeque<(ChatLine, f64)>,
     /// Typing a message on this channel.
     pub typing: Option<ChatChannel>,
-    draft: String,
+    /// Focus moves to the message field one frame after opening, not the same frame: the key
+    /// that opened it (T/Y/U) is still in this frame's keyboard event stream, and giving focus
+    /// right away would let Bevy's own focused-input dispatch type it into the fresh field.
+    pending_focus: bool,
     /// Bumped when the lines change.
     version: u32,
 }
@@ -64,8 +72,14 @@ struct ChatLines;
 #[derive(Component)]
 struct ChatInput;
 
+/// The message being typed: a real `EditableText` (`menu::text_input`), so it gets a caret,
+/// selection, word-wise editing and paste for free.
 #[derive(Component)]
 struct ChatInputText;
+
+/// The "All:"/"Team:"/"Squad:" label next to the message field.
+#[derive(Component)]
+struct ChatTag;
 
 /// A shown line, and when it arrived (for fading).
 #[derive(Component)]
@@ -103,6 +117,8 @@ fn spawn_chat_box(mut commands: Commands) {
             root.spawn((
                 ChatInput,
                 Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(8),
                     padding: UiRect::axes(px(10), px(7)),
                     border_radius: BorderRadius::all(px(8)),
                     ..default()
@@ -110,11 +126,20 @@ fn spawn_chat_box(mut commands: Commands) {
                 BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.8)),
                 Visibility::Hidden,
             ))
-            .with_child((ChatInputText, Text::new(""), font(16.0), TextColor(TEXT)));
+            .with_children(|input| {
+                input.spawn((ChatTag, Text::new("All:"), font(16.0), TextColor(TEXT)));
+                text_input(input, ChatInputText, "chat-message", "", 460.0, TextInputOptions {
+                    max_characters: Some(MAX_CHAT_LENGTH),
+                    ..default()
+                });
+            });
         });
 }
 
-/// Opens the chat on its keys, and while typing takes every key press.
+/// Opens the chat on its keys, and while typing takes every key press. Typing itself (arrows,
+/// selection, backspace, word navigation, paste...) is handled by the focused `EditableText`
+/// field (`menu::text_input`) via Bevy's own input dispatch, not here: this only opens and
+/// closes the box and submits on Enter.
 #[allow(clippy::too_many_arguments)]
 fn chat_keys(
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -126,9 +151,16 @@ fn chat_keys(
     active: Res<ActiveMatch>,
     mut chat: ResMut<ChatBox>,
     mut requests: MessageWriter<ChatRequest>,
+    mut input_focus: ResMut<InputFocus>,
+    mut field: Single<(Entity, &mut EditableText), With<ChatInputText>>,
 ) {
     let presses: Vec<KeyboardInput> = events.read().filter(|e| e.state.is_pressed()).cloned().collect();
     let playing = *screen.get() == Screen::InGame && !menu.paused && active.setup.is_some();
+    // Deferred from the frame that opened the chat (see `ChatBox::pending_focus`).
+    if std::mem::take(&mut chat.pending_focus) {
+        field.1.clear();
+        input_focus.set(field.0, FocusCause::Navigated);
+    }
     let Some(channel) = chat.typing else {
         if !playing {
             return;
@@ -149,7 +181,7 @@ fn chat_keys(
         });
         if let Some((_, channel)) = opened {
             chat.typing = Some(channel);
-            chat.draft.clear();
+            chat.pending_focus = true;
             // The opening key does nothing else (and isn't typed).
             keys.reset_all();
             mouse.reset_all();
@@ -158,35 +190,32 @@ fn chat_keys(
     };
     if !playing {
         chat.typing = None;
+        input_focus.clear();
         return;
     }
     for press in presses {
         match press.key_code {
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                let text = chat.draft.trim().to_string();
+                let text = field.1.value().to_string().trim().to_string();
                 if !text.is_empty() {
                     requests.write(ChatRequest { channel, text });
                 }
+                field.1.clear();
                 chat.typing = None;
+                input_focus.clear();
                 break;
             }
             KeyCode::Escape => {
+                field.1.clear();
                 chat.typing = None;
+                input_focus.clear();
                 break;
             }
-            KeyCode::Backspace => {
-                chat.draft.pop();
-            }
-            _ => {
-                for c in press.text.iter().flat_map(|t| t.chars()) {
-                    if (c.is_ascii_graphic() || c == ' ') && chat.draft.len() < MAX_CHAT_LENGTH {
-                        chat.draft.push(c);
-                    }
-                }
-            }
+            _ => {}
         }
     }
-    // The game and the menus see nothing of it.
+    // The game and the menus see nothing of it (typing itself already went to the focused
+    // field through Bevy's own input dispatch, which doesn't go through `ButtonInput`).
     keys.reset_all();
     mouse.reset_all();
 }
@@ -300,25 +329,24 @@ fn fade_lines(
     }
 }
 
+/// Shows or hides the input row and its channel tag; the message itself, its caret and its
+/// selection are the focused `EditableText` field's own business.
 fn update_input(
-    time: Res<Time<Real>>,
     chat: Res<ChatBox>,
     mut input: Single<&mut Visibility, With<ChatInput>>,
-    mut text: Single<&mut Text, With<ChatInputText>>,
+    mut tag: Single<&mut Text, With<ChatTag>>,
 ) {
     let Some(channel) = chat.typing else {
         input.set_if_neq(Visibility::Hidden);
         return;
     };
     input.set_if_neq(Visibility::Inherited);
-    let tag = match channel {
-        ChatChannel::Team => "Team",
-        ChatChannel::Squad => "Squad",
-        _ => "All",
+    let label = match channel {
+        ChatChannel::Team => "Team:",
+        ChatChannel::Squad => "Squad:",
+        _ => "All:",
     };
-    let caret = if time.elapsed_secs().fract() < 0.5 { "_" } else { " " };
-    let line = format!("{tag}: {}{caret}", chat.draft);
-    if text.0 != line {
-        text.0 = line;
+    if tag.0 != label {
+        tag.0 = label.into();
     }
 }

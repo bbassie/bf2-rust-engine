@@ -177,6 +177,43 @@ is deterministic enough that corrections are normally exactly zero.
 Rendering never touches simulated entities: soldier visuals are separate entities placed
 from `SoldierRender` each frame, so smoothing never moves hitboxes.
 
+### Kits, weapons and loadouts
+
+A kit (`kits/<name>.ron`, `game_data::KitDesc`) lists its weapons in BF2's order and its
+unlocks (BF2's `ItemContainer`s: `unlockLevel` 1 for BF2 1.5, 2 for Special Forces and the
+booster packs, with the weapons they add and replace). The soldier's `Loadout` names his
+weapons; `InputFrame::weapon` picks the one in hand, and the server switches and fires it
+with the same `game_shared::weapons` rules the client predicts with.
+
+- **Switching** (`combat::select_weapon`, `weapon_list`): what can be taken in hand
+  (`WeaponDesc::selectable`: not worn gear, not the parachute, whose `hidden` flag comes from
+  BF2's `SpawnObjectFireComp`) in slot order. Number keys pick a slot (again: the next weapon
+  in it); the wheel steps through the list, skipping the knife and grenades unless
+  `scroll_quick_weapons` is set. Each switch shows the weapon list at the bottom right
+  (slot, BF2's selection icon as a white silhouette, name, grenades left), which fades after
+  two seconds.
+- **Quick actions** (`quick_actions`): the melee key (C, mouse 4) and the grenade key (G on
+  foot; in a vehicle G is still countermeasures, and settings treat on-foot and in-vehicle
+  keys as not conflicting) take the knife or the kit's grenade out, swing it or wind it up
+  while held (cooking) and throw on release, then bring the previous weapon back. It is
+  ordinary input (the weapon index and `FIRE`) plus `Buttons::QUICK`, with which
+  `WeaponState::switch_with` shortens the switch (0.15 s out, 0.35 s back), so the server
+  judges the swing and the throw like any other shot and prediction stays exact.
+- **Loadouts** (`game_shared::arsenal`, `game_server::loadouts`, the client's `loadout`):
+  every kit on disk (imported and the mods') adds its primary weapon (slot 3) and its unlocks'
+  primaries to its class's pool (by `kind`), and its pistol to the sidearms. On the deploy
+  screen a player picks, per class, a primary and a sidearm from those pools; the picks are
+  kept in the settings and sent as `LoadoutRequest`. The server checks them against the pool
+  and its `LoadoutRules` (replicated on the match: `arsenal` or BF2's kits only, weapons
+  restricted to the team's factions, unlock levels needing an account rank), keeps the
+  accepted ones in `LoadoutPicks` on the player and checks again at spawn. A picked rifle
+  replaces the kit's primary with the launcher under it (a rifle and a launcher given together
+  in a kit or unlock go together, e.g. `usrif_m203` and `usrgl_m203`); an assault kit that
+  loses its launcher gets a hand grenade, as BF2's unlocks do. Gadgets never change. Pool
+  weapons outside the level's own kits are lent to the `Armory` (`Armory::pool`) and not
+  preloaded. Bots keep their kits. Server settings: `arsenal`, `faction_locked_weapons`,
+  `unlock_ranks` (config) and `--classic-kits`, `--faction-locked-weapons`.
+
 ### Vehicles
 
 `bf2-import` turns every vehicle a level's spawners use into `vehicles/<name>.ron`
@@ -234,12 +271,20 @@ helicopter, sea, stationary) comes from the engine type.
     gear retracts above its BF2 height.
   - helicopters: the rotor spins up, the collective regulates the climb rate (holding
     altitude hands off), the cyclic tilts the lift within BF2's regulation angles at BF2's
-    turn rates, fading out towards 30° of pitch and 50° of bank, and the body levels itself
-    when let go (0.8/s pitch, 1.2/s roll). In forward flight it turns into its bank (about
-    the vertical) and the tail keeps it into the airflow; backwards and sideways it's slow
-    (extra drag), and hands off at low speed the drift dies out. Near the ground the
-    collective sinks slower (a held-down helicopter touches down at about 2 m/s), and a
-    landed one leans on its skids until the pilot pulls up.
+    turn rates, fading out towards 75° nose down, 35° nose up and 55° of bank, and the body
+    levels itself when let go (0.8/s pitch, 1.2/s roll). Piloted, the rates follow the
+    stick and pedals BF3/BF4-quick (11-12/s: half the rate in about 70 ms, 90 % in about
+    190 ms, stopped as quickly; BF2's 4/s took over half a second). Steeper than 35° nose
+    down the collective lets go of the altitude by 60°: a rocket-run dive (its forward push
+    no stronger than at 35°, so it's no faster way to cruise). In forward flight it turns
+    into its bank (about the vertical) and the tail keeps it into the airflow, except while
+    the pedals turn it: then the fuselage carries the flight path round after the nose (a
+    pedal turn at 180 km/h follows the nose within about 13°), the pedals bank it up to 11°
+    into the turn, and they turn it at 60 % of their hover rate by 50 m/s. Backwards and
+    sideways it's slow (extra drag), and hands off at low speed the drift dies out. Near the
+    ground the collective sinks slower (a held-down helicopter touches down at about 2 m/s),
+    and a landed one leans on its skids until the pilot pulls up. The unit test
+    `flight::heli_handling` flies the imported helicopters and prints their response times.
   - jump jets (the F-35B): below 35 m/s, S swings them into hover (also parked on a deck):
     the lift fan (BF2's `c_ETHelicopter` engine on the jet) carries them like a gentle
     helicopter, W/S climb and sink, the stick tilts them to drift; above 50 m/s or with the
@@ -273,12 +318,19 @@ helicopter, sea, stationary) comes from the engine type.
   camera point or chases the vehicle (V). Gunners look where they aim at once, the turret
   and gun following at their BF2 speeds (a ring marks where the gun points meanwhile), and
   the aim stops at the turret's and gun's limits; joints are drawn between ticks. Pilots'
-  chase camera trails the aircraft's rotation, pulls back with speed and looks into the
-  turn; the cockpit view turns a little into it too (`vehicles::pilot_camera`). The vehicle HUD (`vehicle_hud`, our own design) has a panel with
+  chase camera trails the aircraft's rotation (helicopters' stiffly, 14/s), pulls back with
+  speed and looks into the turn; the cockpit view turns a little into it too
+  (`vehicles::pilot_camera`). A helicopter's chase camera takes half its bank and a third of
+  its pitch near level flight, but follows a steeper dive fully (at 75° nose down it looks
+  62° down). Pilots' free look (Alt) reaches 83° down and 80° up. The vehicle HUD (`vehicle_hud`, our own design) has a panel with
   the vehicle's hit points, who sits in which seat, speed and gear, where the turret points
   and the seat's guns (ammo, heat, lock) and countermeasures; pilots get flight instruments
   (banking horizon and pitch ladder, heading, airspeed, throttle and afterburner, altitude
-  and climb rate, a flight path marker, stall and pull-up warnings). BF2's armor effects show the damage state: smoke (and sparks) while the
+  and climb rate, a flight path marker, stall and pull-up warnings) and, with bombs selected,
+  a bomb marker where they would land if dropped now (BF3's CCIP-like dot: the fall from the
+  muzzle with the aircraft's velocity, as `projectile::step` flies it, traced against the
+  world; off screen it waits at the edge, so pushing the nose down brings it onto the
+  target). BF2's armor effects show the damage state: smoke (and sparks) while the
   hit points are under their thresholds, the explosion and wreck fires at 0; the wreck burns
   down to -100 % over its 10 s and blows apart.
   The outside models' lower LODs (BF2 geom 1 LOD 1..) are rigged like the full model and
@@ -296,7 +348,9 @@ slows a jump jet into hover; helicopters and hovering jets: collective), A/D ste
 or tail rotor, mouse, arrow keys or the gamepad's right stick as the stick (pitch and roll;
 up raises the nose, like looking up; the "invert jet/helicopter pitch" settings make all
 three flight-stick style, BF2's default; settings saved before this swap their old arrow
-keys once, `Settings::migrate`), Alt
+keys once, `Settings::migrate`; the mouse's stick centres itself in 1/8 s, so the aircraft
+stops turning soon after the mouse does; `heli_pedals_roll` ("Helicopter A/D: roll") swaps
+helicopters to A/D roll and mouse X on the tail rotor, BF3/BF4's alternative), Alt
 free look, Shift afterburner, Space wheel brakes, fire/aim buttons the seat's
 primary/secondary guns, weapon keys the gun on a trigger, G countermeasures (flares, smoke),
 V chase camera, F1..F8 seats, E enter/exit.

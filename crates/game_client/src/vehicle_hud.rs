@@ -13,6 +13,7 @@ use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 use bevy::prelude::*;
 use game_data::{JointInput, VehicleCategory};
 use game_shared::{
+    input::Buttons,
     physics::GameLayer,
     vehicle::{Seated, VehicleData, VehicleHealth, VehicleState, VehicleWeapons},
 };
@@ -106,12 +107,61 @@ struct FlightPathMarker;
 /// Where a gunner's gun points while it catches up with his aim.
 #[derive(Component)]
 struct GunMarker;
+/// Where the selected bombs would hit if dropped now (BF3's CCIP-like bomb dot).
+#[derive(Component)]
+struct BombMarker;
 
 /// The speed shows in this colour within this share of a jet's corner speed.
 const CORNER_BAND: f32 = 0.12;
 const CORNER_COLOR: Color = Color::srgb(0.45, 0.8, 1.0);
 /// The gun marker shows once it's this far (logical pixels) from the crosshair.
 const GUN_MARKER_MIN_OFFSET: f32 = 10.0;
+/// The bomb marker's size, and how far inside the screen's edge it waits while the impact
+/// point is off screen (logical pixels).
+const BOMB_MARKER_SIZE: f32 = 28.0;
+const BOMB_MARKER_EDGE: f32 = 24.0;
+/// How far ahead the bomb fall is followed (seconds) and in what steps.
+const BOMB_FALL_TIME: f32 = 40.0;
+const BOMB_FALL_STEP: f32 = 1.0 / 30.0;
+
+/// Where a projectile falling freely from `origin` with `velocity` (gravity times
+/// `gravity`, no drag: like `projectile::step`) first meets the world or a vehicle other
+/// than `exclude`, and after how many seconds.
+pub fn ballistic_impact(spatial: &SpatialQuery, origin: Vec3, velocity: Vec3, gravity: f32, exclude: Entity) -> Option<(Vec3, f32)> {
+    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([exclude]);
+    let fall = Vec3::NEG_Y * game_shared::flight::GRAVITY * gravity;
+    let mut from = origin;
+    let steps = (BOMB_FALL_TIME / BOMB_FALL_STEP) as usize;
+    for step in 1..=steps {
+        let t = step as f32 * BOMB_FALL_STEP;
+        let to = origin + velocity * t + fall * (0.5 * t * t);
+        let delta = to - from;
+        if let Ok(direction) = Dir3::new(delta)
+            && let Some(hit) = spatial.cast_ray(from, direction, delta.length(), true, &filter)
+        {
+            return Some((from + *direction * hit.distance, t - BOMB_FALL_STEP * (1.0 - hit.distance / delta.length())));
+        }
+        from = to;
+    }
+    None
+}
+
+/// The gun of a seat that drops bombs (a projectile without a motor or a push of its own,
+/// under gravity), if it is the one its trigger fires.
+fn selected_bomb(data: &VehicleData, weapons: Option<&VehicleWeapons>, seat: u8) -> Option<usize> {
+    let model = &data.0;
+    model.desc.weapons.iter().enumerate().position(|(i, w)| {
+        let Some(gun) = model.guns.get(i) else { return false };
+        let p = &gun.projectile;
+        w.seat == seat as u32
+            && w.countermeasure.is_none()
+            && p.is_object()
+            && p.acceleration <= 0.0
+            && p.velocity < 60.0
+            && p.gravity > 0.0
+            && weapons.and_then(|s| s.guns.get(i)).is_some_and(|g| g.selected)
+    })
+}
 
 
 fn bar(width: f32, height: f32) -> (Node, BackgroundColor) {
@@ -158,6 +208,28 @@ fn ring(size: f32, color: Color) -> (Node, BorderColor, Visibility, Pickable) {
 fn spawn_hud(mut commands: Commands) {
     commands.spawn((FlightPathMarker, ring(16.0, INSTRUMENT)));
     commands.spawn((GunMarker, ring(22.0, Color::srgba(1.0, 0.85, 0.4, 0.85))));
+    commands
+        .spawn((BombMarker, ring(BOMB_MARKER_SIZE, WARNING)))
+        .insert(Node {
+            position_type: PositionType::Absolute,
+            width: px(BOMB_MARKER_SIZE),
+            height: px(BOMB_MARKER_SIZE),
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::MAX,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_child((
+            Node {
+                width: px(6),
+                height: px(6),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(WARNING),
+            Pickable::IGNORE,
+        ));
     // The panel, where soldiers have their weapon and ammo.
     commands
         .spawn((
@@ -699,13 +771,18 @@ fn update_instruments(
 
 /// Places the flight path and gun markers over the view.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_markers(
     seated: Query<&Seated, With<LocalSoldier>>,
     vehicles: Query<(&VehicleView, &VehicleData)>,
+    weapons: Query<&VehicleWeapons>,
+    history: Res<crate::local_input::InputHistory>,
     camera: Single<(&Camera, &Transform), With<crate::camera::PlayerCamera>>,
     spatial: SpatialQuery,
-    mut path: Single<(&mut Node, &mut Visibility), (With<FlightPathMarker>, Without<GunMarker>)>,
-    mut gun: Single<(&mut Node, &mut Visibility), (With<GunMarker>, Without<FlightPathMarker>)>,
+    mut path: Single<(&mut Node, &mut Visibility), (With<FlightPathMarker>, Without<GunMarker>, Without<BombMarker>)>,
+    mut gun: Single<(&mut Node, &mut Visibility), (With<GunMarker>, Without<FlightPathMarker>, Without<BombMarker>)>,
+    mut bomb: Single<(&mut Node, &mut Visibility), (With<BombMarker>, Without<FlightPathMarker>, Without<GunMarker>)>,
+    mut bomb_trigger: Local<bool>,
 ) {
     let (camera, eye) = *camera;
     let eye_global = GlobalTransform::from(*eye);
@@ -754,4 +831,44 @@ fn update_markers(
     });
     let (node, visibility) = &mut *gun;
     place(node, visibility, gun_point, 22.0, GUN_MARKER_MIN_OFFSET);
+    // Bombs: where they'd hit if dropped now, from the muzzle with the vehicle's velocity.
+    // Off screen (usually below while flying level) it waits at the screen's edge, so diving
+    // towards the target brings it up.
+    let impact = inside.and_then(|(s, view, data)| {
+        let index = selected_bomb(data, weapons.get(s.vehicle).ok(), s.seat)?;
+        let model = &data.0;
+        let transforms = model.part_transforms(&view.joints);
+        let muzzle = view.transform * model.muzzle(&transforms, index);
+        let projectile = &model.guns.get(index)?.projectile;
+        let velocity = muzzle.rotation * Vec3::NEG_Z * projectile.velocity + view.velocity;
+        let trigger = if model.desc.weapons[index].alt_fire { Buttons::AIM } else { Buttons::FIRE };
+        let (point, seconds) = ballistic_impact(&spatial, muzzle.translation, velocity, projectile.gravity, s.vehicle)?;
+        Some((point, seconds, muzzle.translation, history.latest().is_some_and(|f| f.pressed(trigger))))
+    });
+    let pressed = impact.is_some_and(|(.., pressed)| pressed);
+    if let Some((point, seconds, from, true)) = impact
+        && !*bomb_trigger
+    {
+        info!(
+            "bomb marker: dropped from ({:.1}, {:.1}, {:.1}), impact predicted at ({:.1}, {:.1}, {:.1}) in {seconds:.1} s",
+            from.x, from.y, from.z, point.x, point.y, point.z
+        );
+    }
+    *bomb_trigger = pressed;
+    let (node, visibility) = &mut *bomb;
+    let size = camera.logical_viewport_size().unwrap_or_default();
+    let at = impact
+        .map(|(point, ..)| point)
+        .filter(|p| (*p - eye.translation).dot(eye.forward().as_vec3()) > 0.0)
+        .and_then(|p| camera.world_to_viewport(&eye_global, p).ok());
+    match at {
+        Some(at) => {
+            let edge = Vec2::splat(BOMB_MARKER_EDGE);
+            let at = at.clamp(edge, (size - edge).max(edge));
+            node.left = px(at.x - BOMB_MARKER_SIZE * 0.5);
+            node.top = px(at.y - BOMB_MARKER_SIZE * 0.5);
+            **visibility = Visibility::Inherited;
+        }
+        None => **visibility = Visibility::Hidden,
+    }
 }

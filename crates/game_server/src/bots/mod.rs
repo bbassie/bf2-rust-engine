@@ -165,6 +165,8 @@ const CHARGE_UTILITY: f32 = 8.2;
 /// behaviour weight is 3, fire 7.5).
 const REVIVE_DISTANCE: f32 = 35.0;
 const REVIVE_UTILITY: f32 = 4.5;
+/// Seconds a goal it kept getting stuck on the way to is avoided.
+const BAD_GOAL_SECONDS: f32 = 20.0;
 /// How close teammates must be for a held bag to reach them, meters.
 const BAG_REACH: f32 = 4.0;
 /// `BotBrain::spot` keys that aren't areas: a commander's point, and roaming.
@@ -479,6 +481,31 @@ pub struct BotBrain {
     /// Seconds swimming without getting anywhere, and shores that didn't work out.
     swim_stall: f32,
     failed_exits: Vec<Vec3>,
+    /// At the end of a complete path to the current goal: whether the goal itself can be
+    /// walked to in a straight line from there (it may be the other side of a wall, in a
+    /// closed room the path can't get into: it stays at the path's end then).
+    path_done: Option<bool>,
+    /// Statistics: seconds since an enemy came into sight while it hasn't fired yet, the main
+    /// weapon's magazine last tick (rounds fired), and its going down already counted.
+    sighted: Option<f32>,
+    last_magazine: Option<(u8, u16)>,
+    last_stance: Stance,
+    death_noted: bool,
+    /// In the moving fire team of its squad's bound this tick (statistics).
+    bounding: bool,
+    /// Its fight state as the tick began, before reacting to what happened (statistics of
+    /// hits it scored or took then).
+    prev_state: usize,
+    /// Distance to what it last aimed at (statistics).
+    aim_distance: f32,
+    /// The walkable region it is in (see [`walk_region`]), and where that was found out.
+    region: Option<u16>,
+    region_at: Vec3,
+    /// A goal it kept getting stuck on the way to, avoided for the seconds left.
+    bad_goal: Option<(Vec3, f32)>,
+    /// The enemy it last lost sight of and its aim error then: peeking at him again, the aim
+    /// is where it was.
+    lost_aim: Option<(Entity, Vec2)>,
 }
 
 impl Default for BotBrain {
@@ -594,6 +621,18 @@ impl Default for BotBrain {
             swim_exit_timer: 0.0,
             swim_stall: 0.0,
             failed_exits: Vec::new(),
+            path_done: None,
+            sighted: None,
+            last_magazine: None,
+            last_stance: Stance::Standing,
+            death_noted: false,
+            bounding: false,
+            prev_state: 12,
+            aim_distance: 0.0,
+            region: None,
+            region_at: Vec3::ZERO,
+            bad_goal: None,
+            lost_aim: None,
         }
     }
 }
@@ -925,6 +964,10 @@ impl BotBrain {
             self.staged = false;
         }
         self.seq = self.seq.wrapping_add(1);
+        if self.region.is_none() || flat(me.motion.position - self.region_at).length() > 0.5 {
+            self.region_at = me.motion.position;
+            self.region = w.nav().and_then(|nav| walk_region(nav, &w.spatial, me.motion.position));
+        }
         let skill = self.personality.skill(&w.settings, me.team);
         self.sense(w, me, skill, intel, team_stats, cx, dt);
         if self.blind {
@@ -999,7 +1042,7 @@ impl BotBrain {
             Activity::Demolish { vehicle, time, placed } => self.demolish(w, me, vehicle, time, placed, &mut intent, dt),
             Activity::Mount { vehicle, wish, time } => self.mount(w, me, vcx, vehicle, wish, time, &mut intent, dt),
             Activity::Charge { charge, time } => self.work_charge(w, me, charge, time, &mut intent, dt),
-            Activity::TakeCover { cover, time } => self.take_cover(w, me, cover, time, &mut intent, dt),
+            Activity::TakeCover { cover, time } => self.take_cover(w, me, skill, cover, time, &mut intent, dt),
             Activity::Watch { at, time } => self.watch(w, me, at, time, &mut intent, dt),
             Activity::Suppress { at, time } => self.suppress(w, me, skill, at, time, &mut intent, dt),
             Activity::Supply { soldier, time } => self.supply(w, me, soldier, time, &mut intent, dt),
@@ -1042,13 +1085,29 @@ impl BotBrain {
         if matches!(self.activity, Activity::Charge { .. }) {
             team_stats.charge_seconds += dt;
         }
+        if (self.seq.wrapping_add(self.seed)) % 30 == 7
+            && let Some((kind, area)) = self.order
+            && let Some(area) = w.map.areas.get(area)
+        {
+            let d = area.position.distance(me.motion.position);
+            let bucket = match d {
+                d if d < area.radius => 0,
+                d if d < area.radius + 30.0 => 1,
+                d if d < 100.0 => 2,
+                d if d < 200.0 => 3,
+                _ => 4,
+            };
+            team_stats.combat.obj_dist[bucket + if kind == OrderKind::Defend { 5 } else { 0 }] += 0.5;
+        }
         if let Some((_, area)) = self.order
             && let Some(area) = w.map.areas.get(area)
             && area.position.distance(me.motion.position) < area.radius + 30.0
         {
             team_stats.at_objective += dt;
         }
-        self.act(w, me, intent, stats, dt)
+        let frame = self.act(w, me, intent, stats, dt);
+        self.fire_stats(me, &frame, team_stats, dt);
+        frame
     }
 
     /// Notices being hurt, looks around for enemies, listens for gunfire.
@@ -1178,9 +1237,24 @@ impl BotBrain {
         }
 
         let seen = best.map(|(_, entity, ..)| entity);
+        match (self.target, seen) {
+            (None, Some(_)) => {
+                team_stats.combat.sightings += 1;
+                self.sighted = Some(0.0);
+            }
+            (_, None) => self.sighted = None,
+            _ => {}
+        }
         if seen != self.target {
+            if let Some(lost) = self.target {
+                self.lost_aim = Some((lost, self.aim_error));
+            }
             self.target = seen;
             self.engaged = 0.0;
+            // Someone in sight at last: decide now whether to shoot him (peeking from cover).
+            if seen.is_some() && self.tactical && crate::ai::tune::knob("peek_fast", 0.0) > 0.5 {
+                self.decide_timer = 0.0;
+            }
             if let Some((_, _, chest, outside)) = best {
                 let impairment = self.impairment();
                 self.reaction = (skill.reaction_time() + if outside { 0.3 } else { 0.0 }) * impairment;
@@ -1192,12 +1266,22 @@ impl BotBrain {
                     // Someone it knew was there (peeking at him again, or he came round the
                     // corner it watched): already aimed that way.
                     if self.target.is_some_and(|t| known.contains(&t)) {
-                        self.reaction *= 0.4;
+                        self.reaction *= crate::ai::tune::knob("known_react", 0.4);
                         self.aim_error *= 0.6;
+                        // The one it just lost: still aimed about where it was.
+                        if crate::ai::tune::knob("keep_aim", 0.0) > 0.5
+                            && let Some((lost, aim)) = self.lost_aim
+                            && Some(lost) == self.target
+                        {
+                            if (aim * 1.3).length() < self.aim_error.length() {
+                                self.aim_error = aim * 1.3;
+                            }
+                        }
                     }
                     // Under fire it takes a little longer to settle on someone.
-                    self.reaction += 0.12 * self.suppression.min(1.0);
-                    self.aim_error *= 1.0 + 0.3 * self.suppression.min(1.0);
+                    let supp = crate::ai::tune::knob("supp_aim", 1.0);
+                    self.reaction += 0.12 * self.suppression.min(1.0) * supp;
+                    self.aim_error *= 1.0 + 0.3 * self.suppression.min(1.0) * supp;
                     self.call_spot(w, me, skill, cx);
                 }
             }
@@ -1242,7 +1326,7 @@ impl BotBrain {
         if distance < 10.0 {
             return EngageStyle::Strafe;
         }
-        if self.tactical {
+        if self.tactical && crate::ai::tune::knob("style", 1.0) > 0.5 {
             // Low at range: prone far off (steadier), crouched at middle distances.
             return match pose {
                 FiringPose::Prone if distance > 30.0 => EngageStyle::Prone,
@@ -1553,25 +1637,7 @@ impl BotBrain {
             return;
         };
         self.engaged += dt;
-        let eye = me.motion.eye_position();
-        // Aim at the chest, with an error that shrinks while tracking.
-        let aim_at = target.position + Vec3::Y * chest_height(target.stance);
-        let to = aim_at - eye;
-        let distance = to.length();
-        let desired_yaw = yaw_to(to) + self.aim_error.x;
-        let desired_pitch = to.y.atan2(Vec2::new(to.x, to.z).length()) + self.aim_error.y;
-        // The error settles towards a wander whose size depends on skill and distance
-        // (an Ornstein-Uhlenbeck process).
-        let settle = skill.aim_settle();
-        self.aim_error *= 1.0 - (settle * dt).min(1.0);
-        // Bullets cracking past shake the aim (a little: it mostly sends it to cover).
-        let shaken = 1.0 + 0.4 * self.suppression.min(1.0) * (1.0 - 0.5 * skill.0);
-        let wander = skill.aim_spread(distance) * (2.0 * settle * dt).sqrt() * self.impairment() * shaken;
-        self.aim_error += Vec2::new(gaussian(), gaussian()) * wander;
-        self.yaw = turn_towards(self.yaw, desired_yaw, skill.turn_rate() * dt);
-        self.pitch += (desired_pitch - self.pitch).clamp(-4.0 * dt, 4.0 * dt);
-        intent.look = Look::Aimed;
-        self.reaction -= dt;
+        let (distance, on_target) = self.aim_at(me, skill, target, intent, dt);
 
         // From cover: up to shoot, down to reload or when the fire gets too close.
         let from_cover = if self.tactical { self.fight_from_cover(me, intent, dt) } else { None };
@@ -1597,17 +1663,79 @@ impl BotBrain {
                 tolerance: 3.0,
                 sprint: false,
             });
+            // Tactical bots keep shooting as they go.
+            if self.tactical && crate::ai::tune::knob("adv_fire", 0.0) > 0.5 {
+                self.pull_trigger(w, me, distance, on_target, intent, dt);
+            }
             return;
         }
 
+        let may_fire = from_cover.unwrap_or(true);
+        self.pull_trigger(w, me, distance, on_target && may_fire, intent, dt);
+
+        if from_cover.is_some() {
+            return;
+        }
+        let style = match distance {
+            d if d < 8.0 => EngageStyle::Strafe,
+            // Pinned down in the open: get low.
+            d if self.tactical && self.suppression > 0.6 && d > 15.0 && crate::ai::tune::knob("style", 1.0) > 0.5 => {
+                if d > 30.0 { EngageStyle::Prone } else { EngageStyle::Crouch }
+            }
+            _ => self.style,
+        };
+        match style {
+            EngageStyle::Strafe => {
+                if fastrand::f32() < dt * 0.7 {
+                    self.strafe = -self.strafe;
+                    self.decide_timer = 0.0;
+                }
+                if self.strafe_ok {
+                    intent.step = Quat::from_rotation_y(self.yaw) * Vec3::X * self.strafe;
+                }
+            }
+            EngageStyle::Crouch => intent.buttons |= Buttons::CROUCH,
+            EngageStyle::Prone => intent.buttons |= Buttons::PRONE,
+        }
+    }
+
+    /// Aims at `target`'s chest with an error that shrinks while tracking; counts the reaction
+    /// time down. Returns the distance and whether the aim is on target.
+    fn aim_at(&mut self, me: &Me, skill: Skill, target: &SoldierMotion, intent: &mut Intent, dt: f32) -> (f32, bool) {
+        let eye = me.motion.eye_position();
+        // Aim at the chest, with an error that shrinks while tracking.
+        let aim_at = target.position + Vec3::Y * chest_height(target.stance);
+        let to = aim_at - eye;
+        let distance = to.length();
+        self.aim_distance = distance;
+        let desired_yaw = yaw_to(to) + self.aim_error.x;
+        let desired_pitch = to.y.atan2(Vec2::new(to.x, to.z).length()) + self.aim_error.y;
+        // The error settles towards a wander whose size depends on skill and distance
+        // (an Ornstein-Uhlenbeck process).
+        let settle = skill.aim_settle();
+        self.aim_error *= 1.0 - (settle * dt).min(1.0);
+        // Bullets cracking past shake the aim (a little: it mostly sends it to cover).
+        let shaken = 1.0 + 0.4 * self.suppression.min(1.0) * (1.0 - 0.5 * skill.0) * crate::ai::tune::knob("supp_aim", 1.0);
+        let wander = skill.aim_spread(distance) * (2.0 * settle * dt).sqrt() * self.impairment() * shaken;
+        self.aim_error += Vec2::new(gaussian(), gaussian()) * wander;
+        self.yaw = turn_towards(self.yaw, desired_yaw, skill.turn_rate() * dt);
+        self.pitch += (desired_pitch - self.pitch).clamp(-4.0 * dt, 4.0 * dt);
+        intent.look = Look::Aimed;
+        self.reaction -= dt;
         let tolerance = (1.2 / distance.max(1.0)).clamp(0.02, 0.15);
         let on_target = angle_delta(self.yaw, desired_yaw).abs() + (self.pitch - desired_pitch).abs() < tolerance;
+        (distance, on_target)
+    }
+
+    /// Works the trigger at a target `distance` away: bursts for automatic fire (long up
+    /// close, short far away), a fresh pull per shot otherwise; only once the reaction time
+    /// is up and `aimed`.
+    fn pull_trigger(&mut self, w: &Senses, me: &Me, distance: f32, aimed: bool, intent: &mut Intent, dt: f32) {
         let weapon = w.weapon(me.loadout, self.primary);
         let mode = weapon
             .and_then(|weapon| weapon.fire_modes.get(me.inventory.map_or(0, |i| i.fire_mode) as usize).copied())
             .unwrap_or(FireMode::Auto);
-        let may_fire = from_cover.unwrap_or(true);
-        if self.reaction <= 0.0 && on_target && may_fire {
+        if self.reaction <= 0.0 && aimed {
             self.burst -= dt;
             match mode {
                 FireMode::Auto => {
@@ -1633,31 +1761,6 @@ impl BotBrain {
                     }
                 }
             }
-        }
-
-        if from_cover.is_some() {
-            return;
-        }
-        let style = match distance {
-            d if d < 8.0 => EngageStyle::Strafe,
-            // Pinned down in the open: get low.
-            d if self.tactical && self.suppression > 0.6 && d > 15.0 => {
-                if d > 30.0 { EngageStyle::Prone } else { EngageStyle::Crouch }
-            }
-            _ => self.style,
-        };
-        match style {
-            EngageStyle::Strafe => {
-                if fastrand::f32() < dt * 0.7 {
-                    self.strafe = -self.strafe;
-                    self.decide_timer = 0.0;
-                }
-                if self.strafe_ok {
-                    intent.step = Quat::from_rotation_y(self.yaw) * Vec3::X * self.strafe;
-                }
-            }
-            EngageStyle::Crouch => intent.buttons |= Buttons::CROUCH,
-            EngageStyle::Prone => intent.buttons |= Buttons::PRONE,
         }
     }
 
@@ -1858,12 +1961,13 @@ impl BotBrain {
             .and_then(|m| w.strategy.orders.get(&(me.team, m.squad)))
             .and_then(|o| o.point);
 
+        self.bounding = false;
         // Near the fight the squad bounds: one fire team moves while the other covers it.
         let tactic = me
             .member
             .filter(|_| self.tactical && !human_led)
             .and_then(|m| w.tactics.squads.get(&(me.team, m.squad)))
-            .filter(|t| t.bounding)
+            .filter(|t| t.bounding && crate::ai::tune::knob("bound", 1.0) > 0.5)
             .copied();
         match (tactic, squad) {
             (Some(tactic), Some(squad)) if is_leader || leader.is_some() => {
@@ -2003,7 +2107,10 @@ impl BotBrain {
         let from = (me.motion.position - target).with_y(0.0).normalize_or_zero();
         let via = target + Quat::from_rotation_y(angle.to_radians()) * from * 80.0;
         let nav = w.nav()?;
-        let region = nav.cell(nav.locate(me.motion.position, 2.0, None)?).region;
+        let region = match self.region {
+            Some(region) => region,
+            None => nav.cell(nav.locate(me.motion.position, 2.0, None)?).region,
+        };
         nav.locate(via, 12.0, Some(region)).map(|cell| nav.position(cell))
     }
 
@@ -2019,6 +2126,10 @@ impl BotBrain {
         let facing = self.facing(w, me.team, area_index);
         // Squad leaders hold back a little (the squad spawns on them).
         let leader = self.tactical && me.member.is_some_and(|m| m.leader);
+        // Somewhere it can walk to: not a closed room of a house next to the flag.
+        let region = self
+            .region
+            .or_else(|| w.nav().and_then(|nav| nav.locate(me.motion.position, 2.0, None).map(|c| nav.cell(c).region)));
         for attempt in 0..6 {
             let jitter = fastrand::f32();
             let (angle, radius) = match (kind, cp) {
@@ -2046,7 +2157,7 @@ impl BotBrain {
             let Some(nav) = w.nav() else {
                 return candidate;
             };
-            if let Some(cell) = nav.locate(candidate, 2.0, None) {
+            if let Some(cell) = nav.locate(candidate, 2.0, region) {
                 let spot = nav.position(cell);
                 let inside = match (kind, cp) {
                     (OrderKind::Attack, Some(cp)) => cp.contains(spot),
@@ -2068,6 +2179,7 @@ impl BotBrain {
                             toward: None,
                             taken: &[],
                             fire: true,
+                            region,
                         };
                         let mut rays = 16;
                         if let Some(cover) = crate::ai::cover::find(nav, &w.spatial, &query, &mut rays)
@@ -2199,6 +2311,15 @@ impl BotBrain {
                 swim_to = Some(exit);
             }
         }
+        if let Some((at, left)) = &mut self.bad_goal {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.bad_goal = None;
+            } else if intent.goal.is_some_and(|g| flat(g.position - *at).length() < 2.5) {
+                // It can't get there: wait here instead.
+                intent.goal = None;
+            }
+        }
         self.goal = intent.goal.map(|g| g.position);
         // Where walking can't get it (a carrier, an island), it waits for a while rather than
         // pushing against the edge, then tries again.
@@ -2217,6 +2338,8 @@ impl BotBrain {
             let (target, j, step) = match (w.nav.as_deref(), self.direct) {
                 (Some(nav), false) => match self.follow_path(nav, w.obstacles.as_deref(), goal.position, goal.tolerance, me.motion, dt, stats) {
                     Steer::Toward { target, jump, ladder } => (target, jump, ladder),
+                    // At the path's end: on to the goal if it's in walking reach, otherwise here.
+                    Steer::Arrived if self.path_done == Some(false) => (position, false, None),
                     Steer::Arrived => (goal.position, false, None),
                     Steer::Stranded => {
                         stats.stranded += 1;
@@ -2453,10 +2576,14 @@ impl BotBrain {
         self.direct = false;
         self.stuck_strikes += 1.0;
         if self.stuck_strikes > 3.0 {
-            // Keeps failing here: go somewhere else.
+            // Keeps failing here: go somewhere else, and not back to where it was going for a
+            // while (a spot the grid thinks it can reach but it can't).
             self.stuck_strikes = 0.0;
             self.spot = None;
             self.via = None;
+            if crate::ai::tune::knob("bad_goal", 1.0) > 0.5 {
+                self.bad_goal = self.goal.map(|g| (g, BAD_GOAL_SECONDS));
+            }
         }
     }
 
@@ -2507,11 +2634,13 @@ impl BotBrain {
             self.repath = false;
             self.repath_cooldown = 0.5;
             self.path_goal = Some(goal);
+            self.path_done = None;
             let grid = nav.0.clone();
             let blocked = obstacles.map(|o| o.0.clone());
+            let region = self.region;
             self.path_task = Some(AsyncComputeTaskPool::get().spawn(async move {
                 let started = Instant::now();
-                let path = grid.find_path_avoiding(position, goal, blocked.as_deref());
+                let path = grid.find_path_from(position, region, goal, blocked.as_deref());
                 PathResult {
                     path,
                     seconds: started.elapsed().as_secs_f32(),
@@ -2520,6 +2649,9 @@ impl BotBrain {
         }
 
         let Some(path) = &self.path else {
+            if self.path_done.is_some() && self.path_task.is_none() {
+                return Steer::Arrived;
+            }
             return Steer::Toward {
                 target: goal,
                 jump: false,
@@ -2547,6 +2679,8 @@ impl BotBrain {
             let complete = path.complete;
             self.path = None;
             return if complete || flat(goal - position).length() < 3.0 {
+                self.path_done =
+                    Some(flat(goal - position).length() < 1.0 || nav.0.walkable_line_avoiding(position, goal, obstacles.map(|o| &*o.0)));
                 Steer::Arrived
             } else {
                 Steer::Stranded
@@ -2797,6 +2931,14 @@ fn think(
     let mut seated_ms = 0.0;
     for (player, mut brain, mut buffer, team, controls, member, mut deployment) in &mut bots {
         let soldier = controls.and_then(|c| w.soldiers.get(c.0).ok());
+        if soldier.is_none_or(|s| s.8) && !brain.death_noted && brain.soldier.is_some() {
+            brain.death_noted = true;
+            if let Some(team_stats) = ai_stats.team(*team) {
+                let state = brain.fight_state();
+                team_stats.combat.deaths_by[state] += 1;
+                team_stats.combat.deaths_aware[state] += u32::from(brain.target.is_some());
+            }
+        }
         let Some((own, motion, _, inventory, health, _, loadout, seated, downed)) = soldier else {
             brain.while_dead(&w, player, *team, member.copied(), &mut deployment);
             claims.release(player);
@@ -2815,6 +2957,8 @@ fn think(
             });
             continue;
         }
+        brain.death_noted = false;
+        brain.prev_state = brain.fight_state();
         let health = health.copied().unwrap_or_default();
         let me = Me {
             player,
@@ -3094,6 +3238,32 @@ fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>
 }
 
 /// Whether a soldier's main weapons are down to their last magazine.
+/// The walkable region a soldier with his feet at `from` is in: that of the nearest cell it
+/// can see from knee height. Beside a thin wall the nearest cell may be on its other side (a
+/// closed room of a house on the coarse grid of a big map): paths, spots and cover from there
+/// would lead through the wall.
+fn walk_region(nav: &NavGrid, spatial: &avian3d::prelude::SpatialQuery, from: Vec3) -> Option<u16> {
+    let mut cells: Vec<(f32, crate::nav::CellRef)> = nav
+        .cells_near(from.xz(), 2.0)
+        .filter(|&c| nav.cell(c).region != 0 && (-3.0..=1.0).contains(&(nav.cell(c).y - from.y)))
+        .map(|c| {
+            let p = nav.position(c);
+            (p.xz().distance_squared(from.xz()) + 4.0 * (p.y - from.y).powi(2), c)
+        })
+        .collect();
+    cells.sort_by(|a, b| a.0.total_cmp(&b.0));
+    cells.truncate(6);
+    let first = nav.cell(cells.first()?.1).region;
+    if cells.iter().all(|(_, c)| nav.cell(*c).region == first) {
+        return Some(first);
+    }
+    let knee = from + Vec3::Y * 0.5;
+    cells
+        .iter()
+        .find(|(d2, c)| *d2 < 0.3 * 0.3 || tactics::line_of_sight(spatial, knee, nav.position(*c) + Vec3::Y * 0.5))
+        .map_or(Some(first), |(_, c)| Some(nav.cell(*c).region))
+}
+
 fn low_on_ammo(inventory: &Inventory, loadout: &Loadout, armory: &Armory) -> bool {
     loadout.weapons.iter().zip(&inventory.ammo).any(|(name, [_, spare])| {
         armory

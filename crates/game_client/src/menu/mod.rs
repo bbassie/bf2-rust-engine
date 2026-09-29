@@ -14,6 +14,7 @@ mod levels;
 mod loading;
 mod pages;
 mod preview;
+pub mod text_input;
 mod voice;
 mod widgets;
 
@@ -27,13 +28,13 @@ use std::{
 
 use bevy::{
     input::{InputSystems, mouse::AccumulatedMouseScroll},
-    input_focus::InputFocus,
+    input_focus::tab_navigation::TabGroup,
     prelude::*,
     render::{Render, RenderApp, RenderSystems, render_resource::PipelineCache},
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
-    text::{EditableText, EditableTextFilter},
+    text::EditableText,
     ui::RelativeCursorPosition,
-    ui_widgets::ScrollArea,
+    ui_widgets::{ControlOrientation, ScrollArea, ScrollIntoView, Scrollbar, ScrollbarThumb},
     window::{CursorGrabMode, CursorOptions, Monitor, PrimaryMonitor, PrimaryWindow},
 };
 use bevy_replicon::prelude::ClientState;
@@ -53,7 +54,7 @@ use crate::{
     scenario::{ScenarioInput, ScenarioSystems},
     settings::{
         Action, Anisotropy, AntiAliasing, BindSlot, Binding, CrosshairStyle, DisplayMode, GraphicsPreset,
-        Quality, Settings, ShadowQuality, SsaoQuality, ToneMapping, ViewDistance,
+        Quality, Settings, ShadowQuality, SsaoQuality, StanceMode, ToneMapping, ViewDistance,
     },
 };
 
@@ -74,7 +75,12 @@ impl Plugin for MenuPlugin {
             );
         }
         app.insert_resource(compiling)
-            .add_plugins((download::DownloadUiPlugin, account::AccountUiPlugin, voice::VoiceUiPlugin))
+            .add_plugins((
+                download::DownloadUiPlugin,
+                account::AccountUiPlugin,
+                voice::VoiceUiPlugin,
+                text_input::TextInputPlugin,
+            ))
             .insert_state(self.start)
             .init_resource::<Menu>()
             .init_resource::<LevelCatalog>()
@@ -96,13 +102,7 @@ impl Plugin for MenuPlugin {
                     gamepad_menu_nav,
                     (press_buttons, drag_sliders, sync_text_fields),
                     (sync_pause_overlay, build_pages, build_level_details, build_server_list),
-                    (
-                        paint_buttons,
-                        paint_switches,
-                        paint_sliders,
-                        paint_text_fields,
-                        update_values,
-                    ),
+                    (paint_buttons, paint_switches, paint_sliders, update_values),
                 )
                     .chain()
                     .after(ScenarioSystems),
@@ -267,6 +267,7 @@ enum MenuButton {
     /// Bindings page: clears an action's gamepad binding without waiting for a new one.
     ClearGamepad(Action),
     ResetBindings,
+    StanceMode(StanceKind, StanceMode),
     Preset(GraphicsPreset),
     ShadowQuality(ShadowQuality),
     AntiAliasing(AntiAliasing),
@@ -315,6 +316,7 @@ impl MenuButton {
             MenuButton::RebindGamepad(action) => format!("bindpad:{}", action.id()),
             MenuButton::ClearGamepad(action) => format!("bindpad:{}:clear", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
+            MenuButton::StanceMode(kind, mode) => format!("stance:{}:{}", kind.id(), mode.label().to_lowercase()),
             MenuButton::Preset(preset) => format!("preset:{}", preset.label().to_lowercase()),
             MenuButton::ShadowQuality(q) => format!("shadowquality:{}", q.label().to_lowercase()),
             MenuButton::AntiAliasing(aa) => format!("aa:{}", format!("{aa:?}").to_lowercase()),
@@ -345,6 +347,40 @@ enum Look {
     Item,
     /// Painted by its own system (switches, slider bars).
     Custom,
+}
+
+/// Which stance (or sprint) a [`MenuButton::StanceMode`] sets the hold/toggle mode of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StanceKind {
+    Prone,
+    Crouch,
+    Sprint,
+}
+
+impl StanceKind {
+    fn id(self) -> &'static str {
+        match self {
+            StanceKind::Prone => "prone",
+            StanceKind::Crouch => "crouch",
+            StanceKind::Sprint => "sprint",
+        }
+    }
+
+    fn get(self, settings: &Settings) -> StanceMode {
+        match self {
+            StanceKind::Prone => settings.prone_mode,
+            StanceKind::Crouch => settings.crouch_mode,
+            StanceKind::Sprint => settings.sprint_mode,
+        }
+    }
+
+    fn set(self, settings: &mut Settings, mode: StanceMode) {
+        match self {
+            StanceKind::Prone => settings.prone_mode = mode,
+            StanceKind::Crouch => settings.crouch_mode = mode,
+            StanceKind::Sprint => settings.sprint_mode = mode,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -606,10 +642,6 @@ enum TextField {
     Address,
     Port,
 }
-
-/// The box around a text field's text, highlighted while it has focus.
-#[derive(Component)]
-struct TextFieldBox(Entity);
 
 /// Main menu page area, or the Esc menu's panel.
 #[derive(Component)]

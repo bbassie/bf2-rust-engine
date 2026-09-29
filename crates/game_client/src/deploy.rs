@@ -7,7 +7,12 @@
 //! tickets wait for the round to end.
 
 use bevy::{
+    input::{
+        gamepad::Gamepad,
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    },
     prelude::*,
+    ui::RelativeCursorPosition,
     window::{CursorGrabMode, CursorOptions},
 };
 use game_shared::{
@@ -24,7 +29,7 @@ use crate::{
     combat::weapon_display_name,
     conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, charge_color, team_color},
     map_icons::map_uv,
-    map_markers::{LabelRequest, Obstacle, place_labels},
+    map_markers::{LabelRequest, MapView, Obstacle, apply_map_view, drive_map_view, place_labels},
     net::{LocalPlayer, LocalSoldier},
     ui_theme::font,
 };
@@ -41,6 +46,8 @@ impl Plugin for DeployPlugin {
                     clear_stale_choice,
                     open_and_close,
                     set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
+                    drive_deploy_view,
+                    apply_deploy_view,
                     rebuild_markers,
                     rebuild_kits,
                     rebuild_squads,
@@ -67,6 +74,9 @@ pub struct DeployScreen {
     /// Kit and control point picked here; sent when changed.
     choice: Option<(u8, Option<u8>, bool)>,
     changed: bool,
+    /// Pan and zoom of the map: kept while the screen stays open, reset on a new level (see
+    /// `clear_stale_choice`).
+    pub view: MapView,
 }
 
 impl DeployScreen {
@@ -86,8 +96,12 @@ fn clear_stale_choice(
     level: Option<Res<LoadedLevel>>,
     switched: Query<(), (With<LocalPlayer>, Changed<Team>)>,
 ) {
-    if level.is_some_and(|l| l.is_changed()) || !switched.is_empty() {
+    let new_level = level.is_some_and(|l| l.is_changed());
+    if new_level || !switched.is_empty() {
         screen.choice = None;
+    }
+    if new_level {
+        screen.view.reset();
     }
 }
 
@@ -98,8 +112,15 @@ const MARKER: f32 = 24.0;
 
 #[derive(Component)]
 struct DeployRoot;
+/// The fixed-size, clipped viewport the map shows through.
+#[derive(Component)]
+struct MapFrame;
+/// The map image itself: resized/repositioned by [`apply_deploy_view`] to show the current
+/// [`DeployScreen::view`]; markers and clicks are its children (see `map_markers`'s doc comment).
 #[derive(Component)]
 struct MapImage;
+#[derive(Component)]
+struct ResetViewButton;
 #[derive(Component)]
 struct KitList;
 #[derive(Component)]
@@ -156,17 +177,49 @@ fn spawn_deploy_screen(mut commands: Commands) {
                 BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.92)),
             ))
             .with_children(|panel| {
-                panel.spawn((
-                    MapImage,
-                    Node {
-                        width: px(MAP_SIZE),
-                        height: px(MAP_SIZE),
-                        border_radius: BorderRadius::all(px(8)),
-                        overflow: Overflow::clip(),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.16, 0.17, 0.18)),
-                ));
+                panel
+                    .spawn((
+                        MapFrame,
+                        Node {
+                            width: px(MAP_SIZE),
+                            height: px(MAP_SIZE),
+                            border_radius: BorderRadius::all(px(8)),
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.16, 0.17, 0.18)),
+                    ))
+                    .with_children(|frame| {
+                        frame.spawn((
+                            MapImage,
+                            RelativeCursorPosition::default(),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: px(0),
+                                top: px(0),
+                                width: px(MAP_SIZE),
+                                height: px(MAP_SIZE),
+                                ..default()
+                            },
+                        ));
+                        frame
+                            .spawn((
+                                ResetViewButton,
+                                Button,
+                                Name::new("map:reset"),
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    right: px(6),
+                                    top: px(6),
+                                    padding: UiRect::axes(px(8), px(4)),
+                                    border_radius: BorderRadius::all(px(5)),
+                                    ..default()
+                                },
+                                BackgroundColor(Color::srgba(0.02, 0.03, 0.04, 0.7)),
+                                Visibility::Hidden,
+                            ))
+                            .with_child((Text::new("Reset view"), font(11.0), TextColor(TEXT)));
+                    });
                 panel
                     .spawn(Node {
                         width: px(320),
@@ -210,6 +263,17 @@ fn spawn_deploy_screen(mut commands: Commands) {
                         ));
                         side.spawn((StatusText, Text::new(""), font(15.0), TextColor(TEXT)));
                     });
+                // --- Loadouts (loadout): the weapons of the picked kit's class ---
+                panel.spawn((
+                    crate::loadout::LoadoutPanel,
+                    Node {
+                        width: px(330),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(6),
+                        ..default()
+                    },
+                ));
+                // --- end loadouts ---
             });
         });
 }
@@ -269,6 +333,60 @@ fn set_map_image(
             commands.entity(*map).remove::<ImageNode>();
         }
     }
+}
+
+/// Reads the mouse wheel, a right/middle drag, `+`/`-`/the triggers, the arrows/the stick and
+/// a double click (see `map_markers::drive_map_view`), and the reset button, into the view.
+#[allow(clippy::too_many_arguments)]
+fn drive_deploy_view(
+    mut screen: ResMut<DeployScreen>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    motion: Res<AccumulatedMouseMotion>,
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    cursor: Single<&RelativeCursorPosition, (With<MapImage>, Without<MapFrame>)>,
+    reset_button: Query<&Interaction, (With<ResetViewButton>, Changed<Interaction>)>,
+    mut dragging: Local<bool>,
+    mut last_click: Local<Option<(f32, Vec2)>>,
+) {
+    if !screen.open {
+        *dragging = false;
+        return;
+    }
+    let content_size = Vec2::splat(MAP_SIZE * screen.view.zoom);
+    let (now, dt) = (time.elapsed_secs(), time.delta_secs());
+    let cursor = *cursor;
+    drive_map_view(
+        &mut screen.view,
+        cursor,
+        content_size,
+        &keys,
+        &mouse,
+        &scroll,
+        &motion,
+        &gamepads,
+        dt,
+        now,
+        &mut *dragging,
+        &mut *last_click,
+    );
+    if reset_button.iter().any(|i| *i == Interaction::Pressed) {
+        screen.view.reset();
+    }
+}
+
+/// Resizes/repositions [`MapImage`] to show [`DeployScreen::view`], and shows the reset button
+/// once zoomed in.
+fn apply_deploy_view(
+    screen: Res<DeployScreen>,
+    image: Single<&mut Node, (With<MapImage>, Without<ResetViewButton>)>,
+    mut reset_button: Single<&mut Visibility, (With<ResetViewButton>, Without<MapImage>)>,
+) {
+    let mut node = image.into_inner();
+    apply_map_view(&mut node, screen.view, Vec2::splat(MAP_SIZE));
+    reset_button.set_if_neq(if screen.view.zoom > 1.001 { Visibility::Inherited } else { Visibility::Hidden });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -538,6 +656,7 @@ fn pick_control_point(
             choice.1 = Some(marker.index);
             choice.2 = false;
             screen.changed = true;
+            info!("deploy: spawn set to control point {}", marker.index);
         }
     }
 }

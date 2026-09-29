@@ -629,9 +629,19 @@ pub fn plan(
         // In the staged modes things change fast (a charge armed: 30 s to defuse it): an
         // order is only kept while its objective is worth a good part of the best one.
         let best_value = objectives.first().map_or(0.0, |o| o.value);
+        // ... except the only squad defending an objective: it stays (see `cover_defences`).
+        let mut defenders: HashMap<usize, u32> = HashMap::default();
+        for ((order_team, _), order) in &strategy.orders {
+            if *order_team == team && order.kind == OrderKind::Defend && !order.suggestion {
+                *defenders.entry(order.area).or_default() += 1;
+            }
+        }
         let still_valid = |order: &SquadOrder| {
+            let sole_defender = order.kind == OrderKind::Defend && !order.suggestion && defenders.get(&order.area) == Some(&1);
             objectives.iter().any(|o| {
-                o.area == order.area && o.kind == order.kind && (!mode.staged() || o.value >= 0.4 * best_value)
+                o.area == order.area
+                    && o.kind == order.kind
+                    && (!mode.staged() || o.value >= 0.4 * best_value || sole_defender)
             })
         };
         // A human commander's orders go to the bot-led squads as they are.
@@ -711,7 +721,61 @@ pub fn plan(
                 order.suggestion = squads.iter().any(|(s, _, human)| s == squad && *human);
             }
         }
+        if mode.staged() {
+            cover_defences(&mut strategy.orders, team, &objectives, &squads, &map);
+        }
         strategy.objectives[t] = objectives;
+    }
+}
+
+/// Staged modes (Rush, Breakthrough): a squad on every objective the team defends (both
+/// charges of a stage, every flag of the open sector) while it has squads enough. Bot-led
+/// squads move from objectives two or more squads were sent to onto uncovered ones, the
+/// closest first; a human commander's orders stay.
+fn cover_defences(
+    orders: &mut HashMap<(Team, u8), SquadOrder>,
+    team: Team,
+    objectives: &[Objective],
+    squads: &[(u8, Option<Vec3>, bool)],
+    map: &StrategicMap,
+) {
+    loop {
+        let mut count: HashMap<usize, u32> = HashMap::default();
+        for ((order_team, _), order) in orders.iter() {
+            if *order_team == team && !order.suggestion {
+                *count.entry(order.area).or_default() += 1;
+            }
+        }
+        let Some(uncovered) = objectives
+            .iter()
+            .find(|o| o.kind == OrderKind::Defend && !count.contains_key(&o.area))
+        else {
+            return;
+        };
+        let at = map.areas[uncovered.area].position;
+        let donor = squads
+            .iter()
+            .filter(|(_, _, human)| !human)
+            .filter_map(|&(squad, position, _)| {
+                let order = orders.get(&(team, squad))?;
+                let spare = !order.commanded && count.get(&order.area).is_some_and(|&n| n >= 2);
+                spare.then(|| (squad, position.map_or(f32::MAX, |p| p.distance(at))))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((squad, _)) = donor else {
+            return;
+        };
+        orders.insert(
+            (team, squad),
+            SquadOrder {
+                kind: OrderKind::Defend,
+                area: uncovered.area,
+                age: 0.0,
+                suggestion: false,
+                commanded: false,
+                point: None,
+            },
+        );
     }
 }
 
@@ -897,6 +961,46 @@ mod tests {
         let elsewhere = commanded_order(&map, &states, Team::One, &order(CommanderOrderKind::Defend, far)).unwrap();
         assert_eq!((elsewhere.kind, elsewhere.point), (OrderKind::Defend, Some(far)));
         assert!(elsewhere.commanded);
+    }
+
+    #[test]
+    fn staged_defences_cover_every_objective() {
+        let points = [point(0, 0.0, 0.0), point(1, 0.0, 200.0), point(2, 100.0, 200.0)];
+        let map = StrategicMap {
+            areas: build_areas(None, &points),
+            ..default()
+        };
+        let order = |area| SquadOrder {
+            kind: OrderKind::Defend,
+            area,
+            age: 0.0,
+            suggestion: false,
+            commanded: false,
+            point: None,
+        };
+        // Three squads all sent to B (under attack); C is uncovered.
+        let mut orders: HashMap<(Team, u8), SquadOrder> = HashMap::default();
+        for squad in 1..=3 {
+            orders.insert((Team::One, squad), order(1));
+        }
+        let objectives = [
+            Objective { area: 1, kind: OrderKind::Defend, value: 23.0 },
+            Objective { area: 2, kind: OrderKind::Defend, value: 8.0 },
+        ];
+        let squads = [
+            (1, Some(Vec3::new(0.0, 0.0, 190.0)), false),
+            (2, Some(Vec3::new(90.0, 0.0, 190.0)), false),
+            (3, Some(Vec3::new(10.0, 0.0, 190.0)), false),
+        ];
+        cover_defences(&mut orders, Team::One, &objectives, &squads, &map);
+        // The squad closest to C goes there; B keeps two.
+        assert_eq!(orders[&(Team::One, 2)].area, 2);
+        assert_eq!(orders.values().filter(|o| o.area == 1).count(), 2);
+        // A lone squad isn't taken off its objective.
+        let mut orders: HashMap<(Team, u8), SquadOrder> = HashMap::default();
+        orders.insert((Team::One, 1), order(1));
+        cover_defences(&mut orders, Team::One, &objectives, &squads[..1], &map);
+        assert_eq!(orders[&(Team::One, 1)].area, 1);
     }
 
     #[test]

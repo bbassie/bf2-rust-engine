@@ -63,13 +63,17 @@ pub struct CoverQuery<'a> {
     pub taken: &'a [Vec3],
     /// Wants somewhere to shoot from (not just to hide).
     pub fire: bool,
+    /// The walkable region the bot is in, if known (see `bots::walk_region`).
+    pub region: Option<u16>,
 }
 
 /// Finds cover (see the module docs). `rays` is decremented per ray cast; the search stops
 /// when it runs out.
 pub fn find(nav: &NavGrid, spatial: &SpatialQuery, q: &CoverQuery, rays: &mut u32) -> Option<CoverSpot> {
-    let start = nav.locate(q.from, 2.0, None)?;
-    let region = nav.cell(start).region;
+    let region = match q.region {
+        Some(region) => region,
+        None => nav.cell(nav.locate(q.from, 2.0, None)?).region,
+    };
     let from_threat = q.from.xz().distance(q.threat.xz());
     let toward = q.toward.map(|t| (t - q.from).with_y(0.0).normalize_or_zero());
     let mut candidates: Vec<(f32, Vec3, Vec2)> = Vec::new();

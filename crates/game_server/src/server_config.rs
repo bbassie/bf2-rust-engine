@@ -63,6 +63,14 @@
 //!     ranked: false,
 //!     master_api_key: "",
 //!     region: "eu",
+//!     // Loadouts: players pick their kit's primary weapon and sidearm from every weapon of
+//!     // its class, of any faction (true, the default), or play BF2's kits as they are.
+//!     arsenal: true,
+//!     // Only weapons that kits of the player's own team carry.
+//!     faction_locked_weapons: false,
+//!     // Unlock weapons need an account rank (ranked servers): the rank for BF2 1.5's unlocks,
+//!     // then for those of Special Forces and the booster packs. Empty: all unlocked.
+//!     unlock_ranks: [],
 //!     // Modes (`game_data::modes`): gpm_cq (conquest, the default), gpm_coop, gpm_rush,
 //!     // gpm_breakthrough, gpm_tdm, or short: conquest, coop, rush, bt, tdm. Rush and
 //!     // Breakthrough work on every level with a conquest layout.
@@ -137,6 +145,10 @@ pub struct ServerConfig {
     pub master_api_key: Option<String>,
     /// For the master's server list and quick join.
     pub region: String,
+    /// Loadouts (`game_shared::arsenal::LoadoutRules`).
+    pub arsenal: bool,
+    pub faction_locked_weapons: bool,
+    pub unlock_ranks: Vec<u32>,
     pub rotation: Vec<MapEntry>,
 }
 
@@ -177,6 +189,9 @@ impl Default for ServerConfig {
             ranked: false,
             master_api_key: None,
             region: String::new(),
+            arsenal: settings.loadouts.arsenal,
+            faction_locked_weapons: settings.loadouts.faction_locked,
+            unlock_ranks: settings.loadouts.unlock_ranks,
             rotation: Vec::new(),
         }
     }
@@ -271,6 +286,11 @@ impl ServerConfig {
                 api_key: self.master_api_key.filter(|k| !k.trim().is_empty()),
                 region: self.region,
             },
+            loadouts: game_shared::arsenal::LoadoutRules {
+                arsenal: self.arsenal,
+                faction_locked: self.faction_locked_weapons,
+                unlock_ranks: self.unlock_ranks,
+            },
         }
     }
 }
@@ -309,5 +329,6 @@ mod tests {
         assert_eq!(settings.accounts.master_key, None);
         assert_eq!(settings.accounts.region, "eu");
         assert_eq!(settings.admin.admins, vec!["id:42".to_string(), "alice".to_string()]);
+        assert!(settings.loadouts.arsenal && !settings.loadouts.faction_locked);
     }
 }

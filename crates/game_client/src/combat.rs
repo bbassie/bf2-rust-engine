@@ -9,7 +9,11 @@ use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 use bevy_replicon::prelude::*;
 use game_data::{FireKind, FireMode, WeaponDesc};
 use game_shared::{
-    hitzones::ServerClock,
+    hitzones::{BodyPose, ServerClock, SoldierImpact, ZoneHit},
+    revive::Downed,
+    skeleton::{self, AnimState, HitRigs},
+    soldier::Soldier,
+    vehicle::{Seated, VehicleData},
     input::{Buttons, InputPacket},
     physics::GameLayer,
     protocol::{HitConfirmed, KillFeed, Player, ShotFired},
@@ -46,7 +50,7 @@ impl Plugin for ClientCombatPlugin {
                 Update,
                 (
                     select_weapon,
-                    (spawn_local_shots, receive_shots, receive_hits, receive_kills),
+                    (spawn_local_shots, receive_shots, receive_hits, receive_kills, receive_soldier_impacts),
                     (update_tracers, update_impacts, apply_zoom),
                 )
                     .chain(),
@@ -56,33 +60,47 @@ impl Plugin for ClientCombatPlugin {
 
 /// The server tick of the world we see (other soldiers are shown
 /// [`INTERPOLATION_DELAY`] behind the latest state received), sent with every input so the
-/// server judges our hits against it. 0 when not connected to a remote server.
+/// server judges our hits against it. Hosting, the world drawn is between the last two ticks
+/// simulated, and our input reaches the server a tick or two later: it is judged against the
+/// tick drawn too. 0 without a server clock.
 #[derive(Resource, Default)]
 pub struct ViewTick {
     pub tick: u32,
+    /// The same, with the fraction of a tick: seconds on the server clock (for the idle
+    /// animations, which run on it).
+    pub seconds: f64,
     latest: u32,
     received: f64,
 }
 
 fn track_view_tick(
     real: Res<Time<Real>>,
+    fixed: Res<Time<Fixed>>,
     state: Res<State<ClientState>>,
     clock: Query<&ServerClock>,
     mut view: ResMut<ViewTick>,
 ) {
-    let (ClientState::Connected, Ok(clock)) = (state.get(), clock.single()) else {
+    let Ok(clock) = clock.single() else {
         *view = ViewTick::default();
         return;
     };
-    let now = real.elapsed_secs_f64();
-    if clock.0 != view.latest {
-        view.latest = clock.0;
-        view.received = now;
-    }
-    // What is on screen is from a moment before the latest state (which the server sent a
-    // little after the tick it counted).
-    let seconds = (now - view.received).min(0.05) - INTERPOLATION_DELAY;
-    view.tick = (clock.0 as i64 + (seconds * game_shared::TICK_HZ).round() as i64).max(1) as u32;
+    let tick = match state.get() {
+        ClientState::Connected => {
+            let now = real.elapsed_secs_f64();
+            if clock.0 != view.latest {
+                view.latest = clock.0;
+                view.received = now;
+            }
+            // What is on screen is from a moment before the latest state (which the server sent a
+            // little after the tick it counted).
+            let seconds = (now - view.received).min(0.05) - INTERPOLATION_DELAY;
+            clock.0 as f64 + seconds * game_shared::TICK_HZ
+        }
+        // Hosting: drawn between the last two ticks (see `prediction`).
+        _ => clock.0 as f64 - 1.0 + fixed.overstep_fraction() as f64,
+    };
+    view.tick = (tick.round() as i64).max(1) as u32;
+    view.seconds = tick / game_shared::TICK_HZ;
 }
 
 /// `BF2_SIM_INPUT_DELAY_MS`: our inputs are held back this long before they go to the
@@ -124,6 +142,17 @@ fn delay_inputs(real: Res<Time<Real>>, delay: Option<ResMut<InputDelay>>, mut pa
 #[derive(Resource, Default)]
 pub struct WeaponSelection {
     pub index: u8,
+    // --- Quick actions and the weapon list (quick_actions, weapon_list) ---
+    /// The melee or grenade key is at work: sent as `Buttons::QUICK`.
+    pub quick: bool,
+    /// The quick action works the trigger: `Some(true)` holds `Buttons::FIRE` (the grenade key
+    /// held, the knife swinging), `Some(false)` lets go of it (so the swing or throw starts
+    /// with a fresh press once the knife or grenade is out), `None` leaves it to the player.
+    pub quick_fire: Option<bool>,
+    /// Counts the player's weapon switches (keys, wheel, quick actions), for the weapon
+    /// list to show up.
+    pub switches: u32,
+    // --- end quick actions ---
 }
 
 /// Recent combat events for the HUD.
@@ -150,6 +179,8 @@ pub struct CombatFeedback {
     pub fuse: Option<f32>,
     /// The C4 detonator is in our hand instead of the charges (predicted).
     pub detonator: bool,
+    /// A released throw is on its way out of our hand (predicted; `quick_actions`).
+    pub launching: bool,
 }
 
 impl Default for CombatFeedback {
@@ -166,6 +197,7 @@ impl Default for CombatFeedback {
             cooking: false,
             fuse: None,
             detonator: false,
+            launching: false,
         }
     }
 }
@@ -189,6 +221,8 @@ const TOGGLE_WHEN_USED_UP: f32 = 0.8;
 /// A shot we predicted this tick, spawned as visuals in `Update` (and heard, see `audio`).
 #[derive(Message)]
 pub(crate) struct LocalShot {
+    /// Where the server's bullet starts: our eye (plus the weapon's start offset).
+    pub origin: Vec3,
     pub direction: Vec3,
     pub weapon: Arc<WeaponDesc>,
     /// Which of a shotgun's pellets this is (0 for everything else).
@@ -216,11 +250,19 @@ pub(crate) struct EffectAssets {
 
 #[derive(Component)]
 struct Tracer {
+    /// Where the bullet is: on the server's path (from the eye), which is what it can hit.
+    position: Vec3,
+    /// Drawn this far off `position` at first (from the muzzle), closing in over
+    /// [`TRACER_CONVERGE`] meters.
+    offset: Vec3,
+    travelled: f32,
     velocity: Vec3,
     gravity: f32,
     life: f32,
     /// The shooter's hitbox, which the tracer may start inside of.
     ignore: Option<Entity>,
+    /// The shooting soldier, whose hit zones it can't hit.
+    shooter: Option<Entity>,
     /// Projectile material, for the impact effect and the mark it leaves.
     material: u32,
     /// Shells that go off where they hit: the server plays the detonation (`PlayEffect`),
@@ -274,6 +316,7 @@ fn init_local_weapon(
 
 fn select_weapon(
     actions: crate::settings::Actions,
+    settings: Res<crate::settings::Settings>,
     scroll: Res<AccumulatedMouseScroll>,
     armory: Res<Armory>,
     soldier: Query<&Loadout, With<LocalSoldier>>,
@@ -282,25 +325,19 @@ fn select_weapon(
     let Ok(loadout) = soldier.single() else {
         return;
     };
-    let count = loadout.weapons.len() as u8;
-    if count == 0 {
+    // What can be taken in hand, in slot order (the weapon list's order): no worn gear (night
+    // vision, gas mask: keys of their own), no parachute.
+    let order = crate::weapon_list::weapon_order(loadout, &armory);
+    if order.is_empty() {
         return;
     }
-    // Worn gear (night vision, gas mask) has keys of its own and is never held.
-    let slot_of = |index: u8| {
-        loadout
-            .weapons
-            .get(index as usize)
-            .and_then(|w| armory.weapon(w))
-            .filter(|w| !w.worn)
-            .map_or(0, |w| w.slot)
-    };
+    let before = selection.index;
     // Number keys pick a BF2 inventory slot; pressing again cycles weapons in that slot.
     for slot in 1..=9 {
         if !actions.just_pressed(crate::settings::Action::WeaponSlot(slot as u8)) {
             continue;
         }
-        let in_slot: Vec<u8> = (0..count).filter(|&w| slot_of(w) == slot).collect();
+        let in_slot: Vec<u8> = order.iter().filter(|(_, w)| w.slot == slot).map(|(i, _)| *i).collect();
         if let Some(&first) = in_slot.first() {
             let current = in_slot.iter().position(|&w| w == selection.index);
             selection.index = match current {
@@ -309,18 +346,30 @@ fn select_weapon(
             };
         }
     }
-    let step = match scroll.delta.y {
+    // The wheel steps through the list; the knife and grenades have their quick keys unless
+    // the setting puts them back in.
+    let wheel: Vec<u8> = order
+        .iter()
+        .filter(|(i, w)| {
+            settings.scroll_quick_weapons || *i == selection.index || !(w.is_melee() || w.is_hand_grenade())
+        })
+        .map(|(i, _)| *i)
+        .collect();
+    let step: isize = match scroll.delta.y {
         y if y < 0.0 => 1,
-        y if y > 0.0 => count - 1,
-        _ => return,
+        y if y > 0.0 => -1,
+        _ => 0,
     };
-    let mut index = selection.index;
-    for _ in 0..count {
-        index = (index + step) % count;
-        if slot_of(index) != 0 {
-            selection.index = index;
-            return;
-        }
+    if step != 0 && !wheel.is_empty() {
+        let len = wheel.len() as isize;
+        let next = match wheel.iter().position(|&i| i == selection.index) {
+            Some(pos) => (pos as isize + step).rem_euclid(len),
+            None => 0,
+        };
+        selection.index = wheel[next as usize];
+    }
+    if selection.index != before || step != 0 || (1..=9).any(|s| actions.just_pressed(crate::settings::Action::WeaponSlot(s))) {
+        selection.switches = selection.switches.wrapping_add(1);
     }
 }
 
@@ -354,7 +403,7 @@ fn predict_local_shots(
     let local = &mut *local;
     if local.selected != active {
         local.selected = active;
-        local.state.switch_to(&weapon);
+        local.state.switch_with(&weapon, input.pressed(Buttons::QUICK));
     }
     if inventory.is_changed() || local.ammo.len() != inventory.ammo.len() {
         local.ammo = inventory.ammo.clone();
@@ -406,6 +455,7 @@ fn predict_local_shots(
     let released = launching && !local.launching;
     let launched = matches!(fired, Some(Fired::Launch { .. })) && !local.launching;
     local.launching = launching;
+    feedback.launching = launching;
     // The detonator's press animates like a shot.
     if released || launched || fired == Some(Fired::Detonate) {
         feedback.shots_fired = feedback.shots_fired.wrapping_add(1);
@@ -415,6 +465,8 @@ fn predict_local_shots(
     };
     let view = Quat::from_euler(EulerRot::YXZ, input.yaw, input.pitch, 0.0);
     let direction = spread_direction(view * Vec3::NEG_Z, cone, (fastrand::f32(), fastrand::f32()));
+    let eye = predicted.map_or(motion, |p| p.motion()).eye_position();
+    let origin = eye + view * Vec3::from(weapon.fire.start_offset);
     let pellets = weapon.projectiles_per_shot.max(1);
     for pellet in 0..pellets {
         let direction = match pellets {
@@ -422,6 +474,7 @@ fn predict_local_shots(
             _ => spread_direction(direction, weapon.pellet_spread, (fastrand::f32(), fastrand::f32())),
         };
         shots.write(LocalShot {
+            origin,
             direction,
             weapon: weapon.clone(),
             pellet,
@@ -451,12 +504,34 @@ pub(crate) fn spawn_tracer(
     direction: Vec3,
     weapon: &WeaponDesc,
     ignore: Option<Entity>,
-) {
+) -> Option<Entity> {
+    spawn_tracer_from(commands, assets, origin, origin, direction, weapon, ignore, None)
+}
+
+/// Meters over which a tracer drawn from the muzzle closes in on the bullet's path.
+const TRACER_CONVERGE: f32 = 15.0;
+
+/// A tracer for a bullet from `origin`, drawn from `drawn` at first.
+#[allow(clippy::too_many_arguments)]
+fn spawn_tracer_from(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    origin: Vec3,
+    drawn: Vec3,
+    direction: Vec3,
+    weapon: &WeaponDesc,
+    ignore: Option<Entity>,
+    shooter: Option<Entity>,
+) -> Option<Entity> {
     if weapon.projectile.velocity <= 0.0 {
-        return;
+        return None;
     }
-    commands.spawn((
+    let tracer = commands.spawn((
         Tracer {
+            position: origin,
+            offset: drawn - origin,
+            travelled: 0.0,
+            shooter,
             velocity: direction * weapon.projectile.velocity,
             gravity: weapon.projectile.gravity,
             life: weapon.projectile.time_to_live.min(3.0),
@@ -466,10 +541,15 @@ pub(crate) fn spawn_tracer(
         },
         Mesh3d(assets.tracer.clone()),
         MeshMaterial3d(assets.tracer_material.clone()),
-        Transform::from_translation(origin).looking_to(direction, Vec3::Y),
+        Transform::from_translation(drawn).looking_to(direction, Vec3::Y),
         bevy::light::NotShadowCaster,
     ));
+    Some(tracer.id())
 }
+
+/// A tracer of our own shot (for `BF2_HITREG_LOG`).
+#[derive(Component)]
+struct LocalTracer;
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_local_shots(
@@ -480,19 +560,32 @@ fn spawn_local_shots(
     library: Option<Res<EffectLibrary>>,
     zoom: Res<Zoom>,
     third_person: Res<ThirdPerson>,
-    soldier: Query<(&SoldierMotion, &Hitbox), With<LocalSoldier>>,
+    soldier: Query<(Entity, &SoldierMotion, &Hitbox), With<LocalSoldier>>,
     weapon_parts: Query<(&WeaponPart, &GlobalTransform)>,
     mut effects: MessageWriter<SpawnEffect>,
 ) {
     let soldier = soldier.single().ok();
     let library = library.as_deref();
     for shot in shots.read() {
-        // From roughly where the muzzle is, just below and right of the eye.
+        // Drawn from roughly where the muzzle is, just below and right of the eye; the bullet
+        // itself flies from the eye, as on the server.
         let origin = camera.translation + camera.rotation * Vec3::new(0.12, -0.1, -0.4);
-        let hitbox = soldier.map(|(_, hitbox)| hitbox.entity);
+        let hitbox = soldier.map(|(_, _, hitbox)| hitbox.entity);
+        let logical = if game_shared::hitzones::legacy() { origin } else { shot.origin };
         // Grenades, rockets and charges are drawn as themselves (`render::projectiles`).
-        if !shot.weapon.projectile.is_object() {
-            spawn_tracer(&mut commands, &assets, origin, shot.direction, &shot.weapon, hitbox);
+        if !shot.weapon.projectile.is_object()
+            && let Some(tracer) = spawn_tracer_from(
+                &mut commands,
+                &assets,
+                logical,
+                origin,
+                shot.direction,
+                &shot.weapon,
+                hitbox,
+                soldier.map(|(entity, ..)| entity),
+            )
+        {
+            commands.entity(tracer).insert(LocalTracer);
         }
         // Shotguns fire several pellets but flash once.
         if shot.pellet > 0 {
@@ -502,7 +595,7 @@ fn spawn_local_shots(
             continue;
         };
         if third_person.0 {
-            if let Some((motion, _)) = soldier {
+            if let Some((_, motion, _)) = soldier {
                 let at = motion.eye_position() - Vec3::Y * 0.15 + shot.direction * 0.8;
                 effects.write(SpawnEffect::new(muzzle, at).with_forward(shot.direction));
             }
@@ -537,10 +630,20 @@ fn receive_shots(
         let Some(weapon) = loadout.weapons.get(shot.weapon as usize).and_then(|w| armory.weapon(w)) else {
             continue;
         };
-        // Tracer from the gun rather than the eye.
+        // Drawn from the gun rather than the eye (the bullet flies from the eye).
         let gun = shot.origin - Vec3::Y * 0.15;
+        let logical = if game_shared::hitzones::legacy() { gun } else { shot.origin };
         if !weapon.projectile.is_object() {
-            spawn_tracer(&mut commands, &assets, gun, shot.direction, weapon, hitbox.map(|h| h.entity));
+            spawn_tracer_from(
+                &mut commands,
+                &assets,
+                logical,
+                gun,
+                shot.direction,
+                weapon,
+                hitbox.map(|h| h.entity),
+                Some(shot.soldier),
+            );
         }
         // Shotguns fire several pellets but flash once.
         if flashed.contains(&shot.soldier) {
@@ -599,6 +702,100 @@ pub fn weapon_display_name(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
 }
 
+/// Where a soldier's hit zones are as drawn now: the pose the server judges the shots
+/// against that were fired looking at this moment (see `ViewTick`).
+pub(crate) fn drawn_body_pose(render: &SoldierRender, inventory: Option<&Inventory>, seated: bool, view: &ViewTick) -> BodyPose {
+    let on_foot = render.grounded && !render.climbing && !render.riding && !render.parachute && !render.swimming;
+    let anim = (on_foot && !seated && !game_shared::hitzones::legacy()).then(|| AnimState {
+        stance: render.stance,
+        velocity: skeleton::local_velocity(render.yaw, render.velocity),
+        stride: render.stride,
+        clock: skeleton::clock(view.seconds),
+        reload: inventory.and_then(|i| skeleton::reload_elapsed(i.reloading, i.reload_started, view.seconds)),
+        weapon: inventory.map_or(0, |i| i.active),
+    });
+    BodyPose {
+        position: render.position,
+        yaw: render.yaw,
+        stance: if seated { game_shared::soldier::Stance::Crouching } else { render.stance },
+        anim,
+    }
+}
+
+/// Soldiers bullets can hit, as drawn: for the tracers, the hit zone overlay and checks.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct DrawnTargets<'w, 's> {
+    soldiers: Query<
+        'w,
+        's,
+        (Entity, &'static SoldierRender, &'static Loadout, Option<&'static Inventory>, Option<&'static Seated>),
+        (With<Soldier>, Without<Downed>),
+    >,
+    vehicles: Query<'w, 's, &'static VehicleData>,
+    armory: Res<'w, Armory>,
+    rigs: Res<'w, HitRigs>,
+    view: Res<'w, ViewTick>,
+}
+
+/// A soldier's hit zones as drawn this frame; its bones are posed once, for the first ray
+/// passing near.
+pub(crate) struct DrawnTarget<'a> {
+    pub entity: Entity,
+    pub pose: BodyPose,
+    pub zones: &'a [game_data::HitZone],
+    loadout: &'a Loadout,
+    bones: std::cell::OnceCell<Option<skeleton::Pose>>,
+}
+
+impl DrawnTargets<'_, '_> {
+    /// Every soldier the server lets bullets hit: not critically wounded, not inside a closed
+    /// vehicle.
+    pub(crate) fn collect(&self) -> Vec<DrawnTarget<'_>> {
+        self.soldiers
+            .iter()
+            .filter(|(.., seated)| {
+                seated.is_none_or(|s| {
+                    self.vehicles
+                        .get(s.vehicle)
+                        .is_ok_and(|v| v.0.desc.seats.get(s.seat as usize).is_some_and(|seat| seat.open))
+                })
+            })
+            .map(|(entity, render, loadout, inventory, seated)| DrawnTarget {
+                entity,
+                pose: drawn_body_pose(render, inventory, seated.is_some(), &self.view),
+                zones: self.armory.hit_zones(&loadout.kit),
+                loadout,
+                bones: std::cell::OnceCell::new(),
+            })
+            .collect()
+    }
+
+    /// The bones of a target, posed (`None`: its zones keep their stance's pose).
+    pub(crate) fn bones<'a>(&self, target: &'a DrawnTarget) -> Option<&'a skeleton::Pose> {
+        target
+            .bones
+            .get_or_init(|| {
+                let anim = target.pose.anim?;
+                self.rigs.pose(&target.loadout.kit, target.loadout, &self.armory, &anim)
+            })
+            .as_ref()
+    }
+
+    /// A zone's capsule ends.
+    pub(crate) fn capsule(&self, target: &DrawnTarget, zone: &game_data::HitZone) -> (Vec3, Vec3) {
+        target.pose.posed_capsule(zone, self.bones(target))
+    }
+
+    /// The nearest zone of a target a ray meets.
+    pub(crate) fn ray(&self, target: &DrawnTarget, origin: Vec3, direction: Vec3, max: f32) -> Option<ZoneHit> {
+        if !target.pose.near(origin, direction, max) {
+            return None;
+        }
+        let bones = self.bones(target).copied();
+        target.pose.ray_posed(target.zones, || bones, origin, direction, max)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_tracers(
     mut commands: Commands,
@@ -610,11 +807,20 @@ fn update_tracers(
     surfaces: SurfaceQuery,
     mut effects: MessageWriter<SpawnEffect>,
     mut marks: MessageWriter<SpawnDecal>,
-    mut tracers: Query<(Entity, &mut Tracer, &mut Transform)>,
+    mut tracers: Query<(Entity, &mut Tracer, &mut Transform, Has<LocalTracer>)>,
+    drawn: DrawnTargets,
 ) {
     let dt = time.delta_secs();
-    let layers = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier]);
-    for (entity, mut tracer, mut transform) in &mut tracers {
+    let legacy = game_shared::hitzones::legacy();
+    // Bullets meet the world and vehicles as on the server, and soldiers in their hit zones
+    // as drawn (the pose the server judges them against).
+    let layers = if legacy {
+        SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier])
+    } else {
+        SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
+    };
+    let targets = if legacy || tracers.is_empty() { Vec::new() } else { drawn.collect() };
+    for (entity, mut tracer, mut transform, local) in &mut tracers {
         let filter = match tracer.ignore {
             Some(hitbox) => layers.clone().with_excluded_entities([hitbox]),
             None => layers.clone(),
@@ -624,16 +830,42 @@ fn update_tracers(
         let gravity = tracer.gravity;
         tracer.velocity += Vec3::NEG_Y * 9.81 * gravity * dt;
         let step = (start + tracer.velocity) * 0.5 * dt;
-        let hit = Dir3::new(step)
+        let from = tracer.position;
+        let direction = step.normalize_or_zero();
+        let world = Dir3::new(step)
             .ok()
-            .and_then(|dir| spatial.cast_ray(transform.translation, dir, step.length(), true, &filter));
-        if let Some(hit) = hit {
+            .and_then(|dir| spatial.cast_ray(from, dir, step.length(), true, &filter));
+        let soldier = targets
+            .iter()
+            .filter(|t| Some(t.entity) != tracer.shooter)
+            .filter_map(|t| Some((t, drawn.ray(t, from, direction, step.length())?)))
+            .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
+            .filter(|(_, hit)| world.is_none_or(|w| hit.distance < w.distance));
+        if let Some((target, hit)) = soldier {
+            // A predicted hit: the tracer stops in the body. The blood comes from the server
+            // (`SoldierImpact`), where it really hit.
+            if local && game_shared::hitzones::hitreg_log() {
+                info!(
+                    "hitreg tracer: hit {:?} (material {}) zone {} at {:.3}",
+                    target.entity,
+                    hit.material,
+                    target.zones.get(hit.zone).map_or("?", |z| z.bone.as_str()),
+                    hit.point
+                );
+            }
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if let Some(hit) = world {
             commands.entity(entity).despawn();
             if tracer.detonates {
                 continue;
             }
-            let point = transform.translation + step.normalize() * hit.distance;
+            let point = from + direction * hit.distance;
             let surface = surfaces.material(hit.entity, point);
+            if local && game_shared::hitzones::hitreg_log() {
+                info!("hitreg tracer: hit {:?} (material {surface}) at {point:.3}", hit.entity);
+            }
             if let (Some(parent), Some(name)) = (
                 surfaces.decal_surface(hit.entity),
                 decals.as_ref().and_then(|d| d.decal(tracer.material, surface)),
@@ -645,31 +877,77 @@ fn update_tracers(
                     parent,
                 });
             }
-            match library.as_ref().map(|l| (l.impact(tracer.material, surface), l.impacts.effects.is_empty())) {
-                Some((Some(name), _)) => {
-                    effects.write(SpawnEffect::new(name, point).with_up(hit.normal));
-                }
-                // BF2 has no effect for this projectile on this surface.
-                Some((None, false)) => {}
-                // Without imported effects: a puff.
-                _ => {
-                    commands.spawn((
-                        Impact { age: 0.0 },
-                        Mesh3d(assets.impact.clone()),
-                        MeshMaterial3d(assets.impact_material.clone()),
-                        Transform::from_translation(point).with_scale(Vec3::splat(0.3)),
-                        bevy::light::NotShadowCaster,
-                    ));
-                }
-            }
+            spawn_impact(&mut commands, &assets, library.as_deref(), &mut effects, tracer.material, surface, point, hit.normal);
             continue;
         }
         if tracer.life <= 0.0 {
+            if local && game_shared::hitzones::hitreg_log() {
+                info!("hitreg tracer: nothing hit");
+            }
             commands.entity(entity).despawn();
             continue;
         }
-        transform.translation += step;
+        tracer.position += step;
+        tracer.travelled += step.length();
+        let converge = (1.0 - tracer.travelled / TRACER_CONVERGE).max(0.0);
+        transform.translation = tracer.position + tracer.offset * converge;
         transform.look_to(step, Vec3::Y);
+    }
+}
+
+/// The impact effect of a projectile material on a surface material.
+#[allow(clippy::too_many_arguments)]
+fn spawn_impact(
+    commands: &mut Commands,
+    assets: &EffectAssets,
+    library: Option<&EffectLibrary>,
+    effects: &mut MessageWriter<SpawnEffect>,
+    projectile: u32,
+    surface: u32,
+    point: Vec3,
+    normal: Vec3,
+) {
+    match library.map(|l| (l.impact(projectile, surface), l.impacts.effects.is_empty())) {
+        Some((Some(name), _)) => {
+            effects.write(SpawnEffect::new(name, point).with_up(normal));
+        }
+        // BF2 has no effect for this projectile on this surface.
+        Some((None, false)) => {}
+        // Without imported effects: a puff.
+        _ => {
+            commands.spawn((
+                Impact { age: 0.0 },
+                Mesh3d(assets.impact.clone()),
+                MeshMaterial3d(assets.impact_material.clone()),
+                Transform::from_translation(point).with_scale(Vec3::splat(0.3)),
+                bevy::light::NotShadowCaster,
+            ));
+        }
+    }
+}
+
+/// The blood where the server says a bullet hit a soldier.
+fn receive_soldier_impacts(
+    mut commands: Commands,
+    mut impacts: MessageReader<SoldierImpact>,
+    assets: Res<EffectAssets>,
+    library: Option<Res<EffectLibrary>>,
+    mut effects: MessageWriter<SpawnEffect>,
+) {
+    for impact in impacts.read() {
+        if game_shared::hitzones::legacy() {
+            continue;
+        }
+        spawn_impact(
+            &mut commands,
+            &assets,
+            library.as_deref(),
+            &mut effects,
+            impact.projectile,
+            impact.body_part,
+            impact.point,
+            impact.normal,
+        );
     }
 }
 

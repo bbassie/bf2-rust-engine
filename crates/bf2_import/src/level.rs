@@ -20,7 +20,7 @@ use game_data::{
 use glam::{Affine3A, Vec3};
 use rayon::prelude::*;
 
-use crate::{audio, coords, destruction, lods, meshes::MeshConverter, roads, terrain, vehicles, weapons};
+use crate::{audio, coords, destruction, lods, meshes::MeshConverter, roads, soldiers, terrain, vehicles, weapons};
 
 pub struct LevelReport {
     pub statics: usize,
@@ -109,6 +109,9 @@ pub fn import_level(
         .collect();
     let (kit_count, weapon_count) =
         weapons::import(&mut interp, &converter, localization, &kit_names, out)?;
+    // Each kit's own look (vest, pack, helmet, ghillie suit, ...) over the plain body BF2
+    // assigned it above: without this every class renders as the same bare soldier.
+    soldiers::import_kit_gear(&vfs, &converter, &mut level_teams, out);
     let flag_models = flag_models(&mut interp, &vfs, &converter, out);
 
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)

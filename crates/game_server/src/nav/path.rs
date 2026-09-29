@@ -115,8 +115,16 @@ impl NavGrid {
     /// [`Self::find_path`] around the cells parked vehicles stand on. A goal on such a cell
     /// (a vehicle's door) snaps to the nearest free one.
     pub fn find_path_avoiding(&self, from: Vec3, to: Vec3, blocked: Option<&NavBlocked>) -> Option<NavPath> {
-        let start = self
-            .locate(from, 2.5, None)
+        self.find_path_from(from, None, to, blocked)
+    }
+
+    /// [`Self::find_path_avoiding`] starting in walkable region `region` if a cell of it is
+    /// near `from` (a soldier beside a thin wall is nearer to cells on its other side, a
+    /// closed room, than to those it stands on; see `bots::walk_region`).
+    pub fn find_path_from(&self, from: Vec3, region: Option<u16>, to: Vec3, blocked: Option<&NavBlocked>) -> Option<NavPath> {
+        let start = region
+            .and_then(|r| self.locate(from, 2.5, Some(r)))
+            .or_else(|| self.locate(from, 2.5, None))
             .or_else(|| self.locate(from, 6.0, None))?;
         let region = self.cell(start).region;
         let free = |index: u32| blocked.is_none_or(|b| !b.contains(index));

@@ -70,6 +70,7 @@ impl Plugin for ProtocolPlugin {
             .add_mapped_server_message::<KillFeed>(Channel::Ordered)
             .add_mapped_server_message::<VehicleShot>(Channel::Unreliable)
             .add_server_message::<crate::effects::PlayEffect>(Channel::Unordered)
+            .add_server_message::<crate::hitzones::SoldierImpact>(Channel::Unreliable)
             .add_client_message::<crate::chat::ChatRequest>(Channel::Ordered)
             .add_server_message::<crate::chat::ChatLine>(Channel::Ordered)
             .add_server_message::<crate::chat::Kicked>(Channel::Ordered)
@@ -103,6 +104,11 @@ impl Plugin for ProtocolPlugin {
             .add_server_message::<crate::join::JoinVerdict>(Channel::Ordered)
             .make_message_independent::<crate::join::JoinChallenge>()
             .make_message_independent::<crate::join::JoinVerdict>()
+            // Loadouts (`crate::arsenal`): the server's rules on the match, each player's
+            // accepted picks, and the picks a client asks for.
+            .replicate::<crate::arsenal::LoadoutRules>()
+            .replicate::<crate::arsenal::LoadoutPicks>()
+            .add_client_message::<crate::arsenal::LoadoutRequest>(Channel::Ordered)
             // Voice chat (`crate::voice`): each message gets a renet channel of its own, so
             // these are dedicated unreliable channels, registered after the game's so they
             // come last when a packet is filled. The relay holds no entities: out right away.

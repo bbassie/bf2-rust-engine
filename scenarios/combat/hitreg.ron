@@ -1,0 +1,82 @@
+// Hit registration on a listen server: the one bot becomes a target dummy 8 m in front of us
+// (`game_server::dummy`) and takes one pose after the other. In each we check every frame which
+// hit zones rays through points of its drawn body meet (`HitGeometry`: head, chest, arms, legs
+// and the gun), then fire single shots at those points (`ShootAt`); the log has each shot as
+// seen here, the tracer's impact and the server's verdict (`hitreg ...` lines).
+// BF2_NO_SPREAD=1 BF2_HITREG_LOG=1 BF2_SHOW_HITZONES=1 client --scenario scenarios/combat/hitreg.ron
+// python scripts/hitreg_report.py <client log>
+(
+    level: "strike_at_karkand",
+    bots: 1,
+    team: 1,
+    steps: [
+        Dummy("stand"),
+        WaitReady,
+        Teleport((-184.0, 157.0, -85.0), 90.0, 0.0),
+        Wait(3.0),
+        ExpectLog("dummy: ", 10.0),
+        Screenshot("stand"),
+        HitGeometry("stand", 3.0),
+        ShootAt("stand", "all", 22),
+
+        Dummy("stand@90"),
+        Wait(1.5),
+        Screenshot("stand_side"),
+        HitGeometry("side", 3.0),
+        ShootAt("side", "all", 11),
+
+        Dummy("aim"),
+        Wait(1.5),
+        Screenshot("aim"),
+        HitGeometry("aim", 3.0),
+        ShootAt("aim", "all", 11),
+
+        Dummy("crouch"),
+        Wait(1.5),
+        Screenshot("crouch"),
+        HitGeometry("crouch", 3.0),
+        ShootAt("crouch", "all", 22),
+
+        Dummy("prone"),
+        Wait(2.0),
+        Screenshot("prone"),
+        HitGeometry("prone", 3.0),
+        ShootAt("prone", "all", 22),
+
+        Dummy("strafe"),
+        Wait(1.5),
+        Screenshot("strafe"),
+        HitGeometry("strafe", 4.0),
+        ShootAt("strafe", "all", 33),
+
+        Dummy("crouchstrafe"),
+        Wait(1.5),
+        Screenshot("crouchstrafe"),
+        HitGeometry("crouchstrafe", 4.0),
+        ShootAt("crouchstrafe", "all", 22),
+
+        Dummy("walk"),
+        Wait(1.5),
+        HitGeometry("walk", 4.0),
+        ShootAt("walk", "all", 22),
+
+        Dummy("reload"),
+        Wait(0.8),
+        Screenshot("reload"),
+        HitGeometry("reload", 4.0),
+        ShootAt("reload", "all", 22),
+
+        Dummy("fire"),
+        Wait(1.0),
+        Screenshot("fire"),
+        HitGeometry("fire", 3.0),
+        ShootAt("fire", "all", 22),
+
+        Dummy("turn"),
+        Wait(1.0),
+        HitGeometry("turn", 4.0),
+        ShootAt("turn", "all", 22),
+
+        Quit,
+    ],
+)

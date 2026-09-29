@@ -11,18 +11,223 @@
 //! smaller font, then a line further away, and is left out when nothing fits. Labels of
 //! higher priority (control points) go first, and a label pushed away gets a spot next to its
 //! icon back when the one label in the way can move to another spot next to its own.
+//!
+//! [`MapView`] is the pan and zoom shared by every map that can be zoomed (the deploy screen,
+//! the big map, the commander screen): each keeps its own `MapView` and resizes/repositions a
+//! single content node (the map image; markers and clicks are its children, positioned by
+//! `left`/`top` percent or `RelativeCursorPosition`) to show it, so nothing else has to know
+//! about zoom at all: percent-positioned markers keep a constant on-screen size (their own
+//! size is in pixels, not percent) and stay lined up with the image because both scale off the
+//! same resized node, `RelativeCursorPosition::normalized` on that node already is the map's
+//! UV (it's relative to the node's whole, unclipped box), and a marker's label offsets stay
+//! valid at every zoom because zooming is a uniform scale: distances between markers only ever
+//! grow, so a `place_labels` layout that didn't overlap at 1x can't start overlapping zoomed in.
+//! [`drive_map_view`] reads the shared mouse/keyboard/gamepad input.
 
 use bevy::{
     ecs::system::SystemParam,
+    input::{
+        gamepad::{Gamepad, GamepadButton},
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    },
     platform::collections::HashMap,
     prelude::*,
     render::render_resource::{AsBindGroup, ShaderType},
     shader::ShaderRef,
-    ui::FocusPolicy,
+    ui::{FocusPolicy, RelativeCursorPosition},
     ui_render::prelude::{MaterialNode, UiMaterial, UiMaterialPlugin},
 };
 
 use crate::{camera::CameraSystems, prediction::RenderStateSystems, vehicles::VehicleViewSystems};
+
+/// Pan and zoom for a map, in map UV space (0..1) so callers never need to know a frame's
+/// pixel size except to resize/reposition the one content node that shows it
+/// ([`MapView::content_rect`]): `center` is the UV shown at the frame's middle, `zoom` from 1
+/// (the whole map) to [`MAX_ZOOM`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapView {
+    pub zoom: f32,
+    pub center: Vec2,
+}
+
+impl Default for MapView {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            center: Vec2::splat(0.5),
+        }
+    }
+}
+
+/// Enough to place a spawn precisely on a big map (Gulf of Oman, the AIX maps).
+pub const MAX_ZOOM: f32 = 4.0;
+
+/// Wheel zoom rate per line of scroll.
+const WHEEL_ZOOM_RATE: f32 = 0.18;
+/// Zoom multiplier per second while a zoom key (or a trigger, fully pressed) is held.
+const KEY_ZOOM_RATE: f32 = 1.8;
+/// Keyboard/gamepad-stick pan speed, logical pixels/second (of the content at its current
+/// zoom, like dragging: covers less of the map per second zoomed in).
+const KEY_PAN_SPEED: f32 = 420.0;
+const DOUBLE_CLICK_SECS: f32 = 0.35;
+const DOUBLE_CLICK_UV: f32 = 0.05;
+
+impl MapView {
+    fn half_extent(&self) -> f32 {
+        0.5 / self.zoom
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Keeps the zoom in range and the view from panning past the map's edge.
+    pub fn clamp(&mut self) {
+        self.zoom = self.zoom.clamp(1.0, MAX_ZOOM);
+        let half = self.half_extent();
+        self.center = self.center.clamp(Vec2::splat(half), Vec2::splat(1.0 - half));
+    }
+
+    /// Left/top and width/height, logical pixels, to show this view in a `frame`-sized node:
+    /// what callers set a content node's [`Node`] to every frame it (or the frame) changes.
+    pub fn content_rect(&self, frame: Vec2) -> (Vec2, Vec2) {
+        let size = frame * self.zoom;
+        (frame * 0.5 - self.center * size, size)
+    }
+
+    /// Zooms by this factor (>1 in, <1 out), keeping `anchor_uv` (the cursor, or the current
+    /// center without one) under the same screen point.
+    pub fn zoom_at(&mut self, factor: f32, anchor_uv: Vec2) {
+        let old_zoom = self.zoom;
+        self.zoom = (old_zoom * factor).clamp(1.0, MAX_ZOOM);
+        self.center = anchor_uv - (anchor_uv - self.center) * (old_zoom / self.zoom);
+        self.clamp();
+    }
+
+    /// Pans so the map moves by this share of the map (like dragging it with the mouse:
+    /// positive x/y drags the map right/down, revealing more of its left/top).
+    pub fn pan_uv(&mut self, delta: Vec2) {
+        self.center -= delta;
+        self.clamp();
+    }
+}
+
+/// Resizes/repositions a zoomable map's content node to show `view` in a `frame`-sized
+/// viewport, touching `node` only if something actually moved: an unconditionally-changed
+/// `Node` lays out the whole UI tree again every frame, even while the view never changes
+/// (see `docs/ARCHITECTURE.md`'s performance notes).
+pub fn apply_map_view(node: &mut Node, view: MapView, frame: Vec2) {
+    let (left, size) = view.content_rect(frame);
+    let (left, top, width, height) = (px(left.x), px(left.y), px(size.x), px(size.y));
+    if node.left != left || node.top != top || node.width != width || node.height != height {
+        node.left = left;
+        node.top = top;
+        node.width = width;
+        node.height = height;
+    }
+}
+
+/// Continuous zoom (>0 in, <0 out) and pan direction (screen right/down positive) from `+`/`-`
+/// (or a gamepad's triggers) and the arrow keys (or its left stick), for [`drive_map_view`].
+/// Only the most active gamepad is read (see `settings::gamepad_activity`), the same one
+/// `menu::input::gamepad_menu_nav` would.
+fn map_view_keys(keys: &ButtonInput<KeyCode>, gamepads: &Query<&Gamepad>) -> (f32, Vec2) {
+    let mut zoom = 0.0;
+    if keys.pressed(KeyCode::Equal) || keys.pressed(KeyCode::NumpadAdd) {
+        zoom += 1.0;
+    }
+    if keys.pressed(KeyCode::Minus) || keys.pressed(KeyCode::NumpadSubtract) {
+        zoom -= 1.0;
+    }
+    let mut pan = Vec2::ZERO;
+    if keys.pressed(KeyCode::ArrowLeft) {
+        pan.x -= 1.0;
+    }
+    if keys.pressed(KeyCode::ArrowRight) {
+        pan.x += 1.0;
+    }
+    if keys.pressed(KeyCode::ArrowUp) {
+        pan.y -= 1.0;
+    }
+    if keys.pressed(KeyCode::ArrowDown) {
+        pan.y += 1.0;
+    }
+    if let Some(gamepad) = gamepads
+        .iter()
+        .max_by(|a, b| crate::settings::gamepad_activity(a).total_cmp(&crate::settings::gamepad_activity(b)))
+    {
+        zoom += gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0) - gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
+        let stick = gamepad.left_stick();
+        if stick.length() > 0.2 {
+            pan += Vec2::new(stick.x, -stick.y);
+        }
+    }
+    (zoom.clamp(-1.0, 1.0), pan.clamp_length_max(1.0))
+}
+
+/// Whether a left click at `uv` (the map UV under the cursor) is a double click on the last one
+/// recorded in `last`, which this then updates: shared so the deploy screen, the big map and
+/// the commander screen all reset the same way. Call only on an actual left click.
+pub fn is_double_click(now: f32, uv: Vec2, last: &mut Option<(f32, Vec2)>) -> bool {
+    let double = last.is_some_and(|(t, at)| now - t < DOUBLE_CLICK_SECS && at.distance(uv) < DOUBLE_CLICK_UV);
+    *last = Some((now, uv));
+    double
+}
+
+/// Applies the mouse wheel (zooms around the cursor), a right or middle drag (panning stays
+/// while held even if the cursor slips off the map), `+`/`-`/the triggers, the arrows/the
+/// stick, and a double left click (resets), to `view`. `cursor` must be the
+/// [`RelativeCursorPosition`] of the content node itself (not the clipped frame around it),
+/// so its `normalized` is already the map UV; `content_size` is that node's current size
+/// (`frame_size * view.zoom`).
+#[allow(clippy::too_many_arguments)]
+pub fn drive_map_view(
+    view: &mut MapView,
+    cursor: &RelativeCursorPosition,
+    content_size: Vec2,
+    keys: &ButtonInput<KeyCode>,
+    mouse: &ButtonInput<MouseButton>,
+    scroll: &AccumulatedMouseScroll,
+    motion: &AccumulatedMouseMotion,
+    gamepads: &Query<&Gamepad>,
+    dt: f32,
+    now: f32,
+    dragging: &mut bool,
+    last_click: &mut Option<(f32, Vec2)>,
+) {
+    let hovered = cursor.cursor_over;
+    let uv = cursor.normalized.map(|n| n + Vec2::splat(0.5));
+
+    if hovered && scroll.delta.y != 0.0 {
+        view.zoom_at((1.0 + WHEEL_ZOOM_RATE).powf(scroll.delta.y), uv.unwrap_or(view.center));
+    }
+
+    let pan_button = mouse.pressed(MouseButton::Right) || mouse.pressed(MouseButton::Middle);
+    if pan_button && (hovered || *dragging) {
+        *dragging = true;
+        if motion.delta != Vec2::ZERO && content_size.min_element() > 0.0 {
+            view.pan_uv(motion.delta / content_size);
+        }
+    } else {
+        *dragging = false;
+    }
+
+    let (zoom_rate, pan_dir) = map_view_keys(keys, gamepads);
+    if zoom_rate != 0.0 {
+        view.zoom_at(KEY_ZOOM_RATE.powf(zoom_rate * dt), view.center);
+    }
+    if pan_dir != Vec2::ZERO && content_size.min_element() > 0.0 {
+        view.pan_uv(-pan_dir * KEY_PAN_SPEED * dt / content_size);
+    }
+
+    if hovered
+        && mouse.just_pressed(MouseButton::Left)
+        && let Some(uv) = uv
+        && is_double_click(now, uv, last_click)
+    {
+        view.reset();
+    }
+}
 
 pub struct MapMarkersPlugin;
 

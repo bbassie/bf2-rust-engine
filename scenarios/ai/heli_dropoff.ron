@@ -1,0 +1,36 @@
+// Transport helicopters drop their passengers off (crates/game_server/src/bots/vehicle.rs): on
+// Dalian Plant (64) squads board the UH-60 and Z-8, the pilot lands by the objective, everyone
+// else gets out ("dropped off") and the pilot flies back to base for more. The camera chases a
+// transport helicopter on the way, at the landing and on the way back. Fails if nobody gets
+// out at a drop-off or a pilot never heads back.
+// client --scenario scenarios/ai/heli_dropoff.ron --out target/scenarios/ai/heli_dropoff
+(
+    level: "dalian_plant",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        Wait(20.0),
+        ChaseDriven("usthe_uh60", 25.0, 8.0),
+        Screenshot("uh60_boarded"),
+        Wait(10.0),
+        ChaseDriven("chthe_z8", 25.0, 8.0),
+        Screenshot("z8_flying"),
+        Wait(8.0),
+        ChaseDriven("helicopter", 22.0, 6.0),
+        Screenshot("heli_approach"),
+        // The pilot notes the drop-off as soon as the last passenger is out; the passengers'
+        // own lines follow.
+        ExpectLog("flies back to base", 120.0),
+        ExpectLog("(dropped off)", 5.0),
+        ChaseDriven("helicopter", 18.0, 5.0),
+        Screenshot("heli_dropoff"),
+        Wait(4.0),
+        ChaseDriven("helicopter", 22.0, 6.0),
+        Screenshot("heli_leaving"),
+        LogVehicles("after the drop-off"),
+        Quit,
+    ],
+)

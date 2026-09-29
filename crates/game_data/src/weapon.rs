@@ -17,6 +17,25 @@ pub struct KitDesc {
     /// a share per second (BF2 `abilityRestoreRate`). 0 without replenishing gadgets.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub ability_restore: f32,
+    /// Weapons the kit could be given instead of some of its own (BF2's unlocks: an
+    /// `ItemContainer` with `unlockLevel`). Together with `kind` they say which weapons
+    /// belong to the kit's class, for loadouts (see `game_shared::arsenal`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlocks: Vec<KitUnlock>,
+}
+
+/// One of a kit's unlocks (BF2 `ItemContainer`): weapons it adds and the kit's own ones they
+/// replace.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct KitUnlock {
+    /// BF2 `unlockLevel`: 1 for the unlocks of BF2 1.5, 2 for those of Special Forces and
+    /// the booster packs.
+    pub level: u32,
+    /// Weapons added (`addTemplate`).
+    pub weapons: Vec<String>,
+    /// Weapons of the kit (or of a lower unlock) they replace (`replaceItem`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +98,14 @@ pub struct WeaponDesc {
     /// Worn, not held (BF2 `isNightVision`, `isGasMask`): switched by keys of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worn: bool,
+    /// Carried but never taken in hand: the parachute (BF2's `ParachuteLauncher`, a
+    /// `SpawnObjectFireComp` without a `WeaponHud`), opened by the jump key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// Icon for weapon lists: a white silhouette, about 128x44 (`.dds`, relative to the
+    /// imported root; BF2 `weaponHud.selectIcon`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// C4: the detonator the hands hold instead while it is out (BF2 `fire.detonatorObject`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detonator: Option<DetonatorDesc>,
@@ -96,6 +123,28 @@ pub struct WeaponDesc {
     /// repair or revive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replenish: Option<ReplenishDesc>,
+}
+
+impl WeaponDesc {
+    /// Whether the soldier can take it in hand: not worn gear (night vision, gas mask), not
+    /// the parachute. Weapons imported before `hidden` existed are recognised by name.
+    pub fn selectable(&self) -> bool {
+        !self.worn && !self.hidden && !self.name.contains("parachute")
+    }
+
+    /// The knife (inventory slot 1): what the melee key takes out.
+    pub fn is_melee(&self) -> bool {
+        self.slot == 1 && self.fire.kind == FireKind::Gun && self.magazine_size == 0
+    }
+
+    /// Hand grenades (frag, smoke, flash bang, tear gas): thrown, bouncing, going off by
+    /// themselves. Mines and charges are not.
+    pub fn is_hand_grenade(&self) -> bool {
+        self.fire.kind == FireKind::Thrown
+            && self.projectile.impact == Impact::Bounce
+            && self.projectile.trigger.is_none()
+            && self.replenish.is_none()
+    }
 }
 
 /// Healing, resupplying, repairing and reviving (BF2 `ReplenishingAmmoComp` on the weapon,

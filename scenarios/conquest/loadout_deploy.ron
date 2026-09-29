@@ -1,0 +1,44 @@
+// Loadouts on the deploy screen (singleplayer, Strike at Karkand, MEC): the assault kit takes
+// the USMC's M16A2 with its M203 from the class's pool; the server accepts it and the next
+// soldier carries it (the M203 replacing the GP-30). Then a sniper rifle asked for the
+// assault kit directly is refused.
+// client --scenario scenarios/conquest/loadout_deploy.ron --out target/scenarios/loadout_deploy
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    team: 1,
+    steps: [
+        WaitReady,
+        ExpectLog("arsenal: ", 5.0),
+        Kill,
+        Wait(1.0),
+        Click("kit:2"),
+        Wait(0.5),
+        Screenshot("panel_assault"),
+        Click("loadout:usrif_m203"),
+        ExpectLog("loadout accepted: ", 3.0),
+        Wait(0.5),
+        Screenshot("panel_picked"),
+        Click("loadout:tab:sidearm"),
+        Wait(0.5),
+        Screenshot("panel_sidearms"),
+        Click("loadout:tab:primary"),
+        ExpectLog("spawned as mec_assault with usrif_m203, usrgl_m203", 30.0),
+        Wait(1.0),
+        HoldKey(Digit3),
+        Wait(0.1),
+        ReleaseKey(Digit3),
+        Wait(0.5),
+        Screenshot("spawned_m16"),
+        // Not a weapon of the class: refused.
+        SendLoadout("assault", "usrif_m24"),
+        ExpectLog("loadout refused: ", 3.0),
+        // The sniper kit's panel.
+        Key(Enter),
+        Wait(0.3),
+        Click("kit:1"),
+        Wait(0.5),
+        Screenshot("panel_sniper"),
+        Quit,
+    ],
+)

@@ -176,43 +176,19 @@ pub(super) fn slider(p: &mut ChildSpawnerCommands, slider: Slider) {
 }
 
 pub(super) fn text_field(p: &mut ChildSpawnerCommands, field: TextField, value: &str, width: f32) {
-    let mut editable = EditableText::new(value);
-    editable.max_characters = Some(match field {
+    let max_characters = Some(match field {
         TextField::PlayerName => 24,
         TextField::Address => 64,
         TextField::Port => 5,
     });
-    let mut text_entity = Entity::PLACEHOLDER;
-    p.spawn((
-        Node {
-            width: px(width),
-            flex_shrink: 0.0,
-            padding: UiRect::axes(px(10), px(7)),
-            border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(6)),
-            ..default()
-        },
-        BackgroundColor(FIELD),
-        BorderColor::all(Color::NONE),
-    ))
-    .with_children(|b| {
-        let mut entity = b.spawn((
-            Name::new(format!("field:{}", format!("{field:?}").to_lowercase())),
-            field,
-            editable,
-            font(16.0),
-            TextColor(TEXT),
-            Node {
-                width: percent(100),
-                ..default()
-            },
-        ));
-        if field == TextField::Port {
-            entity.insert(EditableTextFilter::new(|c| c.is_ascii_digit()));
-        }
-        text_entity = entity.id();
-    })
-    .insert(TextFieldBox(text_entity));
+    let filter: Option<std::sync::Arc<dyn Fn(char) -> bool + Send + Sync>> =
+        (field == TextField::Port).then(|| std::sync::Arc::new(text_input::digits) as _);
+    let name = format!("{field:?}").to_lowercase();
+    text_input::text_input(p, field, name, value, width, text_input::TextInputOptions {
+        max_characters,
+        filter,
+        ..default()
+    });
 }
 
 pub(super) fn heading(p: &mut ChildSpawnerCommands, title: &str, subtitle: &str) {
@@ -274,6 +250,7 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
         MenuButton::ToneMapping(t) => settings.tone_mapping == *t,
         MenuButton::RebindSlot(action, slot) => menu.rebinding == Some((*action, *slot)),
         MenuButton::RebindGamepad(action) => menu.rebinding_gamepad == Some(*action),
+        MenuButton::StanceMode(kind, mode) => kind.get(settings) == *mode,
         MenuButton::Preset(preset) => settings.graphics_preset == *preset,
         MenuButton::ShadowQuality(q) => settings.shadow_quality == *q,
         MenuButton::AntiAliasing(aa) => settings.anti_aliasing == *aa,
@@ -350,20 +327,6 @@ pub(super) fn paint_sliders(
         if node.left != left {
             node.left = left;
         }
-    }
-}
-
-pub(super) fn paint_text_fields(
-    focus: Res<InputFocus>,
-    mut boxes: Query<(&TextFieldBox, &mut BorderColor)>,
-) {
-    for (field, mut border) in &mut boxes {
-        let color = if focus.get() == Some(field.0) {
-            ACCENT
-        } else {
-            Color::NONE
-        };
-        border.set_if_neq(BorderColor::all(color));
     }
 }
 

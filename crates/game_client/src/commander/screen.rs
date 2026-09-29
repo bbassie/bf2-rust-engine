@@ -7,6 +7,10 @@
 //! shows).
 
 use bevy::{
+    input::{
+        gamepad::Gamepad,
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    },
     platform::collections::HashMap,
     prelude::*,
     ui::{FocusPolicy, RelativeCursorPosition},
@@ -24,7 +28,9 @@ use super::{CommanderScreen, GOLD, Tool, font, map_point, map_size, map_uv};
 use crate::{
     commander::markers::{asset_color, order_color},
     conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD},
-    map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER, SQUAD_LABEL},
+    map_markers::{
+        IconStyle, MapMarker, MapMarkers, MapPoint, MapView, MarkerIcons, NotMarker, SOLDIER_LAYER, SQUAD_LABEL, apply_map_view, drive_map_view,
+    },
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
 };
@@ -33,21 +39,35 @@ pub struct ScreenPlugin;
 
 impl Plugin for ScreenPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_screen).add_systems(
-            Update,
-            (
-                set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
-                show_screen,
-                press_buttons,
-                click_map,
-                rebuild_panel,
-                update_map,
-            )
-                .chain()
-                .after(super::toggle_screen),
-        );
+        app.init_resource::<ScreenView>()
+            .add_systems(Startup, spawn_screen)
+            .add_systems(
+                Update,
+                (
+                    set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
+                    show_screen,
+                    drive_screen_view,
+                    apply_screen_view,
+                    press_buttons,
+                    click_map,
+                    rebuild_panel,
+                    update_map,
+                )
+                    .chain()
+                    .after(super::toggle_screen),
+            );
     }
 }
+
+/// Pan and zoom of the commander map: reset on a new level (`set_map_image`).
+#[derive(Resource, Default)]
+struct ScreenView(MapView);
+
+/// The fixed-size, clipped viewport the map shows through (`ScreenMap`, still the map's own
+/// content node and the parent markers and clicks use, is resized/repositioned to show
+/// [`ScreenView`] inside it; see `map_markers`'s doc comment).
+#[derive(Component)]
+struct ScreenFrame;
 
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
 const DIM: Color = Color::srgba(0.85, 0.87, 0.9, 0.6);
@@ -117,8 +137,7 @@ fn spawn_screen(mut commands: Commands) {
         ))
         .with_children(|root| {
             root.spawn((
-                ScreenMap,
-                Name::new("commander:map"),
+                ScreenFrame,
                 Node {
                     width: vh(90),
                     height: vh(90),
@@ -127,24 +146,39 @@ fn spawn_screen(mut commands: Commands) {
                     overflow: Overflow::clip(),
                     ..default()
                 },
-                RelativeCursorPosition::default(),
                 BackgroundColor(Color::srgb(0.14, 0.15, 0.16)),
                 BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
             ))
-            .with_child((
-                TargetRing,
-                Node {
-                    position_type: PositionType::Absolute,
-                    border: UiRect::all(px(2)),
-                    border_radius: BorderRadius::MAX,
-                    ..default()
-                },
-                BackgroundColor(Color::NONE),
-                BorderColor::all(Color::WHITE),
-                FocusPolicy::Pass,
-                GlobalZIndex(13),
-                Visibility::Hidden,
-            ));
+            .with_children(|frame| {
+                frame
+                    .spawn((
+                        ScreenMap,
+                        Name::new("commander:map"),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(0),
+                            top: px(0),
+                            width: percent(100),
+                            height: percent(100),
+                            ..default()
+                        },
+                        RelativeCursorPosition::default(),
+                    ))
+                    .with_child((
+                        TargetRing,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            border: UiRect::all(px(2)),
+                            border_radius: BorderRadius::MAX,
+                            ..default()
+                        },
+                        BackgroundColor(Color::NONE),
+                        BorderColor::all(Color::WHITE),
+                        FocusPolicy::Pass,
+                        GlobalZIndex(13),
+                        Visibility::Hidden,
+                    ));
+            });
             root.spawn((
                 Node {
                     width: px(340),
@@ -195,6 +229,7 @@ fn set_map_image(
     level: Res<LoadedLevel>,
     asset_server: Res<AssetServer>,
     map: Single<Entity, With<ScreenMap>>,
+    mut view: ResMut<ScreenView>,
 ) {
     match &level.desc.minimap {
         Some(path) => {
@@ -206,6 +241,54 @@ fn set_map_image(
             commands.entity(*map).remove::<ImageNode>();
         }
     }
+    view.0.reset();
+}
+
+/// Reads the mouse wheel, a right/middle drag, `+`/`-`/the triggers, the arrows/the stick and
+/// a double click (see `map_markers::drive_map_view`) into the view, while the screen is open.
+#[allow(clippy::too_many_arguments)]
+fn drive_screen_view(
+    mut view: ResMut<ScreenView>,
+    screen: Res<CommanderScreen>,
+    map: Single<(&RelativeCursorPosition, &ComputedNode), (With<ScreenMap>, Without<ScreenFrame>)>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    motion: Res<AccumulatedMouseMotion>,
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    mut dragging: Local<bool>,
+    mut last_click: Local<Option<(f32, Vec2)>>,
+) {
+    if !screen.open {
+        *dragging = false;
+        return;
+    }
+    let (cursor, node) = *map;
+    drive_map_view(
+        &mut view.0,
+        cursor,
+        node.size,
+        &keys,
+        &mouse,
+        &scroll,
+        &motion,
+        &gamepads,
+        time.delta_secs(),
+        time.elapsed_secs(),
+        &mut *dragging,
+        &mut *last_click,
+    );
+}
+
+/// Resizes/repositions [`ScreenMap`] to show [`ScreenView`].
+fn apply_screen_view(
+    view: Res<ScreenView>,
+    frame: Single<&ComputedNode, (With<ScreenFrame>, Without<ScreenMap>)>,
+    map: Single<&mut Node, (With<ScreenMap>, Without<ScreenFrame>)>,
+) {
+    let mut node = map.into_inner();
+    apply_map_view(&mut node, view.0, frame.size);
 }
 
 fn show_screen(screen: Res<CommanderScreen>, mut root: Single<&mut Visibility, With<ScreenRoot>>) {
@@ -663,7 +746,8 @@ fn update_map(
     soldiers: Query<(Entity, &SoldierRender, &ControlledBy, Has<LocalSoldier>), (With<Soldier>, Without<Seated>)>,
     effects: Query<(Entity, &AssetEffect)>,
     markers: Res<MapMarkers>,
-    map: Single<(Entity, &ComputedNode), With<ScreenMap>>,
+    map: Single<Entity, With<ScreenMap>>,
+    frame: Single<&ComputedNode, With<ScreenFrame>>,
     mut areas: Query<(Entity, &MapIcon, &mut Node), NotMarker>,
     mut icons: MarkerIcons,
 ) {
@@ -695,9 +779,10 @@ fn update_map(
         .iter()
         .chain(&markers.0)
         .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
-    let (map, node) = *map;
-    // Sized for the 648 px map of a 720p window, a little larger on larger ones.
-    icons.sync(map, placed, IconStyle::big_map(node, 1.3, 648.0));
+    let map = *map;
+    // Sized for the 648 px map of a 720p window, a little larger on larger ones; the frame
+    // (not the zoomed map) so markers keep a constant size regardless of zoom.
+    icons.sync(map, placed, IconStyle::big_map(*frame, 1.3, 648.0));
 
     // The areas our strikes, UAVs and crates cover.
     let mut wanted: HashMap<IconKey, IconSpec> = HashMap::default();

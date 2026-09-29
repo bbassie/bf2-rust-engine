@@ -1,0 +1,47 @@
+// Hit registration as a remote client of a dedicated server whose one bot is a target dummy
+// cycling through its poses in front of us (`game_server::dummy`). We alternate checking which
+// hit zones rays through points of its drawn body meet (`HitGeometry`) and firing single shots
+// at those points (`ShootAt`); labels come from the dummy's replicated state. The server logs
+// its verdicts (`hitreg fire` / `hitreg verdict`); join both logs with
+// `python scripts/hitreg_report.py <client log> <server log>`.
+// BF2_DUMMY_BOTS=stand,crouch,prone,strafe,crouchstrafe,reload,fire,walk BF2_DUMMY_SECONDS=8 BF2_NO_SPREAD=1 BF2_HITREG_LOG=1 server --level strike_at_karkand --bots 1 --port 30400
+// BF2_NO_SPREAD=1 BF2_HITREG_LOG=1 [BF2_SIM_INPUT_DELAY_MS=60] client --connect 127.0.0.1 --port 30400 --scenario scenarios/combat/hitreg_net.ron
+(
+    steps: [
+        WaitReady,
+        Wait(4.0),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        HitGeometry("net", 3.0),
+        ShootAt("net", "all", 11),
+        Quit,
+    ],
+)

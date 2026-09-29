@@ -32,11 +32,21 @@ pub struct Armory {
     pub team_kits: [Vec<String>; 2],
     /// Hit zones of the soldier body each kit wears, by kit name.
     pub hit_zones: HashMap<String, Arc<[HitZone]>>,
+    /// Every other kit's weapons (and their unlocks), which loadouts may give a soldier
+    /// (`arsenal`). Looked up after `weapons`, and not preloaded.
+    pub pool: HashMap<String, Arc<WeaponDesc>>,
 }
 
 impl Armory {
     pub fn weapon(&self, name: &str) -> Option<&Arc<WeaponDesc>> {
-        self.weapons.get(name)
+        self.weapons.get(name).or_else(|| self.pool.get(name))
+    }
+
+    /// The level's weapons, then the loadout pool's others.
+    pub fn all_weapons(&self) -> impl Iterator<Item = (&String, &Arc<WeaponDesc>)> {
+        self.weapons
+            .iter()
+            .chain(self.pool.iter().filter(|(name, _)| !self.weapons.contains_key(*name)))
     }
 
     /// Where a soldier wearing `kit` can be hit (rough zones if its body has none).
@@ -52,7 +62,7 @@ impl Armory {
     }
 }
 
-fn load_armory(level: Res<LoadedLevel>, paths: Res<GamePaths>, mut armory: ResMut<Armory>) {
+pub(crate) fn load_armory(level: Res<LoadedLevel>, paths: Res<GamePaths>, mut armory: ResMut<Armory>) {
     *armory = build_armory(&level.desc, &paths);
     info!(
         "armory: {} kits, {} weapons",
@@ -105,6 +115,7 @@ fn build_armory(level: &LevelDesc, paths: &GamePaths) -> Armory {
             kind: "Assault".into(),
             weapons: vec![rifle.name.clone()],
             ability_restore: 0.0,
+            unlocks: Vec::new(),
         };
         armory.weapons.insert(rifle.name.clone(), Arc::new(rifle));
         armory.team_kits = [vec![kit.name.clone()], vec![kit.name.clone()]];
@@ -134,6 +145,8 @@ fn test_rifle() -> WeaponDesc {
         reload_amount: 0,
         fire: Default::default(),
         worn: false,
+        hidden: false,
+        icon: None,
         detonator: None,
         projectile: ProjectileDesc {
             velocity: 900.0,
@@ -187,6 +200,10 @@ pub struct Inventory {
     pub fire_mode: u8,
     /// Currently reloading (for animations and the HUD).
     pub reloading: bool,
+    /// The server tick the current (or last) reload started on: the reload animation runs
+    /// from it, the same for everyone who draws the soldier and for his hit zones.
+    #[serde(default)]
+    pub reload_started: u32,
 }
 
 impl Inventory {
@@ -213,6 +230,7 @@ impl Inventory {
             ammo,
             fire_mode: 0,
             reloading: false,
+            reload_started: 0,
         }
     }
 }
@@ -246,6 +264,9 @@ pub struct WeaponState {
     pub launch: Option<(f32, f32)>,
     /// C4: the detonator is in hand instead of the charges.
     pub detonator: bool,
+    /// The weapon in hand was taken out by the melee or grenade key (see
+    /// [`Self::switch_with`]).
+    pub quick: bool,
 }
 
 /// What a weapon did this tick (see [`WeaponState::trigger`]).
@@ -271,6 +292,11 @@ pub struct Trigger {
     /// Sprinting lowers the weapon.
     pub lowered: bool,
 }
+
+/// Seconds until a knife or grenade taken out by its quick key can be used.
+pub const QUICK_DEPLOY: f32 = 0.15;
+/// Seconds until the weapon a quick action interrupted is ready again.
+pub const QUICK_RETURN: f32 = 0.35;
 
 /// Seconds the C4 detonator needs between presses (its `fire.roundsPerMinute 60`).
 const DETONATOR_INTERVAL: f32 = 1.0;
@@ -327,6 +353,22 @@ impl WeaponState {
         self.wind_up = None;
         self.launch = None;
         self.detonator = false;
+    }
+
+    /// Takes `weapon` in hand, for a quick action if `quick` (the input's
+    /// [`Buttons::QUICK`](crate::input::Buttons::QUICK)): the melee and grenade keys take the
+    /// knife or a grenade out in [`QUICK_DEPLOY`] seconds, and put it away again for the
+    /// weapon it interrupted, which is ready in [`QUICK_RETURN`] seconds. Server and client
+    /// (prediction) both switch through here.
+    pub fn switch_with(&mut self, weapon: &WeaponDesc, quick: bool) {
+        let returning = self.quick;
+        self.switch_to(weapon);
+        self.quick = quick && (weapon.is_melee() || weapon.is_hand_grenade());
+        if self.quick {
+            self.deploy = self.deploy.min(QUICK_DEPLOY);
+        } else if quick && returning {
+            self.deploy = self.deploy.min(QUICK_RETURN);
+        }
     }
 
     /// Works the trigger for one tick, after [`Self::tick`]: reloading, fire modes, winding
@@ -503,9 +545,15 @@ pub fn damage_at(projectile: &ProjectileDesc, distance: f32) -> f32 {
     projectile.damage + (projectile.min_damage.min(projectile.damage) - projectile.damage) * t
 }
 
-/// Rotates `forward` by a random offset inside a cone of `cone_degrees`.
+/// Rotates `forward` by a random offset inside a cone of `cone_degrees`. `BF2_NO_SPREAD=1`
+/// (server and client) fires dead straight, for hit registration tests.
 pub fn spread_direction(forward: Vec3, cone_degrees: f32, random: (f32, f32)) -> Vec3 {
+    static NO_SPREAD: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("BF2_NO_SPREAD").is_some());
     let forward = forward.normalize_or(Vec3::NEG_Z);
+    if *NO_SPREAD {
+        return forward;
+    }
     // Uniform over the cone's disc (BF2's exact distribution is unknown).
     let radius = (cone_degrees.to_radians() * 0.5) * random.0.sqrt();
     let angle = random.1 * std::f32::consts::TAU;

@@ -206,6 +206,15 @@ pub struct Settings {
     pub colorblind_team_colors: bool,
     pub bindings: BTreeMap<Action, BindingSet>,
     pub gamepad: GamepadSettings,
+    // --- Stances (local_input) ---
+    /// Prone: hold the key down to stay prone, or press it once to toggle (BF2 default:
+    /// toggle). Crouch or jump cancels a toggled prone (`local_input::apply_stance_buttons`).
+    pub prone_mode: StanceMode,
+    /// Crouch: hold or toggle (BF2 default: hold).
+    pub crouch_mode: StanceMode,
+    /// Sprint: hold or toggle (BF2 default: hold).
+    pub sprint_mode: StanceMode,
+    // --- end stances ---
     /// What the menu last started, to offer it again.
     pub last_match: LastMatch,
     /// Servers starred in the server browser.
@@ -246,12 +255,31 @@ pub struct Settings {
     /// `migrate`); files from before it have none.
     #[serde(default)]
     pub controls_revision: u32,
+    /// Helicopters: A/D roll and the mouse (or the right stick) turns the tail, instead of
+    /// BF3/BF4's default of A/D on the tail rotor (yaw) and the mouse rolling.
+    pub heli_pedals_roll: bool,
     // --- end flight controls ---
     // --- Voice chat (voice) ---
     /// Push-to-talk voice chat: on or off, push to talk or voice activation, devices, gain and
     /// volume (see `voice::VoiceSettings`).
     pub voice: crate::voice::VoiceSettings,
     // --- end voice chat ---
+    // --- Name tags (nametags) ---
+    /// Names above soldiers' heads: everyone on the team, squad only, or off.
+    pub name_tags: NameTagMode,
+    /// The red "spotted" triangle over enemies the commo rose or a bot marked.
+    pub enemy_spot_markers: bool,
+    /// Scales name tag and icon size on screen, 0.5..2.0.
+    pub name_tag_size: f32,
+    // --- end name tags ---
+    // --- Weapons and loadouts (combat, quick_actions, loadout) ---
+    /// The mouse wheel also cycles through the knife and grenades (they have the melee and
+    /// grenade keys, and their number keys, otherwise).
+    pub scroll_quick_weapons: bool,
+    /// Weapons picked on the deploy screen per kit class (lowercase `kind`), sent to every
+    /// server joined (see `loadout`).
+    pub loadouts: BTreeMap<String, game_shared::arsenal::ClassPick>,
+    // --- end weapons and loadouts ---
 }
 
 /// The latest of [`Settings::migrate`]'s updates.
@@ -298,6 +326,9 @@ impl Default for Settings {
                 .map(|a| (*a, a.default_bindings()))
                 .collect(),
             gamepad: GamepadSettings::default(),
+            prone_mode: StanceMode::Toggle,
+            crouch_mode: StanceMode::Hold,
+            sprint_mode: StanceMode::Hold,
             last_match: LastMatch::default(),
             favourite_servers: Vec::new(),
             recent_servers: Vec::new(),
@@ -312,9 +343,19 @@ impl Default for Settings {
             invert_jet_pitch: false,
             invert_heli_pitch: false,
             controls_revision: CONTROLS_REVISION,
+            heli_pedals_roll: false,
             // --- Voice chat (voice) ---
             voice: Default::default(),
             // --- end voice chat ---
+            // --- Name tags (nametags) ---
+            name_tags: NameTagMode::default(),
+            enemy_spot_markers: true,
+            name_tag_size: 1.0,
+            // --- end name tags ---
+            // --- Weapons and loadouts (combat, quick_actions, loadout) ---
+            scroll_quick_weapons: false,
+            loadouts: BTreeMap::new(),
+            // --- end weapons and loadouts ---
         }
     }
 }
@@ -340,7 +381,7 @@ impl Settings {
     pub fn rebind(&mut self, action: Action, slot: BindSlot, binding: Binding) {
         let old = self.bindings(action);
         if let Some(other) = Action::ALL.iter().find(|a| {
-            **a != action && slot.get(&self.bindings(**a)) == Some(binding)
+            **a != action && !action.other_context(**a) && slot.get(&self.bindings(**a)) == Some(binding)
         }) {
             let mut set = self.bindings(*other);
             slot.set(&mut set, slot.get(&old));
@@ -355,7 +396,7 @@ impl Settings {
     pub fn rebind_gamepad(&mut self, action: Action, button: GamepadButton) {
         if let Some(other) = Action::ALL
             .iter()
-            .find(|a| **a != action && self.bindings(**a).gamepad == Some(button))
+            .find(|a| **a != action && !action.other_context(**a) && self.bindings(**a).gamepad == Some(button))
         {
             let mut set = self.bindings(*other);
             set.gamepad = self.bindings(action).gamepad;
@@ -375,7 +416,7 @@ impl Settings {
         let keys: Vec<Binding> = [set.primary, set.secondary].into_iter().flatten().collect();
         Action::ALL
             .into_iter()
-            .filter(|other| *other != action)
+            .filter(|other| *other != action && !action.other_context(*other))
             .filter(|other| {
                 let o = self.bindings(*other);
                 let o_keys = [o.primary, o.secondary];
@@ -484,9 +525,26 @@ impl Settings {
             "hud_scale" => self.hud_scale = num()?.clamp(0.5, 1.75),
             "minimap_size" => self.minimap_size = num()?.clamp(0.5, 1.75),
             "colorblind_team_colors" => self.colorblind_team_colors = on()?,
+            "prone_mode" | "prone" => {
+                self.prone_mode = StanceMode::parse(value).ok_or_else(|| format!("setting {key}: expected hold or toggle, got {value}"))?
+            }
+            "crouch_mode" | "crouch" => {
+                self.crouch_mode = StanceMode::parse(value).ok_or_else(|| format!("setting {key}: expected hold or toggle, got {value}"))?
+            }
+            "sprint_mode" | "sprint" => {
+                self.sprint_mode = StanceMode::parse(value).ok_or_else(|| format!("setting {key}: expected hold or toggle, got {value}"))?
+            }
             "gamepad_enabled" => self.gamepad.enabled = on()?,
             "invert_jet_pitch" => self.invert_jet_pitch = on()?,
             "invert_heli_pitch" => self.invert_heli_pitch = on()?,
+            // Helicopter A/D: `yaw` (BF3/BF4's default) or `roll`.
+            "heli_ad" | "heli_pedals" => {
+                self.heli_pedals_roll = match value {
+                    "yaw" => false,
+                    "roll" => true,
+                    _ => return Err(format!("setting {key}: expected yaw or roll, got {value}")),
+                }
+            }
             // Lighting: `off`, `on` or `shadows`; `level` or `night`.
             "dynamic_lamps" | "lamps" => {
                 self.dynamic_lamps = crate::render::lamps::DynamicLamps::parse(value)
@@ -499,6 +557,21 @@ impl Settings {
             // --- Voice chat (voice) ---
             key if key.starts_with("voice") => self.voice.set(key, value)?,
             // --- end voice chat ---
+            // --- Name tags (nametags) ---
+            "name_tags" => {
+                self.name_tags = match value.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" | "yes" => NameTagMode::On,
+                    "squad" | "squad_only" | "squadonly" => NameTagMode::SquadOnly,
+                    "off" | "false" | "0" | "no" => NameTagMode::Off,
+                    _ => return Err(format!("setting {key}: expected on, squad or off, got {value}")),
+                }
+            }
+            "enemy_spot_markers" => self.enemy_spot_markers = on()?,
+            "name_tag_size" => self.name_tag_size = num()?.clamp(0.5, 2.0),
+            // --- end name tags ---
+            // --- Weapons and loadouts ---
+            "scroll_quick_weapons" => self.scroll_quick_weapons = on()?,
+            // --- end weapons and loadouts ---
             _ => return Err(format!("unknown setting {key}")),
         }
         Ok(())
@@ -939,6 +1012,55 @@ impl CrosshairStyle {
     }
 }
 
+// --- Name tags (nametags) ---
+/// Names above soldiers' heads (`nametags`): everyone on the team, squad only, or off. The
+/// enemy spot triangle has its own toggle (`Settings::enemy_spot_markers`); it never shows a
+/// name.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NameTagMode {
+    #[default]
+    On,
+    SquadOnly,
+    Off,
+}
+
+impl NameTagMode {
+    pub const ALL: [NameTagMode; 3] = [NameTagMode::On, NameTagMode::SquadOnly, NameTagMode::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NameTagMode::On => "On",
+            NameTagMode::SquadOnly => "Squad only",
+            NameTagMode::Off => "Off",
+        }
+    }
+}
+// --- end name tags ---
+
+/// Whether a stance (or sprint) key is held to stay in it, or pressed once to toggle it on and
+/// pressed again to toggle it off. See `local_input::apply_stance_buttons`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StanceMode {
+    #[default]
+    Hold,
+    Toggle,
+}
+
+impl StanceMode {
+    pub const ALL: [StanceMode; 2] = [StanceMode::Hold, StanceMode::Toggle];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StanceMode::Hold => "Hold",
+            StanceMode::Toggle => "Toggle",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+}
+
 /// Presets bundling [`ShadowQuality`], [`AntiAliasing`], [`SsaoQuality`], [`Anisotropy`],
 /// render scale, LOD detail scale, vegetation density, particle quality, bloom and view
 /// distance. `High` is tuned to be a no-op against this engine's previous hardcoded defaults.
@@ -1189,6 +1311,13 @@ pub enum Action {
     Countermeasures,
     /// In a vehicle: move to this seat (1-based), like F1..F8.
     Seat(u8),
+    // --- Quick actions (quick_actions) ---
+    /// On foot: a quick knife attack, then back to the weapon in hand.
+    Melee,
+    /// On foot: a quick throw of the kit's grenade (hold to cook), then back to the weapon
+    /// in hand. Shares G with the vehicles' countermeasures.
+    Grenade,
+    // --- end quick actions ---
     // --- Voice chat (voice) ---
     /// Push to talk to the squad (a commander without a squad: to his squad leaders).
     VoiceSquad,
@@ -1198,7 +1327,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 51] = [
+    pub const ALL: [Action; 53] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -1248,6 +1377,10 @@ impl Action {
         Action::Seat(6),
         Action::Seat(7),
         Action::Seat(8),
+        // --- Quick actions (quick_actions) ---
+        Action::Melee,
+        Action::Grenade,
+        // --- end quick actions ---
         // --- Voice chat (voice) ---
         Action::VoiceSquad,
         Action::VoiceCommand,
@@ -1290,6 +1423,8 @@ impl Action {
             Action::FreeLook => "Free look (flying)".into(),
             Action::Countermeasures => "Countermeasures (flares, smoke)".into(),
             Action::Seat(seat) => format!("Vehicle seat {seat}"),
+            Action::Melee => "Melee (quick knife)".into(),
+            Action::Grenade => "Throw grenade (hold to cook)".into(),
             // --- Voice chat (voice) ---
             Action::VoiceSquad => "Voice: talk to squad".into(),
             Action::VoiceCommand => "Voice: talk to commander / squad leaders".into(),
@@ -1378,13 +1513,42 @@ impl Action {
                 })),
                 None,
             ),
+            // --- Quick actions (quick_actions) ---
+            // C and mouse 4 are free; G is the vehicles' countermeasures key, and on foot the
+            // grenade's (like the gamepad's C).
+            Action::Melee => (Some(Key(KeyCode::KeyC)), None),
+            Action::Grenade => (Some(Key(KeyCode::KeyG)), Some(GamepadButton::C)),
+            // --- end quick actions ---
             // --- Voice chat (voice) ---
             // Every gamepad button already does something; bind one on the Controls tab.
             Action::VoiceSquad => (Some(Key(KeyCode::KeyB)), None),
             Action::VoiceCommand => (Some(Key(KeyCode::KeyH)), None),
             // --- end voice chat ---
         };
-        BindingSet { primary, secondary: None, gamepad }
+        // The melee key's second default: the mouse's back side button.
+        let secondary = (self == Action::Melee).then_some(Mouse(MouseButton::Back));
+        BindingSet { primary, secondary, gamepad }
+    }
+
+    /// Where an action works: on foot only, in a vehicle only, or anywhere. Actions of the two
+    /// different contexts may share a key (G throws a grenade on foot and drops flares in a
+    /// vehicle): they don't conflict and rebinding one doesn't take the key from the other.
+    fn context(self) -> Option<bool> {
+        match self {
+            Action::Melee | Action::Grenade => Some(false),
+            Action::Countermeasures
+            | Action::Seat(_)
+            | Action::PitchUp
+            | Action::PitchDown
+            | Action::RollLeft
+            | Action::RollRight => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Whether `self` and `other` never work at the same time (see [`Self::context`]).
+    pub fn other_context(self, other: Action) -> bool {
+        matches!((self.context(), other.context()), (Some(a), Some(b)) if a != b)
     }
 }
 

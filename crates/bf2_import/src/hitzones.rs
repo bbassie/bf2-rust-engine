@@ -129,6 +129,8 @@ pub fn hit_zones(interp: &mut Interpreter, vfs: &Vfs, skeleton: &Skeleton, name:
                 standing: ends(&stances[0]),
                 crouching: ends(&stances[1]),
                 prone: ends(&stances[2]),
+                offset: round(offset),
+                length,
             })
         })
         .collect()

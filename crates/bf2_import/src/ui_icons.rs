@@ -83,6 +83,32 @@ pub fn vehicle_icons(interp: &mut Interpreter, vfs: &Vfs, out: &Path, names: &[S
     icons
 }
 
+/// A weapon's icon (`weaponHud.selectIcon`, relative to BF2's `Menu/HUD/Texture`) as a white
+/// silhouette: BF2 draws these dark shapes tinted by its HUD; ours keeps their alpha and
+/// tints them itself. Written as `<name>_white.dds`.
+pub fn hud_image(vfs: &Vfs, out: &Path, path: &str) -> Option<String> {
+    let path = normalize(&format!("{HUD_TEXTURES}/{path}"));
+    let stem = path.rsplit_once('.').map_or(path.as_str(), |(stem, _)| stem);
+    let source = format!("{stem}.tga");
+    if !vfs.exists(&source) {
+        // Not a TGA: as it is.
+        return image(vfs, out, &path);
+    }
+    let target = format!("{stem}_white.dds");
+    let file = out.join(&target);
+    if !file.exists() {
+        let (width, height, mut bgra) = decode_tga(&vfs.read(&source).ok()?)
+            .map_err(|err| log::warn!("{source}: {err:#}"))
+            .ok()?;
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel[..3].fill(255);
+        }
+        std::fs::create_dir_all(file.parent()?).ok()?;
+        std::fs::write(&file, bgra8_dds(width, height, &bgra)).ok()?;
+    }
+    Some(target)
+}
+
 /// Copies or converts an image to `<out>/<path>.dds`; returns that path. Looks for the file
 /// as named, then as `.dds` and `.tga`.
 fn image(vfs: &Vfs, out: &Path, path: &str) -> Option<String> {

@@ -1,5 +1,9 @@
-//! Soldier visuals: the team's imported BF2 soldier model with movement animations and the
-//! weapon in hand, or a team-colored capsule when no model is available (test range).
+//! Soldier visuals: the imported BF2 soldier model that matches the soldier's actual kit (see
+//! [`kit_body`]: a plain `<faction>_heavy_soldier`/`_light_soldier`, or, once the importer
+//! resolved the kit's own gear, `<body>__<kit>`, e.g. `us_heavy_soldier__us_assault` — a vest,
+//! pack, helmet or ghillie suit skinned onto the same body, see
+//! `bf2_import::soldiers::import_kit_gear`) with movement animations and the weapon in hand,
+//! or a team-colored capsule when no model is available (test range).
 //!
 //! Animation is layered like BF2: the legs play the soldier's movement clips, the upper
 //! body plays the matching clip of the current weapon's animation set. Every change
@@ -27,6 +31,7 @@ use bevy::{
 use std::sync::Arc;
 
 use game_data::{FireKind, SoldierDesc, WeaponDesc};
+use game_shared::skeleton::{self, Gait};
 use game_shared::{
     config::GamePaths,
     level::LoadedLevel,
@@ -321,19 +326,24 @@ const LAND_TIME: f32 = 0.35;
 const LAND_TIME_MOVING: f32 = 0.12;
 
 /// Upper-body set for weapons without their own.
-const DEFAULT_WEAPON_ANIMATIONS: &str = "objects/weapons/handheld/rurif_ak47/animations/3p.glb";
+const DEFAULT_WEAPON_ANIMATIONS: &str = game_shared::skeleton::DEFAULT_WEAPON_SET;
 
-/// Loaded soldier models and animation graphs.
+/// Loaded soldier models and animation graphs, keyed by soldier body name (`KitSlot::soldier`:
+/// a plain `<faction>_heavy_soldier` or, once a kit's gear could be resolved, the combined
+/// `<body>__<kit>` the importer writes; see `bf2_import::soldiers::import_kit_gear`). Every
+/// kit slot a team actually uses gets its own entry, so each class can look like it does in
+/// BF2 instead of the whole team sharing one kit's body.
 #[derive(Resource, Default)]
 struct SoldierModels {
-    /// The model each team wears (its first kit's body for now).
-    teams: [Option<Handle<Gltf>>; 2],
-    /// Where each team model's body LODs start and how far it is drawn.
-    lods: [Option<BodyLods>; 2],
+    /// Loaded body model by soldier name.
+    bodies: HashMap<String, Handle<Gltf>>,
+    /// Where each body's LODs start and how far it is drawn, by soldier name.
+    lods: HashMap<String, BodyLods>,
     /// Weapon upper-body animation sets by path.
     weapon_sets: HashMap<String, Handle<Gltf>>,
-    /// One graph per team model.
-    graphs: [Option<ModelAnimations>; 2],
+    /// One animation graph per soldier name (all clips are baked into every body's own glb,
+    /// so there's no sharing to be had between two different bodies).
+    graphs: HashMap<String, ModelAnimations>,
 }
 
 /// Where a body's levels of detail start (the first at 0; `body`, `body_lod1`, ...) and how
@@ -394,9 +404,10 @@ pub(crate) struct SoldierVisual {
     soldier: Entity,
 }
 
-/// Which body is attached to a visual: `Some(team index)` for a model, `None` for the capsule.
+/// Which body is attached to a visual: `Some(soldier name)` for a model, `None` for the
+/// capsule.
 #[derive(Component)]
-struct AttachedBody(Option<usize>);
+struct AttachedBody(Option<String>);
 
 /// Parts of an attached model found when its scene spawned.
 #[derive(Component)]
@@ -564,15 +575,17 @@ impl Legs {
 
 /// The weapon model currently in the soldier's hands.
 #[derive(Component)]
-struct HeldWeapon {
+pub(crate) struct HeldWeapon {
     name: String,
     gltf: Option<Handle<Gltf>>,
-    parts: Vec<Entity>,
+    /// The weapon's meshes (children of the weapon bones).
+    pub(crate) parts: Vec<Entity>,
     spawned: bool,
 }
 
+/// On a soldier: its [`SoldierVisual`].
 #[derive(Component)]
-struct VisualOf(Entity);
+pub(crate) struct VisualOf(pub(crate) Entity);
 
 fn load_placeholder_assets(
     mut commands: Commands,
@@ -607,21 +620,31 @@ fn load_team_models(
     mut models: ResMut<SoldierModels>,
 ) {
     models.graphs = default();
-    for index in 0..2 {
-        let desc = level
-            .desc
-            .teams
-            .get(index)
-            .and_then(|team| team.kits.first())
-            .and_then(|kit| {
-                paths
-                    .read_ron::<SoldierDesc>(format!("soldiers/{}.ron", kit.soldier))
-                    .map_err(|err| warn!("soldier model: {err:#}"))
-                    .ok()
-            });
-        models.teams[index] = desc.as_ref().map(|desc| asset_server.load(format!("imported://{}", desc.mesh)));
+    models.bodies = default();
+    models.lods = default();
+    // Every distinct soldier body any kit slot of either team wears (usually one per kit,
+    // fewer if several kits share a body, e.g. a mod that never resolved that kit's gear).
+    let mut names: Vec<&str> = level
+        .desc
+        .teams
+        .iter()
+        .flat_map(|team| &team.kits)
+        .map(|kit| kit.soldier.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        let Some(desc) = paths
+            .read_ron::<SoldierDesc>(format!("soldiers/{name}.ron"))
+            .map_err(|err| warn!("soldier model {name}: {err:#}"))
+            .ok()
+        else {
+            continue;
+        };
+        models.bodies.insert(name.to_string(), asset_server.load(format!("imported://{}", desc.mesh)));
         // Without LODs: one level (the full-detail body) drawn at any distance.
-        models.lods[index] = desc.map(|desc| match config.enabled {
+        let lods = match config.enabled {
             true => BodyLods {
                 starts: std::iter::once(0.0).chain(desc.lods.iter().copied()).collect(),
                 draw_distance: desc.draw_distance,
@@ -632,47 +655,51 @@ fn load_team_models(
                 draw_distance: None,
                 cull_radius: 0.0,
             },
-        });
+        };
+        models.lods.insert(name.to_string(), lods);
     }
 }
 
-/// The team model's animations, built once its file has loaded. The weapon set is added to
+/// A soldier body's animations, built once its file has loaded. The weapon set is added to
 /// the graph once its file has loaded too (check `upper` for it).
 #[allow(clippy::too_many_arguments)]
-fn team_animations<'a>(
+fn body_animations<'a>(
     models: &'a mut SoldierModels,
-    team: usize,
+    body: &str,
     set: &str,
     asset_server: &AssetServer,
     gltfs: &Assets<Gltf>,
     clip_assets: &Assets<AnimationClip>,
     graphs: &mut Assets<AnimationGraph>,
 ) -> Option<&'a ModelAnimations> {
-    if models.graphs[team].is_none() {
-        let body = gltfs.get(models.teams[team].as_ref()?)?;
+    if !models.graphs.contains_key(body) {
+        let gltf = gltfs.get(models.bodies.get(body)?)?;
         let mut graph = AnimationGraph::new();
         let mut legs = HashMap::default();
         for name in clips::legs() {
-            if let Some(handle) = body.named_animations.get(name) {
+            if let Some(handle) = gltf.named_animations.get(name) {
                 legs.insert(name, add_clip(&mut graph, handle, clip_assets));
             }
         }
         let cycles = clips::cycles().filter_map(|name| legs.get(name)).map(|c| c.node).collect();
-        let others = body
+        let others = gltf
             .named_animations
             .iter()
             .filter(|(name, _)| !legs.contains_key(name.as_ref()))
             .map(|(name, handle)| (name.to_string(), add_clip(&mut graph, handle, clip_assets)))
             .collect();
-        models.graphs[team] = Some(ModelAnimations {
-            graph: graphs.add(graph),
-            legs,
-            cycles,
-            upper: HashMap::default(),
-            others,
-        });
+        models.graphs.insert(
+            body.to_string(),
+            ModelAnimations {
+                graph: graphs.add(graph),
+                legs,
+                cycles,
+                upper: HashMap::default(),
+                others,
+            },
+        );
     }
-    let animations = models.graphs[team].as_mut()?;
+    let animations = models.graphs.get_mut(body)?;
     if !animations.upper.contains_key(set) {
         preload_set(&mut models.weapon_sets, set, asset_server);
         let handle = &models.weapon_sets[set];
@@ -733,12 +760,27 @@ fn soldier_team(soldier: Entity, controllers: &Query<&ControlledBy>, teams: &Que
         .unwrap_or_default()
 }
 
-/// Gives each visual its body once the team (and its model) is known.
+/// The soldier body a kit actually wears: the team's kit slot matching `kit` (the equipped
+/// kit's name, from `Loadout::kit`), or, before a kit is chosen (or for a kit name the level
+/// doesn't know), its first kit slot, same as BF2 shows a default body before spawn.
+pub(crate) fn kit_body(level: &LoadedLevel, team_index: usize, kit: Option<&str>) -> Option<String> {
+    let kits = &level.desc.teams.get(team_index)?.kits;
+    let slot = kit
+        .and_then(|kit| kits.iter().find(|slot| slot.kit.eq_ignore_ascii_case(kit)))
+        .or_else(|| kits.first())?;
+    (!slot.soldier.is_empty()).then(|| slot.soldier.clone())
+}
+
+/// Gives each visual its body once the team (and, from its equipped kit, its model) is known.
 fn attach_models(
     mut commands: Commands,
     visuals: Query<(Entity, &SoldierVisual, Option<&AttachedBody>)>,
     controllers: Query<&ControlledBy>,
     teams: Query<&Team>,
+    loadouts: Query<&Loadout>,
+    // Not loaded yet outside a match (the main menu): every soldier (there are none) would
+    // otherwise show as a capsule anyway, same as a kit the level doesn't know.
+    level: Option<Res<LoadedLevel>>,
     models: Res<SoldierModels>,
     gltfs: Res<Assets<Gltf>>,
     placeholder: Res<PlaceholderAssets>,
@@ -750,14 +792,16 @@ fn attach_models(
             Team::Two => Some(1),
             Team::Spectator => None,
         };
-        let model = team_index.and_then(|i| models.teams[i].as_ref().map(|m| (i, m)));
-        let wanted = model.map(|(i, _)| i);
+        let kit = loadouts.get(visual.soldier).ok().map(|l| l.kit.as_str());
+        let body_name = level.as_deref().zip(team_index).and_then(|(level, i)| kit_body(level, i, kit));
+        let model = body_name.as_deref().and_then(|name| models.bodies.get(name).map(|m| (name.to_string(), m)));
+        let wanted = model.as_ref().map(|(name, _)| name.clone());
         if attached.is_some_and(|a| a.0 == wanted) {
             continue;
         }
         // Wait for the model to load before swapping out the capsule.
         let scene = model.and_then(|(_, m)| gltfs.get(m)).and_then(|g| g.default_scene.clone());
-        if model.is_some() && scene.is_none() {
+        if wanted.is_some() && scene.is_none() {
             if attached.is_none() {
                 attach_capsule(&mut commands, entity, team, &placeholder);
             }
@@ -767,12 +811,12 @@ fn attach_models(
             .entity(entity)
             .despawn_related::<Children>()
             .remove::<(ModelRig, SoldierAnimator, HeldWeapon)>()
-            .insert(AttachedBody(wanted));
+            .insert(AttachedBody(wanted.clone()));
         let Some(scene) = scene else {
             attach_capsule(&mut commands, entity, team, &placeholder);
             continue;
         };
-        let lods = wanted.and_then(|i| models.lods[i].clone());
+        let lods = wanted.as_deref().and_then(|name| models.lods.get(name).cloned());
         commands.spawn((WorldAssetRoot(scene), ChildOf(entity))).observe(
             move |ready: On<WorldInstanceReady>,
                   mut commands: Commands,
@@ -957,7 +1001,7 @@ fn attach_weapons(
                 Some(acc.map_or((min, max), |(a, b)| (a.min(min), b.max(max))))
             });
         let radius = bounds.map_or(0.0, |(min, max)| (max - min).length() * 0.5);
-        let lod = body.and_then(|b| b.0).and_then(|i| models.lods[i].as_ref()).map(|l| UnitLod {
+        let lod = body.and_then(|b| b.0.as_deref()).and_then(|name| models.lods.get(name)).map(|l| UnitLod {
             starts: Arc::from([0.0]),
             draw_distance: small_part_draw_distance(radius, l.cull_radius).or(l.draw_distance),
             level: 0,
@@ -1094,9 +1138,19 @@ fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, rende
         }
         _ => {}
     }
+    let turning = yaw_rate.abs() > if matches!(state, Some(Legs::Turn(..))) { TURN_STOP } else { TURN_START };
+    // The same gait the hit zones are posed with (see `game_shared::skeleton`).
+    if !game_shared::hitzones::legacy() && std::env::var_os("BF2_ANIM_UNSYNCED").is_none() {
+        return match skeleton::gait(render.stance, velocity) {
+            Gait::Still if turning => Legs::Turn(render.stance, yaw_rate > 0.0),
+            Gait::Still => Legs::Still(render.stance),
+            Gait::Walk => Legs::Walk,
+            Gait::Move => Legs::Move(render.stance),
+            Gait::Sprint => Legs::Sprint,
+        };
+    }
     let standing = matches!(state, None | Some(Legs::Still(_) | Legs::Turn(..)));
     let moving = speed > if standing { 0.5 } else { 0.3 };
-    let turning = yaw_rate.abs() > if matches!(state, Some(Legs::Turn(..))) { TURN_STOP } else { TURN_START };
     let sprint_above = if state == Some(Legs::Sprint) { 4.8 } else { 5.2 };
     let walk_below = if state == Some(Legs::Walk) { 2.4 } else { 2.0 };
     match render.stance {
@@ -1139,6 +1193,13 @@ struct Cues<'a> {
     set: &'a str,
     fired: bool,
     reloading: bool,
+    /// Seconds into the reload, when it is timed by the server's tick (everyone but us).
+    reload_time: Option<f32>,
+    /// The server clock idle loops run on (see `game_shared::skeleton`).
+    clock: f32,
+    /// Clips timed like the server times them for hit zones: the step phase, the server
+    /// clock, the reload's tick (off with `BF2_HITREG_BEFORE`).
+    synced: bool,
     /// Critically wounded.
     downed: bool,
     /// Seated in a vehicle: the seat's pose.
@@ -1311,11 +1372,16 @@ impl SoldierAnimator {
             let Some(&clip) = animations.legs.get(name) else {
                 continue;
             };
+            let cycle = animations.cycles.contains(&clip.node);
             let play = match once {
                 Some(restart) => Play::once(restart).speed(speed),
-                None if animations.cycles.contains(&clip.node) => {
-                    Play::looping(weight).speed(speed).phase(cycle_phase)
+                // In step with the replicated step phase, and idling on the server clock, as the
+                // hit zones are posed.
+                None if cues.synced && cycle => Play::looping(weight).at(skeleton::cycle_time(render.stride, clip.duration)),
+                None if cues.synced && matches!(state, Legs::Still(_)) => {
+                    Play::looping(weight).at(skeleton::loop_time(cues.clock, clip.duration))
                 }
+                None if cycle => Play::looping(weight).speed(speed).phase(cycle_phase),
                 None => Play::looping(weight).speed(speed),
             };
             self.legs.play(player, clip, play);
@@ -1365,7 +1431,9 @@ impl SoldierAnimator {
             self.upper.set_fade(fade);
         } else if let Some(action) = &mut self.action {
             action.time += dt;
-            let done = action.clip.finished(player) || (action.kind == ActionKind::Reload && !cues.reloading);
+            let timed_out = action.kind == ActionKind::Reload
+                && cues.reload_time.is_some_and(|t| t >= action.clip.duration);
+            let done = action.clip.finished(player) || (action.kind == ActionKind::Reload && !cues.reloading) || timed_out;
             if done {
                 self.action = None;
                 self.upper.set_fade(FADE_ACTION_OUT);
@@ -1375,7 +1443,12 @@ impl SoldierAnimator {
         if let Some(action) = self.action {
             // Held on its first frame while the old weapon goes down.
             let speed = if action.lowering() { 0.0 } else { 1.0 };
-            self.upper.play(player, action.clip, Play::once(started.is_some()).speed(speed));
+            let play = Play::once(started.is_some()).speed(speed);
+            let play = match cues.reload_time {
+                Some(time) if action.kind == ActionKind::Reload => play.at(time),
+                _ => play,
+            };
+            self.upper.play(player, action.clip, play);
         } else {
             for &(name, weight) in targets {
                 let Some(&clip) = upper.get(clips::upper_for(name)).or_else(|| upper.get("stand")) else {
@@ -1383,7 +1456,17 @@ impl SoldierAnimator {
                 };
                 let phase = animations.legs.get(name).and_then(|legs| legs.phase(player)).unwrap_or(0.0);
                 let speed = if once.is_some() { 1.0 } else { speed };
-                self.upper.play(player, clip, Play::looping(weight).speed(speed).phase(phase));
+                let cycle = animations.legs.get(name).is_some_and(|legs| animations.cycles.contains(&legs.node));
+                let play = match () {
+                    _ if cues.synced && once.is_none() && cycle => {
+                        Play::looping(weight).at(skeleton::cycle_time(render.stride, clip.duration))
+                    }
+                    _ if cues.synced && matches!(state, Legs::Still(_)) => {
+                        Play::looping(weight).at(skeleton::loop_time(cues.clock, clip.duration))
+                    }
+                    _ => Play::looping(weight).speed(speed).phase(phase),
+                };
+                self.upper.play(player, clip, play);
             }
         }
         self.upper.update(player, dt);
@@ -1410,7 +1493,7 @@ fn animate(
     gltfs: Res<Assets<Gltf>>,
     clip_assets: Res<Assets<AnimationClip>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
-    feedback: Res<CombatFeedback>,
+    (feedback, view): (Res<CombatFeedback>, Res<crate::combat::ViewTick>),
     mut shots: MessageReader<ShotFired>,
     mut throws: MessageReader<ThrowReleased>,
     soldiers: Query<(
@@ -1432,8 +1515,8 @@ fn animate(
     // `fire.fireLaunchDelay` and would otherwise restart the arm swing mid-air).
     let released: Vec<Entity> = throws.read().map(|t| t.soldier).collect();
     for (visual, body, rig, mut animator) in &mut visuals {
-        let (Ok((render, loadout, inventory, local, downed, seated)), Some(team)) =
-            (soldiers.get(visual.soldier), body.0)
+        let (Ok((render, loadout, inventory, local, downed, seated)), Some(body_name)) =
+            (soldiers.get(visual.soldier), body.0.as_deref())
         else {
             continue;
         };
@@ -1464,7 +1547,7 @@ fn animate(
                 }
             }
         }
-        let animations = team_animations(&mut models, team, set, &asset_server, &gltfs, &clip_assets, &mut graphs);
+        let animations = body_animations(&mut models, body_name, set, &asset_server, &gltfs, &clip_assets, &mut graphs);
         let (Some(animations), Ok(mut player)) = (animations, players.get_mut(rig.player)) else {
             animator.hand = None;
             continue;
@@ -1498,12 +1581,24 @@ fn animate(
             };
             (fired, inventory.is_some_and(|i| i.reloading))
         };
+        // `BF2_ANIM_UNSYNCED=1`: clips timed by the client alone, as before (to compare).
+        let synced = !game_shared::hitzones::legacy() && std::env::var_os("BF2_ANIM_UNSYNCED").is_none();
+        // Everyone else's reload runs from the tick it started (we learn of it before we draw
+        // that moment); ours as predicted.
+        let reload_time = match (local, synced, inventory) {
+            (false, true, Some(i)) => skeleton::reload_elapsed(i.reloading, i.reload_started, view.seconds),
+            _ => None,
+        };
+        let reloading = if !local && synced { reload_time.is_some() } else { reloading };
         let cues = Cues {
             render,
             weapon,
             set,
             fired,
             reloading,
+            reload_time,
+            clock: skeleton::clock(view.seconds),
+            synced,
             downed,
             seat_pose: seat_pose.as_deref(),
         };

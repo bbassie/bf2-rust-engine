@@ -8,7 +8,10 @@ use bevy::prelude::*;
 use game_data::HitZone;
 use serde::{Deserialize, Serialize};
 
-use crate::soldier::{SoldierMotion, Stance};
+use crate::{
+    skeleton::{AnimState, BONES, Pose},
+    soldier::{SoldierMotion, Stance},
+};
 
 /// Head, body, body armour and limbs: the damage table columns of BF2's soldier hit
 /// capsules.
@@ -25,6 +28,21 @@ pub const REACH: f32 = 2.4;
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct ServerClock(pub u32);
 
+/// `BF2_HITREG_LOG=1`: the server logs every bullet's verdict on soldiers and clients their
+/// predicted impacts, prefixed `hitreg`, for checking hit registration.
+pub fn hitreg_log() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("BF2_HITREG_LOG").is_some());
+    *ON
+}
+
+/// `BF2_HITREG_BEFORE=1`: hit registration as it was before hit zones followed the
+/// animations (stance capsules, client tracers stopped by the movement capsule, the host's
+/// shots judged against the present), for comparison.
+pub fn legacy() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("BF2_HITREG_BEFORE").is_some());
+    *ON
+}
+
 /// Where a ray met a soldier.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoneHit {
@@ -35,15 +53,20 @@ pub struct ZoneHit {
     pub normal: Vec3,
     /// The body part's damage table column.
     pub material: u32,
+    /// Which of the zones it met (index into the soldier's hit zones).
+    pub zone: usize,
 }
 
-/// How a soldier's body is posed for its hit zones: where it stands, which way it faces
-/// and its stance. Soldiers riding in vehicles sit, which the crouching pose is closest to.
+/// How a soldier's body is posed for its hit zones: where it stands, which way it faces,
+/// its stance and, on foot, what its animations depend on ([`crate::skeleton`]). Soldiers
+/// riding in vehicles sit, which the crouching pose is closest to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodyPose {
     pub position: Vec3,
     pub yaw: f32,
     pub stance: Stance,
+    /// Without (seated, climbing, swimming, ...), the zones keep their stance's pose.
+    pub anim: Option<AnimState>,
 }
 
 impl BodyPose {
@@ -52,10 +75,11 @@ impl BodyPose {
             position: motion.position,
             yaw: motion.yaw,
             stance: if seated { Stance::Crouching } else { motion.stance },
+            anim: None,
         }
     }
 
-    /// A zone's capsule ends in the world.
+    /// A zone's capsule ends in the world, in its stance's pose.
     pub fn capsule(&self, zone: &HitZone) -> (Vec3, Vec3) {
         let ends = match self.stance {
             Stance::Standing => &zone.standing,
@@ -67,19 +91,54 @@ impl BodyPose {
         (at(ends[0]), at(ends[1]))
     }
 
-    /// The nearest zone the ray from `origin` along `direction` (normalized) meets within
-    /// `max` meters.
-    pub fn ray(&self, zones: &[HitZone], origin: Vec3, direction: Vec3, max: f32) -> Option<ZoneHit> {
-        // Most rays pass far from the soldier.
+    /// A zone's capsule ends in the world, on its bone as `bones` pose it (see
+    /// [`crate::skeleton::HitRigs::pose`]), else in its stance's pose.
+    pub fn posed_capsule(&self, zone: &HitZone, bones: Option<&Pose>) -> (Vec3, Vec3) {
+        let bone = bones
+            .filter(|_| zone.length != 0.0)
+            .and_then(|bones| Some(bones[BONES.iter().position(|b| *b == zone.bone)?]));
+        let Some((q, t)) = bone else {
+            return self.capsule(zone);
+        };
+        let start = t + q * Vec3::from(zone.offset);
+        let end = start + q * Vec3::new(0.0, -zone.length, 0.0);
+        let rotation = Quat::from_rotation_y(self.yaw);
+        (self.position + rotation * start, self.position + rotation * end)
+    }
+
+    /// Whether a ray from `origin` along `direction` (normalized) passes within reach of the
+    /// soldier within `max` meters: most rays pass far from him.
+    pub fn near(&self, origin: Vec3, direction: Vec3, max: f32) -> bool {
         let center = self.position + Vec3::Y * 0.9;
         let along = (center - origin).dot(direction).clamp(0.0, max);
-        if (origin + direction * along).distance(center) > REACH {
+        (origin + direction * along).distance(center) <= REACH
+    }
+
+    /// The nearest zone, in its stance's pose, the ray from `origin` along `direction`
+    /// (normalized) meets within `max` meters.
+    pub fn ray(&self, zones: &[HitZone], origin: Vec3, direction: Vec3, max: f32) -> Option<ZoneHit> {
+        self.ray_posed(zones, || None, origin, direction, max)
+    }
+
+    /// The same, with the zones on the bones `bones` poses (only asked for if the ray passes
+    /// near).
+    pub fn ray_posed(
+        &self,
+        zones: &[HitZone],
+        bones: impl FnOnce() -> Option<Pose>,
+        origin: Vec3,
+        direction: Vec3,
+        max: f32,
+    ) -> Option<ZoneHit> {
+        if !self.near(origin, direction, max) {
             return None;
         }
+        let bones = bones();
         zones
             .iter()
-            .filter_map(|zone| {
-                let (a, b) = self.capsule(zone);
+            .enumerate()
+            .filter_map(|(index, zone)| {
+                let (a, b) = self.posed_capsule(zone, bones.as_ref());
                 let distance = ray_capsule(origin, direction, a, b, zone.radius)?;
                 (distance <= max).then(|| {
                     let point = origin + direction * distance;
@@ -90,11 +149,24 @@ impl BodyPose {
                         point,
                         normal: (point - (a + axis * t)).normalize_or(-direction),
                         material: zone.material,
+                        zone: index,
                     }
                 })
             })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))
     }
+}
+
+/// Server -> everyone: a bullet hit a soldier here (the blood, which clients leave to the
+/// server: their own tracers only predict where it stops).
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct SoldierImpact {
+    pub point: Vec3,
+    /// Out of the body.
+    pub normal: Vec3,
+    /// The projectile's material and the body part's (the impact effect's pair).
+    pub projectile: u32,
+    pub body_part: u32,
 }
 
 /// Distance along a ray (`direction` normalized) to where it enters the capsule around `a`-`b`
@@ -150,6 +222,8 @@ pub fn fallback() -> &'static [HitZone] {
             standing,
             crouching,
             prone,
+            offset: [0.0; 3],
+            length: 0.0,
         };
         vec![
             zone(
@@ -214,6 +288,7 @@ mod tests {
             position: Vec3::new(10.0, 2.0, 0.0),
             yaw: std::f32::consts::FRAC_PI_2,
             stance: Stance::Standing,
+            anim: None,
         };
         let zones = fallback();
         let head = pose.ray(zones, Vec3::new(0.0, 3.65, 0.0), Vec3::X, 100.0).unwrap();

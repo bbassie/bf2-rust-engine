@@ -45,9 +45,11 @@ pub mod conquest;
 pub mod content;
 pub mod coop;
 pub mod discovery;
+pub mod dummy;
 pub mod gear;
 pub mod join;
 pub mod limits;
+pub mod loadouts;
 pub mod modes;
 pub mod radio;
 pub mod rotation;
@@ -113,6 +115,9 @@ pub struct ServerSettings {
     /// Optional accounts: a master server whose tickets the server checks, ranked or not
     /// (see [`accounts`]).
     pub accounts: accounts::AccountSettings,
+    /// What players may carry: BF2's kits or picks from each class's weapons, faction
+    /// locks, unlocks by rank (see [`loadouts`]).
+    pub loadouts: game_shared::arsenal::LoadoutRules,
 }
 
 impl Default for ServerSettings {
@@ -142,6 +147,7 @@ impl Default for ServerSettings {
             master_server: None,
             content: default(),
             accounts: default(),
+            loadouts: default(),
         }
     }
 }
@@ -170,8 +176,9 @@ impl Plugin for GameServerPlugin {
                 stats::StatsPlugin,
                 content::ContentPlugin,
                 voice::VoicePlugin,
+                dummy::DummyPlugin,
             ))
-            .add_plugins((join::JoinPlugin, accounts::AccountsPlugin))
+            .add_plugins((join::JoinPlugin, accounts::AccountsPlugin, loadouts::LoadoutsPlugin))
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
             .add_systems(
@@ -653,16 +660,25 @@ fn apply_inputs(
         });
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn respawn_players(
     mut commands: Commands,
     time: Res<Time>,
     level: Res<LoadedLevel>,
     armory: Res<Armory>,
+    // Loadouts (`loadouts`): the picks players made for their kit's class.
+    loadout_rules: (Res<ServerSettings>, Res<game_shared::arsenal::Arsenal>),
     match_state: Single<(&MatchInfo, Option<&RoundState>, Option<&game_shared::modes::ModeState>, Option<&game_shared::conquest::Tickets>)>,
     control_points: Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules, Option<&game_shared::modes::SpawnBlocked>)>,
     mut players: Query<
-        (Entity, &Team, &mut Deployment, Option<&mut RespawnTimer>, Option<&SquadMember>),
+        (
+            Entity,
+            &Team,
+            &mut Deployment,
+            Option<&mut RespawnTimer>,
+            Option<&SquadMember>,
+            (Option<&game_shared::arsenal::LoadoutPicks>, Option<&game_shared::join::AccountBadge>),
+        ),
         // Nobody spawns while their client checks its content for a new map (`join`).
         (With<Player>, Without<Controls>, Without<join::ContentPending>),
     >,
@@ -685,7 +701,7 @@ fn respawn_players(
     if armory.kits.is_empty() || round != Some(&RoundState::Playing) {
         return;
     }
-    for (player, team, mut deployment, timer, squad) in &mut players {
+    for (player, team, mut deployment, timer, squad, (picks, badge)) in &mut players {
         // Staged modes: attackers out of tickets don't come back.
         if *team == Team::Spectator || mode.is_some_and(|m| !m.can_spawn(*team, tickets)) {
             continue;
@@ -718,11 +734,15 @@ fn respawn_players(
         };
         commands.entity(player).remove::<RespawnTimer>();
         deployment.respawn_in = 0.0;
-        spawn_soldier(&mut commands, player, *team, deployment.kit, position, yaw, &armory);
+        let (settings, arsenal) = &loadout_rules;
+        let picked = loadouts::picked_loadout(settings, &armory, arsenal, *team, deployment.kit, picks, badge);
+        spawn_soldier(&mut commands, player, *team, deployment.kit, position, yaw, &armory, picked);
     }
 }
 
-/// Spawns a soldier for `player` with kit slot `kit`.
+/// Spawns a soldier for `player` with kit slot `kit`, carrying `picked` (see
+/// [`loadouts::picked_loadout`]) or else the kit's own weapons.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_soldier(
     commands: &mut Commands,
     player: Entity,
@@ -731,17 +751,19 @@ pub fn spawn_soldier(
     position: Vec3,
     yaw: f32,
     armory: &Armory,
+    picked: Option<Loadout>,
 ) -> Entity {
     let mut motion = SoldierMotion::at(position, yaw);
     let team_index = if team == Team::Two { 1 } else { 0 };
     motion.heavy = armory
         .kit_for(team_index, kit as usize)
         .is_some_and(|k| game_shared::soldier::heavy_kit(&k.kind));
-    let loadout = armory
-        .kit_for(team_index, kit as usize)
-        .map(|k| Loadout {
-            kit: k.name.clone(),
-            weapons: k.weapons.clone(),
+    let loadout = picked
+        .or_else(|| {
+            armory.kit_for(team_index, kit as usize).map(|k| Loadout {
+                kit: k.name.clone(),
+                weapons: k.weapons.clone(),
+            })
         })
         .unwrap_or_default();
     let inventory = Inventory::full(&loadout, armory);

@@ -80,6 +80,12 @@ struct Cli {
     /// Bullets hurt teammates.
     #[arg(long)]
     friendly_fire: bool,
+    /// BF2's kits exactly as they are: no picking weapons from each class's pool.
+    #[arg(long)]
+    classic_kits: bool,
+    /// Players may only pick weapons that kits of their own team carry.
+    #[arg(long)]
+    faction_locked_weapons: bool,
     /// Password for the remote console and `/login` in the chat. Only takes effect on
     /// servers that don't require accounts (LAN, offline, unranked): on a ranked server
     /// `/login` is refused and admin rights come from `--admin` instead.
@@ -304,6 +310,8 @@ fn main() -> AppExit {
     settings.accounts.ranked |= cli.ranked;
     settings.public |= cli.public;
     settings.friendly_fire |= cli.friendly_fire;
+    settings.loadouts.arsenal &= !cli.classic_kits;
+    settings.loadouts.faction_locked |= cli.faction_locked_weapons;
 
     let mut app = App::new();
     // Explicit plugin list rather than DefaultPlugins, so the server stays headless even

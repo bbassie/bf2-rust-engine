@@ -102,10 +102,32 @@ const JET_STALL_SINK: f32 = 12.0;
 /// Jets count as airborne (can stall) this high above the ground (m).
 const JET_AIRBORNE: f32 = 4.0;
 
-/// Helicopters: the stick's pitch and roll rates fade out over the last `band` degrees before
-/// these tilts (pitch, roll).
-pub const HELI_MAX_TILT: Vec2 = Vec2::new(30.0, 50.0);
-const HELI_TILT_BAND: f32 = 15.0;
+/// Helicopters: how far the stick tilts them (degrees: nose down, nose up, bank); its rates
+/// fade out over the last `HELI_TILT_BAND` degrees. Far nose down for rocket runs: past
+/// [`HELI_DIVE`] the collective lets go of the altitude and it dives.
+pub const HELI_MAX_TILT: Vec3 = Vec3::new(75.0, 35.0, 55.0);
+const HELI_TILT_BAND: f32 = 10.0;
+/// Hovering jump jets: pitch either way and bank (degrees), and their band.
+const VTOL_MAX_TILT: Vec2 = Vec2::new(30.0, 50.0);
+const VTOL_TILT_BAND: f32 = 15.0;
+/// How quickly a piloted helicopter reaches the rates the stick and pedals ask for (pitch,
+/// yaw, roll), 1/s: like BF3/BF4, half the rate in about 60 ms and nearly all by 200 ms
+/// (BF2's 4/s took over half a second). BF2's `response` is used if quicker.
+pub const HELI_RESPONSE: Vec3 = Vec3::new(11.0, 12.0, 12.0);
+/// Nose down past the first pitch (degrees) the collective stops holding the altitude, fully
+/// by the second: a dive. Its forward push grows no further than at `HELI_DIVE[0]`'s tilt.
+const HELI_DIVE: [f32; 2] = [35.0, 60.0];
+/// In forward flight the pedals bank the helicopter this far into their turn (radians, at full
+/// pedal, with the stick's roll centred), so a pedal turn looks and flies coordinated.
+const HELI_PEDAL_BANK: f32 = 0.2;
+/// Share of the pedals' turn rate left in fast forward flight (by this airspeed, m/s).
+const HELI_PEDAL_FAST: f32 = 0.6;
+const HELI_PEDAL_FAST_SPEED: f32 = 50.0;
+/// In forward flight the fuselage and tail turn sideways drift into the nose's direction
+/// (1/s, times the slip angle), costing a little speed (1/s, times the slip angle): the
+/// flight path follows a pedal turn instead of skidding.
+const HELI_FUSELAGE_GRIP: f32 = 2.5;
+const HELI_SLIP_DRAG: f32 = 0.3;
 /// Piloted, the collective holds the altitude up to this tilt and fades out by the second
 /// (degrees; at the stick's pitch and bank limits together it's tilted 56°).
 const HELI_REGULATION: [f32; 2] = [58.0, 75.0];
@@ -548,15 +570,20 @@ pub fn flight_forces(
         let clearance = around.altitude - resting;
         let airborne = clearance > HOVER_HEIGHT;
         let tilt = up.angle_between(Vec3::Y).to_degrees();
-        // Piloted helicopters hold their altitude as far as the stick tilts them (BF2's 35°
-        // lost height in every banked turn).
-        let (regulated_to, unregulated_from) = if desc.category == VehicleCategory::Helicopter && controls.occupied {
+        let helicopter = desc.category == VehicleCategory::Helicopter && controls.occupied;
+        let right = rotation * Vec3::X;
+        let pitch = forward.y.clamp(-1.0, 1.0).asin();
+        let roll = (-right.y).clamp(-1.0, 1.0).asin();
+        // Piloted helicopters hold their altitude as far as the stick banks them (BF2's 35°
+        // lost height in every banked turn), but steeply nose down they dive.
+        let (regulated_to, unregulated_from) = if helicopter {
             (rotor.regulation_angle.max(HELI_REGULATION[0]), rotor.no_regulation_angle.max(HELI_REGULATION[1]))
         } else {
             (rotor.regulation_angle, rotor.no_regulation_angle)
         };
         let span = (unregulated_from - regulated_to).max(1.0);
-        let regulation = if airborne { 1.0 - ((tilt - regulated_to) / span).clamp(0.0, 1.0) } else { 0.0 };
+        let dive = if helicopter { smoothstep(HELI_DIVE[0], HELI_DIVE[1], -pitch.to_degrees()) } else { 0.0 };
+        let regulation = if airborne { (1.0 - ((tilt - regulated_to) / span).clamp(0.0, 1.0)) * (1.0 - dive) } else { 0.0 };
         let climb = if controls.throttle >= 0.0 {
             controls.throttle * rotor.climb_speed[0]
         } else {
@@ -575,63 +602,84 @@ pub fn flight_forces(
             g * GROUNDED_LIFT
         };
         let thrust = (free + (regulated - free) * regulation).clamp(0.0, g * (1.0 + rotor.lift_margin)) * power;
-        // Tilting further than the regulation reaches doesn't push harder sideways.
+        // Tilting further than the regulation reaches doesn't push harder sideways, nor does
+        // diving steeper than a dive begins.
         let horizontal = (up - Vec3::Y * up.y).clamp_length_max(rotor.regulation_angle.to_radians().sin());
-        let direction = Vec3::Y * up.y + horizontal * rotor.horizontal_magnifier;
+        let steep = if helicopter { (up.y / HELI_DIVE[0].to_radians().cos()).min(1.0) } else { 1.0 };
+        let direction = Vec3::Y * up.y + horizontal * rotor.horizontal_magnifier * steep;
         let flat_velocity = body.velocity - Vec3::Y * body.velocity.y;
         let mut drag = flat_velocity * rotor.horizontal_damping;
-        let right = rotation * Vec3::X;
         let flat_forward = (forward - Vec3::Y * forward.y).normalize_or_zero();
         // Level right of the nose (the right wing's own direction swings forward or back
         // when the helicopter is both pitched and banked).
         let flat_right = flat_forward.cross(Vec3::Y);
         let centred = controls.pitch.abs() < 0.05 && controls.roll.abs() < 0.05;
+        // Measured level (a helicopter flies nose down: in its own frame the air comes from
+        // below, and banked, from the side).
+        let ahead = flat_velocity.dot(flat_forward);
+        let slip = flat_velocity.dot(flat_right).atan2(ahead.max(0.1));
+        let forward_flight = if airborne { smoothstep(HELI_FORWARD_FLIGHT, HELI_FORWARD_FLIGHT * 2.0, ahead) } else { 0.0 };
         if airborne {
             // Backwards and sideways it's slow; hands off and slow, the drift dies out.
-            let ahead = flat_velocity.dot(flat_forward);
             drag += flat_forward * ahead.min(0.0) * HELI_BACKWARD_DRAG
                 + flat_right * flat_velocity.dot(flat_right) * HELI_SIDEWAYS_DRAG;
             if centred && controls.occupied {
                 let slow = 1.0 - (flat_velocity.length() / HELI_HOVER_SPEED).min(1.0);
                 drag += flat_velocity * HELI_HOVER_ASSIST * slow;
             }
+            // In forward flight the fuselage carries the flight path round after the nose
+            // (turning the velocity rather than braking it), for a little speed.
+            let speed = flat_velocity.length();
+            if helicopter && forward_flight > 0.0 && speed > 1.0 {
+                let along = flat_velocity / speed;
+                let toward = (flat_forward - along * along.dot(flat_forward)).normalize_or_zero();
+                let grip = slip.abs() * speed * forward_flight;
+                drag -= toward * grip * HELI_FUSELAGE_GRIP;
+                drag += along * grip * HELI_SLIP_DRAG;
+            }
         }
         push.forces.push(((direction * thrust - drag * power) * mass, com));
 
-        // The stick and rudder turn it at their rates (less towards its tilt limits);
-        // centred, it levels out.
+        // The stick and pedals turn it at their rates (the stick less towards its tilt
+        // limits); centred, it levels out.
         let rates = Vec3::from(rotor.turn_rates);
-        let pitch = forward.y.clamp(-1.0, 1.0).asin();
-        let roll = (-right.y).clamp(-1.0, 1.0).asin();
-        let room = |angle: f32, limit: f32, ask: f32| {
-            let toward = if ask > 0.0 { limit - angle.to_degrees() } else { limit + angle.to_degrees() };
-            (toward / HELI_TILT_BAND).clamp(0.0, 1.0)
+        // Room left towards a limit (degrees below and above 0), 0..1.
+        let room = |angle: f32, [below, above]: [f32; 2], band: f32, ask: f32| {
+            let toward = if ask > 0.0 { above - angle.to_degrees() } else { below + angle.to_degrees() };
+            (toward / band).clamp(0.0, 1.0)
         };
+        let (pitch_limits, bank, band) = if desc.category == VehicleCategory::Helicopter {
+            ([HELI_MAX_TILT.x, HELI_MAX_TILT.y], HELI_MAX_TILT.z, HELI_TILT_BAND)
+        } else {
+            ([VTOL_MAX_TILT.x; 2], VTOL_MAX_TILT.y, VTOL_TILT_BAND)
+        };
+        // The pedals turn it quickest in a hover; fast, the fin holds against them.
+        let pedal_authority = if helicopter { 1.0 - (1.0 - HELI_PEDAL_FAST) * smoothstep(HELI_FORWARD_FLIGHT, HELI_PEDAL_FAST_SPEED, ahead) } else { 1.0 };
         let mut wanted = Vec3::new(
-            controls.pitch * rates.x * room(pitch, HELI_MAX_TILT.x, controls.pitch),
-            -controls.steer * rates.y,
-            -controls.roll * rates.z * room(roll, HELI_MAX_TILT.y, controls.roll),
+            controls.pitch * rates.x * room(pitch, pitch_limits, band, controls.pitch),
+            -controls.steer * rates.y * pedal_authority,
+            -controls.roll * rates.z * room(roll, [bank; 2], band, controls.roll),
         );
         if airborne {
             if controls.pitch.abs() < 0.05 {
                 wanted.x -= pitch * rotor.leveling.max(HELI_LEVELING.x);
             }
             if controls.roll.abs() < 0.05 {
-                wanted.z += roll * rotor.leveling.max(HELI_LEVELING.y);
+                // Levels out, or at speed banks a little into a pedal turn.
+                let pedal_bank = if helicopter { controls.steer.clamp(-1.0, 1.0) * HELI_PEDAL_BANK * forward_flight } else { 0.0 };
+                wanted.z += (roll - pedal_bank) * rotor.leveling.max(HELI_LEVELING.y);
             }
-            // In forward flight it turns into its bank, and the tail keeps it into the
-            // airflow. Measured level (a helicopter flies nose down: in its own frame the air
-            // comes from below, and banked, from the side), turning about the vertical.
-            let ahead = flat_velocity.dot(flat_forward);
-            let forward_flight = smoothstep(HELI_FORWARD_FLIGHT, HELI_FORWARD_FLIGHT * 2.0, ahead);
+            // In forward flight it turns into its bank (about the vertical), and the tail keeps
+            // it into the airflow, except while the pedals turn it out of it.
             if forward_flight > 0.0 {
                 let bank_turn = g * roll.clamp(-1.2, 1.2).tan() / ahead.max(1.0);
-                let slip = flat_velocity.dot(flat_right).atan2(ahead);
-                let turn = (bank_turn.clamp(-rates.y, rates.y) + slip * HELI_WEATHERVANE) * forward_flight;
+                let pedals = if helicopter { controls.steer.abs().min(1.0) } else { 0.0 };
+                let turn = (bank_turn.clamp(-rates.y, rates.y) + slip * HELI_WEATHERVANE * (1.0 - pedals)) * forward_flight;
                 wanted += inverse * (Vec3::NEG_Y * turn);
             }
         }
-        push.torque += rotation * ((wanted - omega) * rotor.response * model.inertia * state.spin);
+        let response = if helicopter { HELI_RESPONSE.max(Vec3::splat(rotor.response)) } else { Vec3::splat(rotor.response) };
+        push.torque += rotation * ((wanted - omega) * response * model.inertia * state.spin);
     }
     push
 }
@@ -657,5 +705,200 @@ mod tests {
         }
         // No airflow, no control.
         assert_eq!(jet_authority(&envelope, 0.0), Vec3::ZERO);
+    }
+}
+
+/// Helicopter handling measured offline: the imported helicopters flown by
+/// [`flight_forces`] and [`crate::vehicle::integrate`] (the driver's prediction) at 60 Hz, from
+/// a hover and from forward flight, printing their response times and rates. Needs the
+/// imported vehicles (`imported/vehicles`, or `GAME_IMPORTED_DIR`); skipped without them.
+/// `cargo test -p game_shared --lib heli_handling -- --nocapture` shows the table.
+#[cfg(test)]
+mod heli_handling {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        config::GamePaths,
+        vehicle::{VehicleModel, integrate},
+    };
+
+    const DT: f32 = 1.0 / 60.0;
+
+    fn model(name: &str) -> Option<VehicleModel> {
+        let imported = std::env::var_os(GamePaths::IMPORTED_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../imported"));
+        let paths = GamePaths { imported, mods: Vec::new() };
+        let desc: game_data::VehicleDesc = paths.read_ron(format!("vehicles/{name}.ron")).ok()?;
+        Some(VehicleModel::new(desc, &paths))
+    }
+
+    /// One run: per tick, the time and the body after it.
+    fn fly(model: &VehicleModel, mut body: BodyState, seconds: f32, controls: impl Fn(f32) -> Controls) -> Vec<(f32, BodyState)> {
+        let mut state = FlightState {
+            spin: 1.0,
+            ..FlightState::new()
+        };
+        let joints = vec![[0.0; 3]; model.joint_count];
+        let around = Surroundings { water: None, altitude: 150.0 };
+        let mut samples = Vec::new();
+        let ticks = (seconds / DT).round() as usize;
+        for tick in 0..ticks {
+            let t = tick as f32 * DT;
+            let push = flight_forces(model, &body, &joints, &controls(t), &mut state, &around, DT);
+            integrate(model, &mut body, &push, DT);
+            samples.push((t + DT, body));
+        }
+        samples
+    }
+
+    fn held(throttle: f32, steer: f32, roll: f32, pitch: f32, until: f32) -> impl Fn(f32) -> Controls {
+        move |t| {
+            let on = t < until;
+            Controls {
+                throttle: if on { throttle } else { 0.0 },
+                steer: if on { steer } else { 0.0 },
+                roll: if on { roll } else { 0.0 },
+                pitch: if on { pitch } else { 0.0 },
+                occupied: true,
+                ..default()
+            }
+        }
+    }
+
+    /// (heading, pitch, roll) in degrees: heading left positive, nose up, right wing down.
+    fn attitude(rotation: Quat) -> Vec3 {
+        let forward = rotation * Vec3::NEG_Z;
+        let right = rotation * Vec3::X;
+        Vec3::new(
+            (-forward.x).atan2(-forward.z).to_degrees(),
+            forward.y.clamp(-1.0, 1.0).asin().to_degrees(),
+            (-right.y).clamp(-1.0, 1.0).asin().to_degrees(),
+        )
+    }
+
+    /// When a rate first reaches a share of `full` (ms).
+    fn reach(samples: &[(f32, f32)], full: f32, share: f32) -> f32 {
+        samples
+            .iter()
+            .find(|(_, r)| *r * full.signum() >= full.abs() * share)
+            .map_or(f32::NAN, |(t, _)| t * 1000.0)
+    }
+
+    fn level(speed: f32) -> BodyState {
+        BodyState {
+            position: Vec3::new(0.0, 150.0, 0.0),
+            velocity: Vec3::NEG_Z * speed,
+            ..default()
+        }
+    }
+
+    /// Step responses from a hover: (rate curve in deg/s, settled rate, 50 % and 90 % times).
+    fn step(model: &VehicleModel, axis: usize, hold: f32) -> (Vec<(f32, f32)>, f32) {
+        let controls = match axis {
+            0 => held(0.0, 1.0, 0.0, 0.0, hold),
+            1 => held(0.0, 0.0, 0.0, -1.0, hold),
+            _ => held(0.0, 0.0, 1.0, 0.0, hold),
+        };
+        let samples = fly(model, level(0.0), hold * 2.0, controls);
+        let rates: Vec<(f32, f32)> = samples
+            .iter()
+            .map(|(t, b)| {
+                let local = b.rotation.inverse() * b.angular_velocity;
+                let rate = match axis {
+                    0 => -b.angular_velocity.y,
+                    1 => local.x,
+                    _ => -local.z,
+                };
+                (*t, rate.to_degrees())
+            })
+            .collect();
+        // Settled: the peak magnitude during the hold (tilt limits stop pitch and roll later).
+        let full = rates.iter().filter(|(t, _)| *t <= hold).map(|(_, r)| *r).fold(0.0, |a: f32, r| if r.abs() > a.abs() { r } else { a });
+        (rates, full)
+    }
+
+    #[test]
+    fn heli_handling() {
+        let names = ["ahe_z10", "ahe_ah1z", "ahe_havoc", "usthe_uh60", "the_mi17"];
+        let models: Vec<(&str, VehicleModel)> = names.iter().filter_map(|n| Some((*n, model(n)?))).collect();
+        if models.is_empty() {
+            eprintln!("heli_handling: no imported helicopters, skipped");
+            return;
+        }
+        println!(
+            "{:<11} {:>22} {:>22} {:>22} {:>9} {:>9} {:>30}",
+            "heli", "yaw 50%/90% ms, deg/s", "pitch 50/90, deg/s", "roll 50/90, deg/s", "nose dn", "yaw stop", "pedal@50m/s nose/course/bank"
+        );
+        let mut failures = Vec::new();
+        for (name, model) in &models {
+            let mut cells = Vec::new();
+            let mut yaw_stop = f32::NAN;
+            let mut yaw_90 = f32::NAN;
+            for axis in 0..3 {
+                let hold = 1.0;
+                let (rates, full) = step(model, axis, hold);
+                let during: Vec<(f32, f32)> = rates.iter().copied().filter(|(t, _)| *t <= hold).collect();
+                cells.push(format!("{:4.0}/{:4.0} {:5.1}", reach(&during, full, 0.5), reach(&during, full, 0.9), full));
+                if axis == 0 {
+                    yaw_90 = reach(&during, full, 0.9);
+                    yaw_stop = rates
+                        .iter()
+                        .find(|(t, r)| *t > hold && r.abs() < full.abs() * 0.1)
+                        .map_or(f32::NAN, |(t, _)| (t - hold) * 1000.0);
+                }
+            }
+            // Full nose down held from a hover: how far down it gets.
+            let dive = fly(model, level(0.0), 3.0, held(0.0, 0.0, 0.0, -1.0, 3.0));
+            let nose_down = dive.iter().map(|(_, b)| attitude(b.rotation).y).fold(0.0, f32::min);
+            // Right pedal for 2 s at 50 m/s: the nose's and the flight path's turn, the bank.
+            let pedal = fly(model, level(50.0), 2.0, held(0.0, 1.0, 0.0, 0.0, 2.0));
+            let (_, end) = pedal.last().copied().unwrap();
+            let a = attitude(end.rotation);
+            let course = (-end.velocity.x).atan2(-end.velocity.z).to_degrees();
+            println!(
+                "{name:<11} {:>22} {:>22} {:>22} {:>9.0} {:>6.0} ms {:>9.0}/{:.0}/{:.0} {:.0} km/h",
+                cells[0],
+                cells[1],
+                cells[2],
+                nose_down,
+                yaw_stop,
+                -a.x,
+                -course,
+                a.z,
+                end.velocity.length() * 3.6
+            );
+            // Held at a nose-down attitude for 15 s from a hover: the speed and height it ends
+            // with (steeper than the old 30° limit mustn't make it much faster, it dives).
+            let mut attitudes = Vec::new();
+            for target in [-30.0f32, -45.0, -60.0] {
+                let mut body = level(0.0);
+                let mut state = FlightState { spin: 1.0, ..FlightState::new() };
+                let joints = vec![[0.0; 3]; model.joint_count];
+                let around = Surroundings { water: None, altitude: 150.0 };
+                for _ in 0..(15.0 / DT) as usize {
+                    let local = body.rotation.inverse() * body.angular_velocity;
+                    let pitch = ((target - attitude(body.rotation).y) * 0.08 - local.x * 0.05).clamp(-1.0, 1.0);
+                    let push = flight_forces(model, &body, &joints, &held(0.0, 0.0, 0.0, pitch, 99.0)(0.0), &mut state, &around, DT);
+                    integrate(model, &mut body, &push, DT);
+                }
+                attitudes.push(format!("{target:.0}: {:.0} km/h {:+.0} m", body.velocity.length() * 3.6, body.position.y - 150.0));
+            }
+            println!("{:<11} nose held down 15 s: {}", "", attitudes.join(", "));
+            // BF3-like: the pedals reach 90 % of their rate within 250 ms and stop as
+            // quickly; the stick can point the nose far down; a pedal turn at speed carries
+            // the flight path round within 25° of the nose.
+            if !(yaw_90 < 250.0 && yaw_stop < 250.0) {
+                failures.push(format!("{name}: pedals slow ({yaw_90:.0} ms to 90 %, {yaw_stop:.0} ms to stop)"));
+            }
+            if nose_down > -60.0 {
+                failures.push(format!("{name}: nose only {nose_down:.0}° down"));
+            }
+            if (a.x - course).abs() > 25.0 {
+                failures.push(format!("{name}: pedal turn skids (nose {:.0}°, path {:.0}°)", -a.x, -course));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

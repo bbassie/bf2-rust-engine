@@ -1,14 +1,11 @@
-//! `BF2_SHOW_HITZONES=1`: draws every soldier's hit zones as the server poses them, over
-//! the model, to check that they follow it.
+//! `BF2_SHOW_HITZONES=1`: draws every soldier's hit zones over the model, posed as the server
+//! judges the shots fired looking at this moment (the same capsules the tracers stop in), to
+//! check that they follow it.
 
 use bevy::prelude::*;
-use game_shared::{
-    hitzones::{BODY, BodyPose, HEAD, LIMBS},
-    soldier::Soldier,
-    weapons::{Armory, Loadout},
-};
+use game_shared::hitzones::{BODY, HEAD, LIMBS};
 
-use crate::prediction::SoldierRender;
+use crate::combat::DrawnTargets;
 
 pub struct HitZoneDebugPlugin;
 
@@ -25,41 +22,10 @@ fn draw_on_top(mut store: ResMut<GizmoConfigStore>) {
     store.config_mut::<DefaultGizmoConfigGroup>().0.depth_bias = -1.0;
 }
 
-fn draw(
-    armory: Res<Armory>,
-    soldiers: Query<(&SoldierRender, &Loadout), With<Soldier>>,
-    bones: Query<(&Name, &GlobalTransform)>,
-    mut gizmos: Gizmos,
-) {
-    // The drawn skeleton's bones the zones hang on, to compare.
-    for (name, transform) in &bones {
-        let color = match name.as_str() {
-            "head" => Color::WHITE,
-            "left_upperleg" | "left_lowerleg" | "left_shoulder" => Color::srgb(0.2, 0.4, 1.0),
-            "right_upperleg" | "right_lowerleg" | "right_shoulder" => Color::srgb(1.0, 0.2, 1.0),
-            _ => continue,
-        };
-        gizmos.sphere(Isometry3d::from_translation(transform.translation()), 0.04, color);
-    }
-    for (render, loadout) in &soldiers {
-        let pose = BodyPose {
-            position: render.position,
-            yaw: render.yaw,
-            stance: render.stance,
-        };
-        for zone in armory.hit_zones(&loadout.kit) {
-            let (a, b) = pose.capsule(zone);
-            if let Some((_, bone)) = bones.iter().find(|(n, _)| n.as_str() == zone.bone) {
-                let local = |p: Vec3| Quat::from_rotation_y(-pose.yaw) * (p - pose.position);
-                debug!(
-                    "{:?} {}: drawn bone {:.2}, zone from {:.2} to {:.2}",
-                    pose.stance,
-                    zone.bone,
-                    local(bone.translation()),
-                    local(a),
-                    local(b)
-                );
-            }
+fn draw(drawn: DrawnTargets, mut gizmos: Gizmos) {
+    for target in drawn.collect() {
+        for zone in target.zones {
+            let (a, b) = drawn.capsule(&target, zone);
             let color = match zone.material {
                 HEAD => Color::srgb(1.0, 0.1, 0.1),
                 BODY => Color::srgb(1.0, 0.85, 0.1),

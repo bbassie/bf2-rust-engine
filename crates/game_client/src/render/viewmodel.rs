@@ -125,8 +125,10 @@ impl Plugin for ViewModelPlugin {
 
 #[derive(Resource, Default)]
 struct ViewModelAssets {
-    /// First-person arms per team.
-    arms: [Option<Handle<Gltf>>; 2],
+    /// First-person arms by soldier body name (see `render::soldiers::kit_body`): a faction's
+    /// heavy and light bodies have different arms, so this follows the local player's actual
+    /// kit rather than assuming the team's first kit slot.
+    arms: HashMap<String, Handle<Gltf>>,
     /// Weapon first-person animation sets by path.
     sets: HashMap<String, Handle<Gltf>>,
     graphs: HashMap<String, ViewAnimations>,
@@ -141,7 +143,8 @@ struct ViewAnimations {
 /// The arms scene under the view model anchor.
 #[derive(Component)]
 struct ViewModelRoot {
-    team: usize,
+    /// Soldier body name the arms are for (see `render::soldiers::kit_body`).
+    body: String,
 }
 
 /// Found in the arms scene once it spawned.
@@ -239,56 +242,67 @@ fn flag_view_model_materials(
     }
 }
 
-fn load_arms(
-    level: Res<LoadedLevel>,
-    paths: Res<GamePaths>,
-    asset_server: Res<AssetServer>,
-    mut assets: ResMut<ViewModelAssets>,
-) {
-    for (index, slot) in assets.arms.iter_mut().enumerate() {
-        *slot = level
-            .desc
-            .teams
-            .get(index)
-            .and_then(|team| team.kits.first())
-            .and_then(|kit| {
-                paths.read_ron::<SoldierDesc>(format!("soldiers/{}.ron", kit.soldier)).ok()
-            })
+fn load_arms(level: Res<LoadedLevel>, paths: Res<GamePaths>, asset_server: Res<AssetServer>, mut assets: ResMut<ViewModelAssets>) {
+    assets.arms.clear();
+    let mut names: Vec<&str> = level
+        .desc
+        .teams
+        .iter()
+        .flat_map(|team| &team.kits)
+        .map(|kit| kit.soldier.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
+        let Some(path) = paths
+            .read_ron::<SoldierDesc>(format!("soldiers/{name}.ron"))
+            .ok()
             .and_then(|desc| desc.mesh_1p)
-            .map(|path| asset_server.load(format!("imported://{path}")));
+        else {
+            continue;
+        };
+        assets.arms.insert(name.to_string(), asset_server.load(format!("imported://{path}")));
     }
 }
 
 /// Spawns the local team's arms under the view model anchor.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn attach_arms(
     mut commands: Commands,
     assets: Res<ViewModelAssets>,
     gltfs: Res<Assets<Gltf>>,
+    level: Option<Res<LoadedLevel>>,
     camera: Query<Entity, With<ViewModelAnchor>>,
-    local: Query<&Team, With<LocalPlayer>>,
+    local_team: Query<&Team, With<LocalPlayer>>,
+    local_soldier: Query<Option<&Loadout>, With<LocalSoldier>>,
     roots: Query<(Entity, &ViewModelRoot)>,
 ) {
-    let (Ok(camera), Ok(team)) = (camera.single(), local.single()) else {
+    let (Ok(camera), Ok(team), Some(level)) = (camera.single(), local_team.single(), level.as_deref()) else {
         return;
     };
-    let team = match team {
+    let team_index = match team {
         Team::One => 0,
         Team::Two => 1,
         Team::Spectator => return,
     };
+    let kit = local_soldier.single().ok().flatten().map(|l| l.kit.as_str());
+    let Some(body) = super::soldiers::kit_body(level, team_index, kit) else {
+        return;
+    };
     if let Ok((entity, root)) = roots.single() {
-        if root.team == team {
+        if root.body == body {
             return;
         }
         commands.entity(entity).despawn();
     }
-    let Some(scene) = assets.arms[team].as_ref().and_then(|h| gltfs.get(h)).and_then(|g| g.default_scene.clone()) else {
+    let Some(scene) = assets.arms.get(&body).and_then(|h| gltfs.get(h)).and_then(|g| g.default_scene.clone()) else {
         return;
     };
     commands
         .spawn((
-            ViewModelRoot { team },
+            ViewModelRoot { body },
             ViewState::default(),
             WorldAssetRoot(scene),
             Visibility::Hidden,

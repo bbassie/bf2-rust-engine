@@ -18,6 +18,9 @@ bevy = { workspace = true, features = [
   "wav",
   "dds",
   "serialize",
+  # OS clipboard for text fields (menu/text_input.rs) and the chat box: without it, Ctrl+C/V/X
+  # only copy and paste within the app's own `EditableText` fields.
+  "system_clipboard",
 ] }
 avian3d = { workspace = true, features = [
   "3d",

@@ -26,6 +26,7 @@ use game_shared::discovery::{ServerInfo, encode_query, parse_reply};
 
 use super::*;
 use crate::account::{Account, clean_url};
+use crate::menu::text_input::{self, TextInputOptions};
 
 pub(super) struct AccountUiPlugin;
 
@@ -33,7 +34,7 @@ impl Plugin for AccountUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AccountForm>().init_resource::<QuickJoinTask>().add_systems(
             Update,
-            (build_account_page, sync_account_fields, press_account_buttons, paint_account_buttons, mask_passwords, poll_quick_join)
+            (build_account_page, sync_account_fields, press_account_buttons, paint_account_buttons, poll_quick_join)
                 .chain()
                 .after(ScenarioSystems),
         );
@@ -70,10 +71,6 @@ pub(super) enum AccountField {
     Password,
     Email,
 }
-
-/// Shows `*` over a password field's (invisible) text.
-#[derive(Component)]
-pub(super) struct PasswordMask(Entity);
 
 /// What was typed (the password is never saved).
 #[derive(Resource, Default)]
@@ -135,63 +132,23 @@ fn account_button(p: &mut ChildSpawnerCommands, action: AccountButton, look: Loo
 }
 
 fn account_field(p: &mut ChildSpawnerCommands, field: AccountField, value: &str, width: f32) {
-    let mut editable = EditableText::new(value);
-    editable.max_characters = Some(match field {
+    let max_characters = Some(match field {
         AccountField::Master => 200,
         AccountField::Name => 24,
         AccountField::Password => 128,
         AccountField::Email => 254,
     });
     let name = match field {
-        AccountField::Master => "field:account-master",
-        AccountField::Name => "field:account-name",
-        AccountField::Password => "field:account-password",
-        AccountField::Email => "field:account-email",
+        AccountField::Master => "account-master",
+        AccountField::Name => "account-name",
+        AccountField::Password => "account-password",
+        AccountField::Email => "account-email",
     };
-    let mut text_entity = Entity::PLACEHOLDER;
-    p.spawn((
-        Node {
-            width: px(width),
-            flex_shrink: 0.0,
-            padding: UiRect::axes(px(10), px(7)),
-            border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(6)),
-            ..default()
-        },
-        BackgroundColor(FIELD),
-        BorderColor::all(Color::NONE),
-    ))
-    .with_children(|b| {
-        let password = field == AccountField::Password;
-        text_entity = b
-            .spawn((
-                Name::new(name),
-                field,
-                editable,
-                font(16.0),
-                // A password's letters stay invisible; `PasswordMask` shows stars.
-                TextColor(if password { Color::NONE } else { TEXT }),
-                Node {
-                    width: percent(100),
-                    ..default()
-                },
-            ))
-            .id();
-        if password {
-            b.spawn((
-                PasswordMask(text_entity),
-                text("", 16.0, TEXT),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(10),
-                    top: px(7),
-                    ..default()
-                },
-                Pickable::IGNORE,
-            ));
-        }
-    })
-    .insert(TextFieldBox(text_entity));
+    text_input::text_input(p, field, name, value, width, TextInputOptions {
+        max_characters,
+        password: field == AccountField::Password,
+        ..default()
+    });
 }
 
 fn stat_tile(p: &mut ChildSpawnerCommands, value: String, label: &str) {
@@ -363,16 +320,6 @@ fn sync_account_fields(mut form: ResMut<AccountForm>, fields: Query<(&EditableTe
             AccountField::Name => form.name = value.trim().to_string(),
             AccountField::Password => form.password = value,
             AccountField::Email => form.email = value.trim().to_string(),
-        }
-    }
-}
-
-fn mask_passwords(mut masks: Query<(&PasswordMask, &mut Text)>, fields: Query<&EditableText>) {
-    for (mask, mut text) in &mut masks {
-        let stars = fields.get(mask.0).map_or(0, |f| f.value().to_string().chars().count());
-        let value = "*".repeat(stars);
-        if text.0 != value {
-            text.0 = value;
         }
     }
 }

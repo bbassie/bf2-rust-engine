@@ -78,6 +78,11 @@ impl BotBrain {
         self.tactical
     }
 
+    /// The area its order (or its own pick) sends it to, and whether to attack it.
+    pub fn order(&self) -> Option<(OrderKind, usize)> {
+        self.order
+    }
+
     /// What it is doing, in a word or two (debug views, scenarios).
     pub fn doing(&self) -> &'static str {
         self.idle_reason()
@@ -303,6 +308,13 @@ impl BotBrain {
         let team_no = self.fire_team(w, me);
         let target_distance = target.map(|t| t.position.distance(position));
         let covered = self.at_cover(position, threat);
+        let push = crate::ai::tune::knob("push", 0.0) > 0.5;
+        // Attacking a flag: where it is, and whether the bot is on it (taking it).
+        let assault = match self.order {
+            Some((OrderKind::Attack, index)) => w.map.areas.get(index).map(|a| (a.position, a.radius)),
+            _ => None,
+        };
+        let on_flag = assault.is_some_and(|(at, radius)| flat(at - position).length() < radius + 8.0);
 
         // Cover to fight from.
         if let (Some(threat), Some(nav)) = (threat, w.nav())
@@ -312,8 +324,11 @@ impl BotBrain {
             && self.cover_cooldown <= 0.0
             && !covered
             && !matches!(self.activity, Activity::TakeCover { .. })
+            // Taking a flag is done standing on it.
+            && !(push && on_flag)
             // Up close, a healthy bot fights it out.
-            && flat(threat - position).length() > if self.suppression > 0.5 || hp < 0.6 { 10.0 } else { 18.0 }
+            && flat(threat - position).length()
+                > if self.suppression > 0.5 || hp < 0.6 { crate::ai::tune::knob("cover_min_hurt", 10.0) } else { crate::ai::tune::knob("cover_min", 18.0) }
             && *cx.rays >= 12
         {
             let leader = me.member.is_some_and(|m| m.leader);
@@ -326,14 +341,16 @@ impl BotBrain {
                     from: position,
                     threat,
                     radius: 14.0,
-                    toward: None,
+                    // Attackers: cover on the way to the flag.
+                    toward: assault.filter(|_| push).map(|(at, _)| at),
                     taken: cx.taken,
                     fire: true,
+                    region: self.region,
                 };
                 // With an enemy in sight, running for cover means not shooting back: only for
                 // cover close by, unless pinned down or hurt.
                 let pressed = self.suppression > 0.5 || hp < 0.6 || self.magazine_low(w, me, 0.15);
-                let reach = if target.is_some() && !pressed { 6.0 } else { 14.0 };
+                let reach = if target.is_some() && !pressed { crate::ai::tune::knob("tc_reach", 6.0) } else { 14.0 };
                 let query = CoverQuery { radius: reach, ..query };
                 match cover::find(nav, &w.spatial, &query, cx.rays) {
                     Some(cover) => {
@@ -360,9 +377,10 @@ impl BotBrain {
             && !holding_bound
             && hp > 0.45
             && self.suppression < 0.5
-            && self.in_cover_time > 4.0 + 5.0 * (1.0 - aggression)
-            // Not while trading shots with someone.
-            && target_distance.is_none_or(|d| d > 45.0)
+            && self.in_cover_time > (4.0 + 5.0 * (1.0 - aggression)) * crate::ai::tune::knob("camp", 1.0)
+            // Not while trading shots with someone (unless it has for a while).
+            && (target_distance.is_none_or(|d| d > 45.0)
+                || (push && self.in_cover_time > 2.0 * (4.0 + 5.0 * (1.0 - aggression)) * crate::ai::tune::knob("camp", 1.0)))
             && area.position.distance(position) > area.radius
             && *cx.rays >= 12
         {
@@ -375,6 +393,7 @@ impl BotBrain {
                 toward: Some(area.position),
                 taken: cx.taken,
                 fire: true,
+                region: self.region,
             };
             if let Some(cover) = cover::find(nav, &w.spatial, &query, cx.rays)
                 && (cover.spot - position).with_y(0.0).dot(toward) > 5.0
@@ -389,7 +408,11 @@ impl BotBrain {
             && covered
             && let Some(contact) = self.memory.most_pressing(position, 8.0).filter(|c| c.source >= Source::Shot)
         {
-            consider(best, 4.8, Activity::Watch { at: contact.position, time: 3.0 + 3.0 * (1.0 - aggression) });
+            consider(
+                best,
+                4.8,
+                Activity::Watch { at: contact.position, time: (3.0 + 3.0 * (1.0 - aggression)) * crate::ai::tune::knob("watch", 1.0) },
+            );
         }
 
         // Suppressive fire: fire team 0 of a pinned squad, or now and then from cover, at
@@ -501,10 +524,14 @@ impl BotBrain {
         let hide = self.suppression > 0.75 || self.hurt_ago < 0.4 || reloading;
         if self.exposed && (self.peek_timer <= 0.0 || hide) {
             self.exposed = false;
-            self.peek_timer = 0.4 + 0.6 * fastrand::f32() + 0.6 * self.suppression.min(1.0);
+            self.peek_timer = crate::ai::tune::knob("peek_hide", 0.4) * (1.0 + 1.5 * fastrand::f32()) + 0.6 * self.suppression.min(1.0);
         } else if !self.exposed && self.peek_timer <= 0.0 && !hide {
             self.exposed = true;
-            self.peek_timer = 2.5 + 2.0 * fastrand::f32() * (0.5 + self.personality.aggression);
+            if crate::ai::tune::knob("peek_fast", 0.0) > 0.5 {
+                // Look for him again as soon as it's up.
+                self.scan_timer = self.scan_timer.min(0.1);
+            }
+            self.peek_timer = crate::ai::tune::knob("peek_up", 2.5) * (1.0 + 0.8 * fastrand::f32() * (0.5 + self.personality.aggression));
         }
         let at = if self.exposed { peek } else { cover.spot };
         if flat(at - position).length() > 0.6 {
@@ -539,7 +566,8 @@ impl BotBrain {
     }
 
     /// Runs to cover, then fights from it (or watches from it).
-    pub(super) fn take_cover(&mut self, w: &Senses, me: &Me, cover: CoverSpot, time: f32, intent: &mut Intent, dt: f32) {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn take_cover(&mut self, w: &Senses, me: &Me, skill: Skill, cover: CoverSpot, time: f32, intent: &mut Intent, dt: f32) {
         let position = me.motion.position;
         let d = flat(cover.spot - position).length();
         if d < 1.0 || time <= 0.0 {
@@ -560,12 +588,20 @@ impl BotBrain {
             };
             return;
         }
+        // With the enemy in sight it shoots back on the way (walking, not sprinting).
+        let target = self.target.and_then(|t| w.soldiers.get(t).ok()).map(|s| *s.1);
+        let shooting = crate::ai::tune::knob("tc_fire", 0.0) > 0.5 && target.is_some();
+        if let Some(target) = target.filter(|_| shooting) {
+            let (distance, on_target) = self.aim_at(me, skill, &target, intent, dt);
+            self.pull_trigger(w, me, distance, on_target, intent, dt);
+        }
         intent.goal = Some(Goal {
             position: cover.spot,
             tolerance: 0.5,
-            sprint: d > 4.0,
+            sprint: d > 4.0 && !shooting,
         });
         if d < 3.0
+            && !shooting
             && let Some(threat) = self.threat_eye(w, me)
         {
             intent.look = Look::At(threat);
@@ -673,6 +709,9 @@ impl BotBrain {
         // Engaged: an enemy in sight, one just lost, or hurt just now (the same test for
         // both behaviours, for the statistics).
         let engaged = self.target.is_some() || self.last_seen.is_some_and(|(_, age)| age < 4.0) || self.hurt_ago < 3.0;
+        if (self.seq.wrapping_add(self.seed)) % 30 == 15 {
+            team_stats.combat.alive_by[self.fight_state()] += 0.5;
+        }
         // Every half second: is it in cover from what it fights? A ray from the threat's
         // eye to the middle of its body.
         if engaged && (self.seq.wrapping_add(self.seed)) % 30 == 0 {
@@ -685,10 +724,20 @@ impl BotBrain {
             if let Some(threat) = threat {
                 let body = position + Vec3::Y * chest_height(me.motion.stance) * 0.75;
                 team_stats.engaged_seconds += 0.5;
+                team_stats.combat.engaged_by[self.fight_state()] += 0.5;
+                team_stats.combat.engaged_stance[match me.motion.stance {
+                    Stance::Standing => 0,
+                    Stance::Crouching => 1,
+                    Stance::Prone => 2,
+                }] += 0.5;
+                team_stats.combat.engaged_moving[usize::from(flat(me.motion.velocity).length() > 1.0)] += 0.5;
                 if !tactics::line_of_sight(&w.spatial, threat, body) {
                     team_stats.covered_seconds += 0.5;
                 }
             }
+        }
+        if self.target.is_some() {
+            team_stats.combat.sight += dt;
         }
         if !self.tactical {
             return;
@@ -709,7 +758,7 @@ impl BotBrain {
             });
             let camped = attacking
                 && self.suppression < 0.3
-                && self.in_cover_time > 10.0 + 6.0 * (1.0 - self.personality.aggression);
+                && self.in_cover_time > (10.0 + 6.0 * (1.0 - self.personality.aggression)) * crate::ai::tune::knob("camp", 1.0);
             if away || camped {
                 self.cover = None;
                 if camped {
@@ -755,7 +804,7 @@ impl BotBrain {
 
     /// Whether to fight from cover this time (by difficulty and courage).
     fn roll_cover(&mut self, skill: Skill) {
-        let chance = (0.15 + skill.tactics()) * (0.8 + 0.4 * (1.0 - self.personality.courage));
+        let chance = (0.15 + skill.tactics()) * (0.8 + 0.4 * (1.0 - self.personality.courage)) * crate::ai::tune::knob("cover", 1.0);
         self.wants_cover = fastrand::f32() < chance;
     }
 
@@ -784,12 +833,13 @@ impl BotBrain {
         }
         if tactic.moving == team_no {
             self.overwatch = None;
+            self.bounding = true;
             if is_leader || team_no == 0 {
                 return false;
             }
             let mut place = squad::bound_slot(tactic, tactic.anchor, slot.unwrap_or(0));
             if let Some(nav) = w.nav()
-                && let Some(region) = nav.locate(position, 2.0, None).map(|c| nav.cell(c).region)
+                && let Some(region) = self.region.or_else(|| nav.locate(position, 2.0, None).map(|c| nav.cell(c).region))
                 && let Some(cell) = nav.locate(place, 6.0, Some(region))
             {
                 place = nav.position(cell);
@@ -842,6 +892,98 @@ impl BotBrain {
             Activity::TakeCover { cover, .. } => Some(cover.spot),
             _ => self.cover.map(|c| c.spot),
         }
+    }
+
+    /// For the statistics of a hit it scored: its [`Self::fight_state`], stance (0 standing, 1
+    /// crouching, 2 prone) and whether suppressed.
+    pub(crate) fn shooting_state(&self) -> (usize, usize, bool) {
+        let stance = match self.last_stance {
+            Stance::Standing => 0,
+            Stance::Crouching => 1,
+            Stance::Prone => 2,
+        };
+        (self.prev_state, stance, self.suppression > 0.3)
+    }
+
+    /// Its fight state as this tick began (see `prev_state`).
+    pub(crate) fn state_before(&self) -> usize {
+        self.prev_state
+    }
+
+    /// What it is doing in a firefight, an index into [`crate::ai::stats::FIGHT_STATES`].
+    pub(crate) fn fight_state(&self) -> usize {
+        if self.ride.is_some() {
+            return 13;
+        }
+        let at_cover = self.cover.is_some_and(|c| {
+            c.peek.is_some()
+                && (flat(c.spot - self.last_position).length() < 2.0
+                    || c.peek.is_some_and(|p| flat(p - self.last_position).length() < 1.2))
+        });
+        match self.activity {
+            Activity::Engage | Activity::Watch { .. } if at_cover => {
+                if self.exposed {
+                    1
+                } else {
+                    2
+                }
+            }
+            Activity::Engage => 0,
+            Activity::TakeCover { .. } | Activity::Cover { .. } => 3,
+            Activity::Watch { .. } => 4,
+            Activity::Suppress { .. } => 5,
+            Activity::Objective if self.overwatch.is_some() => 6,
+            Activity::Objective if self.bounding => 14,
+            Activity::Objective if self.target.is_some() => 15,
+            Activity::Objective => 7,
+            Activity::Search { .. } => 8,
+            Activity::Flank { .. } => 9,
+            Activity::Revive { .. } | Activity::Supply { .. } | Activity::Repair { .. } => 10,
+            Activity::Throw { .. } | Activity::Launch { .. } | Activity::Demolish { .. } => 11,
+            _ => 12,
+        }
+    }
+
+    /// Statistics of the tick's frame: time holding the trigger, rounds fired, the first shot
+    /// at an enemy who came into sight.
+    pub(super) fn fire_stats(&mut self, me: &Me, frame: &game_shared::input::InputFrame, team_stats: &mut TeamStats, dt: f32) {
+        let firing = frame.buttons.contains(Buttons::FIRE);
+        match self.activity {
+            Activity::Engage if firing && self.target.is_some() => team_stats.combat.trigger += dt,
+            Activity::Suppress { .. } if firing => team_stats.combat.suppress_fire += dt,
+            _ => {}
+        }
+        if let Some(seconds) = self.sighted {
+            if firing && self.target.is_some() && self.activity == Activity::Engage {
+                team_stats.combat.first_shots += 1;
+                team_stats.combat.first_shot_time += seconds;
+                self.sighted = None;
+            } else {
+                self.sighted = Some(seconds + dt);
+            }
+        }
+        let magazine = me
+            .inventory
+            .filter(|i| i.active == self.primary)
+            .and_then(|i| i.ammo.get(self.primary as usize).map(|a| (self.primary, a[0])));
+        if let (Some((weapon, now)), Some((was_weapon, was))) = (magazine, self.last_magazine)
+            && weapon == was_weapon
+            && now < was
+            && was - now <= 5
+        {
+            let rounds = u32::from(was - now);
+            let (state, stance, suppressed) = self.shooting_state();
+            let combat = &mut team_stats.combat;
+            if self.target.is_some() && state != 5 {
+                combat.rounds_dist[crate::ai::stats::distance_bucket(self.aim_distance)] += rounds;
+            }
+            combat.rounds += rounds;
+            combat.rounds_by[state] += rounds;
+            combat.rounds_stance[stance] += rounds;
+            combat.rounds_suppressed[suppressed as usize] += rounds;
+        }
+        self.last_magazine = magazine;
+        self.last_stance = me.motion.stance;
     }
 
     /// Per-minute idle diagnostics: what it is doing (and why, when carrying out its order).

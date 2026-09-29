@@ -250,11 +250,20 @@ pub struct FlightStick {
     mouse: Vec2,
     /// Free look: the view's yaw (left positive) and pitch away from straight ahead.
     pub look: Vec2,
+    /// Helicopter pedals from the mouse instead of A/D (`Settings::heli_pedals_roll`), right
+    /// positive; the input's movement x then carries this.
+    pub steer: Option<f32>,
 }
 
-/// Stick travel per mouse count at sensitivity 1, and how quickly it centres (1/s).
-const STICK_PER_COUNT: f32 = 0.012;
-const STICK_CENTERING: f32 = 3.0;
+/// Stick travel per mouse count at sensitivity 1, and how quickly it centres (1/s). Their
+/// ratio is how far the aircraft turns per mouse count; the centring is how long it keeps
+/// turning after the mouse stops (1/8 s; it was 1/3 s, which felt like lag).
+const STICK_PER_COUNT: f32 = 0.032;
+const STICK_CENTERING: f32 = 8.0;
+/// Free look reaches this far down and up (radians from the aircraft's nose): nearly
+/// straight down, to see the ground for rocket and bomb runs.
+pub const FREE_LOOK_DOWN: f32 = 1.45;
+pub const FREE_LOOK_UP: f32 = 1.4;
 /// How quickly the free-look view swings back ahead once let go (1/s).
 const LOOK_RETURN: f32 = 6.0;
 
@@ -284,6 +293,7 @@ fn fly(
         flight.stick = Vec2::ZERO;
         flight.mouse = Vec2::ZERO;
         flight.look = Vec2::ZERO;
+        flight.steer = None;
         return;
     };
     let dt = time.delta_secs();
@@ -293,12 +303,12 @@ fn fly(
         let vertical = if look.invert_y { -delta.y } else { delta.y };
         let sensitivity = look.sensitivity;
         flight.look.x -= delta.x * sensitivity;
-        flight.look.y = (flight.look.y - vertical * sensitivity).clamp(-1.4, 1.4);
+        flight.look.y = (flight.look.y - vertical * sensitivity).clamp(-FREE_LOOK_DOWN, FREE_LOOK_UP);
         if let Some(gamepad) = actions.gamepad() {
             let stick = crate::local_input::deadzone(gamepad.right_stick(), settings.gamepad.look_deadzone);
             let gv = if settings.gamepad.invert_look_y { -stick.y } else { stick.y };
             flight.look.x -= stick.x * sensitivity * 60.0 * dt;
-            flight.look.y = (flight.look.y - gv * sensitivity * 60.0 * dt).clamp(-1.4, 1.4);
+            flight.look.y = (flight.look.y - gv * sensitivity * 60.0 * dt).clamp(-FREE_LOOK_DOWN, FREE_LOOK_UP);
         }
     } else {
         // The mouse moves the stick: up raises the nose (like looking up), unless the invert
@@ -324,6 +334,18 @@ fn fly(
     };
     let helicopter = data.0.desc.category == game_data::VehicleCategory::Helicopter;
     flight.stick = compose_stick(flight.mouse, keys, gamepad_stick, settings.invert_pitch(helicopter));
+    // BF3/BF4's default: A/D work the tail rotor, the mouse rolls. Swapped, A/D (and the left
+    // stick) roll and the mouse's (and the right stick's) sideways share turns the tail.
+    flight.steer = None;
+    if helicopter && settings.heli_pedals_roll {
+        let left_stick = actions
+            .gamepad()
+            .map(|gamepad| crate::local_input::deadzone(gamepad.left_stick(), settings.gamepad.move_deadzone).x)
+            .unwrap_or_default();
+        let pedals = actions.axis(Action::MoveRight, Action::MoveLeft) + left_stick;
+        flight.steer = Some((flight.mouse.x + gamepad_stick.x).clamp(-1.0, 1.0));
+        flight.stick.x = (pedals + keys.x).clamp(-1.0, 1.0);
+    }
     // The soldier looks where the camera does (the server aims with it, and it's the
     // facing when getting out).
     let (yaw, pitch, _) = flight_view(view.transform.rotation, flight.look).to_euler(EulerRot::YXZ);
@@ -357,6 +379,17 @@ mod tests {
         }
         // Roll never inverts.
         assert_eq!(compose_stick(Vec2::X, Vec2::ZERO, Vec2::ZERO, true).x, 1.0);
+    }
+
+    #[test]
+    fn heli_chase_camera_follows_steep_dives() {
+        // Cruising nose down, the camera stays near the horizon; diving, it looks down the
+        // nose (all but the level-flight share).
+        let cruise = heli_chase_pitch(-15f32.to_radians()).to_degrees();
+        assert!((-6.0..-4.0).contains(&cruise), "{cruise}");
+        let dive = heli_chase_pitch(-75f32.to_radians()).to_degrees();
+        assert!(dive < -60.0, "{dive}");
+        assert_eq!(heli_chase_pitch(0.0), 0.0);
     }
 
     #[test]
@@ -493,8 +526,11 @@ fn limit_gunner_aim(
     look.pitch = world.y.clamp(-1.0, 1.0).asin();
 }
 
-/// How quickly the aircraft chase camera turns after the aircraft (1/s).
+/// How quickly the aircraft chase camera turns after the aircraft (1/s): jets, helicopters
+/// (stiffer: a helicopter answers the stick at once, and a camera lagging 1/6 s behind made
+/// it look sluggish).
 const CHASE_STIFFNESS: f32 = 6.0;
+const HELI_CHASE_STIFFNESS: f32 = 14.0;
 /// The pilot's camera looks this far ahead into the aircraft's turn (seconds of its turn
 /// rate, at most `LEAD_MAX` radians); the cockpit view half as far.
 const LEAD_TIME: f32 = 0.25;
@@ -505,8 +541,19 @@ const TURN_RATE_SMOOTHING: f32 = 8.0;
 const CHASE_SPEED_STRETCH: f32 = 0.2;
 /// Stall buffet: the view shakes up to this much (radians).
 const BUFFET: f32 = 0.012;
-/// Share of a helicopter's pitch and bank its chase camera follows.
-const HELI_CHASE_TILT: Vec2 = Vec2::new(0.35, 0.5);
+/// Share of a helicopter's bank its chase camera follows, and of its pitch within
+/// `HELI_CHASE_LEVEL` radians of level (the nose-down attitude of forward flight); tilted
+/// further, the camera follows the nose fully, so a steep dive looks at its target.
+const HELI_CHASE_BANK: f32 = 0.5;
+const HELI_CHASE_PITCH: f32 = 0.35;
+const HELI_CHASE_LEVEL: f32 = 0.33;
+
+/// The pitch a helicopter's chase camera takes from the helicopter's.
+fn heli_chase_pitch(pitch: f32) -> f32 {
+    // The part of the pitch the camera leaves out, at most what level flight needs.
+    let held_level = (pitch * (1.0 - HELI_CHASE_PITCH)).clamp(-HELI_CHASE_LEVEL * (1.0 - HELI_CHASE_PITCH), HELI_CHASE_LEVEL * (1.0 - HELI_CHASE_PITCH));
+    pitch - held_level
+}
 
 /// The pilot camera's memory from frame to frame.
 #[derive(Default)]
@@ -545,15 +592,17 @@ pub fn pilot_camera(
     let wanted = flight_view(rotation, look);
     // Helicopters fly nose down and bank hard: their chase camera takes only part of that, so
     // it keeps looking ahead instead of at the ground.
-    let chased = if data.0.desc.category == game_data::VehicleCategory::Helicopter {
+    let helicopter = data.0.desc.category == game_data::VehicleCategory::Helicopter;
+    let chased = if helicopter {
         let (yaw, pitch, roll) = rotation.to_euler(EulerRot::YXZ);
-        flight_view(Quat::from_euler(EulerRot::YXZ, yaw, pitch * HELI_CHASE_TILT.x, roll * HELI_CHASE_TILT.y), look)
+        flight_view(Quat::from_euler(EulerRot::YXZ, yaw, heli_chase_pitch(pitch), roll * HELI_CHASE_BANK), look)
     } else {
         wanted
     };
+    let stiffness = if helicopter { HELI_CHASE_STIFFNESS } else { CHASE_STIFFNESS };
     let smoothed = camera
         .smoothed
-        .map_or(chased, |c| c.slerp(chased, 1.0 - (-CHASE_STIFFNESS * dt).exp()));
+        .map_or(chased, |c| c.slerp(chased, 1.0 - (-stiffness * dt).exp()));
     camera.smoothed = Some(smoothed);
     let lead = Vec2::new(camera.turn_rate.y, camera.turn_rate.x) * LEAD_TIME;
     let lead = lead.clamp_length_max(LEAD_MAX);

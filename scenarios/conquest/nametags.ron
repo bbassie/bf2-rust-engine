@@ -1,0 +1,54 @@
+// Name tags (`game_client::nametags`): a teammate summoned close shows a full tag, farther
+// teammates fade to a dot, a squad shows its icons, an enemy spotted over the commo rose gets
+// the red triangle (through the wall it's behind for the spot's duration), and aiming at a
+// close enemy flashes their name in red. Tag and reveal state are logged as they change, so
+// this is checked through the log as well as the screenshots.
+// client --scenario scenarios/conquest/nametags.ron --out target/scenarios/nametags
+(
+    level: "strike_at_karkand",
+    bots: 16,
+    team: 2,
+    steps: [
+        WaitReady,
+        Teleport((-150.0, 162.0, 260.0), 180.0, 0.0),
+        Wait(0.5),
+        // A teammate right in front of us: a full tag (name, team colour) straight away.
+        Log("teammate near"),
+        Summon(100.0),
+        Wait(0.3),
+        ExpectLog("nametag: full tag shown for", 2.0),
+        Screenshot("teammate_near"),
+        // Looking over the rest of the team at range: tags fade to a dot (or disappear behind
+        // whatever's between us and them - `sheet.py` is for eyeballing this one).
+        Look(180.0, 10.0),
+        Wait(1.0),
+        Screenshot("teammate_far"),
+        Look(180.0, 0.0),
+        // Join a squad; bots fill it in behind us, some visible, some behind cover - their
+        // squad-colour icon should still show through walls.
+        Log("squad"),
+        Squad(Create),
+        Wait(2.5),
+        Screenshot("squad_icons"),
+        // An enemy, spotted over the radio: the red triangle (`radio::spots`), through the
+        // wall it's behind for as long as the spot lasts.
+        Log("spot"),
+        SummonEnemy(25.0),
+        Wait(0.3),
+        Radio(Spotted),
+        Wait(0.5),
+        Screenshot("enemy_spotted"),
+        // Aim at a close enemy: the name flashes up in red, briefly.
+        Log("aim reveal"),
+        SummonEnemy(8.0),
+        Look(180.0, -6.0),
+        Wait(0.5),
+        ExpectLog("nametag: aim reveal on", 2.0),
+        Screenshot("enemy_aim_reveal"),
+        // Looking away again: the reveal should lapse.
+        Look(0.0, 0.0),
+        Wait(1.5),
+        Screenshot("enemy_reveal_gone"),
+        Quit,
+    ],
+)

@@ -11,6 +11,7 @@ use crate::{
     map_markers::{MapMarker, MapMarkers, MarkerSystems},
     net::LocalPlayer,
     prediction::SoldierRender,
+    settings::Settings,
     vehicles::VehicleView,
 };
 
@@ -86,6 +87,7 @@ fn find_targets(
 #[allow(clippy::type_complexity)]
 fn update_markers(
     mut commands: Commands,
+    settings: Res<Settings>,
     targets: Res<SpottedTargets>,
     vehicles: Query<(), With<VehicleView>>,
     camera: Single<(&Camera, &GlobalTransform), With<PlayerCamera>>,
@@ -93,6 +95,14 @@ fn update_markers(
     mut markers: Query<(Entity, &Marker, &mut Node, &Children)>,
     mut texts: Query<&mut Text, With<MarkerText>>,
 ) {
+    // Settings: "Enemy spot markers" on/off (a small hook for `nametags`, which owns the rest
+    // of the name tag / spot marker settings).
+    if !settings.enemy_spot_markers {
+        for (entity, ..) in &markers {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
     let (camera, view) = *camera;
     let mut wanted: Vec<(Entity, Vec2, f32)> = targets
         .0

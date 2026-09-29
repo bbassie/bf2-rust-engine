@@ -9,7 +9,7 @@ use bf2_formats::{
     localization::Localization,
 };
 use game_data::{
-    DetonatorDesc, DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, LockDesc,
+    DetonatorDesc, DeviationDesc, FireDesc, FireKind, FireMode, Guidance, Impact, KitDesc, KitUnlock, LockDesc,
     OverheatDesc, ProjectileDesc, RecoilDesc, ReplenishDesc, ReplenishKind, RopeDesc, RopeKind, SmokeDesc,
     SoundDesc, TriggerBy, TriggerDesc, WeaponDesc, WeaponSounds, ZoomDesc,
 };
@@ -32,24 +32,15 @@ pub fn import(
             log::warn!("kit template {kit_name} not found");
             continue;
         };
-        let mut items = Vec::new();
-        for child in &kit.children {
-            let name = child.template.to_ascii_lowercase();
-            interp.ensure_template(&name);
-            if interp
-                .world
-                .template(&name)
-                .is_some_and(|t| t.ty.eq_ignore_ascii_case("GenericFireArm"))
-            {
-                items.push(name);
-            }
-        }
+        let (items, unlocks) = kit_contents(interp, &kit);
         weapons.extend(items.iter().cloned());
+        weapons.extend(unlocks.iter().flat_map(|u| u.weapons.iter().cloned()));
         let desc = KitDesc {
             name: kit_name.to_ascii_lowercase(),
             kind: kit.get_str("kittype").unwrap_or_default().to_string(),
             weapons: items,
             ability_restore: kit.get_f32("abilityrestorerate").unwrap_or(0.0).max(0.0),
+            unlocks,
         };
         game_data::write_ron(out.join("kits").join(format!("{}.ron", desc.name)), &desc)?;
         kit_count += 1;
@@ -67,6 +58,62 @@ pub fn import(
         weapon_count += 1;
     }
     Ok((kit_count, weapon_count))
+}
+
+/// A kit's own weapons (its `GenericFireArm` children, in order) and its unlocks (its
+/// `ItemContainer` children: `unlockLevel`, the weapons they add and the ones they
+/// `replaceItem`).
+pub(crate) fn kit_contents(interp: &mut Interpreter, kit: &Template) -> (Vec<String>, Vec<KitUnlock>) {
+    fn is_weapon(interp: &mut Interpreter, name: &str) -> bool {
+        interp.ensure_template(name);
+        interp.world.template(name).is_some_and(|t| t.ty.eq_ignore_ascii_case("GenericFireArm"))
+    }
+    let mut items = Vec::new();
+    let mut unlocks = Vec::new();
+    for child in &kit.children {
+        let name = child.template.to_ascii_lowercase();
+        if is_weapon(interp, &name) {
+            items.push(name);
+            continue;
+        }
+        let Some(container) = interp
+            .world
+            .template(&name)
+            .filter(|t| t.ty.eq_ignore_ascii_case("ItemContainer"))
+            .cloned()
+        else {
+            continue;
+        };
+        let weapons: Vec<String> = container
+            .children
+            .iter()
+            .map(|c| c.template.to_ascii_lowercase())
+            .filter(|w| is_weapon(interp, w))
+            .collect();
+        if weapons.is_empty() {
+            continue;
+        }
+        unlocks.push(KitUnlock {
+            level: container.get_f32("unlocklevel").unwrap_or(1.0).max(1.0) as u32,
+            weapons,
+            replaces: container
+                .get_all("replaceitem")
+                .filter_map(|a| a.first().map(|w| w.to_ascii_lowercase()))
+                .collect(),
+        });
+    }
+    (items, unlocks)
+}
+
+/// Every weapon a kit carries or unlocks.
+pub(crate) fn kit_weapon_names(interp: &mut Interpreter, kit: &str) -> Vec<String> {
+    interp.ensure_template(kit);
+    let Some(kit) = interp.world.template(kit).cloned() else {
+        return Vec::new();
+    };
+    let (mut items, unlocks) = kit_contents(interp, &kit);
+    items.extend(unlocks.into_iter().flat_map(|u| u.weapons));
+    items
 }
 
 /// `CRD_UNIFORM/0.1/0.6/0` → (0.1, 0.6); `CRD_NONE/6/0/0` → (6, 6); `6` → (6, 6).
@@ -240,6 +287,11 @@ pub(crate) fn weapon_desc(
         reload_amount: f("ammo.reloadamount", 0.0) as u32,
         fire: fire_desc(t),
         worn: f("isnightvision", 0.0) != 0.0 || f("isgasmask", 0.0) != 0.0,
+        // The parachute spawns its canopy instead of firing (`SpawnObjectFireComp`).
+        hidden: has_component(t, "SpawnObjectFireComp"),
+        icon: t
+            .get_str("weaponhud.selecticon")
+            .and_then(|path| crate::ui_icons::hud_image(converter.vfs, out, path.trim_matches('"'))),
         detonator: detonator_desc(interp, converter, t, out),
         projectile,
         deviation,

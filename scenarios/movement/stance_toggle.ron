@@ -1,0 +1,51 @@
+// Prone toggles by default (Z goes down, Z again gets up, and it stays down after the key is
+// released in between); crouch is still a hold, and crouching or jumping while a toggled prone
+// is on stands back up (crouch takes you to a crouch, not all the way up). See
+// `Settings::{prone,crouch,sprint}_mode` and `local_input::apply_stance_buttons`.
+//
+// Waits between stance changes are >= 1 s: going prone or standing back up sets
+// `SoldierMotion::stance_lock` (BF2's `prone_switch_delay`, 0.8 s) that briefly blocks another
+// stance change, real BF2 feel that also applies to a toggled prone.
+// client --scenario scenarios/movement/stance_toggle.ron --out target/scenarios/movement/stance_toggle
+(
+    level: "test_range",
+    bots: 0,
+    steps: [
+        WaitReady,
+        LogStance("start"),
+        ExpectLog("start: stance Standing", 5.0),
+
+        // Z (tap): prone toggles on and, importantly, stays on after the key is released.
+        Key(KeyZ),
+        Wait(1.0),
+        LogStance("after first Z"),
+        ExpectLog("after first Z: stance Prone", 5.0),
+        Screenshot("prone_toggled"),
+        Wait(1.0),
+        LogStance("still down a second later"),
+        ExpectLog("still down a second later: stance Prone", 5.0),
+
+        // Z again: stands back up.
+        Key(KeyZ),
+        Wait(1.0),
+        LogStance("after second Z"),
+        ExpectLog("after second Z: stance Standing", 5.0),
+
+        // Prone again, then crouch (its default key, left Ctrl) while prone: stands up into a
+        // crouch rather than all the way up.
+        Key(KeyZ),
+        Wait(1.0),
+        LogStance("prone again"),
+        ExpectLog("prone again: stance Prone", 5.0),
+        HoldKey(ControlLeft),
+        Wait(0.3),
+        LogStance("crouch while prone"),
+        ExpectLog("crouch while prone: stance Crouching", 5.0),
+        Screenshot("crouched_from_prone"),
+        ReleaseKey(ControlLeft),
+        Wait(1.0),
+        LogStance("crouch released"),
+        ExpectLog("crouch released: stance Standing", 5.0),
+        Quit,
+    ],
+)

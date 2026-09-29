@@ -1,0 +1,55 @@
+// The weapon list, the grenade key and the melee key (singleplayer, Strike at Karkand, MEC
+// assault kit). Switching shows the list (no parachute in it); G takes the grenade out, holds
+// it (cooking) while held, throws it and brings the rifle back; C swings the knife and brings
+// the rifle back. The server logs the quick switches and the throw.
+// client --scenario scenarios/combat/quick_weapons.ron --out target/scenarios/quick_weapons
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    team: 1,
+    steps: [
+        ForbidLog("PARACHUTE"),
+        WaitReady,
+        ExpectLog("weapon list:", 5.0),
+        Teleport((-184.0, 157.0, -85.0), 180.0, 8.0),
+        Wait(1.5),
+        // A number key shows the list, the pistol picked.
+        HoldKey(Digit2),
+        Wait(0.1),
+        ReleaseKey(Digit2),
+        Wait(0.6),
+        Screenshot("list_pistol"),
+        HoldKey(Digit3),
+        Wait(0.1),
+        ReleaseKey(Digit3),
+        Wait(1.2),
+        Screenshot("list_rifle"),
+        Wait(2.5),
+        Screenshot("list_faded"),
+        // The grenade key: out, cooking while held, thrown, the rifle back.
+        HoldKey(KeyG),
+        ExpectLog("quick action: ", 2.0),
+        ExpectLog("quick throw with", 2.0),
+        Wait(0.7),
+        Screenshot("grenade_held"),
+        ReleaseKey(KeyG),
+        ExpectLog("throws", 3.0),
+        ExpectLog("quick action over: back to rurif_gp30", 3.0),
+        ExpectLog("back to rurif_gp30 after a quick action", 2.0),
+        Wait(0.3),
+        Screenshot("grenade_back"),
+        Wait(1.5),
+        // The melee key: the knife swings, the rifle comes back.
+        HoldKey(KeyC),
+        Wait(0.1),
+        ReleaseKey(KeyC),
+        ExpectLog("quick melee with kni_knife", 2.0),
+        ExpectLog("quick action: kni_knife swung", 2.0),
+        Screenshot("melee"),
+        ExpectLog("quick action over: back to rurif_gp30", 2.0),
+        ExpectLog("back to rurif_gp30 after a quick action", 2.0),
+        Wait(0.5),
+        Screenshot("melee_back"),
+        Quit,
+    ],
+)

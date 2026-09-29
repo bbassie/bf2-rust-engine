@@ -6,6 +6,7 @@
 //! bf2-import --bf2 ... level strike_at_karkand
 //! bf2-import --bf2 ... level --all
 //! bf2-import --bf2 ... light --all     # only the world lighting and lamps of imported levels
+//! bf2-import --bf2 ... kits --bf2-mod bf2   # every kit, its unlocks and their weapons
 //! bf2-import --bf2 ... check          # parse every mesh and collision mesh, report failures
 //! ```
 
@@ -110,6 +111,13 @@ enum Command {
         all: bool,
         #[arg(long = "bf2-mod")]
         bf2_mod: Option<String>,
+    },
+    /// Import every kit of a BF2 mod with its unlocks and the weapons they carry (models,
+    /// sounds, effects, icons), without a level: the weapon pools of loadouts
+    /// (`game_shared::arsenal`). `level` imports the kits its level uses the same way.
+    Kits {
+        #[arg(long = "bf2-mod", default_value = "bf2")]
+        bf2_mod: String,
     },
     /// Parse every mesh and collision mesh of a mod and report failures.
     Check {
@@ -237,6 +245,7 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Command::Kits { bf2_mod } => import_kits(&install, &cli.out, &bf2_mod)?,
         Command::Check { r#mod } => check(&install, &r#mod)?,
     }
     Ok(())
@@ -252,6 +261,44 @@ fn import_soldiers(install: &Bf2Install, out: &std::path::Path, mods: &[String])
         ),
         Err(err) => log::error!("soldiers: {err:#}"),
     }
+}
+
+/// `bf2-import kits`: every `Kit` template under the mod's `objects/kits`.
+fn import_kits(install: &Bf2Install, out: &std::path::Path, mod_name: &str) -> Result<()> {
+    let started = Instant::now();
+    std::fs::create_dir_all(out)?;
+    write_readme(out)?;
+    let mut vfs = Vfs::new();
+    install
+        .mount_mod(&mut vfs, mod_name, Side::Both)
+        .with_context(|| format!("mounting mod {mod_name}"))?;
+    let localization = Localization::load(install, "english");
+    let mut interp = bf2_formats::con::Interpreter::new(&vfs);
+    let mut files: Vec<String> = vfs
+        .list("objects/kits")
+        .filter(|p| p.ends_with(".con"))
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    for file in &files {
+        interp.run(file, &[]);
+    }
+    let mut kits: Vec<String> = interp
+        .world
+        .templates
+        .iter()
+        .filter(|(_, t)| t.ty.eq_ignore_ascii_case("Kit"))
+        .map(|(name, _)| name.clone())
+        .collect();
+    kits.sort();
+    let converter = meshes::MeshConverter::new(&vfs, out);
+    let (kit_count, weapon_count) = weapons::import(&mut interp, &converter, &localization, &kits, out)?;
+    effects::import_weapon_effects(&mut interp, &converter, &kits, out);
+    log::info!(
+        "{mod_name}: {kit_count} kits, {weapon_count} weapons in {:.1}s",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
 }
 
 fn check(install: &Bf2Install, mod_name: &str) -> Result<()> {

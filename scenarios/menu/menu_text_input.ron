@@ -1,0 +1,119 @@
+// Text input polish (menu::text_input, used by every menu field and the chat box): a visible
+// caret and selection, word/line editing keys, Tab/Shift+Tab between fields, and paste
+// sanitizing (first line only, filtered to what the field allows). Scenarios can't synthesize
+// the pointer click a real focus would start from (bevy_picking's hit-test needs an actual
+// cursor position), so this uses `Focus` to jump straight to what the click would have done,
+// then drives everything else (typing, arrows, Tab, Ctrl+A/Backspace, paste) the same way a
+// player would: real key events, checked with `LogField`/`ExpectLog`.
+// client --scenario scenarios/menu/menu_text_input.ron --out target/scenarios/menu/text_input
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:join"),
+        Wait(0.3),
+
+        Focus("field:address"),
+        Wait(0.2),
+        Screenshot("address_focused"),
+
+        Type("127.0.0.1"),
+        Wait(0.2),
+        LogField("field:address"),
+        ExpectLog("field field:address: \"127.0.0.1\"", 3.0),
+        Screenshot("address_typed"),
+
+        // Left arrow x3, then Shift+Left arrow x3: selects the last 3 characters (".0.1" -> the
+        // "0.1" part), shown as a highlight; Backspace then deletes just the selection.
+        Key(ArrowLeft),
+        Frames(1),
+        Key(ArrowLeft),
+        Frames(1),
+        Key(ArrowLeft),
+        Frames(1),
+        HoldKey(ShiftLeft),
+        Key(ArrowLeft),
+        Frames(1),
+        Key(ArrowLeft),
+        Frames(1),
+        Key(ArrowLeft),
+        Frames(1),
+        ReleaseKey(ShiftLeft),
+        Wait(0.2),
+        Screenshot("address_selection"),
+        Key(Backspace),
+        Wait(0.2),
+        LogField("field:address"),
+        ExpectLog("field field:address: \"127.1\"", 3.0),
+
+        // Ctrl+A selects all; Backspace clears it.
+        HoldKey(ControlLeft),
+        Key(KeyA),
+        ReleaseKey(ControlLeft),
+        Key(Backspace),
+        Wait(0.2),
+        LogField("field:address"),
+        ExpectLog("field field:address: \"\"", 3.0),
+        Type("127.0.0.1"),
+        Wait(0.2),
+
+        // Tab moves focus to the port field, the same as a player's Tab key (this goes through
+        // Bevy's own tab-navigation observer, not `Focus`). Its digit filter rejects a letter
+        // but not digits.
+        Key(Tab),
+        Wait(0.2),
+        Screenshot("port_focused"),
+        HoldKey(ControlLeft),
+        Key(KeyA),
+        ReleaseKey(ControlLeft),
+        Key(Backspace),
+        Type("a"),
+        Type("7"),
+        Type("7"),
+        Type("7"),
+        Wait(0.2),
+        LogField("field:port"),
+        ExpectLog("field field:port: \"777\"", 3.0),
+
+        // Shift+Tab goes back to the address field.
+        HoldKey(ShiftLeft),
+        Key(Tab),
+        ReleaseKey(ShiftLeft),
+        Wait(0.2),
+        Screenshot("shift_tab_back_to_address"),
+
+        // Paste (the OS clipboard, via `SetClipboard` since a scenario has no real one to copy
+        // from): a second line doesn't make it in, even for a field with no character filter.
+        SetClipboard("192.168.1.1\nsecond line"),
+        HoldKey(ControlLeft),
+        Key(KeyA),
+        ReleaseKey(ControlLeft),
+        Key(Backspace),
+        HoldKey(ControlLeft),
+        Key(KeyV),
+        ReleaseKey(ControlLeft),
+        Wait(0.3),
+        LogField("field:address"),
+        ExpectLog("field field:address: \"192.168.1.1\"", 3.0),
+        Screenshot("address_pasted"),
+
+        // The port field's digit filter strips the letters out of a mixed paste instead of
+        // rejecting the whole paste (Bevy's own `EditableTextFilter` would reject it outright).
+        Key(Tab),
+        Wait(0.2),
+        HoldKey(ControlLeft),
+        Key(KeyA),
+        ReleaseKey(ControlLeft),
+        Key(Backspace),
+        SetClipboard("12a3b4"),
+        HoldKey(ControlLeft),
+        Key(KeyV),
+        ReleaseKey(ControlLeft),
+        Wait(0.3),
+        LogField("field:port"),
+        ExpectLog("field field:port: \"1234\"", 3.0),
+        Screenshot("port_pasted"),
+
+        Quit,
+    ],
+)

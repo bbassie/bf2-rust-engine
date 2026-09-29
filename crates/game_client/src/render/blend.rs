@@ -42,6 +42,9 @@ pub struct Play {
     pub phase: f32,
     /// Start from `phase` even if the clip is playing already (a one-shot played again).
     pub restart: bool,
+    /// Held at this time (seconds) instead of playing on: clips timed by the server's state
+    /// (the step phase, the server clock), the same for everyone (`game_shared::skeleton`).
+    pub at: Option<f32>,
 }
 
 impl Play {
@@ -52,6 +55,7 @@ impl Play {
             repeat: true,
             phase: 0.0,
             restart: false,
+            at: None,
         }
     }
 
@@ -69,6 +73,14 @@ impl Play {
 
     pub fn phase(self, phase: f32) -> Self {
         Self { phase, ..self }
+    }
+
+    pub fn at(self, time: f32) -> Self {
+        Self {
+            at: Some(time),
+            speed: 0.0,
+            ..self
+        }
     }
 }
 
@@ -122,6 +134,9 @@ impl BlendLayer {
         } else {
             player.play(clip.node)
         };
+        if let Some(time) = play.at {
+            active.set_seek_time(time);
+        }
         active.set_speed(play.speed);
         self.tracks[index].target += play.weight;
     }

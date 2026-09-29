@@ -129,6 +129,11 @@ pub struct SoldierMotion {
     /// standing only, weapon put away (BF2 soldiers can't dive or fire while swimming).
     #[serde(default)]
     pub swimming: bool,
+    /// How far through their step cycle the legs are, 0..1: the movement clips' phase, the
+    /// same for everyone who draws the soldier and for his hit zones (see
+    /// [`crate::skeleton`]).
+    #[serde(default)]
+    pub stride: f32,
 }
 
 impl Default for SoldierMotion {
@@ -155,6 +160,7 @@ impl Default for SoldierMotion {
             riding: false,
             parachute: false,
             swimming: false,
+            stride: 0.0,
         }
     }
 }
@@ -504,6 +510,26 @@ fn fit_hitboxes_to_stance(
 
 /// Advances one soldier by one tick.
 pub fn step_soldier(
+    m: &mut SoldierMotion,
+    input: &InputFrame,
+    dt: f32,
+    tuning: &SoldierTuning,
+    shapes: &SoldierShapes,
+    mover: &MoveAndSlide,
+    water: Option<f32>,
+) {
+    step(m, input, dt, tuning, shapes, mover, water);
+    // The legs' step phase, for the movement clips and hit zones.
+    if m.grounded && !m.climbing && !m.riding && !m.swimming && !m.parachute {
+        let velocity = crate::skeleton::local_velocity(m.yaw, m.velocity);
+        let step = crate::skeleton::stride_step(m.stance, velocity, dt);
+        if step > 0.0 {
+            m.stride = (m.stride + step).rem_euclid(1.0);
+        }
+    }
+}
+
+fn step(
     m: &mut SoldierMotion,
     input: &InputFrame,
     dt: f32,

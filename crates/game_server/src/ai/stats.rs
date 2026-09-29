@@ -5,7 +5,7 @@
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_shared::{
     conquest::{ControlPoint, FlagState, team_index},
-    protocol::{Player, Team},
+    protocol::{ControlledBy, Player, Team},
     squad::squad_name,
     weapons::Armory,
 };
@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     bots::BotBrain,
-    combat::{Died, VehicleDestroyed},
+    combat::{Died, SoldierHit, VehicleDestroyed},
 };
 
 #[derive(Resource, Default)]
@@ -100,6 +100,205 @@ pub struct TeamStats {
     /// Squads' bounds begun and times pinned down.
     pub bounds: u32,
     pub pinned: u32,
+    /// Firefights in detail (see [`CombatStats`]).
+    pub combat: CombatStats,
+}
+
+/// What a bot on foot is doing in a firefight, for [`CombatStats`]: the same buckets for
+/// both behaviours (tactical and legacy).
+pub const FIGHT_STATES: [&str; FIGHT_N] = [
+    "open", "cover up", "cover down", "to cover", "watch", "suppress", "overwatch", "moving", "search", "flank", "medic",
+    "throw", "other", "vehicle", "bounding", "moving seen",
+];
+pub const FIGHT_N: usize = 16;
+
+/// How bots fight: time with an enemy in sight and holding the trigger, rounds and hits, how
+/// long from seeing an enemy to the first shot, where engaged time goes and what bots were
+/// doing when they went down.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct CombatStats {
+    /// Bot-seconds with an enemy in sight (on foot).
+    pub sight: f32,
+    /// Bot-seconds holding the trigger at an enemy in sight, and in suppressive fire.
+    pub trigger: f32,
+    pub suppress_fire: f32,
+    /// Rounds of the main weapon fired, and hits on enemy soldiers (all weapons) with their
+    /// damage.
+    pub rounds: u32,
+    pub hits: u32,
+    pub damage: f32,
+    /// Enemies coming into sight (none in sight before), of those shot at before losing
+    /// sight, and the seconds from sighting to the first shot.
+    pub sightings: u32,
+    pub first_shots: u32,
+    pub first_shot_time: f32,
+    /// Engaged bot-seconds (see [`TeamStats::engaged_seconds`]) by [`FIGHT_STATES`].
+    pub engaged_by: [f32; FIGHT_N],
+    /// Downs and deaths by [`FIGHT_STATES`], and of those with an enemy in sight.
+    pub deaths_by: [u32; FIGHT_N],
+    pub deaths_aware: [u32; FIGHT_N],
+    /// Rounds and hits by [`FIGHT_STATES`], by the shooter's stance (standing, crouching,
+    /// prone), and while suppressed (over 0.3) or not.
+    pub rounds_by: [u32; FIGHT_N],
+    pub hits_by: [u32; FIGHT_N],
+    pub rounds_stance: [u32; 3],
+    pub hits_stance: [u32; 3],
+    pub rounds_suppressed: [u32; 2],
+    pub hits_suppressed: [u32; 2],
+    /// Hits taken from enemies by [`FIGHT_STATES`], by stance, and standing still or moving
+    /// (over 1 m/s).
+    pub taken_by: [u32; FIGHT_N],
+    pub taken_stance: [u32; 3],
+    pub taken_moving: [u32; 2],
+    /// Engaged bot-seconds by stance, and standing still or moving.
+    pub engaged_stance: [f32; 3],
+    pub engaged_moving: [f32; 2],
+    /// Deaths by what hit them last ([`DEATH_CAUSES`]), and bullet deaths by the shooter's
+    /// distance ([`DISTANCES`]).
+    pub death_cause: [u32; 5],
+    pub death_dist: [u32; 4],
+    /// Main-weapon rounds fired at an enemy in sight, and bullet hits scored on foot, by the
+    /// distance ([`DISTANCES`]).
+    pub rounds_dist: [u32; 4],
+    pub hits_dist: [u32; 4],
+    /// Bot-seconds on foot by [`FIGHT_STATES`], engaged or not (where the time goes).
+    pub alive_by: [f32; FIGHT_N],
+    /// Bot-seconds on foot by the distance to the area of its order: inside its radius, up to
+    /// 30 m beyond, 100 m, 200 m, further; attacking (0..5) and defending (5..10).
+    pub obj_dist: [f32; 10],
+}
+
+/// What killed a soldier (the last hit before going down): bullets, a vehicle's guns or
+/// wheels, a grenade, rocket or mine, the commander's artillery, nothing (a fall, water).
+pub const DEATH_CAUSES: [&str; 5] = ["bullet", "vehicle", "explosive", "artillery", "none"];
+/// Distance buckets of fights: under 10 m, 10-25, 25-50, beyond.
+pub const DISTANCES: [&str; 4] = ["<10", "10-25", "25-50", "50+"];
+
+/// The [`DISTANCES`] bucket of a distance.
+pub fn distance_bucket(d: f32) -> usize {
+    match d {
+        d if d < 10.0 => 0,
+        d if d < 25.0 => 1,
+        d if d < 50.0 => 2,
+        _ => 3,
+    }
+}
+
+impl CombatStats {
+    fn add(&mut self, o: &CombatStats) {
+        self.sight += o.sight;
+        self.trigger += o.trigger;
+        self.suppress_fire += o.suppress_fire;
+        self.rounds += o.rounds;
+        self.hits += o.hits;
+        self.damage += o.damage;
+        self.sightings += o.sightings;
+        self.first_shots += o.first_shots;
+        self.first_shot_time += o.first_shot_time;
+        for i in 0..FIGHT_STATES.len() {
+            self.engaged_by[i] += o.engaged_by[i];
+            self.deaths_by[i] += o.deaths_by[i];
+            self.deaths_aware[i] += o.deaths_aware[i];
+            self.rounds_by[i] += o.rounds_by[i];
+            self.hits_by[i] += o.hits_by[i];
+            self.taken_by[i] += o.taken_by[i];
+            self.alive_by[i] += o.alive_by[i];
+        }
+        for i in 0..2 {
+            self.taken_moving[i] += o.taken_moving[i];
+            self.engaged_moving[i] += o.engaged_moving[i];
+        }
+        for i in 0..3 {
+            self.rounds_stance[i] += o.rounds_stance[i];
+            self.hits_stance[i] += o.hits_stance[i];
+            self.taken_stance[i] += o.taken_stance[i];
+            self.engaged_stance[i] += o.engaged_stance[i];
+        }
+        for i in 0..2 {
+            self.rounds_suppressed[i] += o.rounds_suppressed[i];
+            self.hits_suppressed[i] += o.hits_suppressed[i];
+        }
+        for i in 0..5 {
+            self.death_cause[i] += o.death_cause[i];
+        }
+        for i in 0..10 {
+            self.obj_dist[i] += o.obj_dist[i];
+        }
+        for i in 0..4 {
+            self.death_dist[i] += o.death_dist[i];
+            self.rounds_dist[i] += o.rounds_dist[i];
+            self.hits_dist[i] += o.hits_dist[i];
+        }
+    }
+
+    /// The second log line: causes of death and fights by distance.
+    fn describe_more(&self) -> String {
+        let list = |names: &[&str], values: &[u32]| {
+            names.iter().zip(values).map(|(n, v)| format!("{n} {v}")).collect::<Vec<_>>().join(", ")
+        };
+        format!(
+            "deaths by cause: {}; bullet deaths by distance: {}; rounds by distance: {}; hits by distance: {}; time by state: {}; objective distance: {}",
+            list(&DEATH_CAUSES, &self.death_cause),
+            list(&DISTANCES, &self.death_dist),
+            list(&DISTANCES, &self.rounds_dist),
+            list(&DISTANCES, &self.hits_dist),
+            FIGHT_STATES
+                .iter()
+                .zip(&self.alive_by)
+                .map(|(n, v)| format!("{n} {v:.0}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.obj_dist.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>().join(" "),
+        )
+    }
+
+    /// One log line's worth.
+    fn describe(&self) -> String {
+        let engaged: f32 = self.engaged_by.iter().sum();
+        let states = |values: &dyn Fn(usize) -> String| {
+            (0..FIGHT_STATES.len())
+                .map(|i| format!("{} {}", FIGHT_STATES[i], values(i)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "{:.0} s in sight, {:.0} s trigger, {:.0} s suppressive; {} rounds, {} hits ({:.0} damage); {} sightings, {} first shots after {:.2} s; engaged {:.0} s: {}; deaths: {}; rounds/hits: {}; by stance {}/{} {}/{} {}/{}; suppressed {}/{}, not {}/{}; hits taken: {}; by stance {} {} {}; still {} moving {}; engaged by stance {:.0} {:.0} {:.0}; still {:.0} moving {:.0}",
+            self.sight,
+            self.trigger,
+            self.suppress_fire,
+            self.rounds,
+            self.hits,
+            self.damage,
+            self.sightings,
+            self.first_shots,
+            self.first_shot_time / self.first_shots.max(1) as f32,
+            engaged,
+            states(&|i| format!("{:.0}", self.engaged_by[i])),
+            states(&|i| format!("{}/{}", self.deaths_by[i], self.deaths_aware[i])),
+            states(&|i| format!("{}/{}", self.rounds_by[i], self.hits_by[i])),
+            self.rounds_stance[0],
+            self.hits_stance[0],
+            self.rounds_stance[1],
+            self.hits_stance[1],
+            self.rounds_stance[2],
+            self.hits_stance[2],
+            self.rounds_suppressed[1],
+            self.hits_suppressed[1],
+            self.rounds_suppressed[0],
+            self.hits_suppressed[0],
+            states(&|i| format!("{}", self.taken_by[i])),
+            self.taken_stance[0],
+            self.taken_stance[1],
+            self.taken_stance[2],
+            self.taken_moving[0],
+            self.taken_moving[1],
+            self.engaged_stance[0],
+            self.engaged_stance[1],
+            self.engaged_stance[2],
+            self.engaged_moving[0],
+            self.engaged_moving[1],
+        )
+    }
 }
 
 impl TeamStats {
@@ -151,6 +350,7 @@ impl TeamStats {
         self.spots += other.spots;
         self.bounds += other.bounds;
         self.pinned += other.pinned;
+        self.combat.add(&other.combat);
     }
 }
 
@@ -161,29 +361,101 @@ impl AiStats {
 }
 
 /// Counts flags changing hands, deaths and vehicles bots destroyed.
-pub fn track_events(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn track_events(
+    time: Res<Time>,
     mut stats: ResMut<AiStats>,
     mut deaths: MessageReader<Died>,
     mut destroyed: MessageReader<VehicleDestroyed>,
-    players: Query<(&Player, &Team)>,
+    mut hits: MessageReader<SoldierHit>,
+    players: Query<(&Player, &Team, Option<&BotBrain>)>,
+    controlled: Query<(&ControlledBy, &game_shared::soldier::SoldierMotion, Has<game_shared::vehicle::Seated>)>,
     flags: Query<(Entity, &FlagState), (With<ControlPoint>, Changed<FlagState>)>,
     control_points: Query<(), With<ControlPoint>>,
+    armory: Res<Armory>,
     mut owners: Local<HashMap<Entity, Team>>,
+    // The last hit on each player: cause, distance, when.
+    mut last_hits: Local<HashMap<Entity, (usize, f32, f32)>>,
 ) {
+    let now = time.elapsed_secs();
     for kill in destroyed.read() {
-        if let Some((player, team)) = kill.by.and_then(|by| players.get(by).ok())
+        if let Some((player, team, _)) = kill.by.and_then(|by| players.get(by).ok())
             && player.is_bot
             && let Some(t) = team_index(*team)
         {
             stats.teams[t].vehicle_kills += 1;
         }
     }
+    for hit in hits.read() {
+        let by = hit.attacker.player.and_then(|p| players.get(p).ok());
+        let victim_soldier = controlled.get(hit.victim).ok();
+        let victim = victim_soldier.and_then(|(c, ..)| players.get(c.0).ok());
+        let shooter = hit.attacker.soldier.and_then(|s| controlled.get(s).ok());
+        let distance = shooter.zip(victim_soldier).map_or(f32::MAX, |((_, a, _), (_, v, _))| a.position.distance(v.position));
+        let bullet = armory.weapon(&hit.attacker.weapon).is_some_and(|w| w.fire.kind == game_data::FireKind::Gun);
+        let cause = match () {
+            _ if &*hit.attacker.weapon == "artillery" => 3,
+            _ if shooter.is_some_and(|(_, _, seated)| seated) => 1,
+            _ if bullet => 0,
+            _ => 2,
+        };
+        if let Some((c, ..)) = victim_soldier {
+            last_hits.insert(c.0, (cause, distance, now));
+        }
+        if cause == 0
+            && let (Some((player, team, Some(_))), Some((_, victim_team, _))) = (by, victim)
+            && player.is_bot
+            && team != victim_team
+            && let Some(t) = team_index(*team)
+        {
+            stats.teams[t].combat.hits_dist[distance_bucket(distance)] += 1;
+        }
+        if let (Some((_, team, _)), Some((_, victim_team, Some(brain))), Some((_, motion, _))) = (by, victim, victim_soldier)
+            && team != victim_team
+            && let Some(t) = team_index(*victim_team)
+        {
+            let combat = &mut stats.teams[t].combat;
+            combat.taken_by[brain.state_before()] += 1;
+            combat.taken_stance[match motion.stance {
+                game_shared::soldier::Stance::Standing => 0,
+                game_shared::soldier::Stance::Crouching => 1,
+                game_shared::soldier::Stance::Prone => 2,
+            }] += 1;
+            combat.taken_moving[usize::from(motion.velocity.with_y(0.0).length() > 1.0)] += 1;
+        }
+        if let (Some((player, team, brain)), Some((_, victim_team, _))) = (by, victim)
+            && player.is_bot
+            && team != victim_team
+            && let Some(t) = team_index(*team)
+        {
+            let combat = &mut stats.teams[t].combat;
+            combat.hits += 1;
+            combat.damage += hit.damage;
+            if let Some(brain) = brain {
+                let (state, stance, suppressed) = brain.shooting_state();
+                combat.hits_by[state] += 1;
+                combat.hits_stance[stance] += 1;
+                combat.hits_suppressed[suppressed as usize] += 1;
+            }
+        }
+    }
     for death in deaths.read() {
         if let Some(t) = team_index(death.team) {
             stats.teams[t].deaths += 1;
             stats.teams[1 - t].kills += 1;
+            // Bleeding out after going down can take a while.
+            let (cause, distance) = match last_hits.remove(&death.player) {
+                Some((cause, distance, at)) if now - at < 40.0 => (cause, distance),
+                _ => (4, f32::MAX),
+            };
+            let combat = &mut stats.teams[t].combat;
+            combat.death_cause[cause] += 1;
+            if cause == 0 {
+                combat.death_dist[distance_bucket(distance)] += 1;
+            }
         }
     }
+    last_hits.retain(|_, (.., at)| now - *at < 60.0);
     for (entity, state) in &flags {
         let Some(previous) = owners.insert(entity, state.owner) else {
             continue;
@@ -212,7 +484,7 @@ pub fn log_stats(
     snapshot: Res<SquadSnapshot>,
     armory: Res<Armory>,
     mut tactics: ResMut<SquadTactics>,
-    bots: Query<(), With<BotBrain>>,
+    bots: Query<(&BotBrain, &Team)>,
 ) {
     stats.elapsed += time.delta_secs();
     if stats.elapsed < 60.0 {
@@ -232,7 +504,7 @@ pub fn log_stats(
         let minute = stats.teams[t];
         stats.total[t].add(&minute);
         let total = stats.total[t];
-        let team = if t == 0 { Team::One } else { Team::Two };
+        let team = t_team(t);
         let mut orders: Vec<(u8, String)> = strategy
             .orders
             .iter()
@@ -330,6 +602,30 @@ pub fn log_stats(
             strategy.orders.iter().filter(|((o, _), _)| *o == team).count() - attacking,
             orders.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(", "),
         );
+        info!("ai combat team {}: {}", t + 1, minute.combat.describe());
+        info!("ai combat2 team {}: {}", t + 1, minute.combat.describe_more());
+        // Where the team is: soldiers on their feet at each objective, and bots sent there.
+        let presence: Vec<String> = strategy.objectives[t]
+            .iter()
+            .filter_map(|o| {
+                let area = map.areas.get(o.area)?;
+                let at = snapshot.soldiers[t]
+                    .iter()
+                    .filter(|s| s.position.xz().distance(area.position.xz()) < area.radius + 40.0)
+                    .count();
+                let sent = bots.iter().filter(|(b, team)| **team == t_team(t) && b.order().is_some_and(|(_, a)| a == o.area)).count();
+                let kind = match o.kind {
+                    OrderKind::Attack => "attack",
+                    OrderKind::Defend => "defend",
+                };
+                Some(format!("{kind} {} ({:.1}): {at} there, {sent} sent", area.name, o.value))
+            })
+            .collect();
+        info!("ai objectives team {}: {}", t + 1, presence.join("; "));
     }
     stats.teams = default();
+}
+
+fn t_team(t: usize) -> Team {
+    if t == 0 { Team::One } else { Team::Two }
 }

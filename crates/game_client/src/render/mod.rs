@@ -18,7 +18,7 @@ pub mod scope;
 pub mod sky_light;
 mod sky_occlusion;
 mod static_lightmaps;
-mod soldiers;
+pub(crate) mod soldiers;
 mod statics;
 mod terrain;
 mod unit_lods;

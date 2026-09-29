@@ -8,6 +8,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
+pub mod arsenal;
 pub mod chat;
 pub mod commander;
 pub mod config;
@@ -30,6 +31,7 @@ pub mod protocol;
 pub mod radio;
 pub mod revive;
 pub mod rope;
+pub mod skeleton;
 pub mod soldier;
 pub mod squad;
 pub mod statics;
@@ -46,7 +48,7 @@ pub const TICK_HZ: f64 = 60.0;
 pub const DEFAULT_PORT: u16 = 16567;
 
 /// Bump whenever the wire protocol changes in a way the protocol hash can't detect.
-pub const PROTOCOL_ID: u64 = 0x4246_325f_0002; // "BF2_" + version (2: the join handshake)
+pub const PROTOCOL_ID: u64 = 0x4246_325f_0003; // "BF2_" + version (3: the legs' stride and reload ticks)
 
 /// Adds everything both client and server need. The messaging backend (renet) is added by
 /// the binaries so a future Steam backend can be swapped in.
@@ -66,6 +68,8 @@ impl Plugin for SharedPlugin {
                 soldier::SoldierPlugin,
                 level::LevelPlugin,
                 weapons::WeaponsPlugin,
+                skeleton::SkeletonPlugin,
+                arsenal::ArsenalPlugin,
                 vehicle::VehiclePlugin,
                 commander::CommanderPlugin,
             ));

@@ -1,0 +1,31 @@
+// The Esc menu's Settings page (a centered panel, not the full-screen main menu): checks the
+// tab bar and the Back button stay visible while a tab's content scrolls (`sync_pause_overlay`'s
+// `PageRoot`: `max_height: percent(90)`, `min_height: px(0)`).
+// client --scenario scenarios/menu/pause_settings.ron --out target/scenarios/menu/pause_settings
+(
+    level: "test_range",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Key(Escape),
+        Wait(0.3),
+        Click("menu:settings"),
+        Wait(0.3),
+        Click("tab:controls"),
+        Wait(0.3),
+        Screenshot("controls_top"),
+        ScrollIntoView("bind:reset"),
+        Wait(0.3),
+        Screenshot("controls_bottom"),
+        Click("tab:graphics"),
+        Wait(0.3),
+        Screenshot("graphics_top"),
+        ScrollIntoView("tonemap:neutral"),
+        Wait(0.3),
+        Screenshot("graphics_bottom"),
+        Key(Escape),
+        Wait(0.3),
+        Screenshot("pause_home"),
+        Quit,
+    ],
+)

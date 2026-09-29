@@ -239,6 +239,7 @@ pub(super) fn press_buttons(
             MenuButton::ResetBindings => {
                 settings.bindings = Settings::default().bindings;
             }
+            MenuButton::StanceMode(kind, mode) => kind.set(&mut settings, *mode),
             MenuButton::Preset(preset) => preset.apply(&mut settings),
             MenuButton::ShadowQuality(q) => {
                 settings.shadow_quality = *q;
@@ -306,6 +307,7 @@ pub(super) fn gamepad_menu_nav(
     mut menu: ResMut<Menu>,
     time: Res<Time>,
     gamepads: Query<&Gamepad>,
+    mut commands: Commands,
     // UI nodes carry their screen position in `UiGlobalTransform` (a 2D affine transform,
     // separate from the 3D `GlobalTransform`), computed by `bevy_ui`'s layout system.
     nodes: Query<(Entity, &bevy::ui::UiGlobalTransform), (With<MenuButton>, With<Button>)>,
@@ -349,6 +351,9 @@ pub(super) fn gamepad_menu_nav(
             .iter()
             .min_by(|(_, a), (_, b)| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap())
             .map(|(e, _)| *e);
+        if let Some(entity) = menu.gamepad_focus {
+            commands.trigger(ScrollIntoView { entity });
+        }
         return;
     };
     let next = positions
@@ -366,6 +371,7 @@ pub(super) fn gamepad_menu_nav(
         .map(|(e, _)| *e);
     if let Some(next) = next {
         menu.gamepad_focus = Some(next);
+        commands.trigger(ScrollIntoView { entity: next });
     }
 }
 

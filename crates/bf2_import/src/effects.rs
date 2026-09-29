@@ -169,13 +169,8 @@ pub fn load_effect(interp: &mut Interpreter, name: &str) {
 fn weapon_effects(interp: &mut Interpreter, kits: &[String]) -> WeaponEffectTable {
     let mut table = WeaponEffectTable::default();
     for kit in kits {
-        interp.ensure_template(kit);
-        let Some(kit) = interp.world.template(kit).cloned() else {
-            continue;
-        };
-        for child in &kit.children {
-            let name = child.template.to_ascii_lowercase();
-            interp.ensure_template(&name);
+        // The kit's weapons and its unlocks'.
+        for name in crate::weapons::kit_weapon_names(interp, kit) {
             if let Some(projectile) = interp.world.template(&name).and_then(|w| w.get_str("projectiletemplate")) {
                 let projectile = projectile.to_string();
                 interp.ensure_template(&projectile);
@@ -186,6 +181,22 @@ fn weapon_effects(interp: &mut Interpreter, kits: &[String]) -> WeaponEffectTabl
         }
     }
     table
+}
+
+/// Only the weapons' effects (muzzle flashes, detonations) of `kits`, merged into
+/// `effects/weapons.ron`: for `bf2-import kits`, which imports kits without a level.
+pub fn import_weapon_effects(interp: &mut Interpreter, converter: &MeshConverter, kits: &[String], out: &Path) {
+    let weapons = weapon_effects(interp, kits);
+    let names: Vec<String> = weapons
+        .weapons
+        .values()
+        .flat_map(|effects| effects.muzzle.iter().chain(&effects.detonation).cloned())
+        .collect();
+    let (count, failed) = convert_named(interp, converter, names, out);
+    log::info!("{count} weapon effects ({failed} failed)");
+    if let Err(err) = merge_weapon_effects(out, weapons) {
+        log::warn!("weapons.ron: {err:#}");
+    }
 }
 
 /// Adds the guns of the vehicles loaded by now (every `GenericFireArm` template) to

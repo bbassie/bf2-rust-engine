@@ -21,7 +21,8 @@ use game_data::{FireKind, FireMode, Guidance, HitZone, TriggerBy, WeaponDesc};
 use game_shared::{
     conquest::RoundState,
     effects::PlayEffect,
-    hitzones::{BodyPose, HEAD, ServerClock},
+    hitzones::{self, BodyPose, HEAD, ServerClock, SoldierImpact, ZoneHit},
+    skeleton::{self, AnimState, HitRigs},
     input::Buttons,
     physics::GameLayer,
     projectile::{
@@ -48,7 +49,8 @@ pub struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<Died>()
+        app.init_resource::<SimTick>()
+            .add_message::<Died>()
             .add_message::<Explosion>()
             .add_message::<StaticHit>()
             .add_message::<SoldierHit>()
@@ -254,28 +256,41 @@ impl PoseHistory {
 }
 
 /// The server tick this tick's state goes out with (replicon counts it up after the
-/// simulation).
-fn current_tick(tick: &ServerTick) -> u32 {
-    tick.get().wrapping_add(1)
+/// simulation). Without clients (singleplayer) replicon doesn't count: then it goes up by one
+/// a tick all the same, so poses and animations have a clock.
+#[derive(Resource, Default)]
+pub struct SimTick(pub u32);
+
+fn current_tick(tick: &SimTick) -> u32 {
+    tick.0
 }
 
 /// Remembers where every soldier is this tick, and tells clients which tick it is.
 #[allow(clippy::type_complexity)]
 fn record_poses(
     mut commands: Commands,
-    tick: Res<ServerTick>,
+    server_tick: Res<ServerTick>,
+    mut sim_tick: ResMut<SimTick>,
     mut clock: Query<&mut ServerClock>,
-    mut soldiers: Query<(Entity, &SoldierMotion, Has<Seated>, Option<&mut PoseHistory>), With<Soldier>>,
+    mut soldiers: Query<(Entity, &SoldierMotion, Has<Seated>, Option<&Inventory>, Option<&mut PoseHistory>), With<Soldier>>,
 ) {
-    let tick = current_tick(&tick);
+    let tick = server_tick.get().wrapping_add(1).max(sim_tick.0.wrapping_add(1));
+    sim_tick.0 = tick;
+    let seconds = tick as f64 / game_shared::TICK_HZ;
     match clock.single_mut() {
         Ok(mut clock) => clock.0 = tick,
         Err(_) => {
             commands.spawn((ServerClock(tick), Replicated));
         }
     }
-    for (entity, motion, seated, history) in &mut soldiers {
-        let pose = BodyPose::of(motion, seated);
+    for (entity, motion, seated, inventory, history) in &mut soldiers {
+        let mut pose = BodyPose::of(motion, seated);
+        // On foot, the zones follow the animations clients draw (see `game_shared::skeleton`).
+        if !seated && !hitzones::legacy() {
+            let reload = inventory.and_then(|i| skeleton::reload_elapsed(i.reloading, i.reload_started, seconds));
+            let weapon = inventory.map_or(0, |i| i.active);
+            pose.anim = AnimState::of(motion, skeleton::clock(seconds), reload, weapon);
+        }
         match history {
             Some(mut history) => {
                 history.0.push_back((tick, pose));
@@ -370,7 +385,7 @@ fn fire_weapons(
         Option<&Hitbox>,
     ), Without<Seated>>,
     placed: Query<(Entity, &Live, &ProjectileMotion)>,
-    tick: Res<ServerTick>,
+    tick: Res<SimTick>,
     mut shots: MessageWriter<ToClients<ShotFired>>,
     mut throws: MessageWriter<ToClients<ThrowReleased>>,
     mut detonations: MessageWriter<Detonation>,
@@ -391,7 +406,12 @@ fn fire_weapons(
             inventory.fire_mode = 0;
             inventory.reloading = false;
             match armory.weapon(&loadout.weapons[input.weapon as usize]) {
-                Some(weapon) => state.switch_to(weapon),
+                // The melee and grenade keys switch quickly (`crate::loadouts` logs them).
+                Some(weapon) => {
+                    let quick = input.pressed(Buttons::QUICK);
+                    crate::loadouts::log_quick_switch(&players, player, &state, weapon, quick);
+                    state.switch_with(weapon, quick);
+                }
                 None => state.deploy = 0.5,
             }
         }
@@ -434,6 +454,9 @@ fn fire_weapons(
         let reloading = state.reload > 0.0;
         if inventory.reloading != reloading {
             inventory.reloading = reloading;
+            if reloading {
+                inventory.reload_started = now;
+            }
         }
         // A throw or a placed charge starts its third-person animation the moment the
         // wind-up releases, not `fire.fireLaunchDelay` seconds later when it actually
@@ -511,6 +534,7 @@ fn fire_weapons(
                         1 => direction,
                         _ => spread_direction(direction, weapon.pellet_spread, (fastrand::f32(), fastrand::f32())),
                     };
+                    let rewind = rewind_for(input.view_tick, now, rewind_limit(rtt(player)));
                     let mut projectile = commands.spawn((
                         Live {
                             weapon: weapon.clone(),
@@ -523,10 +547,17 @@ fn fire_weapons(
                             fuse: desc.time_to_live - cooked,
                             guided: weapon.fire.guidance == Guidance::Wire,
                             target: None,
-                            rewind: rewind_for(input.view_tick, now, rewind_limit(rtt(player))),
+                            rewind,
                         },
                         ProjectileMotion::new(origin, launch_velocity(&weapon, direction, soft, motion.velocity), motion.yaw),
                     ));
+                    if hitzones::hitreg_log() && !desc.is_object() {
+                        info!(
+                            "hitreg fire: {name} {:?} tick {now} view {} rewind {rewind} from {origin:.3} dir {direction:.4}",
+                            projectile.id(),
+                            input.view_tick
+                        );
+                    }
                     if desc.is_object() {
                         projectile.insert((
                             Projectile {
@@ -578,9 +609,11 @@ fn fire_weapons(
 /// A soldier bullets can hit, as the projectiles see it this tick.
 struct Target<'a> {
     entity: Entity,
+    /// Its pose this tick.
     pose: BodyPose,
     history: Option<&'a PoseHistory>,
     zones: &'a [HitZone],
+    loadout: &'a Loadout,
 }
 
 impl Target<'_> {
@@ -590,6 +623,13 @@ impl Target<'_> {
             (1.., Some(history)) => history.at(now.wrapping_sub(rewind)).unwrap_or(self.pose),
             _ => self.pose,
         }
+    }
+
+    /// The nearest of its zones, posed as `rewind` ticks ago, a ray meets.
+    fn ray(&self, rigs: &HitRigs, armory: &Armory, now: u32, rewind: u32, origin: Vec3, direction: Vec3, max: f32) -> Option<ZoneHit> {
+        let pose = self.pose(now, rewind);
+        let bones = || pose.anim.and_then(|anim| rigs.pose(&self.loadout.kit, self.loadout, armory, &anim));
+        pose.ray_posed(self.zones, bones, origin, direction, max)
     }
 }
 
@@ -607,7 +647,7 @@ fn simulate_projectiles(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,
-    tick: Res<ServerTick>,
+    tick: Res<SimTick>,
     armory: Res<Armory>,
     mut projectiles: Query<(Entity, &mut Live, &mut ProjectileMotion)>,
     shooters: Query<(&SoldierMotion, &Inventory, Has<Seated>)>,
@@ -617,8 +657,12 @@ fn simulate_projectiles(
         (With<Soldier>, Without<Downed>),
     >,
     vehicles: Query<(&VehicleData, &Position, &LinearVelocity, &Rotation, Option<&VehicleState>, Option<&Decoy>)>,
-    materials: Option<Res<Materials>>,
-    destructibles: Query<(), With<Destructible>>,
+    (materials, destructibles, rigs, mut impacts): (
+        Option<Res<Materials>>,
+        Query<(), With<Destructible>>,
+        Res<HitRigs>,
+        MessageWriter<ToClients<SoldierImpact>>,
+    ),
     mut soldier_hits: MessageWriter<SoldierHit>,
     mut vehicle_hits: MessageWriter<VehicleHit>,
     mut static_hits: MessageWriter<StaticHit>,
@@ -639,9 +683,13 @@ fn simulate_projectiles(
         })
         .map(|(entity, motion, loadout, history, seated)| Target {
             entity,
-            pose: BodyPose::of(motion, seated.is_some()),
+            // This tick's, as `record_poses` kept it.
+            pose: history
+                .and_then(|h| h.0.back().filter(|(t, _)| *t == now).map(|(_, pose)| *pose))
+                .unwrap_or_else(|| BodyPose::of(motion, seated.is_some())),
             history,
             zones: armory.hit_zones(&loadout.kit),
+            loadout,
         })
         .collect();
     for (entity, mut live, mut motion) in &mut projectiles {
@@ -650,6 +698,9 @@ fn simulate_projectiles(
         let desc = &weapon.projectile;
         let goes_off = desc.goes_off();
         if live.age >= live.fuse {
+            if hitzones::hitreg_log() && !desc.is_object() {
+                info!("hitreg verdict: {} {entity:?} miss (flew {:.0} m)", weapon.name, live.travelled);
+            }
             if goes_off {
                 detonations.write(Detonation {
                     entity: Some(entity),
@@ -744,18 +795,21 @@ fn simulate_projectiles(
             filter = filter.with_excluded_entities([hitbox]);
         }
         let (shooter, rewind) = (live.shooter, live.rewind);
+        // The zone the step's soldier hit met, for the log.
+        let zone_hit = std::cell::Cell::new(None::<usize>);
         let soldier_along = |origin: Vec3, direction: Dir3, length: f32| {
             targets
                 .iter()
                 .filter(|target| target.entity != shooter)
                 .filter_map(|target| {
-                    let hit = target.pose(now, rewind).ray(target.zones, origin, *direction, length)?;
+                    let hit = target.ray(&rigs, &armory, now, rewind, origin, *direction, length)?;
                     Some((target, hit))
                 })
                 .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
                 .map(|(target, hit)| {
+                    zone_hit.set(Some(hit.zone));
                     if rewind > 0 {
-                        let now_too = target.pose.ray(target.zones, origin, *direction, length).is_some();
+                        let now_too = target.ray(&rigs, &armory, now, 0, origin, *direction, length).is_some();
                         debug!(
                             "rewound hit on {:?}: {}",
                             target.entity,
@@ -793,6 +847,45 @@ fn simulate_projectiles(
 
         let attacker = live.attacker();
         let body = colliders.get(hit.entity).map(|c| c.body).unwrap_or(hit.entity);
+        if hitzones::hitreg_log() && !desc.is_object() {
+            match hit.body_part {
+                Some(_) => {
+                    let target = targets.iter().find(|t| t.entity == hit.entity);
+                    let zone = target
+                        .zip(zone_hit.get())
+                        .and_then(|(t, zone)| t.zones.get(zone))
+                        .map_or("?", |z| z.bone.as_str());
+                    info!(
+                        "hitreg verdict: {} {entity:?} hit {:?} zone {zone} at {:.3} rewind {} (target at {:.3}, now at {:.3}, animated {})",
+                        weapon.name,
+                        hit.entity,
+                        hit.point,
+                        live.rewind,
+                        target.map_or(Vec3::NAN, |t| t.pose(now, live.rewind).position),
+                        target.map_or(Vec3::NAN, |t| t.pose.position),
+                        target.is_some_and(|t| t.pose(now, live.rewind).anim.is_some() && rigs.rig(&t.loadout.kit).is_some()),
+                    );
+                }
+                None => info!(
+                    "hitreg verdict: {} {entity:?} miss (hit {:?} at {:.3} after {:.1} m)",
+                    weapon.name, hit.entity, hit.point, live.travelled
+                ),
+            }
+        }
+        // Everyone sees the blood where the server hit (clients only stop their tracers there).
+        if let Some(part) = hit.body_part
+            && !desc.goes_off()
+        {
+            impacts.write(ToClients {
+                targets: SendTargets::All,
+                message: SoldierImpact {
+                    point: hit.point,
+                    normal: hit.normal,
+                    projectile: desc.material,
+                    body_part: part,
+                },
+            });
+        }
         if let Some(part) = hit.body_part {
             let factor = body_part_factor(materials.as_deref(), desc.material, part);
             let damage = damage_at(desc, live.travelled) * factor;

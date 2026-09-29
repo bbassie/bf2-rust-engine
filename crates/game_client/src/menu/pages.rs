@@ -58,11 +58,17 @@ pub(super) fn spawn_main_menu(mut commands: Commands, mut menu: ResMut<Menu>) {
             });
             root.spawn((
                 PageRoot,
+                TabGroup::new(0),
                 Node {
                     flex_grow: 1.0,
                     flex_direction: FlexDirection::Column,
                     padding: UiRect::new(px(24), px(48), px(48), px(40)),
                     min_width: px(0),
+                    // Without this, a flex column's automatic minimum height is its content's,
+                    // which can exceed the window: the whole page (tab bar, Back button and
+                    // all) would grow past the bottom instead of the settings tab's own
+                    // `ScrollArea` shrinking to fit and scrolling (see `settings_page`).
+                    min_height: px(0),
                     ..default()
                 },
             ));
@@ -96,10 +102,16 @@ pub(super) fn sync_pause_overlay(
                 ))
                 .with_child((
                     PageRoot,
+                    TabGroup::new(0),
                     Node {
                         flex_direction: FlexDirection::Column,
                         padding: UiRect::all(px(28)),
                         border_radius: BorderRadius::all(px(12)),
+                        // Bounded (rather than sized to content) so a long settings tab's own
+                        // `ScrollArea` scrolls inside this panel instead of the panel itself
+                        // growing past the top and bottom of the screen.
+                        max_height: percent(90),
+                        min_height: px(0),
                         ..default()
                     },
                     BackgroundColor(PANEL),
@@ -548,19 +560,61 @@ fn settings_page(
             button(tabs, MenuButton::Tab(tab), Look::Plain, tab.label());
         }
     });
-    p.spawn((
-        ScrollArea,
-        Node {
-            flex_direction: FlexDirection::Column,
-            min_width: px(640),
-            flex_grow: 1.0,
-            min_height: px(0),
-            overflow: Overflow::scroll_y(),
-            padding: UiRect::right(px(12)),
-            ..default()
-        },
-    ))
-    .with_children(|p| match tab {
+    // The content column scrolls (mouse wheel, or the scrollbar dragged); the tab bar above
+    // and the Back/Apply row below stay put. `min_height: px(0)` matters here too: without it
+    // this row (and the scroll area inside it) would size to the tab's full content instead of
+    // shrinking to whatever height `PageRoot` actually has to give it.
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        flex_grow: 1.0,
+        min_height: px(0),
+        column_gap: px(6),
+        ..default()
+    })
+    .with_children(|row| {
+        let scroll_area = row
+            .spawn((
+                ScrollArea,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    min_width: px(640),
+                    flex_grow: 1.0,
+                    min_height: px(0),
+                    overflow: Overflow::scroll_y(),
+                    padding: UiRect::right(px(12)),
+                    ..default()
+                },
+            ))
+            .with_children(|p| settings_tab_content(p, tab, settings, cli, monitor))
+            .id();
+        // A visible, draggable scrollbar next to the content (Bevy's headless `Scrollbar`
+        // widget: it drives `scroll_area`'s `ScrollPosition` itself, on top of the mouse
+        // wheel scrolling `ScrollArea` already handles).
+        row.spawn((
+            Scrollbar::new(scroll_area, ControlOrientation::Vertical, 24.0),
+            Node {
+                width: px(6),
+                flex_shrink: 0.0,
+                border_radius: BorderRadius::all(px(3)),
+                ..default()
+            },
+            BackgroundColor(TRACK),
+        ))
+        .with_child((
+            ScrollbarThumb { border_radius: BorderRadius::all(px(3)), border: UiRect::ZERO },
+            BackgroundColor(ACCENT.with_alpha(0.7)),
+        ));
+    });
+}
+
+fn settings_tab_content(
+    p: &mut ChildSpawnerCommands,
+    tab: SettingsTab,
+    settings: &Settings,
+    cli: &Cli,
+    monitor: Option<&Monitor>,
+) {
+    match tab {
         SettingsTab::Game => {
             row(p, "Player name", |c| {
                 text_field(c, TextField::PlayerName, &settings.player_name, 300.0)
@@ -702,6 +756,29 @@ fn settings_page(
             voice::settings_rows(p);
         }
         SettingsTab::Controls => {
+            section(p, "Movement style");
+            row(p, "Prone", |c| {
+                for mode in StanceMode::ALL {
+                    button(c, MenuButton::StanceMode(StanceKind::Prone, mode), Look::Plain, mode.label());
+                }
+            });
+            row(p, "Crouch", |c| {
+                for mode in StanceMode::ALL {
+                    button(c, MenuButton::StanceMode(StanceKind::Crouch, mode), Look::Plain, mode.label());
+                }
+            });
+            row(p, "Sprint", |c| {
+                for mode in StanceMode::ALL {
+                    button(c, MenuButton::StanceMode(StanceKind::Sprint, mode), Look::Plain, mode.label());
+                }
+            });
+            p.spawn(text(
+                "BF2 defaults: prone toggles (press once to go down, again to get up); crouch \
+                 or jump while prone toggled on stands back up. Crouch and sprint are held.",
+                12.0,
+                DIM,
+            ));
+            section(p, "Bindings");
             p.spawn(Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(2),
@@ -750,7 +827,7 @@ fn settings_page(
                 DIM,
             ));
         }
-    });
+    }
 }
 
 fn binding_row(p: &mut ChildSpawnerCommands, action: Action, settings: &Settings) {

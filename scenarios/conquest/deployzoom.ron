@@ -1,0 +1,38 @@
+// The deploy map's zoom and pan (see `deploy.rs`, `map_markers::MapView`): the whole map, then
+// zoomed 2x and 4x (panned off-center so it isn't just a bigger view of the same middle), a
+// flag picked while zoomed (a `cp:N` button stays clickable at every zoom), the pick confirmed
+// through the log, then the reset button back to the whole map.
+// client --scenario scenarios/conquest/deployzoom.ron
+(
+    level: "gulf_of_oman",
+    size: 64,
+    team: 1,
+    bots: 8,
+    steps: [
+        WaitReady,
+        Kill,
+        Wait(1.0),
+        Screenshot("deploy_1x"),
+        Click("kit:0"),
+        // Zooms around the current view center (a scenario has no real cursor to hover).
+        DeployZoom(2.0),
+        Wait(0.3),
+        Screenshot("deploy_2x"),
+        // Pans off-center so 4x doesn't just re-show the same middle bigger.
+        DeployPan(0.12, -0.08),
+        DeployZoom(2.0),
+        Wait(0.3),
+        Screenshot("deploy_4x"),
+        // Clicking a control point's button still works while zoomed in.
+        Click("cp:0"),
+        Wait(0.3),
+        ExpectLog("spawn set to control point 0", 2.0),
+        // The reset button returns to the whole map.
+        Click("map:reset"),
+        Wait(0.3),
+        Screenshot("deploy_reset"),
+        Wait(8.0),
+        Screenshot("respawned"),
+        Quit,
+    ],
+)

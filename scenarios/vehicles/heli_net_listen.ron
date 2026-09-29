@@ -1,0 +1,9 @@
+// A listen server for networked vehicle tests that quits by itself after four minutes:
+// client --host --level wake_island_2007 --size 64 --bots 0 --port 30500 --scenario scenarios/vehicles/heli_net_listen.ron
+// then connect the scenario client, e.g. `heli_net_response.ron`.
+(
+    steps: [
+        Wait(240.0),
+        Quit,
+    ],
+)

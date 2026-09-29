@@ -136,7 +136,10 @@ impl BotBrain {
         let away = flat(position - cloud.position).try_normalize().unwrap_or(Vec3::X);
         let spot = cloud.position.with_y(position.y) + away * (cloud.current_radius() + 6.0);
         let nav = w.nav()?;
-        let region = nav.cell(nav.locate(position, 2.0, None)?).region;
+        let region = match self.region {
+            Some(region) => region,
+            None => nav.cell(nav.locate(position, 2.0, None)?).region,
+        };
         nav.locate(spot, 5.0, Some(region)).map(|c| nav.position(c))
     }
 

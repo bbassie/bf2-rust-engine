@@ -342,6 +342,9 @@ pub enum SeatWish {
 pub struct VehicleClaims {
     /// Per vehicle: who, for which seat, until when (seconds of [`Self::clock`]).
     claims: HashMap<Entity, Vec<(Entity, SeatWish, f32)>>,
+    /// Transport helicopters landed at their drop-off: everyone but the pilot gets out
+    /// (until when, seconds of [`Self::clock`]; the pilot renews it every tick).
+    drop_offs: HashMap<Entity, f32>,
     clock: f32,
 }
 
@@ -356,6 +359,17 @@ impl VehicleClaims {
             list.retain(|(_, _, until)| *until > clock);
             !list.is_empty()
         });
+        self.drop_offs.retain(|_, until| *until > clock);
+    }
+
+    /// A transport's pilot has landed where his passengers get out (renewed every tick).
+    pub fn drop_off(&mut self, vehicle: Entity) {
+        self.drop_offs.insert(vehicle, self.clock + 0.5);
+    }
+
+    /// Whether a vehicle's passengers are to get out now.
+    pub fn dropping_off(&self, vehicle: Entity) -> bool {
+        self.drop_offs.contains_key(&vehicle)
     }
 
     pub fn now(&self) -> f32 {

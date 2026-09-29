@@ -1,4 +1,9 @@
 //! Turning keyboard and mouse into [`InputFrame`]s, once per simulation tick.
+//!
+//! Crouch, prone and sprint can each be held or toggled ([`Settings::crouch_mode`] and
+//! friends; BF2 defaults: prone toggles, the other two are held). Toggling is resolved here,
+//! client-side only ([`apply_stance_buttons`]): the server and prediction only ever see the
+//! resulting [`Buttons`], exactly as if the player had held the key down.
 
 use std::{
     collections::VecDeque,
@@ -6,6 +11,7 @@ use std::{
 };
 
 use bevy::{
+    ecs::system::SystemParam,
     input::{
         gamepad::{Gamepad, GamepadButton},
         mouse::AccumulatedMouseMotion,
@@ -15,13 +21,15 @@ use bevy::{
 };
 use game_shared::{
     input::{Buttons, INPUT_REDUNDANCY, InputFrame, InputPacket},
+    revive::Downed,
+    soldier::SoldierMotion,
     vehicle::Seated,
 };
 
 use crate::{
     menu::{Menu, Screen},
     net::LocalSoldier,
-    settings::{Action, Actions, Settings, gamepad_activity},
+    settings::{Action, Actions, Settings, StanceMode, gamepad_activity},
 };
 
 pub struct LocalInputPlugin;
@@ -30,8 +38,9 @@ impl Plugin for LocalInputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LookState>()
             .init_resource::<InputHistory>()
+            .init_resource::<StanceToggles>()
             .add_systems(Update, (grab_cursor, mouse_look).chain().in_set(LookSystems))
-            .add_systems(FixedUpdate, build_input.in_set(LocalInputSystems));
+            .add_systems(FixedUpdate, (reset_stance_toggles, build_input).chain().in_set(LocalInputSystems));
     }
 }
 
@@ -61,6 +70,14 @@ pub struct LookState {
     smoothed_delta: Vec2,
     /// Set when jump is pressed between ticks so short taps aren't lost.
     jump_latched: bool,
+    /// Same idea for the stance keys: `build_input` runs in `FixedUpdate`, which can run less
+    /// often than `Update` sees key presses, so a quick tap could otherwise never register as
+    /// `just_pressed` there. Latching the edge (not just the held state) matters for these
+    /// three because a toggled stance (`Settings::{prone,crouch,sprint}_mode`) flips on the
+    /// press, not the hold.
+    prone_latched: bool,
+    crouch_latched: bool,
+    sprint_latched: bool,
 }
 
 impl Default for LookState {
@@ -74,6 +91,9 @@ impl Default for LookState {
             smoothing: 0.0,
             smoothed_delta: Vec2::ZERO,
             jump_latched: false,
+            prone_latched: false,
+            crouch_latched: false,
+            sprint_latched: false,
         }
     }
 }
@@ -116,10 +136,16 @@ fn grab_cursor(
     gamepads: Query<&Gamepad>,
     // The scoreboard's mute chips want the mouse (`voice::ui`).
     scoreboard_mouse: Res<crate::voice::ScoreboardCursor>,
+    // A scripted run's window may never actually hold OS focus (it can run in the background),
+    // and `Key`/`HoldKey` steps for gameplay actions need the cursor locked deterministically to
+    // reach `Actions` at all (`build_input` only reads them while it is); see
+    // `scenario::lock_cursor_for_scenario`, which does the initial grab a click would.
+    scenario: Option<Res<crate::scenario::ScenarioInput>>,
 ) {
     let playing =
         *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open && !scoreboard_mouse.0;
-    if !playing || !window.focused {
+    let focused = window.focused || scenario.is_some();
+    if !playing || !focused {
         if cursor_locked(&cursor) {
             cursor.visible = true;
             cursor.grab_mode = CursorGrabMode::None;
@@ -190,45 +216,133 @@ fn mouse_look(
     if actions.just_pressed(Action::Jump) {
         look.jump_latched = true;
     }
+    if actions.just_pressed(Action::Prone) {
+        look.prone_latched = true;
+    }
+    if actions.just_pressed(Action::Crouch) {
+        look.crouch_latched = true;
+    }
+    if actions.just_pressed(Action::Sprint) {
+        look.sprint_latched = true;
+    }
+}
+
+/// Client-side latch for stances set to "toggle" in [`Settings`] (`prone_mode`, `crouch_mode`,
+/// `sprint_mode`); a stance left on "hold" ignores its field here and just reads the key every
+/// tick. Only the resulting [`Buttons`] are ever sent ([`build_input`]), so the server and
+/// prediction don't need to know toggling exists.
+#[derive(Resource, Default)]
+pub struct StanceToggles {
+    prone: bool,
+    crouch: bool,
+    sprint: bool,
+}
+
+impl StanceToggles {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// BF2 doesn't carry a toggled stance across death, a respawn, boarding a vehicle, or grabbing
+/// a ladder or rope: reset it there instead of leaving a stale toggle to reassert itself later.
+fn reset_stance_toggles(
+    mut toggles: ResMut<StanceToggles>,
+    reset_now: Query<Entity, (With<LocalSoldier>, Or<(Added<LocalSoldier>, Added<Seated>, Added<Downed>)>)>,
+    motion: Query<&SoldierMotion, With<LocalSoldier>>,
+    mut was_climbing: Local<bool>,
+) {
+    let climbing = motion.single().is_ok_and(|m| m.climbing || m.on_rope);
+    if !reset_now.is_empty() || (climbing && !*was_climbing) {
+        toggles.reset();
+    }
+    *was_climbing = climbing;
+}
+
+/// Resolves this tick's crouch, prone and sprint buttons per `Settings::{crouch,prone,sprint}_mode`
+/// (BF2 defaults: prone toggles, crouch and sprint are held). Mirrors BF2: pressing crouch or
+/// jump while a toggled prone is on stands back up (crouch to a crouch, jump the rest of the
+/// way), since prone otherwise outranks crouch once both bits are set (`soldier::wanted_stance`).
+#[allow(clippy::too_many_arguments)]
+fn apply_stance_buttons(
+    actions: &Actions,
+    settings: &Settings,
+    toggles: &mut StanceToggles,
+    frame: &mut InputFrame,
+    prone_edge: bool,
+    crouch_edge: bool,
+    sprint_edge: bool,
+) {
+    fn resolve(mode: StanceMode, edge: bool, held: bool, toggle: &mut bool) -> bool {
+        match mode {
+            StanceMode::Hold => held,
+            StanceMode::Toggle => {
+                if edge {
+                    *toggle = !*toggle;
+                }
+                *toggle
+            }
+        }
+    }
+    let crouch = resolve(settings.crouch_mode, crouch_edge, actions.pressed(Action::Crouch), &mut toggles.crouch);
+    let mut prone = resolve(settings.prone_mode, prone_edge, actions.pressed(Action::Prone), &mut toggles.prone);
+    let sprint = resolve(settings.sprint_mode, sprint_edge, actions.pressed(Action::Sprint), &mut toggles.sprint);
+    if prone && (crouch_edge || frame.buttons.contains(Buttons::JUMP)) {
+        prone = false;
+        toggles.prone = false;
+    }
+    frame.buttons.set(Buttons::CROUCH, crouch);
+    frame.buttons.set(Buttons::PRONE, prone);
+    frame.buttons.set(Buttons::SPRINT, sprint);
+}
+
+/// Context `build_input` only reads, bundled into one `SystemParam` to stay under Bevy's
+/// 16-parameter limit for a function system (each field here would otherwise be its own
+/// argument).
+#[derive(SystemParam)]
+pub(crate) struct FrameContext<'w, 's> {
+    cli: Res<'w, crate::Cli>,
+    selection: Res<'w, crate::combat::WeaponSelection>,
+    seat: Res<'w, crate::vehicles::SeatRequest>,
+    flight: Res<'w, crate::vehicles::FlightStick>,
+    view: Res<'w, crate::combat::ViewTick>,
+    scenario: Option<Res<'w, crate::scenario::ScenarioInput>>,
+    active: Res<'w, crate::net::ActiveMatch>,
+    downed: Query<'w, 's, &'static Downed, With<crate::net::LocalSoldier>>,
+    seated: Query<'w, 's, &'static Seated, With<LocalSoldier>>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_input(
     actions: Actions,
+    settings: Res<Settings>,
+    mut toggles: ResMut<StanceToggles>,
     cursor: Single<&CursorOptions>,
     mut look: ResMut<LookState>,
     mut history: ResMut<InputHistory>,
     mut packets: MessageWriter<InputPacket>,
-    cli: Res<crate::Cli>,
-    selection: Res<crate::combat::WeaponSelection>,
-    seat: Res<crate::vehicles::SeatRequest>,
-    flight: Res<crate::vehicles::FlightStick>,
-    view: Res<crate::combat::ViewTick>,
-    scenario: Option<Res<crate::scenario::ScenarioInput>>,
-    active: Res<crate::net::ActiveMatch>,
-    downed: Query<&game_shared::revive::Downed, With<crate::net::LocalSoldier>>,
-    seated: Query<&Seated, With<LocalSoldier>>,
+    ctx: FrameContext,
     real: Res<Time<Real>>,
     mut delayed: Local<VecDeque<(f64, InputPacket)>>,
 ) {
-    if active.setup.is_none() {
+    if ctx.active.setup.is_none() {
         return;
     }
-    if cli.debug_walk {
+    if ctx.cli.debug_walk {
         look.yaw += 0.01;
     }
     let mut frame = InputFrame {
         seq: history.next_seq,
         yaw: look.yaw,
         pitch: look.pitch,
-        weapon: selection.index,
-        seat: seat.0,
-        view_tick: view.tick,
+        weapon: ctx.selection.index,
+        seat: ctx.seat.0,
+        view_tick: ctx.view.tick,
         ..default()
     };
     history.next_seq = history.next_seq.wrapping_add(1);
 
-    if cli.debug_walk {
+    if ctx.cli.debug_walk {
         frame.set_movement(Vec2::Y);
         frame.buttons.set(Buttons::SPRINT, true);
         frame.buttons.set(Buttons::JUMP, frame.seq % 150 == 0);
@@ -246,7 +360,7 @@ pub fn build_input(
             .unwrap_or_default();
         let mut movement = (keyboard_move + gamepad_move).clamp_length_max(1.0);
         if let Some(gamepad) = actions.gamepad()
-            && seated.single().is_ok_and(|s| s.seat == 0)
+            && ctx.seated.single().is_ok_and(|s| s.seat == 0)
         {
             let throttle = gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
             let brake = gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
@@ -257,9 +371,6 @@ pub fn build_input(
         frame.set_movement(movement);
         let mut set = |button: Buttons, action: Action| frame.buttons.set(button, actions.pressed(action));
         set(Buttons::JUMP, Action::Jump);
-        set(Buttons::SPRINT, Action::Sprint);
-        set(Buttons::CROUCH, Action::Crouch);
-        set(Buttons::PRONE, Action::Prone);
         set(Buttons::FIRE, Action::Fire);
         set(Buttons::AIM, Action::Zoom);
         set(Buttons::USE, Action::Use);
@@ -269,11 +380,25 @@ pub fn build_input(
         if look.jump_latched {
             frame.buttons.insert(Buttons::JUMP);
         }
-        if flight.active {
-            frame.set_stick(flight.stick);
+        apply_stance_buttons(
+            &actions,
+            &settings,
+            &mut toggles,
+            &mut frame,
+            look.prone_latched,
+            look.crouch_latched,
+            look.sprint_latched,
+        );
+        if ctx.flight.active {
+            frame.set_stick(ctx.flight.stick);
+            // --- Flight controls: helicopter pedals on the mouse (vehicles::fly) ---
+            if let Some(steer) = ctx.flight.steer {
+                frame.set_movement(Vec2::new(steer, frame.movement_vec().y));
+            }
+            // --- end flight controls ---
         }
     }
-    if let Some(scenario) = scenario {
+    if let Some(scenario) = &ctx.scenario {
         frame.buttons |= scenario.buttons;
         if let Some(movement) = scenario.movement {
             frame.set_movement(movement);
@@ -282,9 +407,18 @@ pub fn build_input(
             frame.set_stick(stick);
         }
     }
+    // --- Quick actions (quick_actions): the melee and grenade keys ---
+    frame.buttons.set(Buttons::QUICK, ctx.selection.quick);
+    if let Some(fire) = ctx.selection.quick_fire {
+        frame.buttons.set(Buttons::FIRE, fire);
+    }
+    // --- end quick actions ---
     look.jump_latched = false;
+    look.prone_latched = false;
+    look.crouch_latched = false;
+    look.sprint_latched = false;
     // Critically wounded: the server lies us still whatever we press; predict the same.
-    if let Ok(downed) = downed.single() {
+    if let Ok(downed) = ctx.downed.single() {
         frame = game_shared::revive::downed_input(frame, downed);
     }
 
@@ -296,13 +430,13 @@ pub fn build_input(
     let packet = InputPacket {
         frames: history.frames.range(start..).copied().collect(),
     };
-    if cli.input_delay == 0 {
+    if ctx.cli.input_delay == 0 {
         packets.write(packet);
         return;
     }
     // Debug: a slow connection.
     let now = real.elapsed_secs_f64();
-    delayed.push_back((now + cli.input_delay as f64 / 1000.0, packet));
+    delayed.push_back((now + ctx.cli.input_delay as f64 / 1000.0, packet));
     while delayed.front().is_some_and(|(at, _)| *at <= now) {
         if let Some((_, packet)) = delayed.pop_front() {
             packets.write(packet);

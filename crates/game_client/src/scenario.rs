@@ -53,7 +53,7 @@ use bevy::{
         },
         keyboard::{Key, KeyboardInput, NativeKey, NativeKeyCode},
     },
-    window::PrimaryWindow,
+    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
     pbr::ScreenSpaceAmbientOcclusion,
     platform::collections::HashSet,
     prelude::*,
@@ -77,6 +77,7 @@ use crate::{
     Cli,
     camera::{PlayerCamera, Spectator, ThirdPerson},
     combat::WeaponSelection,
+    deploy::DeployScreen,
     local_input::LookState,
     menu::Screen,
     net::{ActiveMatch, LocalPlayer, LocalSoldier},
@@ -172,6 +173,13 @@ pub enum Step {
     /// In a vehicle: steers right and reports how long until a joint is seen to turn (the
     /// steering, or a rudder), then lets go. Gives up after 3 s.
     SteerResponseTime(String),
+    /// Flying: holds an input (steer right, throttle up, stick roll right, stick pitch up;
+    /// each -1..1) for `seconds`, then lets go for as long, and reports how the drawn vehicle
+    /// and the camera turn: when each first visibly turned (3°/s), reached half and 90 % of
+    /// the rate at the end of the hold, that rate, the rate curve, and how long after letting
+    /// go it was down to 10 %. The axis follows the input: the stick's roll, else its pitch,
+    /// else the heading. E.g. `RateResponse("yaw", (1.0, 0.0, 0.0, 0.0), 1.5)`.
+    RateResponse(String, (f32, f32, f32, f32), f32),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
     Release(Vec<Button>),
@@ -213,6 +221,23 @@ pub enum Step {
     ReleaseKey(KeyCode),
     /// Clicks the UI button with this `Name`, e.g. `Click("kit:5")`.
     Click(String),
+    /// Scrolls the UI element with this `Name` into view within its `ScrollArea` ancestor, the
+    /// same way Tab/gamepad focus does (`menu::text_input::scroll_focus_into_view`,
+    /// `menu::input::gamepad_menu_nav`), e.g. `ScrollIntoView("toggle:bloom")`.
+    ScrollIntoView(String),
+    /// Gives keyboard focus to the UI element with this `Name` directly, e.g.
+    /// `Focus("field:address")`: scenarios can't synthesize the pointer click a real focus
+    /// would come from (bevy_picking's hit-test needs an actual cursor position), so this
+    /// skips straight to what the click would have done. `Key(Tab)` (`HoldKey(ShiftLeft)` first
+    /// for Shift+Tab) moves focus for real from there, through the same path a keypress would.
+    Focus(String),
+    /// Logs the current text of the `EditableText` field with this `Name`
+    /// (`LogField("field:address")`), for `ExpectLog` to check.
+    LogField(String),
+    /// Puts this text on the clipboard, for a `Key(...)` combo that pastes to read
+    /// (`menu::text_input`'s fields and the chat box paste through Ctrl+V like anything else;
+    /// there's no separate scenario-only paste path).
+    SetClipboard(String),
     /// Our soldier dies outright (singleplayer and listen server only).
     Kill,
     /// Our soldier is critically wounded: man down, waiting for a medic (singleplayer and
@@ -237,6 +262,10 @@ pub enum Step {
     /// A squad request, as the deploy screen would send it: `Squad(Create)`, `Squad(Join(1))`,
     /// `Squad(Leave)`.
     Squad(game_shared::squad::SquadRequest),
+    /// Asks the server for a kit class's primary weapon directly, past the deploy screen's
+    /// own checks (the server must refuse what its rules don't allow), e.g.
+    /// `SendLoadout("assault", "usrif_m24")`. An empty weapon asks for the kit's own.
+    SendLoadout(String, String),
     /// The nearest vehicle loses this many hit points (keeping at least 1).
     DamageVehicle(f32),
     /// The vehicle nearest to a point loses this many hit points; at 0 it is destroyed.
@@ -244,6 +273,9 @@ pub enum Step {
     /// Adds our health and ammo, the nearest teammate's health and the nearest vehicle's
     /// hit points to the report.
     Vitals(String),
+    /// Logs the local soldier's stance (`Standing`, `Crouching` or `Prone`) with this label,
+    /// e.g. `LogStance("after first Z")`, for `ExpectLog("after first Z: stance Prone", ...)`.
+    LogStance(String),
     /// Saves `<out>/<name>.png` (or `name` itself if it ends in `.png`).
     Screenshot(String),
     /// Frame time statistics over this many seconds, logged and added to the report.
@@ -264,6 +296,23 @@ pub enum Step {
     /// Fails the scenario as soon as a log line containing the text appears from this step
     /// on, e.g. `ForbidLog("ERROR ")` or `ForbidLog("prediction correction")`.
     ForbidLog(String),
+    /// Hit registration (see `hitreg`): every bot becomes a target dummy that takes this pose
+    /// in front of us (`game_server::dummy`: `stand`, `crouch`, `prone`, `strafe`, `reload`,
+    /// ...; `""` lets them be bots again). Listen server only.
+    Dummy(String),
+    /// For this many seconds, checks every frame which hit zones rays through points of the
+    /// nearest enemy as drawn meet; logs a summary under this label.
+    HitGeometry(String, f32),
+    /// Aims exactly at a part of the nearest enemy as drawn (`head`, `chest`, `lforearm`,
+    /// `muzzle`, ..., `all` in turn) and fires this many single shots, logging each.
+    ShootAt(String, String, u32),
+    /// Zooms the deploy map by this factor (>1 in, <1 out), around its current view (a
+    /// scenario has no real cursor to hover for the usual around-the-cursor anchor), e.g.
+    /// `DeployZoom(2.0)` doubles it.
+    DeployZoom(f32),
+    /// Pans the deploy map by this share of its width/height (like a mouse drag), e.g.
+    /// `DeployPan(0.2, -0.1)`.
+    DeployPan(f32, f32),
     Quit,
 }
 
@@ -417,6 +466,7 @@ impl Plugin for ScenarioPlugin {
         .init_resource::<ScenarioInput>()
         .init_resource::<ScenarioGamepad>()
         .init_resource::<Readiness>()
+        .add_plugins(crate::hitreg::HitregPlugin)
         .add_systems(
             bevy::app::PreUpdate,
             inject_gamepad.before(bevy::input::InputSystems),
@@ -432,6 +482,7 @@ impl Plugin for ScenarioPlugin {
                     note_asset_events::<AnimationClip>,
                     note_asset_events::<Shader>,
                 ),
+                lock_cursor_for_scenario,
                 run_scenario.in_set(ScenarioSystems),
             )
                 .chain(),
@@ -447,6 +498,26 @@ impl Plugin for ScenarioPlugin {
 /// Runs the scenario's steps in `Update`. UI reacting to `Key`/`Click` steps runs after it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScenarioSystems;
+
+/// Real play locks the mouse cursor on a click (`local_input::grab_cursor`); a scripted run has
+/// no mouse to click, so this does it once the match is playable, exactly as that click would.
+/// Without it, `Key`/`HoldKey` steps for gameplay actions (movement, stances, ...) would have no
+/// effect: `build_input` only reads them while the cursor is locked. Menus, the deploy screen
+/// and the commander screen still get it back the same way they always do
+/// (`local_input::grab_cursor` un-grabs it whenever one of those is open); this only ever grabs.
+fn lock_cursor_for_scenario(
+    screen: Res<State<Screen>>,
+    menu: Res<crate::menu::Menu>,
+    deploy: Res<DeployScreen>,
+    commander: Res<crate::commander::CommanderScreen>,
+    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open;
+    if playing && !crate::local_input::cursor_locked(&cursor) {
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+    }
+}
 
 /// Pipelines still compiling, counted in the render world.
 #[derive(Resource, Clone, Default)]
@@ -510,6 +581,9 @@ struct Runner {
     /// `ForbidLog` texts and the log index they apply from.
     forbidden: Vec<(String, usize)>,
     finished: bool,
+    /// `RateResponse`: per frame the time since the input and the vehicle's and the
+    /// camera's angle about the measured axis (degrees).
+    rates: Vec<(f32, f32, f32)>,
 }
 
 /// What a player can do, for [`run_scenario`].
@@ -522,17 +596,25 @@ struct PlayerControls<'w, 's> {
     selection: ResMut<'w, WeaponSelection>,
     keyboard: MessageWriter<'w, KeyboardInput>,
     window: Single<'w, 's, Entity, With<PrimaryWindow>>,
-    buttons: Query<'w, 's, (&'static Name, &'static mut Interaction)>,
+    buttons: Query<'w, 's, (Entity, &'static Name, &'static mut Interaction)>,
     effects: MessageWriter<'w, crate::effects::SpawnEffect>,
     radio: MessageWriter<'w, game_shared::radio::RadioRequest>,
     commander: MessageWriter<'w, game_shared::commander::CommanderRequest>,
     squad: MessageWriter<'w, game_shared::squad::SquadRequest>,
+    loadouts: MessageWriter<'w, game_shared::arsenal::LoadoutRequest>,
     commander_screen: ResMut<'w, crate::commander::CommanderScreen>,
+    deploy_screen: ResMut<'w, DeployScreen>,
     gamepad: ResMut<'w, ScenarioGamepad>,
     /// `gamepad_connection_system` (which attaches/detaches the `Gamepad` component) listens
     /// for this directly, not for `RawGamepadEvent::Connection` (that variant only feeds the
     /// aggregate `GamepadEvent` stream for observers, per `gamepad_event_processing_system`).
     gamepad_events: MessageWriter<'w, GamepadConnectionEvent>,
+    clipboard: ResMut<'w, bevy::clipboard::Clipboard>,
+    /// Every named UI element, for `Focus` (text inputs aren't `Button`s, so they're not in
+    /// `buttons`) and `ScrollIntoView`.
+    named: Query<'w, 's, (Entity, &'static Name)>,
+    input_focus: ResMut<'w, bevy::input_focus::InputFocus>,
+    fields: Query<'w, 's, (&'static Name, &'static bevy::text::EditableText)>,
 }
 
 /// The vehicles around, for [`run_scenario`].
@@ -547,6 +629,10 @@ struct Vehicles<'w, 's> {
     states: Query<'w, 's, &'static game_shared::vehicle::VehicleState>,
     prediction: Res<'w, crate::vehicle_prediction::VehiclePredictionStats>,
     health: Query<'w, 's, (&'static VehicleView, &'static mut VehicleHealth)>,
+    /// The camera as last placed, for `RateResponse`.
+    camera: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
+    /// The pilot's stick and free look, for `VehicleLook`.
+    flight: ResMut<'w, crate::vehicles::FlightStick>,
 }
 
 impl Vehicles<'_, '_> {
@@ -631,6 +717,40 @@ enum Progress {
     Waiting,
 }
 
+/// The logical key a `Key`/`HoldKey`/`ReleaseKey` step's physical `KeyCode` would normally
+/// carry. `on_focused_keyboard_input` (a focused `EditableText`'s editing, in
+/// `menu::text_input` and the chat box) keys entirely off the logical key, not the physical
+/// one, so without this a scenario couldn't press Ctrl, Shift, an arrow, Home/End,
+/// Backspace/Delete or Tab in any way that field would recognize. Limited to the keys that
+/// don't insert a character themselves (`Type` already sends a proper `Key::Character` for
+/// that) plus the four letters our own scenarios combine with Ctrl (A/C/V/X: select all, copy,
+/// paste, cut), so this can't make a `Key(KeyX)` used for some keybound action also type an
+/// "x" into a field that happens to be focused.
+fn scenario_logical_key(code: KeyCode) -> Key {
+    match code {
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => Key::Shift,
+        KeyCode::ControlLeft | KeyCode::ControlRight => Key::Control,
+        KeyCode::AltLeft | KeyCode::AltRight => Key::Alt,
+        KeyCode::SuperLeft | KeyCode::SuperRight => Key::Super,
+        KeyCode::ArrowLeft => Key::ArrowLeft,
+        KeyCode::ArrowRight => Key::ArrowRight,
+        KeyCode::ArrowUp => Key::ArrowUp,
+        KeyCode::ArrowDown => Key::ArrowDown,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::Backspace | KeyCode::NumpadBackspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+        KeyCode::Escape => Key::Escape,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::KeyA => Key::Character("a".into()),
+        KeyCode::KeyC => Key::Character("c".into()),
+        KeyCode::KeyV => Key::Character("v".into()),
+        KeyCode::KeyX => Key::Character("x".into()),
+        _ => Key::Unidentified(NativeKey::Unidentified),
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn run_scenario(
     mut commands: Commands,
@@ -644,11 +764,13 @@ fn run_scenario(
     player: PlayerControls,
     mut vehicles: Vehicles,
     soldiers: Soldiers,
-    (prediction, rendered, diagnostics, mut was_swimming): (
+    (prediction, rendered, diagnostics, mut was_swimming, mut hitreg, mut dummies): (
         Res<crate::prediction::PredictionStats>,
         Query<&crate::prediction::SoldierRender, With<LocalSoldier>>,
         Res<bevy::diagnostic::DiagnosticsStore>,
         Local<bool>,
+        ResMut<crate::hitreg::HitregTask>,
+        Option<ResMut<game_server::dummy::DummyControl>>,
     ),
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
@@ -668,9 +790,15 @@ fn run_scenario(
         mut radio,
         mut commander,
         mut squad,
+        mut loadouts,
         mut commander_screen,
+        mut deploy_screen,
         mut gamepad,
         mut gamepad_events,
+        mut clipboard,
+        named,
+        mut input_focus,
+        fields,
     } = player;
     let Soldiers {
         local: mut soldier,
@@ -727,7 +855,7 @@ fn run_scenario(
     let mut key_event = |key_code: KeyCode, state: ButtonState| {
         keyboard.write(KeyboardInput {
             key_code,
-            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            logical_key: scenario_logical_key(key_code),
             state,
             text: None,
             repeat: false,
@@ -995,6 +1123,12 @@ fn run_scenario(
                     .map_or(0.0, |(_, view, _)| crate::vehicles::heading(view.transform.rotation));
                 look.yaw = heading + yaw.to_radians();
                 look.pitch = pitch.to_radians();
+                // Piloting: the free look (it swings back ahead unless free look stays held,
+                // `HoldKey(AltLeft)`), as far as it reaches.
+                vehicles.flight.look = Vec2::new(
+                    yaw.to_radians(),
+                    pitch.to_radians().clamp(-crate::vehicles::FREE_LOOK_DOWN, crate::vehicles::FREE_LOOK_UP),
+                );
                 Progress::Done
             }
             Step::LogVehicles(label) => {
@@ -1214,6 +1348,71 @@ fn run_scenario(
                     Progress::Waiting
                 }
             }
+            Step::RateResponse(label, (steer, throttle, roll, pitch), seconds) => {
+                let rotation = vehicles
+                    .seated
+                    .single()
+                    .ok()
+                    .and_then(|s| vehicles.vehicles.get(s.vehicle).ok())
+                    .map(|(_, view, _)| view.transform.rotation);
+                let camera_rotation = vehicles.camera.single().ok().map(|t| t.rotation);
+                let (Some(rotation), Some(camera_rotation)) = (rotation, camera_rotation) else {
+                    let line = format!("{label}: not in a vehicle");
+                    info!("scenario: {line}");
+                    writeln!(runner.report, "{line}").ok();
+                    runner.next += 1;
+                    runner.step_started = None;
+                    runner.frames = 0;
+                    continue;
+                };
+                // 0 heading (world up), 1 pitch, 2 roll (right wing down), in degrees.
+                let axis = if *roll != 0.0 {
+                    2
+                } else if *pitch != 0.0 {
+                    1
+                } else {
+                    0
+                };
+                let angle = |rotation: Quat| {
+                    let forward = rotation * Vec3::NEG_Z;
+                    let right = rotation * Vec3::X;
+                    match axis {
+                        0 => (-forward.x).atan2(-forward.z),
+                        1 => forward.y.clamp(-1.0, 1.0).asin(),
+                        _ => (-right.y).clamp(-1.0, 1.0).asin(),
+                    }
+                    .to_degrees()
+                };
+                if runner.frames == 0 {
+                    runner.rates.clear();
+                    input.movement = Some(Vec2::new(*steer, *throttle)).filter(|m| *m != Vec2::ZERO);
+                    input.stick = Some(Vec2::new(*roll, *pitch)).filter(|s| *s != Vec2::ZERO);
+                }
+                // Unwrapped across ±180°.
+                let unwrap = |now: f32, before: f32| before + (now - before + 540.0).rem_euclid(360.0) - 180.0;
+                let (vehicle_angle, camera_angle) = match runner.rates.last() {
+                    Some(&(_, v, c)) => (unwrap(angle(rotation), v), unwrap(angle(camera_rotation), c)),
+                    None => (angle(rotation), angle(camera_rotation)),
+                };
+                if runner.rates.last().is_none_or(|s| elapsed > s.0) {
+                    runner.rates.push((elapsed, vehicle_angle, camera_angle));
+                }
+                runner.frames += 1;
+                if elapsed >= *seconds && (input.movement.is_some() || input.stick.is_some()) {
+                    input.movement = None;
+                    input.stick = None;
+                }
+                if elapsed < *seconds * 2.0 {
+                    Progress::Waiting
+                } else {
+                    let line = rate_report(label, &runner.rates, *seconds);
+                    for line in line.lines() {
+                        info!("scenario: {line}");
+                    }
+                    writeln!(runner.report, "{line}").ok();
+                    Progress::Done
+                }
+            }
             Step::PlaceVehicle(position, heading, speed) => {
                 match vehicles.seated.single() {
                     Ok(seated) => {
@@ -1264,8 +1463,16 @@ fn run_scenario(
                             })
                             .collect();
                         let wheels: Vec<String> = view.wheels.iter().map(|w| format!("{w:.2}")).collect();
+                        // Where the camera looks: pitch from the horizon, and from the hull.
+                        let camera_forward = vehicles.camera.single().map_or(Vec3::NEG_Z, |c| c.rotation * Vec3::NEG_Z);
+                        let hull_forward = t.rotation.inverse() * camera_forward;
+                        let camera = format!(
+                            "camera pitch {:.0} deg ({:.0} from the hull)",
+                            camera_forward.y.clamp(-1.0, 1.0).asin().to_degrees(),
+                            hull_forward.y.clamp(-1.0, 1.0).asin().to_degrees()
+                        );
                         format!(
-                            "{label}: {} seat {} at ({:.2}, {:.2}, {:.2}), {:.1} km/h, heading {:.0} deg, tilt {:.1} deg, aim [{}], wheels down [{}]",
+                            "{label}: {} seat {} at ({:.2}, {:.2}, {:.2}), {:.1} km/h, heading {:.0} deg, tilt {:.1} deg, {camera}, aim [{}], wheels down [{}]",
                             model.desc.name,
                             seated.seat + 1,
                             t.translation.x,
@@ -1403,9 +1610,39 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Click(name) => {
-                match buttons.iter_mut().find(|(n, _)| n.as_str() == name) {
-                    Some((_, mut interaction)) => *interaction = Interaction::Pressed,
+                match buttons.iter_mut().find(|(_, n, _)| n.as_str() == name) {
+                    Some((_, _, mut interaction)) => *interaction = Interaction::Pressed,
                     None => warn!("scenario: no button named {name}"),
+                }
+                Progress::Done
+            }
+            Step::ScrollIntoView(name) => {
+                match named.iter().find(|(_, n)| n.as_str() == name) {
+                    Some((entity, _)) => commands.trigger(bevy::ui_widgets::ScrollIntoView { entity }),
+                    None => warn!("scenario: no element named {name} to scroll into view"),
+                }
+                Progress::Done
+            }
+            Step::Focus(name) => {
+                match named.iter().find(|(_, n)| n.as_str() == name) {
+                    Some((entity, _)) => {
+                        input_focus.set(entity, bevy::input_focus::FocusCause::Navigated);
+                        commands.trigger(bevy::ui_widgets::ScrollIntoView { entity });
+                    }
+                    None => warn!("scenario: no element named {name} to focus"),
+                }
+                Progress::Done
+            }
+            Step::LogField(name) => {
+                match fields.iter().find(|(n, _)| n.as_str() == name) {
+                    Some((_, editable)) => info!("scenario: field {name}: {:?}", editable.value().to_string()),
+                    None => warn!("scenario: no field named {name}"),
+                }
+                Progress::Done
+            }
+            Step::SetClipboard(value) => {
+                if let Err(err) = clipboard.set_text(value.clone()) {
+                    warn!("scenario: couldn't set the clipboard: {err:?}");
                 }
                 Progress::Done
             }
@@ -1468,8 +1705,27 @@ fn run_scenario(
                 squad.write(*request);
                 Progress::Done
             }
+            Step::SendLoadout(class, weapon) => {
+                let pick = game_shared::arsenal::ClassPick {
+                    primary: (!weapon.is_empty()).then(|| weapon.clone()),
+                    sidearm: None,
+                };
+                loadouts.write(game_shared::arsenal::LoadoutRequest {
+                    picks: vec![(class.clone(), pick)],
+                });
+                Progress::Done
+            }
             Step::CommanderClick((x, y, z)) => {
                 commander_screen.click = Some(Vec3::new(*x, *y, *z));
+                Progress::Done
+            }
+            Step::DeployZoom(factor) => {
+                let center = deploy_screen.view.center;
+                deploy_screen.view.zoom_at(*factor, center);
+                Progress::Done
+            }
+            Step::DeployPan(dx, dy) => {
+                deploy_screen.view.pan_uv(Vec2::new(*dx, *dy));
                 Progress::Done
             }
             Step::Summon(health) => {
@@ -1556,6 +1812,11 @@ fn run_scenario(
                 let line = format!("{name}: health {own:.1}, ammo {ammo}, teammate {mate:.1}, vehicle {vehicle:.1}");
                 info!("scenario: {line}");
                 writeln!(runner.report, "{line}").ok();
+                Progress::Done
+            }
+            Step::LogStance(label) => {
+                let stance = soldier.single().map(|(m, _)| m.stance).unwrap_or_default();
+                info!("scenario: {label}: stance {stance:?}");
                 Progress::Done
             }
             Step::Screenshot(name) => {
@@ -1664,6 +1925,34 @@ fn run_scenario(
                 runner.forbidden.push((text.clone(), from));
                 Progress::Done
             }
+            Step::Dummy(pose) => {
+                match dummies.as_mut() {
+                    Some(control) => control.pose = (!pose.is_empty()).then(|| pose.clone()),
+                    None => warn!("scenario: no server to make dummies on"),
+                }
+                Progress::Done
+            }
+            Step::HitGeometry(label, seconds) => match (elapsed == 0.0, &hitreg.request) {
+                (true, _) => {
+                    hitreg.request = Some(crate::hitreg::Request::Geometry {
+                        label: label.clone(),
+                        seconds: *seconds,
+                    });
+                    Progress::Waiting
+                }
+                (false, request) => done_if(request.is_none()),
+            },
+            Step::ShootAt(label, part, shots) => match (elapsed == 0.0, &hitreg.request) {
+                (true, _) => {
+                    hitreg.request = Some(crate::hitreg::Request::Shoot {
+                        label: label.clone(),
+                        part: part.clone(),
+                        shots: *shots,
+                    });
+                    Progress::Waiting
+                }
+                (false, request) => done_if(request.is_none()),
+            },
             Step::Quit => {
                 finish(&mut runner, &mut exit, now, None);
                 Progress::Waiting
@@ -1707,6 +1996,58 @@ fn finish(runner: &mut Runner, exit: &mut MessageWriter<AppExit>, now: f32, fail
             exit.write(AppExit::error());
         }
     }
+}
+
+/// `RateResponse`'s report from its samples (seconds since the input, the vehicle's and the
+/// camera's angle in degrees), the input held for `hold` seconds. Rates are taken over
+/// 100 ms windows centred on each moment, so a slow frame doesn't read as a spike.
+fn rate_report(label: &str, samples: &[(f32, f32, f32)], hold: f32) -> String {
+    // The angle at a moment, between the frames around it.
+    let at = |t: f32, pick: fn(&(f32, f32, f32)) -> f32| -> f32 {
+        let i = samples.partition_point(|s| s.0 < t);
+        match (i.checked_sub(1).and_then(|i| samples.get(i)), samples.get(i)) {
+            (Some(a), Some(b)) if b.0 > a.0 => pick(a) + (pick(b) - pick(a)) * (t - a.0) / (b.0 - a.0),
+            (_, Some(b)) => pick(b),
+            (Some(a), None) => pick(a),
+            (None, None) => 0.0,
+        }
+    };
+    const WINDOW: f32 = 0.1;
+    let rate = |t: f32, pick: fn(&(f32, f32, f32)) -> f32| (at(t + WINDOW * 0.5, pick) - at(t - WINDOW * 0.5, pick)) / WINDOW;
+    let end = samples.last().map_or(0.0, |s| s.0);
+    let times: Vec<f32> = (0..).map(|i| i as f32 * 0.01).take_while(|t| *t <= end - WINDOW * 0.5).collect();
+    let describe = |name: &str, pick: fn(&(f32, f32, f32)) -> f32| {
+        // Settled: the average over the last 0.2 s of the hold.
+        let full = (at(hold, pick) - at(hold - 0.2, pick)) / 0.2;
+        let sign = if full < 0.0 { -1.0 } else { 1.0 };
+        let start = samples.first().map_or(0.0, pick);
+        let ms = |t: Option<&f32>, from: f32| t.map_or("never".to_string(), |t| format!("{:.0} ms", (t - from) * 1000.0));
+        let visible = samples.iter().find(|s| (pick(s) - start).abs() >= 0.5).map(|s| s.0);
+        let reach = |share: f32| times.iter().find(|t| **t <= hold && rate(**t, pick) * sign >= full.abs() * share);
+        let stop = times.iter().find(|t| **t >= hold && rate(**t, pick) * sign <= full.abs() * 0.1);
+        let peak = times.iter().filter(|t| **t <= hold).map(|t| rate(*t, pick) * sign).fold(0.0, f32::max);
+        format!(
+            "{name}: moved 0.5° after {}, 50 % {}, 90 % {}, {:.1} deg/s at the end (peak {:.1}); let go: 10 % after {}",
+            ms(visible.as_ref(), 0.0),
+            ms(reach(0.5), 0.0),
+            ms(reach(0.9), 0.0),
+            full,
+            peak * sign,
+            ms(stop, hold),
+        )
+    };
+    // The curve every 50 ms.
+    let curve: Vec<String> = (1..=((hold * 2.0 / 0.05) as usize))
+        .map(|i| i as f32 * 0.05)
+        .filter(|t| *t <= end - WINDOW * 0.5)
+        .map(|t| format!("{:.0}:{:.0}/{:.0}", t * 1000.0, rate(t, |s| s.1), rate(t, |s| s.2)))
+        .collect();
+    format!(
+        "{label}: {}\n{label}: {}\n{label} curve ms:vehicle/camera deg/s: {}",
+        describe("vehicle", |s| s.1),
+        describe("camera", |s| s.2),
+        curve.join(" ")
+    )
 }
 
 fn done_if(done: bool) -> Progress {

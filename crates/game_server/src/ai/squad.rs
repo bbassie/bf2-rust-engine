@@ -312,10 +312,10 @@ pub fn coordinate(
             .orders
             .get(&key)
             .and_then(|o| o.point.or_else(|| map.areas.get(o.area).map(|a| a.order_position)));
-        let enemies_near = intel.enemies_near(team, leader.position, 110.0) > 0;
+        let enemies_near = intel.enemies_near(team, leader.position, super::tune::knob("bound_near", 110.0)) > 0;
         let wanted = objective.is_some_and(|at| {
             let d = at.distance(leader.position);
-            d > ARRIVED_DISTANCE && (d < CONTACT_DISTANCE || enemies_near)
+            d > ARRIVED_DISTANCE && (d < super::tune::knob("contact_dist", CONTACT_DISTANCE) || enemies_near)
         }) && members >= 3
             && tactic.pinned.is_none();
         let Some(objective) = objective.filter(|_| wanted) else {
@@ -336,7 +336,7 @@ pub fn coordinate(
                     .filter_map(|(slot, player)| squad.alive.iter().find(|s| s.player == *player).map(|s| (slot, s)))
                     .all(|(slot, s)| s.position.distance(bound_slot(tactic, tactic.anchor, slot)) < 5.0),
             };
-        if start || done || tactic.phase_time > BOUND_SECONDS {
+        if start || done || tactic.phase_time > super::tune::knob("bound_secs", BOUND_SECONDS) {
             tactic.moving = if start { 0 } else { 1 - tactic.moving };
             tactic.bounding = true;
             tactic.phase = tactic.phase.wrapping_add(1);

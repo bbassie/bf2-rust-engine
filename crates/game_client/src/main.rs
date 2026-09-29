@@ -64,8 +64,10 @@ mod content;
 mod deploy;
 mod effects;
 mod gadgets;
+mod hitreg;
 mod hud;
 mod join;
+mod loadout;
 mod local_input;
 mod map_icons;
 mod map_markers;
@@ -73,9 +75,11 @@ mod menu;
 mod minimap;
 mod mod_assets;
 mod mode_hud;
+mod nametags;
 mod nav_debug;
 mod net;
 mod prediction;
+mod quick_actions;
 mod radio;
 mod render;
 mod scenario;
@@ -88,6 +92,7 @@ mod vehicles;
 // --- Voice chat ---
 mod voice;
 // --- end voice chat ---
+mod weapon_list;
 mod wounded;
 
 #[derive(Parser, Debug, Clone, Resource)]
@@ -316,6 +321,7 @@ fn main() -> AppExit {
         chat::ChatPlugin,
         summary::SummaryPlugin,
         wounded::WoundedPlugin,
+        nametags::NameTagsPlugin,
         radio::RadioPlugin,
         map_markers::MapMarkersPlugin,
         map_icons::MapIconsPlugin,
@@ -323,6 +329,8 @@ fn main() -> AppExit {
         vehicle_prediction::VehiclePredictionPlugin,
         mode_hud::ModeHudPlugin,
     ))
+    // Weapons: the weapon list, the melee and grenade keys, loadouts on the deploy screen.
+    .add_plugins((weapon_list::WeaponListPlugin, quick_actions::QuickActionsPlugin, loadout::LoadoutPlugin))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).
         GameServerPlugin { settings: None },

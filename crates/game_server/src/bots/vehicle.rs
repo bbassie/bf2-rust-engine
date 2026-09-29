@@ -54,6 +54,10 @@ const MOUNT_DISTANCE: f32 = 160.0;
 const BOARD_WAIT: f32 = 14.0;
 /// Seconds a transport pilot back at base waits for passengers before he parks there.
 const BASE_WAIT: f32 = 60.0;
+/// A helicopter this close above the ground (its origin, meters) has touched down.
+const LANDED_HEIGHT: f32 = 3.5;
+/// Seconds a transport helicopter waits at the drop-off for its passengers to get out.
+const DROP_OFF_WAIT: f32 = 8.0;
 /// Seconds a bot keeps away from vehicles after leaving one (and from that one for longer).
 const VEHICLE_COOLDOWN: f32 = 8.0;
 const ABANDON_COOLDOWN: f32 = 60.0;
@@ -436,7 +440,9 @@ impl BotBrain {
         let attacking = order.is_some_and(|(k, _)| k == OrderKind::Attack);
         let skill = self.personality.skill(&w.settings, me.team).0;
         // Cut off: walking can't get to the objective from here (a carrier, an island).
-        let here = w.nav().and_then(|nav| nav.locate(position, 2.0, None)).map(|c| w.nav().unwrap().cell(c).region);
+        let here = self
+            .region
+            .or_else(|| w.nav().and_then(|nav| nav.locate(position, 2.0, None)).map(|c| w.nav().unwrap().cell(c).region));
         let cut_off = self.stranded > 0.0
             || order.is_some_and(|(_, area)| {
                 let goal = w.map.walk_regions.get(area).copied().flatten();
@@ -773,7 +779,7 @@ impl BotBrain {
         }
         let driver = crew.iter().find(|c| c.seat == 0);
         ride.no_driver = if driver.is_none() && profile.role != Role::Stationary { ride.no_driver + dt } else { 0.0 };
-        if ride.purpose != Purpose::Drive && ride.no_driver > 4.0 && seen.motion.velocity.length() < 3.0 {
+        if ride.purpose != Purpose::Drive && ride.no_driver > 4.0 && seen.motion.velocity.length() < 3.0 && grounded {
             // The driver left: nothing to wait for. Gunners of land vehicles with nobody else
             // to drive take the wheel if they can.
             if ride.purpose == Purpose::Gun && !profile.role.flies() && ride.no_driver < 4.5 && profile.role != Role::Boat {
@@ -809,11 +815,13 @@ impl BotBrain {
                 if !fighting {
                     self.look_around(&mut ride, &seen, &mut frame, dt);
                 }
-                self.ride_along(w, me, &mut ride, &seen, profile, order, crew);
+                let drop_off = vcx.claims.dropping_off(seen.entity);
+                self.ride_along(w, me, &mut ride, &seen, profile, order, crew, drop_off);
             }
             Purpose::Ride => {
                 self.look_around(&mut ride, &seen, &mut frame, dt);
-                self.ride_along(w, me, &mut ride, &seen, profile, order, crew);
+                let drop_off = vcx.claims.dropping_off(seen.entity);
+                self.ride_along(w, me, &mut ride, &seen, profile, order, crew, drop_off);
             }
         }
 
@@ -851,7 +859,9 @@ impl BotBrain {
         frame
     }
 
-    /// Riders and gunners get out where their vehicle has brought them.
+    /// Riders and gunners get out where their vehicle has brought them: at their objective,
+    /// when their squad leader gets out, or where the transport helicopter's pilot sets them
+    /// down (`drop_off`: he stays in and flies back for more, so that is their only cue).
     #[allow(clippy::too_many_arguments)]
     fn ride_along(
         &self,
@@ -862,6 +872,7 @@ impl BotBrain {
         profile: &VehicleProfile,
         order: Option<(OrderKind, usize)>,
         crew: &[Crew],
+        drop_off: bool,
     ) {
         if profile.role == Role::Stationary {
             return;
@@ -869,7 +880,12 @@ impl BotBrain {
         let speed = seen.motion.velocity.length();
         let position = seen.motion.position;
         let height = if profile.role.flies() { w.height_above_ground(position, 50.0, seen.entity) } else { 0.0 };
-        let landed = height < 2.5;
+        // The same test as the pilot's for having touched down (see `fly_helicopter`).
+        let landed = height < LANDED_HEIGHT;
+        if drop_off && landed && speed < 4.0 {
+            ride.leave("dropped off");
+            return;
+        }
         // Riding with the squad leader: out when he gets out.
         let squad = me.member.and_then(|m| w.snapshot.squads.get(&(me.team, m.squad)));
         let leader = squad.and_then(|s| s.leader).filter(|_| !me.member.is_some_and(|m| m.leader));
@@ -1730,8 +1746,12 @@ impl BotBrain {
             }
             _ => {}
         }
-        if ride.flight == Flight::Land && height < 3.5 && motion.velocity.length() < 2.0 {
+        if ride.flight == Flight::Land && height < LANDED_HEIGHT && motion.velocity.length() < 2.0 {
             ride.arrived += dt;
+            if !attack && !ride.returning && ride.carried {
+                // Down by the objective: everyone else aboard gets out.
+                vcx.claims.drop_off(seen.entity);
+            }
             if ride.returning {
                 // Home: wait there for the next passengers.
                 if ride.arrived > 1.0 {
@@ -1745,7 +1765,7 @@ impl BotBrain {
             } else if !attack && !ride.carried {
                 // Flew there alone (off a carrier): the objective was his own.
                 ride.leave("landed");
-            } else if !attack && (riders <= 1 || ride.arrived > 6.0) {
+            } else if !attack && (riders <= 1 || ride.arrived > DROP_OFF_WAIT) {
                 // Down by the objective: once everyone is out, the pilot stays in and flies back
                 // for more, like BF2's bot pilots, rather than leaving the helicopter there.
                 ride.trips += 1;

@@ -98,6 +98,8 @@ pub struct SoldierRender {
     /// Vertical offset of the eye easing out steps up and down (stairs, curbs) so the view
     /// doesn't jerk. Part of [`Self::eye_position`].
     pub step_offset: f32,
+    /// The legs' step phase ([`SoldierMotion::stride`]).
+    pub stride: f32,
 }
 
 impl SoldierRender {
@@ -155,6 +157,7 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             swimming: motion.swimming,
             eye_height: motion.stance.eye_height(),
             step_offset: 0.0,
+            stride: motion.stride,
         },
         Snapshots::default(),
         TickHistory {
@@ -320,6 +323,7 @@ fn update_render_state(
             swimming: to.swimming,
             eye_height: render.eye_height + (eye_target - render.eye_height) * eye_blend,
             step_offset: (step * (1.0 - eye_blend)).clamp(-STEP_SMOOTHING, STEP_SMOOTHING),
+            stride: lerp_phase(from.stride, to.stride, t),
         };
     }
 }
@@ -337,6 +341,12 @@ fn interpolate_snapshots(
     let (t1, b) = snapshots[i + 1];
     let t = ((at - t0) / (t1 - t0).max(1e-6)) as f32;
     Some((a, b, t.clamp(0.0, 1.0)))
+}
+
+/// Between two step phases (0..1), the short way round.
+fn lerp_phase(a: f32, b: f32, t: f32) -> f32 {
+    let d = (b - a + 0.5).rem_euclid(1.0) - 0.5;
+    (a + d * t).rem_euclid(1.0)
 }
 
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {

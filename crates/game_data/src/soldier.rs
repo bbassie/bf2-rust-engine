@@ -48,6 +48,17 @@ pub struct HitZone {
     pub standing: [[f32; 3]; 2],
     pub crouching: [[f32; 3]; 2],
     pub prone: [[f32; 3]; 2],
+    /// The capsule on its bone, to pose it from an animated skeleton: it starts at `offset`
+    /// (in the bone's frame) and runs `length` meters along the bone's -Y axis. Both zero in
+    /// hit zones imported before they were stored.
+    #[serde(default, skip_serializing_if = "is_origin")]
+    pub offset: [f32; 3],
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub length: f32,
+}
+
+fn is_origin(value: &[f32; 3]) -> bool {
+    *value == [0.0; 3]
 }
 
 /// One side of a match.

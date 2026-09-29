@@ -19,6 +19,10 @@ bitflags::bitflags! {
         const FIRE_MODE = 1 << 8;
         /// In a vehicle: decoy flares or smoke grenades.
         const COUNTERMEASURE = 1 << 9;
+        /// The melee or grenade key is at work: the knife or grenade selected with it comes
+        /// out quickly, and the weapon it interrupted comes back quickly (see
+        /// `weapons::WeaponState::switch_with`).
+        const QUICK = 1 << 10;
     }
 }
 

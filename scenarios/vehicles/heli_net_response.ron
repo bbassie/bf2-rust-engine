@@ -1,0 +1,49 @@
+// Helicopter responsiveness on a remote server (the pilot's prediction): walk to the Z-10 at
+// the Chinese airfield on Wake Island, lift off, and time the pedals (A/D) and the stick
+// with `RateResponse` (drawn helicopter and camera), then fly forward and turn. The traces
+// show how many inputs each reconciliation replayed and how far it corrected.
+// server --level wake_island_2007 --port 30500
+// client --connect 127.0.0.1 --port 30500 --scenario scenarios/vehicles/heli_net_response.ron --out target/scenarios/vehicles/heli_net_response
+//   [--input-delay 100]
+(
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        WalkToVehicle("ahe_z10"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(1.0),
+        VehicleInfo("entered"),
+        ThirdPerson(true),
+        VehicleTrace("spin up", 6.0),
+        Move(0.0, 1.0),
+        VehicleTrace("lift off", 4.0),
+        Move(0.0, 0.0),
+        VehicleTrace("hover", 3.0),
+        RateResponse("pedals right", (1.0, 0.0, 0.0, 0.0), 1.5),
+        Wait(1.0),
+        RateResponse("pedals left", (-1.0, 0.0, 0.0, 0.0), 1.0),
+        Wait(1.5),
+        RateResponse("nose down", (0.0, 0.0, 0.0, -1.0), 0.4),
+        Wait(2.5),
+        RateResponse("roll right", (0.0, 0.0, 1.0, 0.0), 0.4),
+        Wait(2.5),
+        Stick(0.0, -0.5),
+        VehicleTrace("speed up", 2.0),
+        Stick(0.0, 0.0),
+        VehicleTrace("cruise", 3.0),
+        Move(1.0, 0.0),
+        VehicleTrace("pedal turn", 2.0),
+        Move(0.0, 0.0),
+        Stick(0.7, 0.0),
+        VehicleTrace("bank", 0.6),
+        Stick(0.0, 0.0),
+        VehicleTrace("turn", 3.0),
+        Screenshot("01_turn"),
+        ForbidLog("panicked"),
+        Quit,
+    ],
+)
