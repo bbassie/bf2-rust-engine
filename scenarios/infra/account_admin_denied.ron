@@ -1,0 +1,27 @@
+// The same ranked server as account_admin_grant.ron, joined with an account that is *not*
+// listed in `admins`: it verifies normally but gets no admin rights, and `/login` (which
+// would grant them by password on an offline server) is refused instead.
+//   client --connect 127.0.0.1 --port 30310 --settings <dir>/settings.ron ...
+//          --scenario scenarios/infra/account_admin_denied.ron
+// (a different --settings / account.ron than account_admin_grant.ron: an account not
+// listed in the server's --admin.)
+(
+    steps: [
+        ExpectLog("offering our account ticket", 60.0),
+        ExpectLog("content verified by the server", 60.0),
+        ForbidLog("Signed in as admin"),
+        WaitReady,
+        Wait(1.0),
+        Key(KeyT),
+        Frames(2),
+        Type("/login anything"),
+        Frames(2),
+        Key(Enter),
+        ExpectLog("Admin access on this server comes from your account.", 5.0),
+        HoldKey(Tab),
+        Wait(0.5),
+        Screenshot("admin_denied"),
+        ReleaseKey(Tab),
+        Quit,
+    ],
+)

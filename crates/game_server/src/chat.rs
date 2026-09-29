@@ -142,6 +142,10 @@ fn receive_chat(
             let (word, rest) = command.split_once(' ').unwrap_or((&command, ""));
             match word.to_ascii_lowercase().as_str() {
                 "login" => {
+                    if settings.accounts.ranked {
+                        lines.write(private("Admin access on this server comes from your account."));
+                        continue;
+                    }
                     // By address, so reconnecting doesn't start over.
                     let key = match request.client_id {
                         ClientId::Client(client) => network_ids
@@ -244,5 +248,82 @@ fn receive_chat(
             // Only the server speaks on these.
             ChatChannel::Server | ChatChannel::Private => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(settings: ServerSettings) -> App {
+        let mut app = App::new();
+        app.add_message::<FromClient<ChatRequest>>()
+            .add_message::<ToClients<ChatLine>>()
+            .insert_resource(Time::<Real>::default())
+            .insert_resource(settings)
+            .add_systems(Update, receive_chat);
+        app
+    }
+
+    /// The host's own player, so the test needs no client connection or transport.
+    fn host(app: &mut App, name: &str) -> Entity {
+        let player = app
+            .world_mut()
+            .spawn((
+                Player {
+                    name: name.into(),
+                    is_bot: false,
+                },
+                Team::One,
+            ))
+            .id();
+        app.world_mut().insert_resource(HostPlayer(player));
+        player
+    }
+
+    fn login(app: &mut App, password: &str) {
+        app.world_mut().write_message(FromClient {
+            client_id: ClientId::Server,
+            message: ChatRequest { channel: ChatChannel::All, text: format!("/login {password}") },
+        });
+    }
+
+    /// The last private line sent this update, if any.
+    fn last_private_line(app: &mut App) -> Option<String> {
+        let messages = app.world().resource::<Messages<ToClients<ChatLine>>>();
+        messages.iter_current_update_messages().last().map(|m| m.message.text.clone())
+    }
+
+    #[test]
+    fn login_is_refused_when_the_server_requires_accounts() {
+        let mut settings = ServerSettings::default();
+        settings.admin.password = "secret".into();
+        settings.accounts.ranked = true;
+        let mut app = app(settings);
+        let player = host(&mut app, "Bob");
+        login(&mut app, "secret");
+        app.update();
+        assert!(!app.world().entity(player).contains::<Admin>(), "the right password shouldn't matter here");
+        assert_eq!(last_private_line(&mut app).as_deref(), Some("Admin access on this server comes from your account."));
+    }
+
+    #[test]
+    fn login_still_works_offline_with_a_password() {
+        let mut settings = ServerSettings::default();
+        settings.admin.password = "secret".into();
+        let mut app = app(settings);
+        let player = host(&mut app, "Bob");
+        login(&mut app, "secret");
+        app.update();
+        assert!(app.world().entity(player).contains::<Admin>());
+    }
+
+    #[test]
+    fn login_is_off_without_a_password_even_offline() {
+        let mut app = app(ServerSettings::default());
+        let player = host(&mut app, "Bob");
+        login(&mut app, "anything");
+        app.update();
+        assert!(!app.world().entity(player).contains::<Admin>());
     }
 }

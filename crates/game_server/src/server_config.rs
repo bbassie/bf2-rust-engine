@@ -15,8 +15,14 @@
 //!     // Percent of each level's tickets.
 //!     ticket_ratio: 100.0,
 //!     // Remote console (`server rcon`) and `/login` in the chat; empty turns both off.
+//!     // Only takes effect on servers that don't require accounts (LAN, offline, unranked):
+//!     // on a ranked server /login is refused and admin rights come from `admins` instead.
 //!     admin_password: "secret",
 //!     rcon_port: 4711,
+//!     // Accounts that get admin rights on join (a ranked server's `/login` replacement):
+//!     // `id:<account id>` matches by id, anything else matches the account name
+//!     // case-insensitively. Removing an entry takes effect on that account's next join.
+//!     admins: ["id:42", "alice"],
 //!     rcon_public: false,
 //!     motd: "Welcome! Be nice.\nVisit example.com",
 //!     // Relative to this file. Default: the `server` folder in the user's config directory.
@@ -91,6 +97,8 @@ pub struct ServerConfig {
     pub admin_password: String,
     pub rcon_port: u16,
     pub rcon_public: bool,
+    /// Accounts that get admin rights on join (see the module docs' example).
+    pub admins: Vec<String>,
     pub motd: String,
     /// `None` keeps stats in memory only.
     pub stats_file: Option<PathBuf>,
@@ -144,6 +152,7 @@ impl Default for ServerConfig {
             admin_password: String::new(),
             rcon_port: admin.rcon_port,
             rcon_public: false,
+            admins: Vec::new(),
             motd: String::new(),
             stats_file: data.as_ref().map(|d| d.join("stats.ron")),
             ban_file: data.map(|d| d.join("bans.ron")),
@@ -226,6 +235,7 @@ impl ServerConfig {
                 motd: self.motd,
                 ban_file: self.ban_file,
                 stats_file: self.stats_file,
+                admins: self.admins,
             },
             coop: CoopSettings {
                 human_team: if self.coop_team == 2 { 2 } else { 1 },
@@ -284,5 +294,6 @@ mod tests {
         assert_eq!(settings.accounts.master_url.as_deref(), Some("https://master.example.com"));
         assert_eq!(settings.accounts.master_key, None);
         assert_eq!(settings.accounts.region, "eu");
+        assert_eq!(settings.admin.admins, vec!["id:42".to_string(), "alice".to_string()]);
     }
 }

@@ -70,12 +70,18 @@ struct Cli {
     /// Bullets hurt teammates.
     #[arg(long)]
     friendly_fire: bool,
-    /// Password for the remote console and `/login` in the chat.
+    /// Password for the remote console and `/login` in the chat. Only takes effect on
+    /// servers that don't require accounts (LAN, offline, unranked): on a ranked server
+    /// `/login` is refused and admin rights come from `--admin` instead.
     #[arg(long)]
     admin_password: Option<String>,
     /// TCP port of the remote console (0: off).
     #[arg(long)]
     rcon_port: Option<u16>,
+    /// An account that gets admin rights on join (repeatable): `id:<account id>` matches by
+    /// id, anything else matches the account name case-insensitively.
+    #[arg(long = "admin")]
+    admins: Vec<String>,
     /// Announce the server to this master server (`host[:port]`).
     #[arg(long)]
     master: Option<String>,
@@ -239,6 +245,9 @@ fn main() -> AppExit {
     }
     if let Some(port) = cli.rcon_port {
         settings.admin.rcon_port = port;
+    }
+    if !cli.admins.is_empty() {
+        settings.admin.admins = cli.admins;
     }
     if let Some(master) = cli.master {
         settings.master_server = Some(master);

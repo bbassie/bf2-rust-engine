@@ -427,6 +427,7 @@ fn create_client_player(
             rank_name: account.0.rank_name.clone(),
             rank_short: account.0.rank_short.clone(),
         });
+        admin::grant_if_admin(&mut commands, &settings.admin.admins, player, &account.0);
     }
     commands.entity(add.entity).insert(ClientPlayer(player));
     info!("client {} joined team {team:?}", network_id.get());

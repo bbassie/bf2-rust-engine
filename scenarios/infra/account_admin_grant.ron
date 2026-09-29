@@ -1,0 +1,22 @@
+// Admin rights from an account on a ranked (accounts-required) server: an account listed in
+// the server's `admins` gets `Admin` as soon as its ticket verifies, with no `/login`.
+//   master --data-dir <dir> --bind 127.0.0.1:30390 --http 127.0.0.1:30391
+//   master --data-dir <dir> add-server --name Ranked          (prints the API key)
+//   register an account (POST /api/v1/register to the http address) and write its
+//   refresh_token into account.ron next to --settings (see game_client::account); note its
+//   profile.id and name.
+//   server --port 30310 --ranked --master-url http://127.0.0.1:30391 --api-key <key>
+//          --admin id:<account id> --bots 0
+//   client --connect 127.0.0.1 --port 30310 --settings <dir>/settings.ron ...
+//          --scenario scenarios/infra/account_admin_grant.ron
+(
+    steps: [
+        ExpectLog("offering our account ticket", 60.0),
+        ExpectLog("content verified by the server", 60.0),
+        ExpectLog("Signed in as admin", 15.0),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("admin_grant"),
+        Quit,
+    ],
+)

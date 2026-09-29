@@ -35,7 +35,7 @@ use game_shared::{
 };
 
 use crate::{
-    ClientPlayer, ServerSettings,
+    ClientPlayer, ServerSettings, admin,
     accounts::Accounts,
     content::{ContentServer, Requirement},
     limits::{Rate, RateLimiter},
@@ -359,6 +359,11 @@ fn receive_tickets(
         match checked {
             Some(Ok(claims)) => {
                 info!("client {client}: account {} ({}) verified", claims.name, claims.rank_name);
+                // Usually the player doesn't exist yet (`create_client_player` grants admin
+                // rights then, reading `ClientAccount` back); this covers the other order too.
+                if let Some(player) = player {
+                    admin::grant_if_admin(&mut commands, &handshake.settings.admin.admins, player.0, &claims);
+                }
                 commands.entity(client).insert(ClientAccount(claims));
             }
             Some(Err(err)) if required => {

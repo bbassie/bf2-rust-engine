@@ -469,6 +469,7 @@ and every server that isn't *ranked* work without it and without an account.
 | API key (ranked) | `master_api_key: "bf2r_..."` | `--api-key <key>` |
 | region (quick join) | `region: "eu"` | `--region <name>` |
 | server list (UDP) | `master_server: "master.example.com"` | `--master <host[:port]>` |
+| admin accounts | `admins: ["id:42", "alice"]` | `--admin <entry>` (repeatable) |
 
 - **Unranked** (the default): leave it all out. With `master_url` set, the server checks the
   tickets players offer (offline, with the master's key) and shows their account name and
@@ -484,6 +485,15 @@ and every server that isn't *ranked* work without it and without an account.
   round once.
 - `master_server` (UDP) announces any server to the master's server list, ranked or not;
   it is what the in-game browser reads.
+- **Admin rights from accounts.** `admins` lists accounts that get [`Admin`] rights as soon
+  as their ticket verifies on join: an entry `id:<account id>` matches by id, anything else
+  matches the verified account name case-insensitively. They get a private chat line
+  ("Signed in as admin (account ...)."). Removing an entry from the list takes effect on that
+  account's next join; nothing revokes it from an admin already connected. On a server that
+  requires accounts (`ranked: true`), chat `/login` is refused ("Admin access on this server
+  comes from your account.") — put the admin's account in `admins` instead. `admin_password`
+  and `/login` keep working exactly as before on LAN, offline and unranked servers. The
+  remote console (`rcon_port`) is unaffected either way.
 
 ### Running a master server
 

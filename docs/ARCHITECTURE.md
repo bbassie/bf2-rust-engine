@@ -133,6 +133,14 @@ public key (configured, or fetched once and pinned), and accept each ticket once
 The client keeps a refresh token (never the password) in `account.ron` in the config folder
 and asks for a ticket after the server proved its identity (`game_client::account`).
 
+**Admin rights.** `ServerSettings.admin.admins` (config `admins`, CLI `--admin`, see
+`docs/MODDING.md`) lists accounts that get `Admin` as soon as their ticket verifies on join
+(`admin::grant_if_admin`, called from `join::receive_tickets` and
+`create_client_player`, whichever order the player and its verified account show up in). On
+a server that requires accounts, chat `/login` is refused instead of checking
+`admin_password`; LAN, offline and unranked servers keep `/login <password>` exactly as
+before (`chat::receive_chat`). RCON (`admin::rcon`) is unaffected.
+
 ### Player vs soldier
 
 As in BF2, a **`Player`** (name, team, score) outlives the **`Soldier`** bodies it controls.
