@@ -106,6 +106,7 @@ impl SettingsFile {
         match game_data::read_ron::<Settings>(path) {
             Ok(mut settings) => {
                 settings.fill_missing_bindings();
+                settings.migrate();
                 settings
             }
             Err(err) => {
@@ -232,7 +233,21 @@ pub struct Settings {
     /// (`https://master.example.com`); none by default (see `account`).
     pub master_url: Option<String>,
     // --- end online ---
+    // --- Flight controls (vehicles::fly) ---
+    /// Jets: pushing the mouse or the right stick forward (and the pitch-up key) pitches the
+    /// nose down, like a flight stick (BF2's default), instead of up like looking around.
+    pub invert_jet_pitch: bool,
+    /// The same for helicopters.
+    pub invert_heli_pitch: bool,
+    /// The one-off updates of an older settings file that have been applied (see
+    /// `migrate`); files from before it have none.
+    #[serde(default)]
+    pub controls_revision: u32,
+    // --- end flight controls ---
 }
+
+/// The latest of [`Settings::migrate`]'s updates.
+const CONTROLS_REVISION: u32 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -286,6 +301,9 @@ impl Default for Settings {
             trusted_servers: Vec::new(),
             confirm_new_servers: true,
             master_url: None,
+            invert_jet_pitch: false,
+            invert_heli_pitch: false,
+            controls_revision: CONTROLS_REVISION,
         }
     }
 }
@@ -356,6 +374,25 @@ impl Settings {
             .collect()
     }
 
+    /// Updates settings saved by an older version. Revision 1: the pitch keys follow the
+    /// mouse (up pitches up unless `invert_*_pitch`), so the old defaults (down arrow pulls
+    /// up) swap.
+    fn migrate(&mut self) {
+        if self.controls_revision < 1 {
+            let (up, down) = (self.bindings(Action::PitchUp), self.bindings(Action::PitchDown));
+            if up.primary == Some(Binding::Key(KeyCode::ArrowDown)) && down.primary == Some(Binding::Key(KeyCode::ArrowUp)) {
+                self.bindings.insert(Action::PitchUp, down);
+                self.bindings.insert(Action::PitchDown, up);
+            }
+        }
+        self.controls_revision = CONTROLS_REVISION;
+    }
+
+    /// Whether pitch is inverted (flight-stick style) for this kind of aircraft.
+    pub fn invert_pitch(&self, helicopter: bool) -> bool {
+        if helicopter { self.invert_heli_pitch } else { self.invert_jet_pitch }
+    }
+
     fn fill_missing_bindings(&mut self) {
         for action in Action::ALL {
             self.bindings.entry(action).or_insert(action.default_bindings());
@@ -421,6 +458,8 @@ impl Settings {
             "minimap_size" => self.minimap_size = num()?.clamp(0.5, 1.75),
             "colorblind_team_colors" => self.colorblind_team_colors = on()?,
             "gamepad_enabled" => self.gamepad.enabled = on()?,
+            "invert_jet_pitch" => self.invert_jet_pitch = on()?,
+            "invert_heli_pitch" => self.invert_heli_pitch = on()?,
             // Lighting: `off`, `on` or `shadows`; `level` or `night`.
             "dynamic_lamps" | "lamps" => {
                 self.dynamic_lamps = crate::render::lamps::DynamicLamps::parse(value)
@@ -1105,7 +1144,8 @@ pub enum Action {
     /// Special Forces gas mask on or off.
     GasMask,
     /// Flying: the stick on the keyboard (the mouse, or a gamepad's right stick, also moves
-    /// it directly; see `vehicles::fly`).
+    /// it directly; see `vehicles::fly`). Pitch up raises the nose, like moving the mouse
+    /// up, unless the invert pitch settings make both flight-stick style.
     PitchUp,
     PitchDown,
     RollLeft,
@@ -1271,8 +1311,8 @@ impl Action {
             Action::CommanderScreen => (Some(Key(KeyCode::CapsLock)), Some(DPadUp)),
             Action::NightVision => (Some(Key(KeyCode::KeyL)), None),
             Action::GasMask => (Some(Key(KeyCode::KeyK)), None),
-            Action::PitchUp => (Some(Key(KeyCode::ArrowDown)), None),
-            Action::PitchDown => (Some(Key(KeyCode::ArrowUp)), None),
+            Action::PitchUp => (Some(Key(KeyCode::ArrowUp)), None),
+            Action::PitchDown => (Some(Key(KeyCode::ArrowDown)), None),
             Action::RollLeft => (Some(Key(KeyCode::ArrowLeft)), None),
             Action::RollRight => (Some(Key(KeyCode::ArrowRight)), None),
             Action::FreeLook => (Some(Key(KeyCode::AltLeft)), Some(LeftTrigger)),
@@ -1672,5 +1712,29 @@ fn save_settings(
             Ok(()) => info!("saved settings to {}", path.display()),
             Err(err) => warn!("can't save settings: {err}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod flight_control_tests {
+    use super::*;
+
+    #[test]
+    fn old_pitch_keys_swap_once() {
+        // A file from before the flight-control revision: the down arrow pulled up.
+        let mut settings = Settings {
+            controls_revision: 0,
+            ..Settings::default()
+        };
+        let (up, down) = (Action::PitchUp.default_bindings(), Action::PitchDown.default_bindings());
+        settings.bindings.insert(Action::PitchUp, down);
+        settings.bindings.insert(Action::PitchDown, up);
+        settings.migrate();
+        assert_eq!(settings.binding(Action::PitchUp), Some(Binding::Key(KeyCode::ArrowUp)));
+        assert_eq!(settings.controls_revision, CONTROLS_REVISION);
+        // Rebound by the player since: left alone.
+        settings.bindings.insert(Action::PitchUp, down);
+        settings.migrate();
+        assert_eq!(settings.binding(Action::PitchUp), Some(Binding::Key(KeyCode::ArrowDown)));
     }
 }

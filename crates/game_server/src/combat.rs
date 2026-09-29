@@ -28,7 +28,7 @@ use game_shared::{
         self, Projectile, ProjectileMotion, SmokeCloud, collision_layers, in_trigger, launch_origin, launch_velocity,
         steer,
     },
-    protocol::{ControlledBy, HitConfirmed, Player, ShotFired, Team},
+    protocol::{ControlledBy, HitConfirmed, Player, ShotFired, ThrowReleased, Team},
     revive::{Downed, WRECK_HIT_POINTS},
     soldier::{Health, Hitbox, Soldier, SoldierMotion},
     statics::Destructible,
@@ -362,6 +362,7 @@ fn fire_weapons(
     placed: Query<(Entity, &Live, &ProjectileMotion)>,
     tick: Res<ServerTick>,
     mut shots: MessageWriter<ToClients<ShotFired>>,
+    mut throws: MessageWriter<ToClients<ThrowReleased>>,
     mut detonations: MessageWriter<Detonation>,
 ) {
     let dt = time.delta_secs();
@@ -413,6 +414,7 @@ fn fire_weapons(
         let zoomed = input.pressed(Buttons::AIM);
         let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
         let mut ammo = inventory.ammo.get(active).copied().unwrap_or([0, 0]);
+        let was_launching = state.launch.is_some();
         let fired = state.trigger(&weapon, mode, &mut ammo, trigger, dt);
         if inventory.ammo.get(active).is_some_and(|a| *a != ammo) {
             inventory.ammo[active] = ammo;
@@ -420,6 +422,17 @@ fn fire_weapons(
         let reloading = state.reload > 0.0;
         if inventory.reloading != reloading {
             inventory.reloading = reloading;
+        }
+        // A throw or a placed charge starts its third-person animation the moment the
+        // wind-up releases, not `fire.fireLaunchDelay` seconds later when it actually
+        // appears as a projectile (`ShotFired`, below): otherwise everyone but the thrower
+        // sees the arm swing start exactly as the grenade already leaves.
+        if state.launch.is_some() && !was_launching {
+            let targets = match player_client(player, &clients, host.as_deref()) {
+                Some(client) => SendTargets::AllExcept(client),
+                None => SendTargets::All,
+            };
+            throws.write(ToClients { targets, message: ThrowReleased { soldier } });
         }
         let Some(fired) = fired else {
             continue;

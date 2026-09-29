@@ -65,6 +65,7 @@ impl Plugin for ProtocolPlugin {
             .add_client_message::<crate::squad::SquadRequest>(Channel::Ordered)
             .add_mapped_server_message::<FlagEvent>(Channel::Ordered)
             .add_mapped_server_message::<ShotFired>(Channel::Unreliable)
+            .add_mapped_server_message::<ThrowReleased>(Channel::Unreliable)
             .add_mapped_server_message::<HitConfirmed>(Channel::Unordered)
             .add_mapped_server_message::<KillFeed>(Channel::Ordered)
             .add_mapped_server_message::<VehicleShot>(Channel::Unreliable)
@@ -178,6 +179,19 @@ pub struct ShotFired {
     pub direction: Vec3,
     /// Index into the soldier's loadout.
     pub weapon: u8,
+}
+
+/// Server -> everyone but the thrower: a throw or a charge just left the wind-up (BF2's
+/// `fire.pullBackTime` ended and the trigger let go, or the charge's trigger was pulled) and
+/// is on its way out of the hand, `fire.fireLaunchDelay` seconds before it actually appears
+/// as a projectile (`ShotFired`, sent once that delay runs out). Starts the third-person
+/// throw animation at the right moment; the thrower's own client already started it locally
+/// (see `game_client::combat::predict_local_shots`, which times off the same wind-up release
+/// rather than the projectile's spawn).
+#[derive(Message, Serialize, Deserialize, Clone, Debug, MapEntities)]
+pub struct ThrowReleased {
+    #[entities]
+    pub soldier: Entity,
 }
 
 /// Server -> the attacker: your shot hit someone (for the hit marker).

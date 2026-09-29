@@ -26,11 +26,11 @@ use bevy::{
 };
 use std::sync::Arc;
 
-use game_data::{SoldierDesc, WeaponDesc};
+use game_data::{FireKind, SoldierDesc, WeaponDesc};
 use game_shared::{
     config::GamePaths,
     level::LoadedLevel,
-    protocol::{ControlledBy, ShotFired, Team},
+    protocol::{ControlledBy, ShotFired, ThrowReleased, Team},
     soldier::{SOLDIER_CENTER, SOLDIER_HEIGHT, SOLDIER_RADIUS, Soldier, Stance},
     statics::StaticMesh,
     vehicle::{Seated, VehicleData},
@@ -76,41 +76,109 @@ impl Plugin for SoldierRenderPlugin {
     }
 }
 
-/// BF2's parachute canopy, and how high above a soldier's feet it hangs.
+/// BF2's parachute canopy, and where it hangs relative to the soldier's feet in the
+/// direction he glides (BF2's parachute seat is 2.08 m below and 0.26 m ahead of it).
 const PARACHUTE_MESH: &str = "objects/vehicles/air/parachute/meshes/animatedparachute.glb";
-const PARACHUTE_HEIGHT: f32 = 2.4;
+const PARACHUTE_OFFSET: Vec3 = Vec3::new(0.0, 2.08, 0.26);
+/// BF2's parachute poses of the soldier: hanging, and touching down.
+const PARACHUTE_POSE: &str = "3p_parachute";
+const PARACHUTE_LANDING_POSE: &str = "3p_parachute_landing";
+/// After touchdown: how long the landing pose holds, and how long the canopy takes to
+/// collapse onto the ground (seconds).
+const PARACHUTE_LANDING_TIME: f32 = 0.6;
+const CANOPY_COLLAPSE_TIME: f32 = 1.6;
+/// How quickly the canopy swings round to where the soldier glides (1/s), and how far it
+/// banks into a turn (radians per rad/s of turning, at most `CANOPY_MAX_BANK`).
+const CANOPY_TURN_SMOOTHING: f32 = 4.0;
+const CANOPY_BANK: f32 = 0.5;
+const CANOPY_MAX_BANK: f32 = 0.45;
 
-/// A soldier's open parachute, drawn over its visual.
+/// A soldier's open parachute. Its own entity rather than part of the soldier's visual, so it
+/// also shows in first person (looking up) and can collapse after he lands.
 #[derive(Component)]
-struct Canopy;
+struct Canopy {
+    soldier: Entity,
+    /// The direction it glides (like a soldier's yaw) and its bank.
+    heading: f32,
+    bank: f32,
+    /// Seconds since the soldier touched down; `None` while he hangs under it.
+    collapse: Option<f32>,
+}
 
-/// Opens and packs away the parachutes of soldiers who have one out.
+/// Opens, flies and collapses the parachutes of soldiers who have one out.
 fn show_parachutes(
     mut commands: Commands,
-    visuals: Query<(Entity, &SoldierVisual, Option<&Children>)>,
-    renders: Query<&SoldierRender>,
-    canopies: Query<(), With<Canopy>>,
+    time: Res<Time>,
+    renders: Query<(Entity, &SoldierRender)>,
+    mut canopies: Query<(Entity, &mut Canopy, &mut Transform)>,
 ) {
-    for (visual, owner, children) in &visuals {
-        let open = renders.get(owner.soldier).is_ok_and(|r| r.parachute);
-        let canopy = children.and_then(|c| c.iter().find(|e| canopies.contains(*e)));
-        match (open, canopy) {
-            (true, None) => {
-                commands.spawn((
-                    Canopy,
-                    Transform::from_xyz(0.0, PARACHUTE_HEIGHT, 0.0),
-                    Visibility::default(),
-                    StaticMesh {
-                        path: PARACHUTE_MESH.into(),
-                        index: 0,
-                    },
-                    ChildOf(visual),
-                ));
-            }
-            (false, Some(canopy)) => commands.entity(canopy).despawn(),
-            _ => {}
+    let dt = time.delta_secs();
+    for (soldier, render) in &renders {
+        if render.parachute && !canopies.iter().any(|(_, c, _)| c.soldier == soldier && c.collapse.is_none()) {
+            let heading = glide_heading(render).unwrap_or(render.yaw);
+            commands.spawn((
+                Canopy {
+                    soldier,
+                    heading,
+                    bank: 0.0,
+                    collapse: None,
+                },
+                canopy_transform(render.position, heading, 0.0),
+                Visibility::default(),
+                StaticMesh {
+                    path: PARACHUTE_MESH.into(),
+                    index: 0,
+                },
+            ));
         }
     }
+    for (entity, mut canopy, mut transform) in &mut canopies {
+        let render = renders.get(canopy.soldier).ok().map(|(_, r)| r);
+        match (canopy.collapse, render) {
+            (None, Some(render)) if render.parachute => {
+                // Swing round after the glide, banking into the turn.
+                let wanted = glide_heading(render).unwrap_or(canopy.heading);
+                let turn = wrap_angle(wanted - canopy.heading) * (1.0 - (-CANOPY_TURN_SMOOTHING * dt).exp());
+                canopy.heading = wrap_angle(canopy.heading + turn);
+                let rate = if dt > 0.0 { turn / dt } else { 0.0 };
+                let bank = (-rate * CANOPY_BANK).clamp(-CANOPY_MAX_BANK, CANOPY_MAX_BANK);
+                canopy.bank += (bank - canopy.bank) * (1.0 - (-CANOPY_TURN_SMOOTHING * dt).exp());
+                *transform = canopy_transform(render.position, canopy.heading, canopy.bank);
+            }
+            (None, _) => canopy.collapse = Some(0.0),
+            (Some(elapsed), _) => {
+                // Landed: the canopy drifts on a little, sinks behind him and folds up.
+                let elapsed = elapsed + dt;
+                canopy.collapse = Some(elapsed);
+                if elapsed >= CANOPY_COLLAPSE_TIME {
+                    commands.entity(entity).despawn();
+                    continue;
+                }
+                let t = elapsed / CANOPY_COLLAPSE_TIME;
+                let forward = Quat::from_rotation_y(canopy.heading) * Vec3::NEG_Z;
+                transform.translation += forward * 1.5 * (1.0 - t) * dt - Vec3::Y * PARACHUTE_OFFSET.y * dt / CANOPY_COLLAPSE_TIME;
+                transform.rotation = Quat::from_rotation_y(canopy.heading) * Quat::from_rotation_x(-t * 1.2);
+                transform.scale = Vec3::new(1.0, (1.0 - t).max(0.05), 1.0);
+            }
+        }
+    }
+}
+
+/// Where a soldier's canopy hangs over his feet at `position`.
+fn canopy_transform(position: Vec3, heading: f32, bank: f32) -> Transform {
+    let rotation = Quat::from_rotation_y(heading);
+    Transform::from_translation(position + rotation * PARACHUTE_OFFSET).with_rotation(rotation * Quat::from_rotation_z(bank))
+}
+
+/// The direction a soldier glides (like a yaw), if he moves enough to tell.
+fn glide_heading(render: &SoldierRender) -> Option<f32> {
+    let flat = Vec2::new(render.velocity.x, render.velocity.z);
+    (flat.length() > 1.0).then(|| (-flat.x).atan2(-flat.y))
+}
+
+fn wrap_angle(a: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    (a + PI).rem_euclid(TAU) - PI
 }
 
 /// Clips by lowercase BF2 file name: the body's movement clips (legs) and the weapon sets'
@@ -862,7 +930,8 @@ fn update_visuals(
                 (false, true) => ROPE_BODY_RAISE,
                 _ => 0.0,
             };
-            Transform::from_translation(render.position + Vec3::Y * raise).with_rotation(Quat::from_rotation_y(render.yaw))
+            let yaw = if render.parachute { glide_heading(render).unwrap_or(render.yaw) } else { render.yaw };
+            Transform::from_translation(render.position + Vec3::Y * raise).with_rotation(Quat::from_rotation_y(yaw))
         });
     }
 }
@@ -1231,6 +1300,7 @@ fn animate(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     feedback: Res<CombatFeedback>,
     mut shots: MessageReader<ShotFired>,
+    mut throws: MessageReader<ThrowReleased>,
     soldiers: Query<(
         &SoldierRender,
         Option<Ref<Loadout>>,
@@ -1240,10 +1310,15 @@ fn animate(
         Option<&Seated>,
     )>,
     vehicles: Query<&VehicleData>,
+    canopies: Query<&Canopy>,
     mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
     let fired: Vec<Entity> = shots.read().map(|shot| shot.soldier).collect();
+    // Throws and placed charges animate from the wind-up releasing, not from the moment the
+    // projectile actually appears (`ShotFired`, which for these is delayed by
+    // `fire.fireLaunchDelay` and would otherwise restart the arm swing mid-air).
+    let released: Vec<Entity> = throws.read().map(|t| t.soldier).collect();
     for (visual, body, rig, mut animator) in &mut visuals {
         let (Ok((render, loadout, inventory, local, downed, seated)), Some(team)) =
             (soldiers.get(visual.soldier), body.0)
@@ -1253,6 +1328,18 @@ fn animate(
         let seat_pose = seated.and_then(|s| {
             let data = vehicles.get(s.vehicle).ok()?;
             data.0.desc.seats.get(s.seat as usize)?.pose.clone()
+        });
+        // Under a parachute (BF2 plays these through the parachute's seat): hanging, and
+        // touching down for a moment after landing.
+        let landing = || {
+            canopies
+                .iter()
+                .any(|c| c.soldier == visual.soldier && c.collapse.is_some_and(|t| t < PARACHUTE_LANDING_TIME))
+        };
+        let seat_pose = seat_pose.or_else(|| match render.parachute {
+            true => Some(PARACHUTE_POSE.to_string()),
+            false if landing() => Some(PARACHUTE_LANDING_POSE.to_string()),
+            false => None,
         });
         let loadout_changed = loadout.as_ref().is_some_and(|l| l.is_changed());
         let loadout = loadout.as_deref();
@@ -1278,13 +1365,21 @@ fn animate(
                 ..default()
             };
         }
-        // Our own shots are predicted locally; everyone else's arrive from the server.
+        // Our own shots are predicted locally; everyone else's arrive from the server. A
+        // throw or a charge (`ThrowReleased`) animates from the wind-up releasing; anything
+        // else (`ShotFired`) from the shot itself.
         let (fired, reloading) = if local {
             let fired = animator.shots_seen.is_some_and(|seen| seen != feedback.shots_fired);
             animator.shots_seen = Some(feedback.shots_fired);
             (fired, feedback.reloading)
         } else {
-            (fired.contains(&visual.soldier), inventory.is_some_and(|i| i.reloading))
+            let is_throw = weapon.is_some_and(|w| matches!(w.fire.kind, FireKind::Thrown | FireKind::Explosives));
+            let fired = if is_throw {
+                released.contains(&visual.soldier)
+            } else {
+                fired.contains(&visual.soldier)
+            };
+            (fired, inventory.is_some_and(|i| i.reloading))
         };
         let cues = Cues {
             render,

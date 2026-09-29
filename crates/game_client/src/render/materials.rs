@@ -587,6 +587,26 @@ fn describe(
     let normal_map = base.normal_map_texture.take();
     base.metallic = 0.0;
 
+    // BF2's light-glow sprites: small quads next to lamps and light sources (the `glow2`/
+    // `glow3` family under `objects/common/glow/`, and the `xp1_light_glow_*`/`*lightbulb*`
+    // textures) that always read bright, added onto the scene rather than lit by it. BF2's
+    // own technique for the `objects/common/glow` meshes is `Alpha_One`; the `xp1_light_glow_*`
+    // family instead exports as an ordinary opaque static material (its own mesh file really
+    // does store `Opaque`), so detection also keys off the texture name. Left as ordinary
+    // per-pixel-lit (or lightmapped) geometry, both go pitch black wherever the scene (or the
+    // baked lightmap, which has no bulb to bake in) is dark, most visibly at night.
+    let is_glow = technique.contains("alpha_one") || path.contains("/glow/") || path.contains("light_glow");
+    if is_glow {
+        base.unlit = true;
+        base.alpha_mode = AlphaMode::Add;
+        base.double_sided = true;
+        base.cull_mode = None;
+        // Not lightmapped (see `Bf2Layers::DYNAMIC`'s use in `Bf2Materials::from_standard`):
+        // a baked lightmap would otherwise still darken it at night.
+        layers.flags |= Bf2Layers::DYNAMIC;
+        return Bf2Material { base, extension: layers };
+    }
+
     if kind == "static" {
         let (names, parallax) = static_layers(&technique);
         let mut crack = false;

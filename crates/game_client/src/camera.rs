@@ -102,9 +102,6 @@ fn overview_on_level_load(
     look.pitch = -0.55;
 }
 
-/// How quickly the aircraft chase camera turns after the aircraft (1/s).
-const CHASE_STIFFNESS: f32 = 6.0;
-
 /// `pivot + offset`, pulled in if the world is in the way (at least `min` meters out).
 fn chase_position(spatial: &avian3d::prelude::SpatialQuery, pivot: Vec3, offset: Vec3, min: f32) -> Vec3 {
     let filter = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
@@ -148,7 +145,7 @@ fn update_camera(
     vehicles: Query<(&crate::vehicles::VehicleView, &VehicleData)>,
     flight: Res<crate::vehicles::FlightStick>,
     camera: Single<(&mut Transform, &mut Spectator), With<PlayerCamera>>,
-    mut chase: Local<Option<Quat>>,
+    mut pilot: Local<crate::vehicles::PilotCamera>,
 ) {
     let (mut transform, mut spectator) = camera.into_inner();
     let rotation = look.rotation();
@@ -160,23 +157,35 @@ fn update_camera(
         .and_then(|(_, seated)| seated)
         .and_then(|seated| crate::vehicles::seat_view(seated, &vehicles))
     {
-        // Piloting: the view is fixed to the aircraft (turned by free look); the chase
-        // camera follows its rotation a little behind.
-        if flight.active {
-            let wanted = crate::vehicles::flight_view(view.vehicle.rotation, flight.look);
-            let smoothed = chase.map_or(wanted, |c| c.slerp(wanted, 1.0 - (-CHASE_STIFFNESS * time.delta_secs()).exp()));
-            *chase = Some(smoothed);
-            transform.translation = if third_person.0 {
-                let offset = smoothed * Vec3::new(0.0, view.chase_height, view.chase_distance * 0.8 * zoom.0);
-                chase_position(&spatial, view.vehicle.translation, offset, 3.0)
-            } else {
-                view.eye
-            };
-            transform.rotation = if third_person.0 { smoothed } else { wanted };
+        // Piloting: the cockpit view is fixed to the aircraft (turned by free look); the chase
+        // camera trails it (see `vehicles::pilot_camera`).
+        if flight.active
+            && let Some(seated) = soldier.single().ok().and_then(|(_, seated)| seated)
+            && let Ok((vehicle, data)) = vehicles.get(seated.vehicle)
+        {
+            let filter = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+            let altitude = spatial
+                .cast_ray(view.vehicle.translation, Dir3::NEG_Y, 200.0, true, &filter)
+                .map_or(200.0, |hit| hit.distance);
+            let (placed, chase) = crate::vehicles::pilot_camera(
+                &mut pilot,
+                &view,
+                vehicle,
+                data,
+                flight.look,
+                third_person.0,
+                zoom.0,
+                altitude,
+                time.delta_secs(),
+            );
+            *transform = placed;
+            if let Some((pivot, offset)) = chase {
+                transform.translation = chase_position(&spatial, pivot, offset, 3.0);
+            }
             spectator.position = transform.translation;
             return;
         }
-        *chase = None;
+        *pilot = default();
         transform.translation = if third_person.0 {
             let pivot = view.vehicle.translation + Vec3::Y * 1.5;
             let offset = rotation * Vec3::new(0.0, 0.0, view.chase_distance * 0.7 * zoom.0) + Vec3::Y * view.chase_height;
@@ -198,10 +207,8 @@ fn update_camera(
         } else {
             view.eye
         };
-        transform.rotation = match (third_person.0, view.aimed) {
-            (false, Some(aimed)) => aimed,
-            _ => rotation,
-        };
+        // Gunners look where they aim; the turret catches up (see `vehicles::limit_gunner_aim`).
+        transform.rotation = rotation;
         spectator.position = transform.translation;
         return;
     }

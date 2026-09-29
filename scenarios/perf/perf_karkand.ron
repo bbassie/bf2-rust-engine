@@ -1,0 +1,32 @@
+// Frame times with many bots on Karkand's 64 player layout, as a soldier: at spawn, from a
+// fixed spot looking over the Square, and in the fight around the Hotel after the bots have
+// spread out. The bot count comes from the command line (0, 32, 63). Each Measure gives
+// avg/p50/p95/max in report.txt.
+// client --scenario scenarios/perf/perf_karkand.ron --bots 63 --out target/scenarios/perf/karkand_63
+// Presets: add `--settings <file>` or put `Setting("preset", "low")` after WaitReady.
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 1,
+    steps: [
+        WaitReady,
+        Wait(3.0),
+        Measure("spawn", 6.0),
+        Screenshot("spawn"),
+        // Fixed view: down the street to the Square.
+        Teleport((-184.0, 156.0, -60.0), 0.0, -3.0),
+        Wait(2.0),
+        Screenshot("fixed"),
+        Measure("fixed", 8.0),
+        // Let the bots reach the flags, then stand by the Hotel flag.
+        Wait(20.0),
+        Teleport((-190.0, 159.0, -20.0), 150.0, -2.0),
+        Wait(2.0),
+        Screenshot("fight"),
+        Measure("fight", 8.0),
+        Look(330.0, -2.0),
+        Measure("fight_back", 5.0),
+        Screenshot("fight_back"),
+        Quit,
+    ],
+)

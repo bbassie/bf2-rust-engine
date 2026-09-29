@@ -783,9 +783,10 @@ fn fire_vehicle_guns(
     }
 }
 
-/// Server-side: a vehicle's velocity last tick, to notice crashes.
+/// Server-side: a vehicle's velocity last tick, to notice crashes. Removing it (moving a
+/// vehicle by hand, like the scenarios' `PlaceVehicle`) skips the next tick's check.
 #[derive(Component, Default)]
-struct LastVelocity(Vec3);
+pub struct LastVelocity(Vec3);
 
 /// Speed lost in one tick beyond which a crash does damage (m/s), and hit points per m/s
 /// beyond it; aircraft are more fragile.

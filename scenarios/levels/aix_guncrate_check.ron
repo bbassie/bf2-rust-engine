@@ -1,0 +1,27 @@
+// Checks AIX2's ammo crates near a base (user report: "boxes with weapons but the weapons
+// are not there"): the aix_guncrate_<class> statics (decorative, kit icon on the lid) and,
+// after the bf2_import fix, the aix_resupplycrate next to them (BF2 SupplyObject, previously
+// dropped entirely because it's placed via an ObjectSpawner like a vehicle spawner).
+(
+    level: "aix2_dragon_valley",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Teleport((-60.969, 68.7, 211.235), 0.0, -85.0),
+        Wait(0.5),
+        Screenshot("guncrate_support_top"),
+        Teleport((-63.0, 67.5, 208.0), 220.0, -15.0),
+        Wait(0.5),
+        Screenshot("resupplycrate_wide"),
+        Teleport((-64.279, 68.0, 211.223), 0.0, -85.0),
+        Wait(0.5),
+        Screenshot("resupplycrate_top"),
+        Teleport((-68.0, 66.6, 211.223), 270.0, -8.0),
+        Wait(0.5),
+        Screenshot("base_row_overhead"),
+        Teleport((-70.0, 67.2, 214.0), 300.0, -12.0),
+        Wait(0.5),
+        Screenshot("resupplycrate_close"),
+        Quit,
+    ],
+)

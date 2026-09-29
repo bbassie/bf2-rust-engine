@@ -629,11 +629,20 @@ pub fn step_soldier(
             return;
         }
     } else if m.parachute || (fresh_jump && m.velocity.y < -PARACHUTE_OPENS_AT) {
-        // Under a parachute: glide where the keys steer, sink slowly.
+        // Under a parachute: the canopy glides where the soldier looks (W dives, S brakes, A/D
+        // slip sideways) and flares just above the ground.
         m.parachute = true;
-        horizontal = approach(horizontal, wish * PARACHUTE_SPEED, PARACHUTE_STEER, dt);
+        let flare = world.ground(shape, start, PARACHUTE_FLARE_HEIGHT).is_some();
+        let (glide, sink) = parachute_glide(horizontal, m.yaw, intent, flare, dt);
+        horizontal = glide;
         m.velocity.x = horizontal.x;
         m.velocity.z = horizontal.z;
+        // The canopy opening catches a fast fall over a moment rather than at once.
+        m.velocity.y = if m.velocity.y < -sink {
+            (m.velocity.y + PARACHUTE_OPENING * dt).min(-sink)
+        } else {
+            (m.velocity.y - tuning.gravity * dt).max(-sink)
+        };
     } else {
         // Airborne: keep momentum, steer a little right after a jump.
         let control = m.air_control / tuning.air_control_time;
@@ -649,9 +658,7 @@ pub fn step_soldier(
     }
 
     // In the air.
-    if m.parachute {
-        m.velocity.y = (m.velocity.y - tuning.gravity * dt).max(-PARACHUTE_SINK);
-    } else {
+    if !m.parachute {
         m.velocity.y -= tuning.gravity * dt;
     }
     let impact = -m.velocity.y;
@@ -664,8 +671,13 @@ pub fn step_soldier(
     if let Some(ground) = world.ground(shape, moved.center, 5.0 * SKIN) {
         m.position.y -= ground.gap();
         m.grounded = true;
+        let mut horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
+        if m.parachute {
+            // Touching down under a canopy: a few running steps to take up the glide.
+            horizontal *= PARACHUTE_LANDING_KEEP;
+            m.recovery = m.recovery.max(tuning.landing_time);
+        }
         m.parachute = false;
-        let horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
         m.velocity = along_ground(horizontal, ground.normal);
         if impact > tuning.landing_impact {
             m.recovery = tuning.landing_time;
@@ -983,13 +995,61 @@ fn along_ground(horizontal: Vec3, normal: Vec3) -> Vec3 {
 }
 
 /// BF2's acceleration model: every 1/30 s, close `factor` of the gap to the target.
-/// Parachutes: how fast they sink and glide (m/s), how quickly the glide follows the keys
-/// (like the walking `acceleration`), and how fast a falling soldier must drop for the jump
-/// key to open one.
-const PARACHUTE_SINK: f32 = 5.0;
-const PARACHUTE_SPEED: f32 = 7.0;
+/// Parachutes (BF2's sinks at about 5 m/s and glides forward, W faster and lower, S slower):
+/// glide speed and sink rate hands off, diving (W) and braking (S), m/s.
+pub const PARACHUTE_GLIDE: [f32; 3] = [8.0, 13.0, 3.0];
+pub const PARACHUTE_SINK: [f32; 3] = [4.5, 7.0, 3.2];
+/// A/D slip sideways this fast (m/s); the canopy turns towards the view at most this fast
+/// (rad/s).
+const PARACHUTE_SLIP: f32 = 3.0;
+const PARACHUTE_TURN: f32 = 1.2;
+/// How quickly the glide speed follows (like the walking `acceleration`); much faster while
+/// still faster than a canopy glides (bailing out of a jet).
 const PARACHUTE_STEER: f32 = 0.04;
+const PARACHUTE_BRAKE: f32 = 0.12;
+/// The canopy opening slows a fall this hard (m/s²).
+const PARACHUTE_OPENING: f32 = 30.0;
+/// Below this height (m) above the ground the canopy flares: sinking and gliding slower for a
+/// soft landing.
+const PARACHUTE_FLARE_HEIGHT: f32 = 3.0;
+const PARACHUTE_FLARE_SINK: f32 = 2.0;
+const PARACHUTE_FLARE_GLIDE: f32 = 0.6;
+/// Share of the glide kept on touchdown.
+const PARACHUTE_LANDING_KEEP: f32 = 0.5;
+/// How fast a falling soldier must drop for the jump key to open a parachute.
 const PARACHUTE_OPENS_AT: f32 = 12.0;
+
+/// One tick of gliding under a canopy: the new horizontal velocity and the sink rate to hold.
+/// The canopy turns towards the look direction (`yaw`) at [`PARACHUTE_TURN`] and glides at
+/// the speed the forward key asks for.
+fn parachute_glide(horizontal: Vec3, yaw: f32, intent: Vec2, flare: bool, dt: f32) -> (Vec3, f32) {
+    let look = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
+    let speed = horizontal.length();
+    let heading = if speed > 1.0 {
+        let current = horizontal / speed;
+        let angle = current.cross(look).y.atan2(current.dot(look));
+        Quat::from_rotation_y(angle.clamp(-PARACHUTE_TURN * dt, PARACHUTE_TURN * dt)) * current
+    } else {
+        look
+    };
+    let pick = |values: [f32; 3]| {
+        let forward = intent.y.clamp(-1.0, 1.0);
+        if forward >= 0.0 {
+            values[0] + (values[1] - values[0]) * forward
+        } else {
+            values[0] + (values[2] - values[0]) * -forward
+        }
+    };
+    let (mut glide, mut sink) = (pick(PARACHUTE_GLIDE), pick(PARACHUTE_SINK));
+    if flare {
+        glide *= PARACHUTE_FLARE_GLIDE;
+        sink = sink.min(PARACHUTE_FLARE_SINK);
+    }
+    let right = heading.cross(Vec3::Y);
+    let target = heading * glide + right * intent.x.clamp(-1.0, 1.0) * PARACHUTE_SLIP;
+    let factor = if speed > glide * 1.5 { PARACHUTE_BRAKE } else { PARACHUTE_STEER };
+    (approach(heading * speed, target, factor, dt), sink)
+}
 
 fn approach(current: Vec3, target: Vec3, factor: f32, dt: f32) -> Vec3 {
     let keep = (1.0 - factor).powf(dt * 30.0);

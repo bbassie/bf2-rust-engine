@@ -357,6 +357,8 @@ enum Toggle {
     GamepadEnabled,
     GamepadInvertY,
     GamepadAimAssist,
+    InvertJetPitch,
+    InvertHeliPitch,
 }
 
 impl Toggle {
@@ -374,6 +376,8 @@ impl Toggle {
             Toggle::GamepadEnabled => "gamepad_enabled",
             Toggle::GamepadInvertY => "gamepad_invert_y",
             Toggle::GamepadAimAssist => "gamepad_aim_assist",
+            Toggle::InvertJetPitch => "invert_jet_pitch",
+            Toggle::InvertHeliPitch => "invert_heli_pitch",
         }
     }
 
@@ -391,6 +395,8 @@ impl Toggle {
             Toggle::GamepadEnabled => settings.gamepad.enabled,
             Toggle::GamepadInvertY => settings.gamepad.invert_look_y,
             Toggle::GamepadAimAssist => settings.gamepad.aim_assist,
+            Toggle::InvertJetPitch => settings.invert_jet_pitch,
+            Toggle::InvertHeliPitch => settings.invert_heli_pitch,
         }
     }
 
@@ -408,6 +414,8 @@ impl Toggle {
             Toggle::GamepadEnabled => settings.gamepad.enabled ^= true,
             Toggle::GamepadInvertY => settings.gamepad.invert_look_y ^= true,
             Toggle::GamepadAimAssist => settings.gamepad.aim_assist ^= true,
+            Toggle::InvertJetPitch => settings.invert_jet_pitch ^= true,
+            Toggle::InvertHeliPitch => settings.invert_heli_pitch ^= true,
         }
     }
 }

@@ -556,6 +556,11 @@ fn settings_page(
             row(p, "Mouse sensitivity", |c| slider(c, Slider::Sensitivity));
             row(p, "Mouse smoothing", |c| slider(c, Slider::MouseSmoothing));
             row(p, "Invert mouse Y", |c| switch(c, Toggle::InvertY));
+            row(p, "Invert jet pitch", |c| {
+                switch(c, Toggle::InvertJetPitch);
+                c.spawn(text("on: mouse, stick and pitch keys forward push the nose down", 12.0, DIM));
+            });
+            row(p, "Invert helicopter pitch", |c| switch(c, Toggle::InvertHeliPitch));
             row(p, "Raw mouse input", |c| {
                 switch(c, Toggle::MouseRawInput);
                 c.spawn(text("not yet wired to an engine hook", 12.0, DIM));

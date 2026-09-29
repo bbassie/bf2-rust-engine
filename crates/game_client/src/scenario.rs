@@ -613,9 +613,10 @@ fn run_scenario(
     player: PlayerControls,
     mut vehicles: Vehicles,
     soldiers: Soldiers,
-    (prediction, rendered): (
+    (prediction, rendered, diagnostics): (
         Res<crate::prediction::PredictionStats>,
         Query<&crate::prediction::SoldierRender, With<LocalSoldier>>,
+        Res<bevy::diagnostic::DiagnosticsStore>,
     ),
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
@@ -1070,6 +1071,8 @@ fn run_scenario(
                             LinearVelocity(rotation * Vec3::NEG_Z * *speed),
                             AngularVelocity(Vec3::ZERO),
                         ));
+                        // Not a crash.
+                        commands.entity(seated.vehicle).remove::<game_server::vehicles::LastVelocity>();
                     }
                     Err(_) => warn!("scenario: not in a vehicle to place"),
                 }
@@ -1421,11 +1424,25 @@ fn run_scenario(
             Step::Measure(name, seconds) => {
                 if elapsed > 0.0 {
                     runner.samples.push(time.delta_secs() * 1000.0);
+                } else if game_server::profile::enabled() {
+                    // Start the system timings of this measurement afresh.
+                    game_server::profile::take_report(1, 0);
                 }
                 if elapsed >= *seconds {
+                    let frames = runner.samples.len() as u32;
                     let line = frame_stats(name, &mut runner.samples);
                     info!("scenario: {line}");
                     writeln!(runner.report, "{line}").ok();
+                    let gpu = gpu_pass_times(&diagnostics);
+                    if !gpu.is_empty() {
+                        writeln!(runner.report, "{name}: GPU passes (ms, recent frames)
+{gpu}").ok();
+                    }
+                    if game_server::profile::enabled() {
+                        let systems = game_server::profile::take_report(frames, 60).replace("ms/tick", "ms/frame").replace("calls/tick", "calls/frame");
+                        writeln!(runner.report, "{name}: systems (BF2_PROFILE_FRAMES)
+{systems}").ok();
+                    }
                     Progress::Done
                 } else {
                     Progress::Waiting
@@ -1536,6 +1553,22 @@ fn set_look(look: &mut LookState, yaw: f32, pitch: f32) {
     look.pitch = pitch.to_radians();
 }
 
+/// The GPU (and render-encoding CPU) time of each render pass, averaged over the recent
+/// frames, from `RenderDiagnosticsPlugin` (`--diagnostics`); empty without it.
+fn gpu_pass_times(diagnostics: &bevy::diagnostic::DiagnosticsStore) -> String {
+    let mut rows: Vec<(f64, String)> = diagnostics
+        .iter()
+        .filter(|d| d.path().as_str().ends_with("/elapsed_gpu") || d.path().as_str().ends_with("/elapsed_cpu"))
+        .filter_map(|d| Some((d.average()?, d.path().as_str().to_string())))
+        .collect();
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut out = String::new();
+    for (ms, path) in rows.into_iter().take(40) {
+        writeln!(out, "  {ms:>7.3}  {path}").ok();
+    }
+    out
+}
+
 /// `name: avg 5.8 ms (172 fps), p50 5.6 ms, p95 7.9 ms, max 12.1 ms over 520 frames`
 fn frame_stats(name: &str, samples: &mut [f32]) -> String {
     if samples.is_empty() {
@@ -1624,8 +1657,16 @@ mod log_capture {
 }
 
 /// The log layer behind `ExpectLog`/`ForbidLog` (for `LogPlugin::custom_layer`).
-pub fn log_capture_layer(_app: &mut App) -> Option<bevy::log::BoxedLayer> {
-    Some(Box::new(log_capture::CaptureLayer))
+/// With `BF2_PROFILE_FRAMES` set, also times every system (`game_server::profile`; needs a
+/// build with `--features game_server/profile`) and `Measure` steps add the most expensive
+/// ones per frame to the report.
+pub fn log_capture_layer(app: &mut App) -> Option<bevy::log::BoxedLayer> {
+    let capture: bevy::log::BoxedLayer = Box::new(log_capture::CaptureLayer);
+    if std::env::var_os("BF2_PROFILE_FRAMES").is_none() {
+        return Some(capture);
+    }
+    let layers: Vec<bevy::log::BoxedLayer> = [Some(capture), game_server::profile::layer(app)].into_iter().flatten().collect();
+    Some(Box::new(layers))
 }
 
 /// Starts keeping log lines for the scenario's assertions.

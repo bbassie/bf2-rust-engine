@@ -1,0 +1,21 @@
+// Checks the black-quad light-glow fix (user report: "light texture placeholders" on AIX
+// night maps; the lead separately flagged black boxes at Devil's Perch's market near
+// (-372, 15, 158) and Midnight Sun's gas station). Devil's Perch is a night map already;
+// this views the lamp_post_lit glow quads near the market directly.
+(
+    level: "devils_perch",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Teleport((-372.0, 15.5, 158.0), 0.0, 0.0),
+        Wait(0.5),
+        Screenshot("market_wide"),
+        Teleport((-370.0, 16.5, 153.5), 90.0, -5.0),
+        Wait(0.5),
+        Screenshot("lamp_close"),
+        Teleport((-374.0, 17.0, 153.0), 340.0, 20.0),
+        Wait(0.5),
+        Screenshot("lamp_head"),
+        Quit,
+    ],
+)

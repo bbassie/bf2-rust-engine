@@ -66,6 +66,8 @@ pub struct PredictedVehicle {
     pub previous: BodyState,
     pub current: BodyState,
     pub state: VehicleState,
+    /// The joint angles a tick before `state`'s (drawn between the two).
+    pub previous_joints: Vec<[f32; 3]>,
     sim: VehicleSim,
     /// The engines' and springs' state after each input (not replicated; replays start from
     /// the one after the input the server acknowledged).
@@ -125,6 +127,7 @@ fn predict(
                 previous: motion.body(),
                 current: motion.body(),
                 state: state.clone(),
+                previous_joints: state.joints.clone(),
                 sim: VehicleSim::new(&data.0.desc),
                 sims: VecDeque::new(),
                 error: Vec3::ZERO,
@@ -141,11 +144,13 @@ fn predict(
             previous,
             current,
             state,
+            previous_joints,
             sim,
             sims,
             ..
         } = &mut *predicted;
         *previous = *current;
+        previous_joints.clone_from(&state.joints);
         let push = step_vehicle(model, current, &inputs, state, sim, &spatial, entity, water, dt);
         integrate(model, current, &push, dt);
         sims.push_back((input.seq, sim.clone()));

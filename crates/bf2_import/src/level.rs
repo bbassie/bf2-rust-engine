@@ -138,6 +138,11 @@ pub fn import_level(
         .collect();
     // The commander's assets (spawned by the layouts) are objects too.
     template_names.extend(assets.iter().cloned());
+    // Ammo/health supply crates (BF2 `SupplyObject`, e.g. AIX2's `aix_resupplycrate`, vanilla
+    // `supply_crate`) are placed as `ObjectSpawner`s in `GamePlayObjects.con`, same as vehicle
+    // spawners; `build_game_mode` below renders them as ordinary statics instead (they aren't
+    // vehicles), but need their meshes built here like any other static.
+    template_names.extend(supply_crate_templates(world, &layouts));
 
     let failed = Mutex::new(Vec::new());
     let mesh_count = Mutex::new(0usize);
@@ -176,7 +181,7 @@ pub fn import_level(
     let game_modes: Vec<GameModeDesc> = layouts
         .iter()
         .map(|(mode, size, range, templates)| {
-            build_game_mode(templates, localization, mode, *size, &world.instances[range.clone()])
+            build_game_mode(world, templates, localization, mode, *size, &world.instances[range.clone()])
         })
         .collect();
     // The top-down map BF2 shows in game, copied as-is (north up, not flipped).
@@ -328,6 +333,38 @@ fn is_visible_static(t: &Template) -> bool {
         t.ty.to_ascii_lowercase().as_str(),
         "simpleobject" | "bundle" | "destroyableobject" | "ladder" | "animatedbundle" | "rotationalbundle"
     )
+}
+
+/// A BF2 `SupplyObject` (ammo/health supply crate, e.g. AIX2's `aix_resupplycrate`, vanilla
+/// `supply_crate`): normally spawned as an `ObjectSpawner` in `GamePlayObjects.con` alongside
+/// real vehicle spawners, but it's a decorative static, not something to drive.
+fn is_supply_object(world: &World, name: &str) -> bool {
+    world
+        .template(name)
+        .is_some_and(|t| t.ty.eq_ignore_ascii_case("supplyobject"))
+}
+
+/// Every `ObjectSpawner` target across every layout that is a supply crate rather than a real
+/// vehicle, so its mesh gets built like any other static template (see [`is_supply_object`]).
+fn supply_crate_templates(
+    world: &World,
+    layouts: &[(String, u32, std::ops::Range<usize>, HashMap<String, Template>)],
+) -> HashSet<String> {
+    layouts
+        .iter()
+        .flat_map(|(_, _, range, templates)| {
+            world.instances[range.clone()].iter().filter_map(|i| {
+                let template = templates.get(&i.template.to_ascii_lowercase())?;
+                template
+                    .ty
+                    .eq_ignore_ascii_case("objectspawner")
+                    .then(|| template.get_all("setobjecttemplate").filter_map(|args| args.get(1).cloned()))
+            })
+        })
+        .flatten()
+        .map(|name| name.to_ascii_lowercase())
+        .filter(|name| is_supply_object(world, name))
+        .collect()
 }
 
 fn instance_placement(instance: &Instance) -> Option<Placement> {
@@ -547,6 +584,7 @@ fn flatten(
 /// A layout from its instances and the templates they had when its script ran (by
 /// lowercased name).
 fn build_game_mode(
+    world: &World,
     templates: &HashMap<String, Template>,
     localization: &Localization,
     mode: &str,
@@ -597,19 +635,33 @@ fn build_game_mode(
                 placement,
             }),
             "objectspawner" => {
-                let mut templates: [Option<String>; 2] = [None, None];
+                let mut targets: [Option<String>; 2] = [None, None];
                 for args in template.get_all("setobjecttemplate") {
                     if let (Some(team), Some(name)) = (args.first(), args.get(1)) {
                         match team.as_str() {
-                            "1" => templates[0] = Some(name.to_ascii_lowercase()),
-                            "2" => templates[1] = Some(name.to_ascii_lowercase()),
+                            "1" => targets[0] = Some(name.to_ascii_lowercase()),
+                            "2" => targets[1] = Some(name.to_ascii_lowercase()),
                             _ => {}
                         }
                     }
                 }
+                // Ammo/health supply crates (BF2 `SupplyObject`) are spawned the same way as
+                // vehicles (`ObjectSpawner`), but they're decorative statics, not something to
+                // drive: place whichever target resolves to one as an ordinary static instead.
+                let supply_crate = targets
+                    .iter()
+                    .flatten()
+                    .find(|name| is_supply_object(world, name));
+                if let Some(crate_template) = supply_crate {
+                    layout.statics.push(StaticInstance {
+                        template: crate_template.clone(),
+                        placement,
+                    });
+                    continue;
+                }
                 layout.vehicle_spawners.push(VehicleSpawnerDesc {
                     control_point: instance.get_str("setcontrolpointid").map(str::to_string),
-                    templates,
+                    templates: targets,
                     placement,
                     min_respawn_seconds: template.get_f32("minspawndelay").unwrap_or(0.0),
                     max_respawn_seconds: template.get_f32("maxspawndelay").unwrap_or(0.0),

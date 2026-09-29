@@ -42,7 +42,8 @@ impl Plugin for ClientVehiclesPlugin {
             .init_resource::<VehicleSight>()
             .add_systems(Update, (read_seat_keys, receive_shots))
             .add_systems(PostUpdate, update_sight.after(VehicleViewSystems))
-            .add_systems(Update, fly.after(crate::local_input::LookSystems))
+            .add_systems(Update, (fly, limit_gunner_aim).after(crate::local_input::LookSystems))
+            .add_systems(FixedFirst, remember_joints.run_if(in_state(ClientState::Disconnected)))
             .add_systems(
                 PostUpdate,
                 (place_vehicles, follow_vehicle_heading)
@@ -91,7 +92,20 @@ fn add_view(add: On<Add, Vehicle>, mut commands: Commands, motions: Query<&Vehic
             ..default()
         },
         Snapshots::default(),
+        PreviousJoints::default(),
     ));
+}
+
+/// Hosting: the joint angles before this tick, so turrets and control surfaces are drawn
+/// between ticks like avian draws the body (at 60 Hz they visibly stepped at higher frame
+/// rates, and a gunner's view rode on the stepping turret).
+#[derive(Component, Default)]
+struct PreviousJoints(Vec<[f32; 3]>);
+
+fn remember_joints(mut vehicles: Query<(&VehicleState, &mut PreviousJoints)>) {
+    for (state, mut previous) in &mut vehicles {
+        previous.0.clone_from(&state.joints);
+    }
 }
 
 fn record_snapshots(
@@ -120,17 +134,19 @@ fn place_vehicles(
         &VehicleState,
         &Snapshots,
         Option<&mut PredictedVehicle>,
+        &PreviousJoints,
         &mut VehicleView,
         &mut Transform,
     )>,
 ) {
     let connected = *state.get() == ClientState::Connected;
     let at = real.elapsed_secs_f64() - INTERPOLATION_DELAY;
-    for (motion, current, snapshots, predicted, mut view, mut transform) in &mut vehicles {
+    let alpha = fixed.overstep_fraction();
+    for (motion, current, snapshots, predicted, previous, mut view, mut transform) in &mut vehicles {
         if let Some(mut predicted) = predicted {
             // The vehicle we drive, predicted (see `vehicle_prediction`).
-            *transform = predicted.transform(fixed.overstep_fraction(), time.delta_secs());
-            view.joints.clone_from(&predicted.state.joints);
+            *transform = predicted.transform(alpha, time.delta_secs());
+            view.joints = between_ticks(&predicted.previous_joints, &predicted.state.joints, alpha);
             view.wheels.clone_from(&predicted.state.wheels);
             view.velocity = predicted.velocity();
             view.speed = view.velocity.dot(transform.rotation * Vec3::NEG_Z);
@@ -152,7 +168,7 @@ fn place_vehicles(
             view.boost = b.1.boost;
         } else {
             // Hosting: avian already interpolates the body's transform between ticks.
-            view.joints.clone_from(&current.joints);
+            view.joints = between_ticks(&previous.0, &current.joints, alpha);
             view.wheels.clone_from(&current.wheels);
             view.speed = motion.forward_speed();
             view.velocity = motion.velocity;
@@ -175,6 +191,16 @@ fn interpolate(snapshots: &VecDeque<(f64, VehicleMotion, VehicleState)>, at: f64
     let (t1, m1, s1) = &snapshots[i + 1];
     let t = ((at - t0) / (t1 - t0).max(1e-6)) as f32;
     Some(((*m0, s0.clone()), (*m1, s1.clone()), t.clamp(0.0, 1.0)))
+}
+
+/// Joint angles `alpha` of the way through the tick from `previous` (which may be missing, a
+/// new vehicle) to `current`.
+fn between_ticks(previous: &[[f32; 3]], current: &[[f32; 3]], alpha: f32) -> Vec<[f32; 3]> {
+    if previous.len() == current.len() {
+        lerp_joints(previous, current, alpha)
+    } else {
+        current.to_vec()
+    }
 }
 
 fn lerp_joints(a: &[[f32; 3]], b: &[[f32; 3]], t: f32) -> Vec<[f32; 3]> {
@@ -217,7 +243,7 @@ fn read_seat_keys(
 pub struct FlightStick {
     /// Piloting an aircraft: the mouse flies instead of looking around.
     pub active: bool,
-    /// x = roll right, y = pitch up (pulled back), -1..1.
+    /// x = roll right, y = nose up, -1..1.
     pub stick: Vec2,
     /// The mouse's share of the stick.
     mouse: Vec2,
@@ -253,7 +279,7 @@ fn fly(
         .ok()
         .and_then(|s| vehicles.get(s.vehicle).ok().filter(|(_, d)| pilots(d, s.seat)));
     flight.active = pilot.is_some();
-    let Some((view, _)) = pilot else {
+    let Some((view, data)) = pilot else {
         flight.stick = Vec2::ZERO;
         flight.mouse = Vec2::ZERO;
         flight.look = Vec2::ZERO;
@@ -261,8 +287,9 @@ fn fly(
     };
     let dt = time.delta_secs();
     let delta = if cursor_locked(&cursor) { mouse.delta } else { Vec2::ZERO };
-    let vertical = if look.invert_y { -delta.y } else { delta.y };
     if actions.pressed(Action::FreeLook) {
+        // Free look turns the view like looking around on foot.
+        let vertical = if look.invert_y { -delta.y } else { delta.y };
         let sensitivity = look.sensitivity;
         flight.look.x -= delta.x * sensitivity;
         flight.look.y = (flight.look.y - vertical * sensitivity).clamp(-1.4, 1.4);
@@ -273,8 +300,10 @@ fn fly(
             flight.look.y = (flight.look.y - gv * sensitivity * 60.0 * dt).clamp(-1.4, 1.4);
         }
     } else {
+        // The mouse moves the stick: up raises the nose (like looking up), unless the invert
+        // pitch setting makes it a flight stick (see below).
         let scale = STICK_PER_COUNT * look.sensitivity / crate::local_input::BASE_SENSITIVITY;
-        flight.mouse = (flight.mouse + Vec2::new(delta.x, vertical) * scale).clamp(Vec2::NEG_ONE, Vec2::ONE);
+        flight.mouse = (flight.mouse + Vec2::new(delta.x, -delta.y) * scale).clamp(Vec2::NEG_ONE, Vec2::ONE);
         flight.look *= (-LOOK_RETURN * dt).exp();
     }
     flight.mouse *= (-STICK_CENTERING * dt).exp();
@@ -292,12 +321,51 @@ fn fly(
             .map(|gamepad| crate::local_input::deadzone(gamepad.right_stick(), settings.gamepad.look_deadzone))
             .unwrap_or_default()
     };
-    flight.stick = (flight.mouse + keys + gamepad_stick).clamp(Vec2::NEG_ONE, Vec2::ONE);
+    let helicopter = data.0.desc.category == game_data::VehicleCategory::Helicopter;
+    flight.stick = compose_stick(flight.mouse, keys, gamepad_stick, settings.invert_pitch(helicopter));
     // The soldier looks where the camera does (the server aims with it, and it's the
     // facing when getting out).
     let (yaw, pitch, _) = flight_view(view.transform.rotation, flight.look).to_euler(EulerRot::YXZ);
     look.yaw = yaw;
     look.pitch = pitch.clamp(-1.5, 1.5);
+}
+
+/// The flight stick from the mouse's share, the keys (pitch-up key +y) and the gamepad's
+/// right stick (pushed forward +y), all "up raises the nose"; inverted (flight-stick style,
+/// BF2's default) they all push it down.
+fn compose_stick(mouse: Vec2, keys: Vec2, gamepad: Vec2, invert: bool) -> Vec2 {
+    let mut stick = (mouse + keys + gamepad).clamp(Vec2::NEG_ONE, Vec2::ONE);
+    if invert {
+        stick.y = -stick.y;
+    }
+    stick
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pitch_keys_follow_the_mouse() {
+        // Up on the keys, the mouse (its share goes up when moved up) and the gamepad raises
+        // the nose; inverted, all of them lower it.
+        let up = Vec2::Y;
+        for (mouse, keys, gamepad) in [(up, Vec2::ZERO, Vec2::ZERO), (Vec2::ZERO, up, Vec2::ZERO), (Vec2::ZERO, Vec2::ZERO, up)] {
+            assert_eq!(compose_stick(mouse, keys, gamepad, false).y, 1.0);
+            assert_eq!(compose_stick(mouse, keys, gamepad, true).y, -1.0);
+        }
+        // Roll never inverts.
+        assert_eq!(compose_stick(Vec2::X, Vec2::ZERO, Vec2::ZERO, true).x, 1.0);
+    }
+
+    #[test]
+    fn default_pitch_keys() {
+        use crate::settings::{Action, Binding, Settings};
+        let settings = Settings::default();
+        assert_eq!(settings.binding(Action::PitchUp), Some(Binding::Key(KeyCode::ArrowUp)));
+        assert_eq!(settings.binding(Action::PitchDown), Some(Binding::Key(KeyCode::ArrowDown)));
+        assert!(!settings.invert_jet_pitch && !settings.invert_heli_pitch);
+    }
 }
 
 /// The pilot's view: along the aircraft, turned by free look.
@@ -346,6 +414,163 @@ fn follow_vehicle_heading(
         }
     }
     *last = Some((seated.vehicle, seated.seat, now));
+}
+
+/// How far a gunner's aim may turn from the hull (radians, hull space): the limits of the
+/// turret (yaw) and gun (pitch) the seat aims, if they are limited.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AimLimits {
+    pub yaw: Option<(f32, f32)>,
+    pub pitch: Option<(f32, f32)>,
+}
+
+/// The aim limits of a seat: of the joints its camera rides on, else of the first ones the
+/// seat turns.
+pub fn aim_limits(model: &game_shared::vehicle::VehicleModel, seat: usize) -> AimLimits {
+    use game_data::JointInput;
+    let desc = &model.desc;
+    let mut chain = Vec::new();
+    let mut part = desc.seats.get(seat).and_then(|s| s.camera.as_ref()).map(|c| c.attachment.part as usize);
+    while let Some(index) = part {
+        chain.push(index);
+        part = desc.parts.get(index).and_then(|p| p.parent).map(|p| p as usize);
+    }
+    let find = |input: JointInput| {
+        let axis_of = |index: usize| {
+            let joint = desc.parts.get(index)?.joint.as_ref().filter(|j| j.seat as usize == seat)?;
+            joint.axes.iter().find(|a| a.input == Some(input))
+        };
+        chain
+            .iter()
+            .find_map(|i| axis_of(*i))
+            .or_else(|| (0..desc.parts.len()).find_map(axis_of))
+            .filter(|a| a.limited())
+            .map(|a| (a.min.min(a.max).to_radians(), a.max.max(a.min).to_radians()))
+    };
+    AimLimits {
+        yaw: find(JointInput::AimYaw),
+        pitch: find(JointInput::AimPitch),
+    }
+}
+
+/// A gunner's view turns with the mouse at once (the turret and gun follow at their BF2
+/// speeds; the HUD marks where the gun points meanwhile), but no further than they can
+/// reach: looking past the gun's depression, say, would leave the mouse turning nothing on
+/// the way back.
+fn limit_gunner_aim(
+    seated: Query<&Seated, With<LocalSoldier>>,
+    vehicles: Query<(&VehicleView, &VehicleData)>,
+    flight: Res<FlightStick>,
+    mut look: ResMut<LookState>,
+) {
+    let Some((seated, view, data)) = seated
+        .single()
+        .ok()
+        .filter(|_| !flight.active)
+        .and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d)| (s, v, d)))
+    else {
+        return;
+    };
+    let seat = seated.seat as usize;
+    if !data.0.seat_aims(seat) {
+        return;
+    }
+    let limits = aim_limits(&data.0, seat);
+    if limits == AimLimits::default() {
+        return;
+    }
+    let hull = view.transform.rotation;
+    let direction = hull.inverse() * (Quat::from_euler(EulerRot::YXZ, look.yaw, look.pitch, 0.0) * Vec3::NEG_Z);
+    let (yaw, pitch) = ((-direction.x).atan2(-direction.z), direction.y.clamp(-1.0, 1.0).asin());
+    let clamp = |angle: f32, limits: Option<(f32, f32)>| limits.map_or(angle, |(min, max)| angle.clamp(min, max));
+    let (limited_yaw, limited_pitch) = (clamp(yaw, limits.yaw), clamp(pitch, limits.pitch));
+    if (limited_yaw - yaw).abs() < 1e-4 && (limited_pitch - pitch).abs() < 1e-4 {
+        return;
+    }
+    let world = hull * (Quat::from_euler(EulerRot::YXZ, limited_yaw, limited_pitch, 0.0) * Vec3::NEG_Z);
+    look.yaw = (-world.x).atan2(-world.z);
+    look.pitch = world.y.clamp(-1.0, 1.0).asin();
+}
+
+/// How quickly the aircraft chase camera turns after the aircraft (1/s).
+const CHASE_STIFFNESS: f32 = 6.0;
+/// The pilot's camera looks this far ahead into the aircraft's turn (seconds of its turn
+/// rate, at most `LEAD_MAX` radians); the cockpit view half as far.
+const LEAD_TIME: f32 = 0.25;
+const LEAD_MAX: f32 = 0.2;
+/// How quickly the measured turn rate follows the aircraft (1/s).
+const TURN_RATE_SMOOTHING: f32 = 8.0;
+/// The chase camera pulls back this share further at 100 m/s.
+const CHASE_SPEED_STRETCH: f32 = 0.2;
+/// Stall buffet: the view shakes up to this much (radians).
+const BUFFET: f32 = 0.012;
+
+/// The pilot camera's memory from frame to frame.
+#[derive(Default)]
+pub struct PilotCamera {
+    smoothed: Option<Quat>,
+    last: Option<Quat>,
+    /// The aircraft's turn rate (hull space), smoothed.
+    turn_rate: Vec3,
+    time: f32,
+}
+
+/// Where the pilot's camera goes: the chase camera trails the aircraft's rotation a little,
+/// pulls back with speed and looks into the turn; the cockpit view is fixed to the aircraft,
+/// turned a little into the turn. Free look turns both. A stalling jet shakes.
+#[allow(clippy::too_many_arguments)]
+pub fn pilot_camera(
+    camera: &mut PilotCamera,
+    seat: &SeatView,
+    view: &VehicleView,
+    data: &VehicleData,
+    look: Vec2,
+    third_person: bool,
+    zoom: f32,
+    altitude: f32,
+    dt: f32,
+) -> (Transform, Option<(Vec3, Vec3)>) {
+    let rotation = view.transform.rotation;
+    if let Some(last) = camera.last
+        && dt > 0.0
+    {
+        let turn = rotation.inverse() * ((rotation * last.inverse()).to_scaled_axis() / dt);
+        camera.turn_rate += (turn - camera.turn_rate) * (1.0 - (-TURN_RATE_SMOOTHING * dt).exp());
+    }
+    camera.last = Some(rotation);
+    camera.time += dt;
+    let wanted = flight_view(rotation, look);
+    let smoothed = camera
+        .smoothed
+        .map_or(wanted, |c| c.slerp(wanted, 1.0 - (-CHASE_STIFFNESS * dt).exp()));
+    camera.smoothed = Some(smoothed);
+    let lead = Vec2::new(camera.turn_rate.y, camera.turn_rate.x) * LEAD_TIME;
+    let lead = lead.clamp_length_max(LEAD_MAX);
+    let body = game_shared::flight::BodyState {
+        position: view.transform.translation,
+        rotation,
+        velocity: view.velocity,
+        angular_velocity: Vec3::ZERO,
+    };
+    let stall = if game_shared::flight::jet_airborne(altitude) {
+        game_shared::flight::jet_stall(&data.0.desc, &body)
+    } else {
+        0.0
+    };
+    let t = camera.time;
+    let buffet = Vec2::new((t * 71.0).sin() + (t * 43.0).sin(), (t * 59.0).sin() + (t * 37.0).cos()) * 0.5 * BUFFET * stall;
+    let turn = |share: f32| Quat::from_euler(EulerRot::YXZ, lead.x * share + buffet.x, lead.y * share + buffet.y, 0.0);
+    if third_person {
+        let stretch = 1.0 + CHASE_SPEED_STRETCH * (view.velocity.length() / 100.0).min(1.5);
+        let offset = smoothed * Vec3::new(0.0, seat.chase_height, seat.chase_distance * 0.8 * zoom * stretch);
+        // The caller pulls the camera in if the world is in the way.
+        (
+            Transform::from_translation(seat.vehicle.translation + offset).with_rotation(smoothed * turn(1.0)),
+            Some((seat.vehicle.translation, offset)),
+        )
+    } else {
+        (Transform::from_translation(seat.eye).with_rotation(wanted * turn(0.5)), None)
+    }
 }
 
 /// BF2's sight of the weapon fired from our seat (its vehicle HUD: reticle, sight frame), over
@@ -435,9 +660,6 @@ fn update_sight(
 /// Where the camera goes for a seat: the seat camera's eye point and chase settings.
 pub struct SeatView {
     pub eye: Vec3,
-    /// Gunners' cameras ride on the turret or gun they aim: the view turns with it (at its
-    /// speed, as in BF2) rather than with the mouse.
-    pub aimed: Option<Quat>,
     pub vehicle: Transform,
     pub chase_distance: f32,
     pub chase_height: f32,
@@ -459,20 +681,9 @@ pub fn seat_view(seated: &Seated, vehicles: &Query<(&VehicleView, &VehicleData)>
         .camera
         .as_ref()
         .map_or((12.0, 1.0), |c| (c.chase_distance, c.chase_offset[1]));
-    let aims = |axis: &game_data::JointAxis| {
-        matches!(axis.input, Some(game_data::JointInput::AimYaw | game_data::JointInput::AimPitch))
-    };
-    let mut part = seat.camera.as_ref().map(|c| c.attachment.part as usize);
-    let mut aimed = false;
-    while let Some(index) = part {
-        let desc = &model.desc.parts[index];
-        aimed |= desc.joint.as_ref().is_some_and(|j| j.axes.iter().any(aims));
-        part = desc.parent.map(|p| p as usize);
-    }
     let world = view.transform * local;
     Some(SeatView {
         eye: world.translation,
-        aimed: aimed.then_some(world.rotation),
         vehicle: view.transform,
         chase_distance,
         chase_height,

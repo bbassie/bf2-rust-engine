@@ -1,0 +1,60 @@
+// Tank turret feel, T-90 on Karkand (driver's seat, which also aims the main gun): the view
+// turns with the aim at once and the turret follows at BF2's 30 deg/s (the gun marker shows
+// where the barrel points meanwhile); looking below the gun's depression stops at it (no
+// dead zone on the way back); the hull turning under a steady aim; the same from the chase
+// camera. VehicleInfo logs the turret and gun angles.
+// client --scenario scenarios/vehicles/vfeel_tank.ron --out target/scenarios/vfeel/tank
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        NearVehicle("rutnk_t90"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(1.0),
+        VehicleLook(0.0, 0.0),
+        Wait(1.5),
+        VehicleInfo("ahead"),
+        Screenshot("01_ahead"),
+        // Swing 90 degrees left: the view is there at once, the turret takes 3 s.
+        VehicleLook(90.0, 0.0),
+        Wait(0.5),
+        VehicleInfo("swing 0.5 s"),
+        Screenshot("02_swing_catching_up"),
+        Wait(1.0),
+        VehicleInfo("swing 1.5 s"),
+        Wait(2.0),
+        VehicleInfo("swing 3.5 s"),
+        Screenshot("03_swing_caught_up"),
+        // Far below the gun's depression (-5): held at the limit.
+        VehicleLook(90.0, -40.0),
+        Wait(1.5),
+        VehicleInfo("look down"),
+        Screenshot("04_depression_limit"),
+        VehicleLook(90.0, 10.0),
+        Wait(1.0),
+        VehicleInfo("look up"),
+        // Driving and turning with the aim held.
+        VehicleLook(0.0, 0.0),
+        Wait(3.0),
+        Move(1.0, 0.5),
+        Wait(3.0),
+        VehicleInfo("hull turning, aim held"),
+        Screenshot("05_hull_turning"),
+        Move(0.0, 0.0),
+        ThirdPerson(true),
+        VehicleLook(60.0, 0.0),
+        Wait(0.6),
+        Screenshot("06_chase_swing"),
+        Wait(2.5),
+        VehicleInfo("chase"),
+        ForbidLog("panicked"),
+        Quit,
+    ],
+)

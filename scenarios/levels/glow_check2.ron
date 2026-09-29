@@ -1,0 +1,14 @@
+(
+    level: "midnight_sun",
+    bots: 0,
+    steps: [
+        WaitReady,
+        Teleport((-440.0, 87.0, 140.0), 90.0, 0.0),
+        Wait(0.5),
+        Screenshot("gas_station_wide"),
+        Teleport((-444.0, 87.0, 128.0), 0.0, 0.0),
+        Wait(0.5),
+        Screenshot("gas_station_close"),
+        Quit,
+    ],
+)

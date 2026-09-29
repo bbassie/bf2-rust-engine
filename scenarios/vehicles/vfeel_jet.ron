@@ -1,0 +1,124 @@
+// Jet handling (BF3/BF4-style fly-by-wire over BF2's data), J-10 over Wake Island: take-off,
+// then placed level at altitude for each test: hands off (flies straight on), full roll, a
+// full-stick loop at the corner speed, banked turns at corner speed with the throttle
+// neutral, with the afterburner, fast, and slow with the air brake, rudder yaw, and a stall
+// and its recovery. `python scripts/flight_rates.py <out>/report.txt` turns the trace into
+// turn, pitch and roll rates. Screenshots: chase camera in the turn, the stall, cockpit.
+// (The pitch keys and their inversion need a grabbed cursor, which scenarios don't have;
+// `vehicles::tests` checks the mapping.)
+// client --scenario scenarios/vehicles/vfeel_jet.ron --out target/scenarios/vfeel/jet
+(
+    level: "wake_island_2007",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        NearVehicle("air_j10"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        ThirdPerson(true),
+        Move(0.0, 1.0),
+        VehicleTrace("takeoff", 6.0),
+        Stick(0.0, 0.6),
+        VehicleTrace("rotate", 1.5),
+        Stick(0.0, 0.0),
+        VehicleTrace("climb", 3.0),
+        Screenshot("01_climb"),
+
+        // Hands off at the corner speed: keeps its attitude.
+        Move(0.0, 0.0),
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        VehicleTrace("hands off", 3.0),
+
+        // Full right roll.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Stick(1.0, 0.0),
+        VehicleTrace("roll", 1.5),
+        Stick(0.0, 0.0),
+        VehicleTrace("roll stop", 1.0),
+
+        // Full stick back at the corner speed, full throttle: a loop.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Move(0.0, 1.0),
+        Stick(0.0, 1.0),
+        VehicleTrace("loop", 4.0),
+        Stick(0.0, 0.0),
+
+        // Banked turn at the corner speed, throttle neutral: roll 80 degrees, pull.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Move(0.0, 0.0),
+        Stick(1.0, 0.0),
+        VehicleTrace("bank", 0.5),
+        Stick(0.0, 1.0),
+        VehicleTrace("turn corner", 5.0),
+        Screenshot("02_turn_chase"),
+        Stick(0.0, 0.0),
+
+        // The same with the afterburner.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Hold([Sprint]),
+        Move(0.0, 1.0),
+        Stick(1.0, 0.0),
+        VehicleTrace("bank", 0.5),
+        Stick(0.0, 1.0),
+        VehicleTrace("turn afterburner", 5.0),
+        Stick(0.0, 0.0),
+        Release([Sprint]),
+
+        // Fast (afterburner speed): wider.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 140.0),
+        Hold([Sprint]),
+        Stick(1.0, 0.0),
+        VehicleTrace("bank", 0.5),
+        Stick(0.0, 1.0),
+        VehicleTrace("turn fast", 4.0),
+        Stick(0.0, 0.0),
+        Release([Sprint]),
+
+        // Slow, air brake: mushy.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 55.0),
+        Move(0.0, -1.0),
+        Stick(1.0, 0.0),
+        VehicleTrace("bank", 0.5),
+        Stick(0.0, 1.0),
+        VehicleTrace("turn slow", 4.0),
+        Stick(0.0, 0.0),
+
+        // Rudder.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Move(1.0, 0.0),
+        VehicleTrace("rudder", 3.0),
+        Move(0.0, 0.0),
+        VehicleTrace("rudder off", 1.0),
+
+        // Stall: slow, engine idle, stick back; then let go, full throttle.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 45.0),
+        Move(0.0, -1.0),
+        Stick(0.0, 1.0),
+        VehicleTrace("stall", 5.0),
+        Screenshot("03_stall"),
+        Stick(0.0, 0.0),
+        Move(0.0, 1.0),
+        VehicleTrace("recover", 3.0),
+        Stick(0.0, 0.6),
+        VehicleTrace("pull out", 3.0),
+        Stick(0.0, 0.0),
+
+        // Cockpit, in a turn.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        ThirdPerson(false),
+        Stick(0.7, 0.0),
+        Wait(0.4),
+        Stick(0.0, 0.8),
+        Wait(1.0),
+        Screenshot("04_cockpit_turn"),
+        Stick(0.0, 0.0),
+        ForbidLog("panicked"),
+        Quit,
+    ],
+)

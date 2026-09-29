@@ -1,0 +1,31 @@
+// Frame times with many bots on AIX 2's Archipelago (about 6,600 statics, against Karkand's
+// 1,800), 64 player layout, as a soldier: at spawn, from a fixed spot at the Village flag,
+// and at the Bridge flag after the bots have spread out. Needs the AIX 2 mod imported into
+// mods/aix2. The bot count comes from the command line.
+// client --mods mods --scenario scenarios/perf/perf_archipelago.ron --bots 63 --out target/scenarios/perf/archipelago_63
+(
+    level: "aix2_aix_archipelago",
+    size: 64,
+    team: 1,
+    steps: [
+        WaitReady,
+        Wait(3.0),
+        Measure("spawn", 6.0),
+        Screenshot("spawn"),
+        // Fixed view: at the Village flag.
+        Teleport((-346.5, 58.0, 366.3), 45.0, -3.0),
+        Wait(2.0),
+        Screenshot("fixed"),
+        Measure("fixed", 8.0),
+        Wait(20.0),
+        // The Bridge flag, in the middle of the island.
+        Teleport((-209.5, 45.0, 14.4), 0.0, -2.0),
+        Wait(2.0),
+        Screenshot("fight"),
+        Measure("fight", 8.0),
+        Look(180.0, -2.0),
+        Measure("fight_back", 5.0),
+        Screenshot("fight_back"),
+        Quit,
+    ],
+)

@@ -3,7 +3,9 @@
 //! where the turret points, and the seat's guns and countermeasures; pilots also get flight
 //! instruments around the crosshair: a horizon with a pitch ladder that banks with the
 //! aircraft, the heading above, airspeed and throttle on the left, altitude and climb rate on
-//! the right, and stall and pull-up warnings.
+//! the right (the speed lit up in the jet's best turning band), and stall and pull-up
+//! warnings. Markers over the view show where a jet is going (its flight path) and, while a
+//! gunner's turret or gun is still turning after his aim, where the gun points.
 
 use std::fmt::Write as _;
 
@@ -26,7 +28,13 @@ pub struct VehicleHudPlugin;
 impl Plugin for VehicleHudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_hud)
-            .add_systems(Update, (update_panel, update_instruments));
+            .add_systems(Update, (update_panel, update_instruments))
+            .add_systems(
+                PostUpdate,
+                update_markers
+                    .after(crate::camera::CameraSystems)
+                    .before(bevy::ui::UiSystems::Layout),
+            );
     }
 }
 
@@ -91,6 +99,18 @@ struct ThrottleFill;
 struct BoostFill;
 #[derive(Component)]
 struct WarningText;
+/// Where a jet is going.
+#[derive(Component)]
+struct FlightPathMarker;
+/// Where a gunner's gun points while it catches up with his aim.
+#[derive(Component)]
+struct GunMarker;
+
+/// The speed shows in this colour within this share of a jet's corner speed.
+const CORNER_BAND: f32 = 0.12;
+const CORNER_COLOR: Color = Color::srgb(0.45, 0.8, 1.0);
+/// The gun marker shows once it's this far (logical pixels) from the crosshair.
+const GUN_MARKER_MIN_OFFSET: f32 = 10.0;
 
 fn font(size: f32) -> TextFont {
     TextFont {
@@ -130,7 +150,26 @@ fn fill(color: Color) -> (Node, BackgroundColor) {
     )
 }
 
+/// A ring marker over the view, placed by `update_markers`.
+fn ring(size: f32, color: Color) -> (Node, BorderColor, Visibility, Pickable) {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(size),
+            height: px(size),
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::MAX,
+            ..default()
+        },
+        BorderColor::all(color),
+        Visibility::Hidden,
+        Pickable::IGNORE,
+    )
+}
+
 fn spawn_hud(mut commands: Commands) {
+    commands.spawn((FlightPathMarker, ring(16.0, INSTRUMENT)));
+    commands.spawn((GunMarker, ring(22.0, Color::srgba(1.0, 0.85, 0.4, 0.85))));
     // The panel, where soldiers have their weapon and ammo.
     commands
         .spawn((
@@ -580,6 +619,7 @@ fn update_instruments(
     mut boost: Single<&mut Node, (With<BoostFill>, Without<PitchLadder>, Without<ThrottleFill>)>,
     mut rungs: Query<(&Rung, &mut Visibility), Without<Instruments>>,
     texts: InstrumentTexts,
+    mut speed_color: Single<&mut TextColor, (With<SpeedText>, Without<WarningText>)>,
 ) {
     let (mut heading_text, mut speed_text, mut altitude_text, warning) = texts;
     let (mut warning_text, mut warning_color) = warning.into_inner();
@@ -619,6 +659,10 @@ fn update_instruments(
     if speed_text.0 != wanted {
         speed_text.0 = wanted;
     }
+    // Jets turn best around their corner speed.
+    let corner = game_shared::flight::JetEnvelope::of(desc).corner;
+    let in_band = desc.category == VehicleCategory::Air && (speed / corner - 1.0).abs() < CORNER_BAND;
+    speed_color.0 = if in_band { CORNER_COLOR } else { INSTRUMENT };
     let filter = SpatialQueryFilter::from_mask(GameLayer::World);
     let altitude = spatial
         .cast_ray(view.transform.translation, Dir3::NEG_Y, 2000.0, true, &filter)
@@ -634,11 +678,18 @@ fn update_instruments(
     // Warnings: the ground coming up fast, or too slow to fly (jump jets that slow hover).
     let impact = if climb < -1.0 { altitude / -climb } else { f32::MAX };
     let slow = desc.category == VehicleCategory::Air && altitude > 8.0 && speed < 30.0;
+    let body = game_shared::flight::BodyState {
+        position: view.transform.translation,
+        rotation,
+        velocity: view.velocity,
+        angular_velocity: Vec3::ZERO,
+    };
+    let stalled = game_shared::flight::jet_airborne(altitude) && game_shared::flight::jet_stall(desc, &body) > 0.35;
     let (warning, color) = if altitude < 200.0 && impact < 4.0 {
         ("PULL UP", WARNING)
     } else if slow && desc.rotor.is_some() {
         ("HOVER", INSTRUMENT)
-    } else if slow {
+    } else if stalled {
         ("STALL", WARNING)
     } else {
         ("", WARNING)
@@ -647,4 +698,63 @@ fn update_instruments(
         warning_text.0 = warning.into();
     }
     warning_color.0 = color;
+}
+
+/// Places the flight path and gun markers over the view.
+#[allow(clippy::type_complexity)]
+fn update_markers(
+    seated: Query<&Seated, With<LocalSoldier>>,
+    vehicles: Query<(&VehicleView, &VehicleData)>,
+    camera: Single<(&Camera, &Transform), With<crate::camera::PlayerCamera>>,
+    spatial: SpatialQuery,
+    mut path: Single<(&mut Node, &mut Visibility), (With<FlightPathMarker>, Without<GunMarker>)>,
+    mut gun: Single<(&mut Node, &mut Visibility), (With<GunMarker>, Without<FlightPathMarker>)>,
+) {
+    let (camera, eye) = *camera;
+    let eye_global = GlobalTransform::from(*eye);
+    let centre = camera.logical_viewport_size().unwrap_or_default() * 0.5;
+    let place = |node: &mut Node, visibility: &mut Visibility, point: Option<Vec3>, size: f32, min_offset: f32| {
+        let at = point
+            .filter(|p| (*p - eye.translation).dot(eye.forward().as_vec3()) > 0.0)
+            .and_then(|p| camera.world_to_viewport(&eye_global, p).ok())
+            .filter(|at| at.distance(centre) >= min_offset);
+        match at {
+            Some(at) => {
+                node.left = px(at.x - size * 0.5);
+                node.top = px(at.y - size * 0.5);
+                *visibility = Visibility::Inherited;
+            }
+            None => *visibility = Visibility::Hidden,
+        }
+    };
+    let inside = seated.single().ok().and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d)| (s, v, d)));
+    // The flight path: a jet's velocity, far ahead.
+    let flight_path = inside
+        .filter(|(s, _, d)| s.seat == 0 && d.0.desc.category == VehicleCategory::Air)
+        .filter(|(_, v, _)| v.velocity.length() > 20.0)
+        .map(|(_, v, _)| eye.translation + v.velocity.normalize() * 1000.0);
+    let (node, visibility) = &mut *path;
+    place(node, visibility, flight_path, 16.0, 0.0);
+    // The gun: where the seat's main gun points, while it's off the aim.
+    let gun_point = inside.filter(|(s, _, d)| d.0.seat_aims(s.seat as usize)).and_then(|(s, view, data)| {
+        let model = &data.0;
+        let index = model
+            .desc
+            .weapons
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.seat == s.seat as u32)
+            .min_by_key(|(_, w)| w.alt_fire)
+            .map(|(i, _)| i)?;
+        let transforms = model.part_transforms(&view.joints);
+        let muzzle = view.transform * model.muzzle(&transforms, index);
+        // Where the barrel's line meets something, like the aim converges on what's under
+        // the crosshair.
+        let direction = Dir3::new(muzzle.rotation * Vec3::NEG_Z).ok()?;
+        let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([s.vehicle]);
+        let distance = spatial.cast_ray(muzzle.translation, direction, 800.0, true, &filter).map_or(800.0, |hit| hit.distance);
+        Some(muzzle.translation + *direction * distance)
+    });
+    let (node, visibility) = &mut *gun;
+    place(node, visibility, gun_point, 22.0, GUN_MARKER_MIN_OFFSET);
 }
