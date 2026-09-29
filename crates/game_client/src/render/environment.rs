@@ -720,6 +720,8 @@ fn clear_environment(
     mut clear: ResMut<ClearColor>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut cameras: Query<&mut DistanceFog, With<PlayerCamera>>,
+    suns: Query<Entity, With<Sun>>,
+    skies: Query<Entity, With<SkyDome>>,
 ) {
     commands.remove_resource::<LevelLight>();
     commands.remove_resource::<SkyLight>();
@@ -729,6 +731,9 @@ fn clear_environment(
     for mut fog in &mut cameras {
         *fog = DistanceFog::default();
     }
+    // `Sun` and `SkyDome` are `LevelEntity`s: by the time this runs (`leave_match` despawns
+    // them synchronously, earlier the same frame), both counts should already be 0.
+    info!("left the match: {} suns, {} sky domes left over", suns.iter().count(), skies.iter().count());
 }
 
 fn apply_environment(

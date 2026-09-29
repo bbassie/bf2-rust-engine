@@ -714,4 +714,66 @@ mod tests {
         stop(app.world_mut());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn admission_and_transfer_caps_and_manifest_cache() {
+        let dir = std::env::temp_dir().join(format!("bf2_content_caps_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mod_dir = dir.join("mods/sample");
+        std::fs::create_dir_all(mod_dir.join("levels/x")).unwrap();
+        std::fs::write(mod_dir.join("mod.ron"), "(name: \"Sample\")").unwrap();
+        std::fs::write(mod_dir.join("levels/x/level.ron"), "(name: \"x\")").unwrap();
+        let paths = GamePaths::resolve_with_mods(Some(dir.join("imported")), Some(dir.join("mods")));
+        let port = 27891;
+        let mut app = App::new();
+        app.insert_resource(paths).insert_resource(ServerSettings {
+            port,
+            content: ContentSettings { cache_dir: Some(dir.join("cache")), ..default() },
+            ..default()
+        });
+        start(app.world_mut());
+        let shared = app.world().resource::<ContentServer>().shared.clone();
+        let level_hash = loop {
+            let (status, body) = get(port, MANIFEST_URL_PATH, None);
+            if status == 200 {
+                let manifest = content::Manifest::parse(&body).unwrap();
+                break manifest.files().find(|(_, f)| f.path == "levels/x/level.ron").unwrap().1.hash.clone();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        // The encoded manifest is reused across requests until something changes (S22).
+        let cached = shared.manifest_cache.lock().unwrap().as_ref().unwrap().2.clone();
+        get(port, MANIFEST_URL_PATH, None);
+        assert!(Arc::ptr_eq(&cached, &shared.manifest_cache.lock().unwrap().as_ref().unwrap().2), "same Arc: not re-encoded");
+
+        // Filling the transfer slots (S8) makes further downloads answer busy, not hang or
+        // queue behind a worker thread; other requests (manifest) are unaffected.
+        shared.transfers.store(MAX_TRANSFERS, Ordering::SeqCst);
+        assert_eq!(get(port, &format!("{FILE_URL_PREFIX}{level_hash}"), None).0, 503);
+        assert_eq!(get(port, MANIFEST_URL_PATH, None).0, 200, "manifest requests aren't held up by full transfer slots");
+        shared.transfers.store(0, Ordering::SeqCst);
+        assert_eq!(get(port, &format!("{FILE_URL_PREFIX}{level_hash}"), None).0, 200, "a freed slot works again");
+
+        // A source address that already has too many requests admitted is refused quickly
+        // rather than processed (S8/S22): tiny_http gives no real connection cap, so this is
+        // ours. Let the requests above finish releasing their slot (that happens just after
+        // we read their response, so it can still be settling) before saturating it, and
+        // hold every real check under one more slot of slack so a guard genuinely still
+        // settling can't flip the result.
+        std::thread::sleep(Duration::from_millis(200));
+        let ip = Ipv4Addr::LOCALHOST.into();
+        let mut guards = Vec::new();
+        while let Some(guard) = shared.admission.enter(ip) {
+            guards.push(guard);
+            assert!(guards.len() <= 2 * MAX_REQUESTS_PER_IP as usize, "the per-address cap should have bitten by now");
+        }
+        assert!(shared.admission.enter(ip).is_none(), "still saturated");
+        assert_eq!(get(port, MANIFEST_URL_PATH, None).0, 429, "a request over the cap is refused");
+        drop(guards);
+        assert_eq!(get(port, MANIFEST_URL_PATH, None).0, 200, "and works again once the slots free up");
+
+        stop(app.world_mut());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

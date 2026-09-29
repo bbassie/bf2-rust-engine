@@ -27,6 +27,43 @@ use crate::{
     vehicles::VehicleView,
 };
 
+/// Map position (0..1, top-left origin, north up) of a world position: the one conversion
+/// `deploy`, `bigmap`, `commander` and `minimap` all did their own (identical) copy of.
+pub fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
+    let Some(heightmap) = &level.heightmap else {
+        return Vec2::splat(0.5);
+    };
+    let size = heightmap.world_size().max(1.0);
+    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
+    Vec2::new((position.x - corner.x) / size, (position.z - corner.z) / size)
+}
+
+/// The point on the ground at a map position: [`map_uv`]'s inverse.
+pub fn map_point(level: &LoadedLevel, uv: Vec2) -> Vec3 {
+    let Some(heightmap) = &level.heightmap else {
+        return Vec3::ZERO;
+    };
+    let size = heightmap.world_size().max(1.0);
+    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
+    let (x, z) = (corner.x + uv.x * size, corner.z + uv.y * size);
+    Vec3::new(x, heightmap.height_at(x, z), z)
+}
+
+/// Meters across the map.
+pub fn map_size(level: &LoadedLevel) -> f32 {
+    level.heightmap.as_ref().map_or(1.0, |h| h.world_size().max(1.0))
+}
+
+/// [`map_uv`] and [`map_size`] together, for the minimap's own fallback without a heightmap
+/// (a 1000 m window centered on the camera, rather than [`map_uv`]'s constant 0.5, 0.5: the
+/// minimap always needs a plausible width to scale its icons and range ring by).
+pub fn to_map(level: &LoadedLevel, position: Vec3) -> (Vec2, f32) {
+    match &level.heightmap {
+        Some(_) => (map_uv(level, position), map_size(level)),
+        None => (Vec2::new(position.x, position.z) / 1000.0 + 0.5, 1000.0),
+    }
+}
+
 pub struct MapIconsPlugin;
 
 impl Plugin for MapIconsPlugin {

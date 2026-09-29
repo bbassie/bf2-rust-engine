@@ -51,8 +51,10 @@ impl Identity {
         Ok(Self::from_secret(secret))
     }
 
-    /// Writes the key file, readable by this user only (on Unix; Windows keeps the user's
-    /// profile folders private by default).
+    /// Writes the key file, readable by this user only: a file mode on Unix, a best-effort
+    /// ACL restriction on Windows (S38, below), since Windows has no equivalent of the mode
+    /// bits and the containing folder isn't always the private, per-user default (`--data-dir`
+    /// / `--identity` can point anywhere, including a folder other accounts can read).
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -71,7 +73,10 @@ impl Identity {
             io::Write::write_all(&mut file, text.as_bytes())?;
             file.sync_all()?;
         }
-        std::fs::rename(&temp, path)
+        std::fs::rename(&temp, path)?;
+        #[cfg(windows)]
+        restrict_windows_acl(path);
+        Ok(())
     }
 
     /// The key in `path`, or a new one saved there. Also says whether it is new.
@@ -109,6 +114,34 @@ impl Identity {
             public_key: self.public_hex(),
             signature: hex(&self.sign(&proof_message(purpose, nonce, manifest_id, name))),
         }
+    }
+}
+
+/// Restricts a just-written key file to the current user only, using the OS's own `icacls`
+/// (no extra dependency for this). Best-effort: `icacls` can be missing, the volume might not
+/// be NTFS, or the environment might be locked down; any of that only warns (S38); the key is
+/// written either way, just not necessarily locked down beyond the containing folder.
+#[cfg(windows)]
+fn restrict_windows_acl(path: &Path) {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let account = match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() && !user.is_empty() => format!("{domain}\\{user}"),
+        _ => user.clone(),
+    };
+    let restricted = !account.is_empty()
+        && std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{account}:F"))
+            .output()
+            .is_ok_and(|o| o.status.success());
+    if !restricted {
+        eprintln!(
+            "warning: couldn't restrict {}'s permissions to the current user (is `icacls` available?); keep \
+             its folder private, since anyone who can read this file can impersonate its holder",
+            path.display()
+        );
     }
 }
 

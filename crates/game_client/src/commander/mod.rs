@@ -75,12 +75,7 @@ const DIM: Color = Color::srgba(0.85, 0.87, 0.9, 0.6);
 /// The commander's color on the panels.
 pub const GOLD: Color = Color::srgb(0.98, 0.8, 0.35);
 
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
+use crate::ui_theme::font;
 
 /// Caps Lock opens and closes the commander screen, for the commander only.
 #[allow(clippy::too_many_arguments)]
@@ -227,28 +222,7 @@ fn press_deploy_panel(
     }
 }
 
-/// Map position (0..1, top-left origin, north up) of a world position, as on the big map.
-pub fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
-    let Some(heightmap) = &level.heightmap else {
-        return Vec2::splat(0.5);
-    };
-    let size = heightmap.world_size().max(1.0);
-    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
-    Vec2::new((position.x - corner.x) / size, (position.z - corner.z) / size)
-}
-
-/// The point on the ground at a map position.
-pub fn map_point(level: &LoadedLevel, uv: Vec2) -> Vec3 {
-    let Some(heightmap) = &level.heightmap else {
-        return Vec3::ZERO;
-    };
-    let size = heightmap.world_size().max(1.0);
-    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
-    let (x, z) = (corner.x + uv.x * size, corner.z + uv.y * size);
-    Vec3::new(x, heightmap.height_at(x, z), z)
-}
-
-/// Meters across the map.
-pub fn map_size(level: &LoadedLevel) -> f32 {
-    level.heightmap.as_ref().map_or(1.0, |h| h.world_size().max(1.0))
-}
+// `map_uv`/`map_point`/`map_size` moved to `map_icons` (they were duplicated, byte for byte,
+// across `deploy`, `bigmap` and here); re-exported so `screen` and `markers` keep using them
+// as `super::map_uv` and the like.
+pub use crate::map_icons::{map_point, map_size, map_uv};

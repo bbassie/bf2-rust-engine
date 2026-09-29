@@ -20,6 +20,7 @@ use game_shared::{
 use crate::{
     net::LocalSoldier,
     settings::{Action, Actions},
+    ui_theme::{font, shadow},
     vehicles::{VehicleView, readable_name},
 };
 
@@ -112,19 +113,6 @@ const CORNER_COLOR: Color = Color::srgb(0.45, 0.8, 1.0);
 /// The gun marker shows once it's this far (logical pixels) from the crosshair.
 const GUN_MARKER_MIN_OFFSET: f32 = 10.0;
 
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
-
-fn shadow() -> TextShadow {
-    TextShadow {
-        offset: Vec2::splat(1.0),
-        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-    }
-}
 
 fn bar(width: f32, height: f32) -> (Node, BackgroundColor) {
     (

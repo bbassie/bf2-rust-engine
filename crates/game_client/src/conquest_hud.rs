@@ -25,6 +25,7 @@ use game_shared::{
 use crate::{
     map_icons::UiIcons,
     net::{LocalPlayer, LocalSoldier},
+    ui_theme::{font, shadow},
 };
 
 pub struct ConquestHudPlugin;
@@ -154,20 +155,6 @@ struct FlagFeedText;
 struct RoundBanner;
 #[derive(Component)]
 struct RoundBannerText;
-
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
-
-fn shadow() -> TextShadow {
-    TextShadow {
-        offset: Vec2::splat(1.0),
-        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-    }
-}
 
 fn spawn_conquest_hud(mut commands: Commands) {
     // Top center: our tickets, the objectives, their tickets; the stage under them.

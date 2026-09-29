@@ -81,6 +81,7 @@ mod render;
 mod scenario;
 mod settings;
 mod summary;
+mod ui_theme;
 mod vehicle_prediction;
 mod vehicle_hud;
 mod vehicles;

@@ -25,6 +25,7 @@ use crate::{
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
     settings::{Action, Actions},
+    ui_theme::{font, shadow},
 };
 
 pub struct WoundedPlugin;
@@ -113,19 +114,6 @@ struct Notices {
     changed: bool,
 }
 
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
-
-fn shadow() -> TextShadow {
-    TextShadow {
-        offset: Vec2::splat(1.0),
-        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-    }
-}
 
 fn spawn_ui(mut commands: Commands) {
     // Markers over downed teammates, under everything else.

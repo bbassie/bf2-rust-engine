@@ -19,6 +19,7 @@ use crate::{
     menu::{Menu, MenuKeys, Screen},
     net::{ActiveMatch, LocalPlayer},
     settings::{Action, Binding, Settings},
+    ui_theme::{font, shadow},
 };
 
 pub struct ChatPlugin;
@@ -74,19 +75,6 @@ struct LineAge(f64);
 #[derive(Component)]
 struct BaseColor(Color);
 
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
-
-fn shadow() -> TextShadow {
-    TextShadow {
-        offset: Vec2::splat(1.0),
-        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-    }
-}
 
 fn spawn_chat_box(mut commands: Commands) {
     commands

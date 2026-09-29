@@ -21,6 +21,7 @@ use crate::{
     net::{LocalPlayer, LocalSoldier},
     prediction::{Predicted, PredictionStats},
     settings::{Action, Actions, CrosshairStyle, Settings},
+    ui_theme::{font, shadow},
 };
 
 pub struct HudPlugin;
@@ -83,20 +84,6 @@ struct ScoreboardTeam(usize);
 #[derive(Component)]
 struct ScoreboardFlag(usize);
 
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
-
-/// A tight drop shadow; the default 4 px offset reads as a second copy of small text.
-fn shadow() -> TextShadow {
-    TextShadow {
-        offset: Vec2::splat(1.0),
-        color: Color::srgba(0.0, 0.0, 0.0, 0.8),
-    }
-}
 
 fn spawn_hud(mut commands: Commands) {
     // Status line.

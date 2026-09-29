@@ -334,6 +334,11 @@ game reads), never code, and every file is checked against its hash before it is
   `--public`. For players on other machines, open TCP as well as UDP for the port.
   Browsers (LAN and master server) show what a server shares and roughly how much a client
   downloads, e.g. `shares mods, 9.1 MB`.
+- `tiny_http` (what the endpoint is built on) doesn't expose a real per-connection timeout or
+  connection cap, so the endpoint caps requests itself instead: per source address, in total,
+  and separately for file transfers (a handful of slow downloads can't starve out the small,
+  fast manifest/identity checks other joining players need). None of this is configurable;
+  it's sized generously for normal play.
 - Clients get the files of the maps the server plays: the current one and the rotation. The
   server works out which files each level uses from the references in the data, so a
   client that joins a BF2 map downloads that map and what it uses (about 0.5 GB with `All`),
@@ -436,9 +441,16 @@ and every server that isn't *ranked* work without it and without an account.
   `master_url` in the settings), then log in or register (name, password, optional email).
   Logged in, the page shows your rank, the XP to the next one and your career stats. The
   same account logs in on the master's web pages (leaderboards, profiles).
+  `master_url` must be `https://`; a plain `http://` address is only accepted to
+  `localhost`/`127.0.0.1` (for testing a master on your own machine), since it would
+  otherwise send your password and tokens in the clear.
 - The game keeps a **refresh token**, never your password, in `account.ron` in the config
   folder (`%APPDATA%\bf2-rust-engine` on Windows; next to `--settings` if given). *Log out*
-  revokes it on the master and deletes it.
+  revokes it on the master and deletes it. `account.ron` also remembers the master's key
+  fingerprint from your last login there; if it ever answers with a different one, the game
+  refuses to log in rather than trust a possibly different server, and says so on the
+  Account page (log out and back in if the master's key really did change, e.g. after
+  restoring `master.key` from a backup).
 - Joining a server that takes accounts, the game asks the master for a **ticket** for that
   server (after the server proved its identity). A ticket works on that one server, once,
   for a few minutes. **Ranked** servers need one: log in to play there. On other servers it
@@ -460,7 +472,9 @@ and every server that isn't *ranked* work without it and without an account.
 
 - **Unranked** (the default): leave it all out. With `master_url` set, the server checks the
   tickets players offer (offline, with the master's key) and shows their account name and
-  rank; anyone can still join.
+  rank; anyone can still join. As on the client, `master_url` must be `https://` unless it
+  points at `localhost`/`127.0.0.1`; the server refuses to use it otherwise (its own API key,
+  when ranked, and the master's key travel over that address).
 - **Ranked**: the master's admin runs `master add-server --name "My server"`, which prints
   an API key once. Put it in the config with `ranked: true` and `master_url`. The server then
   requires accounts, sends the master a heartbeat every 30 s (so it is listed as ranked,
@@ -489,13 +503,23 @@ It listens on UDP 16580 (server list) and HTTP 16581 (web pages and API), on 127
 default. The data folder holds `master.sqlite` (accounts, stats) and `master.key` (the key
 that signs tokens, made on the first start). **Back up both**; game servers pin the key, so
 a new key means every ranked server has to forget the old one (delete its line in
-`master-keys.txt`).
+`master-keys.txt`). `master.key` (and a game server's `identity.key`) are written readable
+by your own account only: a Unix file mode, or on Windows a best-effort ACL restriction (the
+`icacls` that ships with Windows; if that fails for some reason, the game warns and you
+should keep the containing folder private yourself).
 
 **Production needs TLS**: passwords and tokens must not cross the internet in the clear.
 Run the master on 127.0.0.1 behind a reverse proxy that terminates HTTPS, set
-`public_url: "https://master.example.com"` (cookies are then `Secure`) and
-`trust_proxy: true` (rate limits see the players' addresses from `X-Forwarded-For`). On a
-Debian machine, for example:
+`public_url: "https://master.example.com"` (cookies are then `Secure`) and `trust_proxy:
+true` so rate limits see the players' addresses from `X-Forwarded-For`/`X-Real-IP` — but only
+as reported by the proxy itself: the master only honours those headers from a request whose
+*immediate* peer is trusted (loopback by default, which is what every setup below uses; add
+`trusted_proxies: ["10.0.0.5"]` if the proxy runs on a different host or container, so a
+client that somehow reaches 16581 directly can't spoof its address to dodge rate limits). The
+proxy is also the place to set a request/response timeout (Caddy already applies sane
+defaults; nginx: `client_body_timeout`, `send_timeout`) — the master bounds how long it
+waits for a request body itself, but can't fully replace a real socket timeout in front of
+it. On a Debian machine, for example:
 
 ```text
 # /etc/systemd/system/bf2-master.service
@@ -530,13 +554,24 @@ $proxy_add_x_forwarded_for;`).
 
 **Security**: passwords are hashed with Argon2id; refresh tokens, web sessions and API keys
 are stored as hashes; session tokens last 15 minutes, tickets 5, refresh tokens 30 days
-(rotated on use); failed logins are limited per address and per name (429 after too many)
-and registrations per address; names, passwords, emails and stats reports are validated;
-the web pages escape everything and send a strict Content-Security-Policy.
+(rotated on use); failed logins are limited per address (429 after too many) — repeated
+failures against one account *name* only slow it down, never block it outright, so an
+attacker can't lock someone else's account out just by guessing wrong a few times; join
+tickets are rate-limited per account and pruned after `ticket_window_hours`; registrations
+are limited per address; names, passwords, emails and stats reports are validated; the web
+pages escape everything, send a strict Content-Security-Policy, and check a CSRF token and
+the `Origin` header on login/registration; requests are capped per address and in total
+(`tiny_http` doesn't give the master a real connection limit or socket timeout, so this is
+the practical substitute — see `master_server::http` and `game_auth::admission`); the UDP
+server list caps entries per address, per /24 (or /64) network and in total, ignores the
+unauthenticated `BYE` message (a spoofed one could otherwise delist any server; a shutdown
+server just times out after 95 s instead), and throttles `LIST` replies per address so the
+list can't be used to amplify a spoofed-source flood.
 
 **Web pages**: `/` (overview), `/leaderboard`, `/players/<name>`, `/servers`, `/ranks`,
 `/login`, `/register`. **API** for the game: see `game_auth::api` (`/api/v1/login`,
-`/refresh`, `/me`, `/ticket`, `/quickjoin`, `/servers`, ...).
+`/refresh`, `/me`, `/ticket`, `/quickjoin`, `/servers?limit=&offset=`, ...); `/servers` is
+paginated (100 per page by default, 200 at most).
 
 **XP and ranks**: XP comes from ranked rounds: by default 1 per point of score, 0.5 per
 minute played and 10 for a win, at most 5000 a round; BF2's ranks from Private (0) to

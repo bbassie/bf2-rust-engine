@@ -20,6 +20,7 @@ use game_shared::{
 use crate::{
     camera::PlayerCamera,
     conquest_hud::{FRIENDLY, SQUAD},
+    map_icons::to_map,
     map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
@@ -219,17 +220,6 @@ fn set_map_image(
             map.remove::<MaterialNode<MinimapMaterial>>().insert(Visibility::Hidden);
         }
     }
-}
-
-/// World position to map coordinates (0..1 across the terrain, north up) and the map's
-/// width in meters.
-fn to_map(level: &LoadedLevel, position: Vec3) -> (Vec2, f32) {
-    let Some(heightmap) = &level.heightmap else {
-        return (Vec2::new(position.x, position.z) / 1000.0 + 0.5, 1000.0);
-    };
-    let size = heightmap.world_size().max(1.0);
-    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
-    (Vec2::new(position.x - corner.x, position.z - corner.z) / size, size)
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]

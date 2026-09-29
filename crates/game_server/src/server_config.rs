@@ -45,7 +45,9 @@
 //!     identity_file: "identity.key",
 //!     // Optional accounts (crates/master_server): the master's web address. Unranked servers
 //!     // show verified account names; ranked ones (with the API key the master's admin gave
-//!     // out) require accounts and report stats.
+//!     // out) require accounts and report stats. Must be https:// (http:// only to
+//!     // localhost/127.0.0.1, for testing): the master's key and this server's API key
+//!     // travel over it.
 //!     master_url: "https://master.example.com",
 //!     // The master's public key (64 hex digits); default: fetched from master_url once.
 //!     master_key: "",

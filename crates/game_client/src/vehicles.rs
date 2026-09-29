@@ -1,10 +1,11 @@
 //! Vehicles on the client: where to draw them, the seat keys, the view from a seat and the
 //! vehicle line on the HUD.
 //!
-//! Connected to a remote server, vehicles are shown [`INTERPOLATION_DELAY`] in the past,
-//! blending between received states like remote soldiers. There is no vehicle prediction yet:
-//! a driver sees the vehicle react one round trip plus that delay after pressing a key (about
-//! 130 ms on a LAN). Hosting, the simulation is local and avian interpolates between ticks.
+//! A vehicle's own driver runs the prediction in `vehicle_prediction` (the same `step_vehicle`
+//! and `integrate` as the server, rewound and replayed against corrections). Connected to a
+//! remote server, every other vehicle is shown [`INTERPOLATION_DELAY`] in the past, blending
+//! between received states like remote soldiers. Hosting, the simulation is local and avian
+//! interpolates between ticks.
 
 use std::collections::VecDeque;
 

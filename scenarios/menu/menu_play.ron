@@ -36,6 +36,11 @@
         Wait(0.2),
         Click("pause:leave"),
         Wait(0.5),
+        // Lifecycle: leaving tears down the level's sun, sky and lamps instead of leaving them
+        // rendering behind the menu (see `render::environment::clear_environment` and
+        // `render::lamps::clear_lamps`).
+        ExpectLog("left the match: 0 suns, 0 sky domes left over", 2.0),
+        ExpectLog("lamps cleared", 2.0),
         WaitReady,
         Screenshot("left"),
         Click("menu:play"),

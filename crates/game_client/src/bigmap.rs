@@ -15,6 +15,7 @@ use crate::{
     camera::PlayerCamera,
     conquest_hud::{FRIENDLY, SQUAD},
     deploy::DeployScreen,
+    map_icons::map_uv,
     map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER},
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
@@ -137,16 +138,6 @@ fn show_big_map(
 ) {
     let show = actions.pressed(crate::settings::Action::Map) && !deploy.open;
     root.set_if_neq(if show { Visibility::Inherited } else { Visibility::Hidden });
-}
-
-/// Map position (0..1, top-left origin, north up) of a world position.
-fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
-    let Some(heightmap) = &level.heightmap else {
-        return Vec2::splat(0.5);
-    };
-    let size = heightmap.world_size().max(1.0);
-    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
-    Vec2::new((position.x - corner.x) / size, (position.z - corner.z) / size)
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]

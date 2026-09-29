@@ -75,10 +75,13 @@ impl Plugin for SettingsPlugin {
                 apply_graphics,
                 apply_post_processing,
                 apply_anisotropy,
-                apply_frame_cap,
                 save_settings,
             ),
-        );
+        )
+        // After every `PostUpdate` rendering-prep system (transform propagation, visibility,
+        // camera updates) is done for the frame, so the blocking sleep doesn't hold up work
+        // this frame still needs to submit, only delay handing off to the next one.
+        .add_systems(Last, apply_frame_cap);
     }
 }
 

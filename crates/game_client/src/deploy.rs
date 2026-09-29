@@ -23,8 +23,10 @@ use game_shared::{
 use crate::{
     combat::weapon_display_name,
     conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, charge_color, team_color},
+    map_icons::map_uv,
     map_markers::{LabelRequest, Obstacle, place_labels},
     net::{LocalPlayer, LocalSoldier},
+    ui_theme::font,
 };
 
 pub struct DeployPlugin;
@@ -125,13 +127,6 @@ struct PointFlag(Entity);
 /// A Rush charge on the map.
 #[derive(Component)]
 struct ChargeMarker(Entity);
-
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
 
 fn spawn_deploy_screen(mut commands: Commands) {
     commands
@@ -274,17 +269,6 @@ fn set_map_image(
             commands.entity(*map).remove::<ImageNode>();
         }
     }
-}
-
-/// Map position (0..1, top-left origin) of a world position. The map covers the terrain,
-/// north (-Z) up.
-fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
-    let Some(heightmap) = &level.heightmap else {
-        return Vec2::splat(0.5);
-    };
-    let size = heightmap.world_size().max(1.0);
-    let corner = heightmap.center() - Vec3::new(size, 0.0, size) * 0.5;
-    Vec2::new((position.x - corner.x) / size, (position.z - corner.z) / size)
 }
 
 #[allow(clippy::too_many_arguments)]

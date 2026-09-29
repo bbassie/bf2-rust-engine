@@ -16,6 +16,7 @@ use crate::{
     menu::{Menu, Screen},
     net::LocalSoldier,
     settings::{Action, Actions},
+    ui_theme::font,
 };
 
 pub struct RosePlugin;
@@ -63,13 +64,6 @@ struct RoseCenterText;
 
 #[derive(Component)]
 struct RosePointer;
-
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
 
 fn spawn_rose(mut commands: Commands) {
     commands

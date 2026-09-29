@@ -349,12 +349,22 @@ pub(crate) fn load_library(mut commands: Commands, paths: Res<GamePaths>, mut me
     });
 }
 
-/// Loads the effects of the weapons and of bullet hits before the first shot.
+/// Loads the effects of the weapons, every impact and material variant, the level's vehicle
+/// templates' guns and armour (damage state) effects, and its destroyable objects' destruction
+/// effects, before any of them are needed: `EffectLibrary::prepare` parses one lazily
+/// otherwise, which used to mean a hitch the first time a vehicle blew up or a bullet hit an
+/// explosive material mid-fight instead of while the level was still loading.
+#[allow(clippy::too_many_arguments)]
 fn preload_level_effects(
     mut library: ResMut<EffectLibrary>,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    level: Res<LoadedLevel>,
+    match_info: Query<&game_shared::protocol::MatchInfo>,
+    paths: Res<GamePaths>,
+    mut vehicle_library: ResMut<game_shared::vehicle::VehicleLibrary>,
+    destructibles: Query<&game_shared::statics::Destructible>,
 ) {
     let mut names: Vec<String> = library
         .weapons
@@ -362,14 +372,41 @@ fn preload_level_effects(
         .values()
         .flat_map(|w| w.muzzle.iter().chain(&w.detonation).cloned())
         .collect();
-    names.extend(
-        library
-            .impacts
-            .effects
+    // Every impact/material effect, not just bullets: explosions and vehicle guns hit things
+    // too (e_mexp_* and the like).
+    names.extend(library.impacts.effects.values().cloned());
+
+    // Every vehicle template the level's spawners can produce, from the layout data rather
+    // than waiting for one to actually spawn and replicate (a client would otherwise still
+    // hitch on the first Abrams it sees, just later).
+    if let Some(info) = match_info.iter().next()
+        && let Some(layout) = level.base_layout(&info.mode, info.size)
+    {
+        let mut templates: Vec<&str> = layout
+            .vehicle_spawners
             .iter()
-            .filter(|((projectile, _), _)| *projectile == impacts::BULLET)
-            .map(|(_, name)| name.clone()),
-    );
+            .flat_map(|s| s.templates.iter().flatten().map(String::as_str))
+            .collect();
+        templates.sort_unstable();
+        templates.dedup();
+        for template in templates {
+            let Some(model) = vehicle_library.get(template, &paths) else {
+                continue;
+            };
+            for gun in &model.guns {
+                if let Some(effect) = &gun.projectile.detonation_effect {
+                    names.push(effect.clone());
+                }
+            }
+            names.extend(model.desc.armor_effects.iter().map(|e| e.effect.clone()));
+        }
+    }
+
+    // The level's destroyable objects' own destruction effects.
+    for destructible in &destructibles {
+        names.extend(destructible.armor.effect.effects.iter().map(|e| e.name.clone()));
+    }
+
     names.sort();
     names.dedup();
     for name in names {

@@ -35,17 +35,19 @@ impl Plugin for LampsPlugin {
         app.insert_resource(PointLightShadowMap { size: SHADOW_MAP_SIZE })
             .add_systems(
                 Update,
-                (
-                    spawn_lamps.run_if(resource_exists_and_changed::<LevelLight>),
-                    clear_lamps.run_if(resource_removed::<LoadedLevel>),
-                ),
+                spawn_lamps.run_if(resource_exists_and_changed::<LevelLight>),
             )
             .add_systems(
                 PostUpdate,
-                update_lamps
-                    .after(crate::camera::CameraSystems)
-                    .before(TransformSystems::Propagate)
-                    .run_if(resource_exists::<LevelLight>),
+                (
+                    update_lamps
+                        .after(crate::camera::CameraSystems)
+                        .before(TransformSystems::Propagate)
+                        .run_if(resource_exists::<LevelLight>),
+                    // After `environment::clear_environment` (`Update`): logged in a
+                    // deterministic order after it for scenarios to check both.
+                    clear_lamps.run_if(resource_removed::<LoadedLevel>),
+                ),
             );
     }
 }
@@ -158,9 +160,11 @@ fn lumens(desc: &LampDesc, lamp: f32) -> f32 {
 /// changes, which never happens on the way out (the resource is removed, not changed), so
 /// they'd otherwise keep shining in the menu.
 fn clear_lamps(mut commands: Commands, existing: Query<Entity, With<Lamp>>) {
+    let count = existing.iter().count();
     for entity in &existing {
         commands.entity(entity).despawn();
     }
+    info!("left the match: {count} lamps cleared");
 }
 
 fn spawn_lamps(

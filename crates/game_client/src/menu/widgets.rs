@@ -2,12 +2,7 @@
 
 use super::*;
 
-pub(super) fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
+pub(super) use crate::ui_theme::font;
 
 pub(super) fn text(value: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     (Text::new(value), font(size), TextColor(color))

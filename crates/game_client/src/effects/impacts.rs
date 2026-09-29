@@ -19,7 +19,10 @@ pub const HUMAN_LIMBS: u32 = 77;
 pub const CONCRETE: u32 = 78;
 /// Light vehicle armor, for vehicles (their hulls' own materials live on the server).
 pub const VEHICLE_ARMOR: u32 = 27;
-/// Small arms bullets, the projectile material of most handheld weapons.
+/// Small arms bullets, the projectile material of most handheld weapons. Kept for reference
+/// (BF2's material numbering): `preload_level_effects` used to preload only this projectile's
+/// impacts, now every one.
+#[allow(dead_code)]
 pub const BULLET: u32 = 38;
 
 /// The loaded level's surface materials.

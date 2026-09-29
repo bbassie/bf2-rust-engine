@@ -13,6 +13,7 @@ use game_shared::{
 use crate::{
     conquest_hud::{team_color, team_name},
     net::LocalPlayer,
+    ui_theme::font,
 };
 
 pub struct SummaryPlugin;
@@ -41,13 +42,6 @@ struct SummaryRoot;
 
 #[derive(Component)]
 struct SummaryPanel;
-
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: FontSize::Px(size),
-        ..default()
-    }
-}
 
 fn spawn_summary(mut commands: Commands) {
     commands

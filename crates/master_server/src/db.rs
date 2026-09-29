@@ -7,9 +7,11 @@
 use std::path::Path;
 
 use game_auth::{
-    api::{CareerStats, LeaderboardEntry, PlayerRound, Profile, RoundReport, RoundResult, Tally},
+    api::{CareerStats, LeaderboardEntry, Profile, RoundReport, RoundResult, Tally},
     ranks::Progression,
 };
+#[cfg(test)]
+use game_auth::api::PlayerRound;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct Db {
