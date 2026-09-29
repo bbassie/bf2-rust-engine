@@ -257,6 +257,7 @@ fn log_stats(
     materials: Res<Assets<Bf2Material>>,
     bodies: Query<(&avian3d::prelude::RigidBody, Has<avian3d::prelude::Sleeping>)>,
     colliders: Query<(), With<avian3d::prelude::Collider>>,
+    kinds: MeshKinds,
 ) {
     let now = time.elapsed_secs();
     if now - counts.since < 5.0 {
@@ -298,6 +299,7 @@ fn log_stats(
         per(counts.bf2),
         per(counts.standard),
     );
+    info!("perf stats: meshes by kind (total/seen/distinct mesh+material): {}", kinds.summary());
     let mut kinds = [0u32; 4];
     for (body, sleeping) in &bodies {
         let index = match body {
@@ -338,4 +340,58 @@ fn log_stats(
         full: counts.full,
         ..default()
     };
+}
+
+/// Counts mesh entities by what they belong to (for `BF2_PERF_STATS`).
+#[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)]
+struct MeshKinds<'w, 's> {
+    meshes: Query<'w, 's, (Entity, &'static ViewVisibility, &'static Mesh3d, Option<&'static MeshMaterial3d<Bf2Material>>, Has<VisibilityRange>)>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    roots: Query<
+        'w,
+        's,
+        (
+            Has<super::soldiers::SoldierVisual>,
+            Has<crate::vehicles::VehicleView>,
+            Has<game_shared::statics::StaticMesh>,
+            Option<&'static Name>,
+        ),
+    >,
+    statics: Query<'w, 's, (), With<game_shared::statics::StaticMesh>>,
+}
+
+impl MeshKinds<'_, '_> {
+    fn summary(&self) -> String {
+        let mut rows: HashMap<String, (u32, u32, u32, bevy::platform::collections::HashSet<(AssetId<Mesh>, Option<AssetId<Bf2Material>>)>)> =
+            HashMap::default();
+        for (entity, visibility, mesh, material, ranged) in &self.meshes {
+            let mut root = entity;
+            let mut in_static = false;
+            while let Ok(parent) = self.parents.get(root) {
+                root = parent.parent();
+                in_static |= self.statics.contains(root);
+            }
+            let kind = match self.roots.get(root) {
+                _ if in_static => "static".to_string(),
+                Ok((true, ..)) => "soldier".to_string(),
+                Ok((_, true, ..)) => "vehicle".to_string(),
+                Ok((.., true, _)) => "static".to_string(),
+                Ok((.., Some(name))) => format!("'{}'", name.as_str().chars().take(24).collect::<String>()),
+                _ => "other".to_string(),
+            };
+            let row = rows.entry(kind).or_default();
+            row.0 += 1;
+            row.1 += visibility.get() as u32;
+            row.2 += ranged as u32;
+            row.3.insert((mesh.id(), material.map(|m| m.id())));
+        }
+        let mut rows: Vec<_> = rows.into_iter().collect();
+        rows.sort_by_key(|(_, r)| std::cmp::Reverse(r.0));
+        rows.iter()
+            .take(12)
+            .map(|(kind, r)| format!("{kind} {}/{}/{} (ranged {})", r.0, r.1, r.3.len(), r.2))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }

@@ -390,7 +390,7 @@ struct PlaceholderAssets {
 /// The visual entity drawn for a soldier. Kept separate from the simulated entity so
 /// smoothing never moves the hitbox.
 #[derive(Component)]
-struct SoldierVisual {
+pub(crate) struct SoldierVisual {
     soldier: Entity,
 }
 

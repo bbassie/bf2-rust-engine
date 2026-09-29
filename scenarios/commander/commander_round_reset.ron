@@ -1,0 +1,46 @@
+// Round lifecycle (S13): a round ending and restarting on the same level clears the
+// commander's assets in play (a UAV up, an artillery strike, a scan, a supply crate) and their
+// recharge, instead of leaving them running into the new round. Ends the round with the chat
+// `/tickets` admin command (host is admin) and waits through the break for `next_round` to
+// fire `RoundReset` (see `game_server::modes::RoundReset`, `game_server::commander::reset_on_round`).
+// target/debug/deps/client.exe --scenario scenarios/commander/commander_round_reset.ron --out target/scenarios/commander/round_reset
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    team: 2,
+    steps: [
+        WaitReady,
+        Teleport((-150.0, 162.0, 260.0), 180.0, 0.0),
+        Wait(1.0),
+        Commander(Apply),
+        Wait(1.0),
+        Log("start a uav, an artillery strike, a scan and a supply drop"),
+        Commander(Use(asset: Uav, target: (-150.0, 0.0, 300.0))),
+        Wait(0.3),
+        Commander(Use(asset: Artillery, target: (-150.0, 0.0, 308.0))),
+        Wait(0.3),
+        Commander(Use(asset: Scan, target: (0.0, 0.0, 0.0))),
+        Wait(0.3),
+        Commander(Use(asset: Supply, target: (-150.0, 0.0, 260.0))),
+        Wait(1.0),
+        Key(CapsLock),
+        Wait(0.8),
+        Screenshot("assets_before_reset"),
+        Key(CapsLock),
+        Log("end the round"),
+        Key(KeyT),
+        Frames(2),
+        Type("/tickets 0"),
+        Frames(2),
+        Key(Enter),
+        ExpectLog("round over", 3.0),
+        Wait(20.5),
+        ExpectLog("round reset: commander assets and recharge cleared", 3.0),
+        WaitReady,
+        Wait(0.5),
+        Key(CapsLock),
+        Wait(0.8),
+        Screenshot("assets_after_reset"),
+        Quit,
+    ],
+)
