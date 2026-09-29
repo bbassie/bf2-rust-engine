@@ -8,6 +8,10 @@
 //! With `menu: true` the client starts at the main menu, to script it with `Click` steps.
 //! Scenarios use the default settings (see `settings`) unless `--settings` is given.
 //!
+//! `ExpectLog` and `ForbidLog` steps turn a scenario into a check: they watch the log (captured
+//! only while a scenario runs) and fail the run with exit code 1. Every run writes
+//! `result.txt` (`PASS`, or `FAIL: <reason>`) next to its screenshots.
+//!
 //! ```ron
 //! (
 //!     level: "strike_at_karkand",
@@ -213,6 +217,14 @@ pub enum Step {
     /// Adds our soldier's movement state, stamina (and the last prediction correction when
     /// connected) to the report every frame for this many seconds.
     Trace(String, f32),
+    /// Passes once a log line containing the text has been logged since the scenario began
+    /// (or since the line the previous `ExpectLog` matched, so expectations go in order),
+    /// waiting up to this many seconds; otherwise the scenario fails, e.g.
+    /// `ExpectLog("captured", 45.0)`.
+    ExpectLog(String, f32),
+    /// Fails the scenario as soon as a log line containing the text appears from this step
+    /// on, e.g. `ForbidLog("ERROR ")` or `ForbidLog("prediction correction")`.
+    ForbidLog(String),
     Quit,
 }
 
@@ -400,6 +412,11 @@ struct Runner {
     mark: Option<Vec3>,
     /// Text of the last `Type` step, typed the next frame.
     typed: String,
+    /// Captured log lines before this index are done with for `ExpectLog`.
+    log_cursor: usize,
+    /// `ForbidLog` texts and the log index they apply from.
+    forbidden: Vec<(String, usize)>,
+    finished: bool,
 }
 
 /// What a player can do, for [`run_scenario`].
@@ -544,6 +561,17 @@ fn run_scenario(
         spatial,
     } = soldiers;
     let now = time.elapsed_secs();
+    if runner.finished {
+        return;
+    }
+    let forbidden = runner
+        .forbidden
+        .iter()
+        .find_map(|(text, from)| log_capture::find(text, *from).map(|(_, line)| (text.clone(), line)));
+    if let Some((text, line)) = forbidden {
+        finish(&mut runner, &mut exit, now, Some(format!("forbidden log text \"{text}\": {line}")));
+        return;
+    }
     // Typed characters: text without a key the game reacts to.
     for c in std::mem::take(&mut runner.typed).chars() {
         for state in [ButtonState::Pressed, ButtonState::Released] {
@@ -1284,13 +1312,26 @@ fn run_scenario(
                 writeln!(runner.report, "{text}").ok();
                 Progress::Done
             }
-            Step::Quit => {
-                if !runner.report.is_empty() {
-                    let _ = std::fs::create_dir_all(&runner.out);
-                    let _ = std::fs::write(runner.out.join("report.txt"), &runner.report);
+            Step::ExpectLog(text, seconds) => {
+                if let Some((at, _)) = log_capture::find(text, runner.log_cursor) {
+                    runner.log_cursor = at + 1;
+                    info!("scenario: saw \"{text}\" after {elapsed:.1} s");
+                    Progress::Done
+                } else if elapsed > *seconds {
+                    let reason = format!("no log line with \"{text}\" within {seconds} s");
+                    finish(&mut runner, &mut exit, now, Some(reason));
+                    Progress::Waiting
+                } else {
+                    Progress::Waiting
                 }
-                info!("scenario: finished after {now:.1} s");
-                exit.write(AppExit::Success);
+            }
+            Step::ForbidLog(text) => {
+                let from = log_capture::len();
+                runner.forbidden.push((text.clone(), from));
+                Progress::Done
+            }
+            Step::Quit => {
+                finish(&mut runner, &mut exit, now, None);
                 Progress::Waiting
             }
         };
@@ -1301,6 +1342,28 @@ fn run_scenario(
         runner.step_started = None;
         runner.frames = 0;
         runner.samples.clear();
+    }
+}
+
+/// Ends the run: writes `report.txt` (if anything was reported) and `result.txt`, and quits
+/// with exit code 1 on a failure.
+fn finish(runner: &mut Runner, exit: &mut MessageWriter<AppExit>, now: f32, failure: Option<String>) {
+    runner.finished = true;
+    let _ = std::fs::create_dir_all(&runner.out);
+    if !runner.report.is_empty() {
+        let _ = std::fs::write(runner.out.join("report.txt"), &runner.report);
+    }
+    match failure {
+        None => {
+            let _ = std::fs::write(runner.out.join("result.txt"), "PASS\n");
+            info!("scenario: finished after {now:.1} s");
+            exit.write(AppExit::Success);
+        }
+        Some(reason) => {
+            let _ = std::fs::write(runner.out.join("result.txt"), format!("FAIL: {reason}\n"));
+            error!("scenario: FAILED after {now:.1} s: {reason}");
+            exit.write(AppExit::error());
+        }
     }
 }
 
@@ -1329,6 +1392,85 @@ fn frame_stats(name: &str, samples: &mut [f32]) -> String {
         samples[samples.len() - 1],
         samples.len()
     )
+}
+
+/// Log lines kept for `ExpectLog`/`ForbidLog`: [`log_capture_layer`] records them while a
+/// scenario runs ([`enable_log_capture`]).
+mod log_capture {
+    use std::{
+        fmt::Write as _,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    use bevy::log::{
+        tracing::{self, field::Field},
+        tracing_subscriber::{Layer, layer::Context},
+    };
+
+    pub static ENABLED: AtomicBool = AtomicBool::new(false);
+    static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// A long soak logs a lot; later lines are dropped rather than growing without bound.
+    const MAX_LINES: usize = 200_000;
+
+    pub fn len() -> usize {
+        LINES.lock().unwrap().len()
+    }
+
+    /// The first line at or after `from` that contains `text`.
+    pub fn find(text: &str, from: usize) -> Option<(usize, String)> {
+        let lines = LINES.lock().unwrap();
+        lines.iter().enumerate().skip(from).find(|(_, line)| line.contains(text)).map(|(i, line)| (i, line.clone()))
+    }
+
+    pub struct CaptureLayer;
+
+    impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            if !ENABLED.load(Ordering::Relaxed) {
+                return;
+            }
+            let meta = event.metadata();
+            let mut line = format!("{} {}: ", meta.level(), meta.target());
+            event.record(&mut Visitor(&mut line));
+            let mut lines = LINES.lock().unwrap();
+            if lines.len() < MAX_LINES {
+                lines.push(line);
+            }
+        }
+    }
+
+    struct Visitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for Visitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.0.push_str(value);
+            } else {
+                let _ = write!(self.0, " {}={value}", field.name());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                let _ = write!(self.0, "{value:?}");
+            } else {
+                let _ = write!(self.0, " {}={value:?}", field.name());
+            }
+        }
+    }
+}
+
+/// The log layer behind `ExpectLog`/`ForbidLog` (for `LogPlugin::custom_layer`).
+pub fn log_capture_layer(_app: &mut App) -> Option<bevy::log::BoxedLayer> {
+    Some(Box::new(log_capture::CaptureLayer))
+}
+
+/// Starts keeping log lines for the scenario's assertions.
+pub fn enable_log_capture() {
+    log_capture::ENABLED.store(true, Ordering::Relaxed);
 }
 
 #[cfg(test)]

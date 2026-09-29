@@ -254,6 +254,9 @@ fn main() -> AppExit {
     let menu_scenario = scenario.as_ref().is_some_and(|(s, _)| s.menu);
     let start = cli.match_setup(&settings, menu_scenario);
 
+    if scenario.is_some() {
+        scenario::enable_log_capture();
+    }
     let mut app = App::new();
     // Converted BF2 assets live outside the game folder and are addressed as
     // `imported://levels/...`, with mods on top. Must be registered before the asset plugin.
@@ -266,6 +269,11 @@ fn main() -> AppExit {
             })
             .set(ImagePlugin {
                 default_sampler: render::materials::default_sampler(),
+            })
+            // Captures log lines for scenario assertions (`ExpectLog`, `ForbidLog`).
+            .set(bevy::log::LogPlugin {
+                custom_layer: scenario::log_capture_layer,
+                ..default()
             })
             // Static meshes' lightmap UVs (glTF `_LIGHTMAP_UV`; the glTF crate drops the
             // underscore before Bevy looks the name up).

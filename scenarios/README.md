@@ -12,6 +12,11 @@ client --scenario scenarios/animation/viewmodel.ron      # writes target/scenari
 `cargo test -p game_client --bin client all_scenarios_parse` checks that every file here still
 parses.
 
+Scenarios can check things, not just take screenshots: `ExpectLog("round started", 10.0)` waits
+for a log line and `ForbidLog("ERROR ")` fails on one. A run exits with code 1 on a failure and
+writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick suite of them;
+`scripts/sheet.py` and `scripts/compare.py` turn screenshot folders into one image to review.
+
 | Folder | What the scenarios check |
 |---|---|
 | `abilities/` | Man-down and revive, medic, support and engineer gadgets |

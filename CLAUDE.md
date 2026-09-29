@@ -42,6 +42,13 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
   `client --scenario scenarios/animation/viewmodel.ron` writes `target/scenarios/viewmodel/*.png`
   (and `report.txt` for `Measure` steps). Prefer one scenario with several screenshots
   over several launches. `client --screenshot out.png` is the one-shot shorthand.
+- Make scenarios checks, not just screenshots: `ExpectLog("text", seconds)` waits for a log line
+  and `ForbidLog("text")` fails on one; a failed run exits with code 1 and writes
+  `result.txt` (`PASS` / `FAIL: reason`).
+- Review screenshots as one image: `python scripts/sheet.py <dir>` (contact sheet) and
+  `python scripts/compare.py <before> <after>` (per-image change plus a before/after/diff sheet).
+- `scripts/smoke.sh` runs a quick scenario suite plus the unit tests on the Linux machine
+  (about 4 minutes); run it before handing back a batch of changes.
 - `--debug-walk` exercises prediction; the HUD shows RTT and prediction corrections.
 - Test with dev builds (`target/debug/client.exe`); release builds take much longer.
 - If the user is playing, `target/debug/client.exe` is locked and the build ends with
