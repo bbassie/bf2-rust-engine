@@ -1,0 +1,17 @@
+// Short soak of the modes without stages (scripts/soak.sh or the server's `--soak`): team
+// deathmatch on a conquest layout (flags only mark spawns), then conquest and co-op to check
+// they play as before. With `--soak-rotate 4` each gets 4 minutes.
+//
+//   scripts/remote.sh ./target/debug/server --config scripts/soak_modes_regress.ron --soak 12 --soak-rotate 4 --port 29200
+(
+    name: "Modes regression soak",
+    bots: 24,
+    respawn_time: 10.0,
+    stats_file: None,
+    ban_file: None,
+    rotation: [
+        (level: "strike_at_karkand", mode: "tdm", size: 16, bots: 16),
+        (level: "strike_at_karkand", mode: "gpm_cq", size: 32),
+        (level: "strike_at_karkand", mode: "gpm_coop", size: 16, bots: 16),
+    ],
+)

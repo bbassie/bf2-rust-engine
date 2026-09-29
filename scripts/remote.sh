@@ -39,4 +39,8 @@ remote_cmd=$(printf '%q ' "$@")
 git ls-files -co --exclude-standard -z | tar --null -T - -cf - |
     "${ssh_cmd[@]}" "mkdir -p ~/$dir && cd ~/$dir && flock ~/.bf2-remote.lock tar -xf -"
 
-exec "${ssh_cmd[@]}" "cd ~/$dir && source ~/.cargo/env && export BF2_DIR=\"\$HOME/games/Battlefield 2\" && flock ~/.bf2-remote.lock $remote_cmd"
+# Builds hold the lock (one cargo at a time in the shared target); anything else, such as a
+# long soak of an already built server, runs without it so it doesn't block everyone.
+lock=''
+[[ "$1" == cargo ]] && lock='flock ~/.bf2-remote.lock'
+exec "${ssh_cmd[@]}" "cd ~/$dir && source ~/.cargo/env && export BF2_DIR=\"\$HOME/games/Battlefield 2\" && $lock $remote_cmd"

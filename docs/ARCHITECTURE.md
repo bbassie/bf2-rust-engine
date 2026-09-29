@@ -321,6 +321,16 @@ Bots are `Player`s whose `InputBuffer` is filled by a `BotBrain` instead of the 
 They therefore obey exactly the same movement rules and use the same weapons and vehicles
 code. The roadmap has the BF2-style layers (strategic areas, squads, behaviours).
 
+**Walking** (`game_server::nav`) follows paths on a layered walkability grid rasterized from
+the level's collision (0.5 m cells, 0.75 m on the big layouts), with ladders as links and A*
+on background tasks. Big, intricate statics (the aircraft carriers) get a **detail patch**: a
+0.33 m grid in the object's own frame, so its ramps, doors and catwalks run along the cells
+whatever its heading. The level grid leaves the patch's rectangle out and portals join the two
+along its edge; patch cells live in the same arrays, so paths, regions and every other query
+cover both (`nav::patch`). Vehicles standing still are marked on the grid once a second and
+paths go around them; a goal at a vehicle's door snaps to the nearest free cell
+(`nav::obstacles`).
+
 **Bots in vehicles** (`game_server::bots::vehicle`, `ai::vehicles`, `nav::vehicle`) use the
 use button, the seat keys and ordinary `InputFrame`s like players:
 
@@ -423,6 +433,25 @@ by the view distance setting (`render::statics`, `render::unit_lods`).
   until they are seen again.
 - `BF2_STATIC_LODS=off` / `BF2_UNIT_LODS=off` draw full detail at any distance (for
   comparisons), `BF2_UNIT_LOD_STATS` logs the vehicle and soldier triangles drawn.
+
+### Lighting
+
+Everything is lit in real time from each level's `sky.con` colours (`render::environment`,
+whose module docs explain the model): one sun (the moon at night) with cascaded shadows, a
+directional sky light as an environment map, and BF2's baked sky visibility (never its baked
+sun) as ambient occlusion on statics and terrain.
+
+- BF2's colours keep their hue but only part of their saturation: warm tints much less than
+  cool ones (Strike at Karkand is less sepia, Midnight Sun stays blue), night levels most of
+  theirs.
+- Lamps: `bf2-import` reads the level's `LightSource` objects (and gives day levels' street
+  lamps a lamp at their head, for night versions) into `environment.lamps`; `render::lamps`
+  draws them as Bevy point and spot lights at night and indoors on day levels, culled beyond
+  220 m, with BF2's baked lamp light as brightness reference. Setting "Dynamic lamps": off,
+  on, or on with shadows (the two nearest lamps).
+- Night versions of day levels (setting `time_of_day`, or `BF2_LIGHT=night=1`) replace the
+  level's light with the Special Forces night levels' and light its lamps.
+- `BF2_LIGHT=key=value,...` overrides the tuning constants (see `render::environment`).
 
 ## Coordinate conventions
 

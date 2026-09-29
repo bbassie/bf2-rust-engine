@@ -1501,18 +1501,26 @@ fn run_scenario(
 /// with exit code 1 on a failure.
 fn finish(runner: &mut Runner, exit: &mut MessageWriter<AppExit>, now: f32, failure: Option<String>) {
     runner.finished = true;
-    let _ = std::fs::create_dir_all(&runner.out);
-    if !runner.report.is_empty() {
+    // `--screenshot` runs have no output folder: nothing to write next to them.
+    let files = !runner.out.as_os_str().is_empty();
+    if files {
+        let _ = std::fs::create_dir_all(&runner.out);
+    }
+    if files && !runner.report.is_empty() {
         let _ = std::fs::write(runner.out.join("report.txt"), &runner.report);
     }
     match failure {
         None => {
-            let _ = std::fs::write(runner.out.join("result.txt"), "PASS\n");
+            if files {
+                let _ = std::fs::write(runner.out.join("result.txt"), "PASS\n");
+            }
             info!("scenario: finished after {now:.1} s");
             exit.write(AppExit::Success);
         }
         Some(reason) => {
-            let _ = std::fs::write(runner.out.join("result.txt"), format!("FAIL: {reason}\n"));
+            if files {
+                let _ = std::fs::write(runner.out.join("result.txt"), format!("FAIL: {reason}\n"));
+            }
             error!("scenario: FAILED after {now:.1} s: {reason}");
             exit.write(AppExit::error());
         }

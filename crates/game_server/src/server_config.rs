@@ -267,7 +267,7 @@ mod tests {
         let path = std::env::temp_dir().join("bf2_server_config_test.ron");
         std::fs::write(&path, example).unwrap();
         let config = ServerConfig::load(&path).unwrap();
-        assert_eq!(config.rotation.len(), 3);
+        assert_eq!(config.rotation.len(), 5);
         assert_eq!(config.coop_bot_skill, Some(0.4));
         assert_eq!(config.rotation[0].mode, "gpm_cq");
         assert_eq!(config.rotation[1].bots, Some(24));

@@ -1,5 +1,5 @@
 // Breakthrough on Strike at Karkand (32), as the attacking US: the HUD (our tickets, the open
-// sector's flags, SECTOR 1/3 · ATTACK), lowering the Hotel's flag (sector 1), a flag of the
+// sector's flags, SECTOR 1/3 | ATTACK), lowering the Hotel's flag (sector 1), a flag of the
 // next sector that can't be taken yet (Locked), the big map and the deploy screen.
 // client --scenario scenarios/modes/breakthrough.ron
 (

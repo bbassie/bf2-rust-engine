@@ -294,8 +294,9 @@ pub fn default_tickets(kind: ModeKind, size: u32) -> f32 {
 /// has nothing to fight over between the bases.
 ///
 /// - **Sides**: the attackers are the side holding fewer flags at the start (at Karkand the US
-///   at the gas station, attacking the MEC's town); on a tie team 2, BF2's usual invaders. Their
-///   bases and flags are where they start from.
+///   at the gas station, attacking the MEC's town); on a tie the side starting nearer the
+///   flags between them (Dalian: the airfield, not the carrier), else team 2. Their bases and
+///   flags are where they start from.
 /// - **Order**: the other flags, by how far along the way from the attackers' start to the
 ///   defenders' main base (or the flag farthest away) they are, measured over the links
 ///   between neighbouring flags (the relative neighbourhood graph: two flags are neighbours
@@ -402,9 +403,25 @@ impl Front {
         let has_spawns = |cp: &ControlPointDesc| cp.uncapturable || layout.spawn_points.iter().any(|s| s.control_point == cp.id);
         let held = |team: u8| points.iter().filter(|cp| !cp.uncapturable && cp.initial_team == team).count();
         let can_start = |team: u8| points.iter().any(|cp| cp.initial_team == team && has_spawns(cp));
+        // On a tie, the side starting nearer the flags between them (a land base rather than a
+        // carrier far out at sea: bots cut off from the front on a carrier soon run out of
+        // boats and aircraft); else team 2.
+        let reach = |team: u8| {
+            let starts = points.iter().filter(|cp| cp.initial_team == team);
+            starts
+                .flat_map(|s| {
+                    points
+                        .iter()
+                        .filter(|cp| !cp.uncapturable && cp.initial_team != team)
+                        .map(move |cp| distance(xz(s.position), xz(cp.position)))
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
         let mut attacker = match held(1).cmp(&held(2)) {
             Ordering::Less => 1,
-            _ => 2,
+            Ordering::Greater => 2,
+            Ordering::Equal if reach(1) + 50.0 < reach(2) => 1,
+            Ordering::Equal => 2,
         };
         if !can_start(attacker) {
             attacker = 3 - attacker;
@@ -727,6 +744,21 @@ mod tests {
         assert_eq!(front.start, [4, 5]);
         assert_eq!(front.bases, [0]);
         assert_eq!(front.stages, [vec![3], vec![2], vec![1]]);
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_side_nearer_the_front() {
+        // Dalian-like: a land base in the west, a carrier far out in the east, neutral flags
+        // between: the land side attacks.
+        let source = layout(vec![
+            cp("airfield", -700.0, 0.0, 1, true),
+            cp("west", -250.0, 0.0, 0, false),
+            cp("east", 250.0, 0.0, 0, false),
+            cp("carrier", 800.0, 0.0, 2, true),
+        ]);
+        let front = Front::new(&source, ModeKind::Breakthrough).unwrap();
+        assert_eq!(front.attacker, 1);
+        assert_eq!(front.stages, [vec![1], vec![2]]);
     }
 
     #[test]

@@ -3,7 +3,10 @@
 use std::{collections::VecDeque, f32::consts::FRAC_PI_2};
 
 use bevy::{
-    input::{gamepad::GamepadButton, mouse::AccumulatedMouseMotion},
+    input::{
+        gamepad::{Gamepad, GamepadButton},
+        mouse::AccumulatedMouseMotion,
+    },
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
@@ -15,7 +18,7 @@ use game_shared::{
 use crate::{
     menu::{Menu, Screen},
     net::LocalSoldier,
-    settings::{Action, Actions, Settings},
+    settings::{Action, Actions, Settings, gamepad_activity},
 };
 
 pub struct LocalInputPlugin;
@@ -107,6 +110,7 @@ fn grab_cursor(
     commander: Res<crate::commander::CommanderScreen>,
     screen: Res<State<Screen>>,
     menu: Res<Menu>,
+    gamepads: Query<&Gamepad>,
 ) {
     let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open;
     if !playing || !window.focused {
@@ -114,7 +118,15 @@ fn grab_cursor(
             cursor.visible = true;
             cursor.grab_mode = CursorGrabMode::None;
         }
-    } else if mouse.just_pressed(MouseButton::Left) && !cursor_locked(&cursor) {
+        return;
+    }
+    if cursor_locked(&cursor) {
+        return;
+    }
+    // A click grabs it, same as ever; moving a gamepad also does, since a controller player
+    // may never click the mouse at all.
+    let gamepad_active = gamepads.iter().any(|g| gamepad_activity(g) > 0.05);
+    if mouse.just_pressed(MouseButton::Left) || gamepad_active {
         cursor.visible = false;
         cursor.grab_mode = CursorGrabMode::Locked;
     }

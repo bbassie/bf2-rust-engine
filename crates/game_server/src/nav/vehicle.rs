@@ -1173,8 +1173,7 @@ mod tests {
             geometry: LevelGeometry {
                 terrain: Some(Arc::new(terrain)),
                 meshes,
-                ladders: Vec::new(),
-                bounds: None,
+                ..default()
             },
             roads,
             water,

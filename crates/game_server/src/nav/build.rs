@@ -11,6 +11,10 @@
 //! 4. A distance field (to walls and ledges) lets paths keep off walls.
 //! 5. Ladders link the cell at their foot to the one behind their top.
 //! 6. Connected regions let path requests reject unreachable goals quickly.
+//!
+//! Detail patches (see [`super::patch`]) are built the same way in the frame of the object
+//! they cover: [`LevelGeometry::frame`] turns the grid with the object, and the level grid
+//! leaves the object's footprint to the patch ([`LevelGeometry::holes`]).
 
 use std::{
     collections::HashMap,
@@ -27,7 +31,7 @@ use game_shared::{ladder::Ladder, level::Heightmap};
 use super::{NavCell, NavGrid, NavLadder, NavParams, SLOPE_SCALE};
 
 /// Bump when the build changes, to invalidate cached grids.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// Columns per side of the tiles rasterized in parallel.
 const TILE: u32 = 64;
@@ -41,12 +45,110 @@ const MAX_COLUMNS: f32 = 4e6;
 /// At most this many cells per column (links store the index in a `u8`).
 const MAX_LAYERS: u16 = 250;
 
+#[derive(Default)]
 pub struct LevelGeometry {
     pub terrain: Option<Arc<Heightmap>>,
     pub meshes: Vec<MeshInstance>,
     pub ladders: Vec<Ladder>,
     /// XZ area to cover, clamped to the terrain. The whole level if `None`.
     pub bounds: Option<(Vec2, Vec2)>,
+    /// Columns whose middle is inside one of these get no cells: a detail patch covers them.
+    pub holes: Vec<Rect>,
+    /// Build in this frame (a detail patch): meshes, ladders and `bounds` are in its local
+    /// space, the terrain is sampled through it, and `bounds` isn't clamped to the terrain.
+    pub frame: Option<Frame>,
+}
+
+/// A horizontal frame: local XZ turned by a yaw and moved. Heights stay world heights.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    /// World XZ of the local origin.
+    pub center: Vec2,
+    /// Local +X in world XZ (a unit vector).
+    pub axis: Vec2,
+}
+
+impl Frame {
+    /// The frame of an object placed at `position`, turned by (the yaw of) `rotation`.
+    pub fn new(position: Vec2, rotation: Quat) -> Self {
+        let x = rotation * Vec3::X;
+        Self {
+            center: position,
+            axis: Vec2::new(x.x, x.z).normalize_or(Vec2::X),
+        }
+    }
+
+    /// Local +Z in world XZ.
+    fn z_axis(&self) -> Vec2 {
+        Vec2::new(-self.axis.y, self.axis.x)
+    }
+
+    pub fn to_world(&self, local: Vec2) -> Vec2 {
+        self.center + self.axis * local.x + self.z_axis() * local.y
+    }
+
+    pub fn to_local(&self, world: Vec2) -> Vec2 {
+        let d = world - self.center;
+        Vec2::new(d.dot(self.axis), d.dot(self.z_axis()))
+    }
+
+    pub fn point_to_world(&self, local: Vec3) -> Vec3 {
+        let p = self.to_world(local.xz());
+        Vec3::new(p.x, local.y, p.y)
+    }
+
+    pub fn point_to_local(&self, world: Vec3) -> Vec3 {
+        let p = self.to_local(world.xz());
+        Vec3::new(p.x, world.y, p.y)
+    }
+
+    pub fn dir_to_world(&self, local: Vec3) -> Vec3 {
+        let d = self.axis * local.x + self.z_axis() * local.z;
+        Vec3::new(d.x, local.y, d.y)
+    }
+
+    pub fn dir_to_local(&self, world: Vec3) -> Vec3 {
+        let d = Vec2::new(world.x, world.z);
+        Vec3::new(d.dot(self.axis), world.y, d.dot(self.z_axis()))
+    }
+
+    pub fn world_from_local(&self) -> Affine3A {
+        let yaw = (-self.axis.y).atan2(self.axis.x);
+        Affine3A::from_rotation_translation(Quat::from_rotation_y(yaw), Vec3::new(self.center.x, 0.0, self.center.y))
+    }
+}
+
+/// A rectangle in a frame's local XZ.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub frame: Frame,
+    pub min: Vec2,
+    pub max: Vec2,
+}
+
+impl Rect {
+    /// Whether a world XZ point is inside.
+    pub fn contains(&self, world: Vec2) -> bool {
+        let p = self.frame.to_local(world);
+        p.cmpge(self.min).all() && p.cmple(self.max).all()
+    }
+
+    pub fn shrunk(&self, by: f32) -> Self {
+        Self {
+            min: self.min + by,
+            max: self.max - by,
+            ..*self
+        }
+    }
+
+    /// World XZ bounds.
+    pub fn world_aabb(&self) -> (Vec2, Vec2) {
+        let corners = [self.min, Vec2::new(self.max.x, self.min.y), self.max, Vec2::new(self.min.x, self.max.y)];
+        corners.iter().fold((Vec2::MAX, Vec2::MIN), |(lo, hi), &c| {
+            let w = self.frame.to_world(c);
+            (lo.min(w), hi.max(w))
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -70,7 +172,14 @@ struct RawCell {
     slope: u8,
 }
 
-pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
+pub fn build(geometry: &LevelGeometry, params: NavParams) -> NavGrid {
+    let mut grid = build_cells(geometry, params);
+    regions(&mut grid);
+    grid
+}
+
+/// Everything but the regions (which detail patches need to join first).
+pub(super) fn build_cells(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
     let instances: Vec<Instance> = geometry
         .meshes
         .iter()
@@ -86,6 +195,7 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         (origin, origin + t.world_size())
     });
     let (lo, hi) = match (geometry.bounds, terrain_area) {
+        (Some(bounds), _) if geometry.frame.is_some() => bounds,
         (Some((lo, hi)), Some((t_lo, t_hi))) => (lo.max(t_lo), hi.min(t_hi)),
         (Some(bounds), None) => bounds,
         (None, Some(area)) => area,
@@ -105,6 +215,9 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
             cells: Vec::new(),
             ladders: Vec::new(),
             ladder_ends: Map::default(),
+            base_cells: 0,
+            patches: Vec::new(),
+            portals: Map::default(),
         };
     }
     // Huge areas get coarser cells to bound memory (about 16 bytes per column).
@@ -167,6 +280,7 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         y0,
         voxel,
         terrain: geometry.terrain.as_deref(),
+        frame: geometry.frame,
         instances: &instances,
         buckets: &buckets,
         tiles_x,
@@ -201,7 +315,11 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
         }
     });
 
-    // Gather the tiles' columns in grid order.
+    // Gather the tiles' columns in grid order, leaving out the holes.
+    let in_hole = |x: u32, z: u32| {
+        let p = origin + (Vec2::new(x as f32, z as f32) + 0.5) * cell;
+        geometry.holes.iter().any(|h| h.contains(p))
+    };
     let mut columns = Vec::with_capacity((width * depth + 1) as usize);
     let mut raw: Vec<RawCell> = Vec::new();
     columns.push(0);
@@ -212,7 +330,9 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
                 .unwrap();
             let local = ((z % TILE) * tile.width + x % TILE) as usize;
             let (start, end) = (tile.starts[local] as usize, tile.starts[local + 1] as usize);
-            raw.extend_from_slice(&tile.cells[start..end]);
+            if geometry.holes.is_empty() || !in_hole(x, z) {
+                raw.extend_from_slice(&tile.cells[start..end]);
+            }
             columns.push(raw.len() as u32);
         }
         if z % TILE == TILE - 1 {
@@ -243,11 +363,13 @@ pub fn build(geometry: &LevelGeometry, mut params: NavParams) -> NavGrid {
             .collect(),
         ladders: Vec::new(),
         ladder_ends: Map::default(),
+        base_cells: raw.len() as u32,
+        patches: Vec::new(),
+        portals: Map::default(),
     };
     link(&mut grid, &raw);
     distance_field(&mut grid);
     place_ladders(&mut grid, &geometry.ladders);
-    regions(&mut grid);
     grid
 }
 
@@ -413,9 +535,9 @@ fn nearest_cell(grid: &NavGrid, pos: Vec3, radius: f32) -> Option<super::CellRef
     best.map(|(_, c)| c)
 }
 
-/// Connected regions (ignoring which way drops go, and joined by ladders); tiny ones get
-/// region 0.
-fn regions(grid: &mut NavGrid) {
+/// Connected regions (ignoring which way drops go, and joined by ladders and the portals
+/// between the level grid and its patches); tiny ones get region 0.
+pub(super) fn regions(grid: &mut NavGrid) {
     let mut parent: Vec<u32> = (0..grid.cells.len() as u32).collect();
     fn root(parent: &mut [u32], mut i: u32) -> u32 {
         while parent[i as usize] != i {
@@ -424,32 +546,44 @@ fn regions(grid: &mut NavGrid) {
         }
         i
     }
-    for z in 0..grid.depth {
-        for x in 0..grid.width {
-            for index in grid.column(x, z) {
-                let c = super::CellRef { x, z, index };
-                for dir in 0..4 {
-                    if let Some(n) = grid.neighbour(c, dir) {
-                        let (a, b) = (root(&mut parent, index), root(&mut parent, n.index));
-                        parent[a.max(b) as usize] = a.min(b);
-                    }
-                }
+    let join = |parent: &mut [u32], a: u32, b: u32| {
+        let (a, b) = (root(parent, a), root(parent, b));
+        parent[a.max(b) as usize] = a.min(b);
+    };
+    grid.for_each_cell(|c| {
+        for dir in 0..4 {
+            if let Some(n) = grid.neighbour(c, dir) {
+                join(&mut parent, c.index, n.index);
             }
         }
-    }
+    });
     for ladder in &grid.ladders {
-        let (a, b) = (root(&mut parent, ladder.bottom.index), root(&mut parent, ladder.top.index));
-        parent[a.max(b) as usize] = a.min(b);
+        join(&mut parent, ladder.bottom.index, ladder.top.index);
     }
-    let mut sizes = vec![0usize; grid.cells.len()];
+    for (&from, to) in &grid.portals {
+        for n in to {
+            join(&mut parent, from, n.index);
+        }
+    }
+    // By area: a patch's finer cells count for less.
+    let mut sizes = vec![0f32; grid.cells.len()];
+    let base_area = grid.params.cell * grid.params.cell;
+    let mut area = base_area;
+    let mut next_space = grid.patches.first().map_or(u32::MAX, |p| p.first_cell);
     for i in 0..grid.cells.len() as u32 {
-        sizes[root(&mut parent, i) as usize] += 1;
+        if i >= next_space {
+            let p = grid.patches.iter().rev().find(|p| i >= p.first_cell).unwrap();
+            area = p.cell * p.cell;
+            next_space = grid.patches.iter().map(|p| p.first_cell).filter(|&f| f > i).min().unwrap_or(u32::MAX);
+        }
+        sizes[root(&mut parent, i) as usize] += area;
     }
+    let min_area = MIN_REGION_CELLS as f32 * base_area;
     let mut region_of = vec![0u16; grid.cells.len()];
     let mut next_region = 1u32;
     for i in 0..grid.cells.len() as u32 {
         let r = root(&mut parent, i) as usize;
-        if r == i as usize && sizes[r] >= MIN_REGION_CELLS {
+        if r == i as usize && sizes[r] >= min_area * 0.999 {
             region_of[r] = next_region.min(u16::MAX as u32) as u16;
             next_region += 1;
         }
@@ -465,6 +599,7 @@ struct Rasterizer<'a> {
     y0: f32,
     voxel: f32,
     terrain: Option<&'a Heightmap>,
+    frame: Option<Frame>,
     instances: &'a [Instance<'a>],
     buckets: &'a [Vec<u32>],
     tiles_x: u32,
@@ -498,7 +633,7 @@ impl Rasterizer<'_> {
         };
         raster.pool.reset((w * d) as usize);
         if let Some(terrain) = self.terrain {
-            raster.terrain(terrain);
+            raster.terrain(terrain, self.frame);
         }
         for &i in &self.buckets[tile] {
             let instance = &self.instances[i as usize];
@@ -653,13 +788,14 @@ impl TileRaster<'_> {
     }
 
     /// The terrain is solid from the bottom of the grid up to its surface.
-    fn terrain(&mut self, terrain: &Heightmap) {
+    fn terrain(&mut self, terrain: &Heightmap, frame: Option<Frame>) {
         let (w, d, cell) = (self.w, self.d, self.cell);
         let stride = (w + 1) as usize;
         let mut corners = Vec::with_capacity(stride * (d + 1) as usize);
         for z in 0..=d {
             for x in 0..=w {
-                let p = self.min + Vec2::new(x as f32, z as f32) * cell;
+                let local = self.min + Vec2::new(x as f32, z as f32) * cell;
+                let p = frame.map_or(local, |f| f.to_world(local));
                 corners.push(terrain.height_at(p.x, p.y));
             }
         }
@@ -889,6 +1025,13 @@ pub fn geometry_key(geometry: &LevelGeometry, params: &NavParams) -> u64 {
     }
     h.bytes(&instances.to_le_bytes());
     h.bytes(&(geometry.meshes.len() as u64).to_le_bytes());
+    h.0
+}
+
+/// A key for extra inputs of a build (the detail patches' frames and extents).
+pub fn words_key(words: &[f32]) -> u64 {
+    let mut h = Fnv::default();
+    words.iter().for_each(|&v| h.f32(v));
     h.0
 }
 

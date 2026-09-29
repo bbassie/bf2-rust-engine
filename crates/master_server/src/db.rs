@@ -124,6 +124,7 @@ impl Db {
         Ok(Self { conn })
     }
 
+    #[cfg(test)]
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;

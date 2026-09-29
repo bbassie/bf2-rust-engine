@@ -151,7 +151,6 @@ fn lumens(desc: &LampDesc, lamp: f32) -> f32 {
     if n == 0 { 0.0 } else { (log_sum / n as f32).exp() }
 }
 
-#[allow(clippy::type_complexity)]
 fn spawn_lamps(
     mut commands: Commands,
     level: Res<LoadedLevel>,

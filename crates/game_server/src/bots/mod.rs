@@ -59,7 +59,7 @@ use crate::{
         vehicles::{SeatWish, VehicleClaims, VehicleProfiles},
     },
     destruction::ObjectHealth,
-    nav::{LadderStep, NavGrid, NavPath, Navigation, Waypoint, vehicle::VehicleNavigation},
+    nav::{LadderStep, NavBlocked, NavGrid, NavObstacles, NavPath, Navigation, Waypoint, vehicle::VehicleNavigation},
 };
 
 mod equipment;
@@ -189,6 +189,8 @@ pub struct BotStats {
     climbs: u32,
     /// Times a bot found it couldn't walk to its goal.
     stranded: u32,
+    /// Stuck events on or around aircraft carriers (within [`CARRIER_REACH`] of one).
+    stuck_near_carriers: u32,
     /// Milliseconds spent in `think`.
     think_ms: f32,
     max_think_ms: f32,
@@ -553,6 +555,8 @@ struct Senses<'w, 's> {
     strategy: Res<'w, Strategy>,
     snapshot: Res<'w, SquadSnapshot>,
     nav: Option<Res<'w, Navigation>>,
+    /// Cells parked vehicles stand on, which paths go around.
+    obstacles: Option<Res<'w, NavObstacles>>,
     spatial: SpatialQuery<'w, 's>,
     smoke: Smoke<'w, 's>,
     control_points: Query<'w, 's, (&'static ControlPoint, &'static FlagState)>,
@@ -610,6 +614,10 @@ struct Senses<'w, 's> {
 impl Senses<'_, '_> {
     fn nav(&self) -> Option<&NavGrid> {
         self.nav.as_deref().map(|n| &*n.0)
+    }
+
+    fn blocked(&self) -> Option<&NavBlocked> {
+        self.obstacles.as_deref().map(|o| &*o.0)
     }
 
     fn weapon(&self, loadout: Option<&Loadout>, index: u8) -> Option<&WeaponDesc> {
@@ -1855,10 +1863,10 @@ impl BotBrain {
             if self.direct_goal.is_none_or(|g| g.distance_squared(goal.position) > 1.0) {
                 self.direct_goal = Some(goal.position);
                 self.direct = flat(goal.position - position).length() < 15.0
-                    && w.nav().is_none_or(|nav| nav.walkable_line(position, goal.position));
+                    && w.nav().is_none_or(|nav| nav.walkable_line_avoiding(position, goal.position, w.blocked()));
             }
             let (target, j, step) = match (w.nav.as_deref(), self.direct) {
-                (Some(nav), false) => match self.follow_path(nav, goal.position, goal.tolerance, me.motion, dt, stats) {
+                (Some(nav), false) => match self.follow_path(nav, w.obstacles.as_deref(), goal.position, goal.tolerance, me.motion, dt, stats) {
                     Steer::Toward { target, jump, ladder } => (target, jump, ladder),
                     Steer::Arrived => (goal.position, false, None),
                     Steer::Stranded => {
@@ -1918,6 +1926,7 @@ impl BotBrain {
                 if self.unwanted_ladders >= 2.0 {
                     self.unwanted_ladders = 0.0;
                     self.stuck_event(position, stats);
+                    stats.stuck_near_carriers += u32::from(near_carrier(&w.level, position));
                 }
             }
         }
@@ -1940,6 +1949,7 @@ impl BotBrain {
             }
             if self.stuck_time > 0.75 {
                 self.stuck_event(position, stats);
+                stats.stuck_near_carriers += u32::from(near_carrier(&w.level, position));
             }
         } else {
             self.stuck_time = 0.0;
@@ -2072,9 +2082,11 @@ impl BotBrain {
     /// Requests paths as needed and walks them waypoint by waypoint. Without a path yet,
     /// heads straight for the goal. The path is kept while the goal moves less than
     /// `tolerance` meters.
+    #[allow(clippy::too_many_arguments)]
     fn follow_path(
         &mut self,
         nav: &Navigation,
+        obstacles: Option<&NavObstacles>,
         goal: Vec3,
         tolerance: f32,
         motion: &SoldierMotion,
@@ -2115,9 +2127,10 @@ impl BotBrain {
             self.repath_cooldown = 0.5;
             self.path_goal = Some(goal);
             let grid = nav.0.clone();
+            let blocked = obstacles.map(|o| o.0.clone());
             self.path_task = Some(AsyncComputeTaskPool::get().spawn(async move {
                 let started = Instant::now();
-                let path = grid.find_path(position, goal);
+                let path = grid.find_path_avoiding(position, goal, blocked.as_deref());
                 PathResult {
                     path,
                     seconds: started.elapsed().as_secs_f32(),
@@ -2440,7 +2453,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
              flanking; {:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
              {:.1} ms avg, {:.1} ms max; {} ladders climbed, {} goals out of reach; thinking {:.2} ms per tick, {:.1} ms max; \
-             stuck most at {}",
+             stuck most at {}; {} stuck events near carriers",
             stats.stuck_events,
             stats.stuck_by_activity[0],
             stats.stuck_by_activity[1],
@@ -2460,6 +2473,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.think_ms / stats.ticks.max(1) as f32,
             stats.max_think_ms,
             hotspots(&stats.stuck_spots),
+            stats.stuck_near_carriers,
         );
         info!(
             "bots in vehicles: {} seats taken, {} left; {:.2} km driven in {:.0} s at the wheel ({:.1} m/s); \
@@ -2494,6 +2508,17 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
 }
 
 /// The three 10 m squares with the most stuck events, as `x z (count)`.
+/// How far from an aircraft carrier's statics stuck events count as near it, meters.
+const CARRIER_REACH: f32 = 150.0;
+
+/// Whether a position is on or around an aircraft carrier.
+fn near_carrier(level: &LoadedLevel, position: Vec3) -> bool {
+    level.desc.statics.iter().any(|s| {
+        s.template.contains("carrier")
+            && Vec2::new(s.placement.position[0], s.placement.position[2]).distance(position.xz()) < CARRIER_REACH
+    })
+}
+
 fn hotspots(spots: &bevy::platform::collections::HashMap<(i32, i32), u32>) -> String {
     let mut spots: Vec<_> = spots.iter().collect();
     spots.sort_by(|a, b| b.1.cmp(a.1));

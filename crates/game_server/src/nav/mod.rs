@@ -9,11 +9,24 @@
 //! [`NavGrid::find_path`]). The grid covers the played layout's control points and spawns.
 //! Grids are cached next to the level (`navgrid_<mode>_<size>.bin`), keyed by a hash of
 //! the collision geometry and the movement limits.
+//!
+//! Big, intricate statics (the aircraft carriers: a hangar, ramps, narrow doors and
+//! catwalks, turned at any angle) get a **detail patch** ([`patch`]): a finer grid in the
+//! object's own frame, so its corridors run along the cells, that takes the object's
+//! footprint out of the level grid and joins it through portals along the edge. Patch
+//! cells are ordinary [`NavCell`]s in the same arrays, so every query ([`NavGrid::find_path`],
+//! [`NavGrid::locate`], [`NavGrid::cells_near`], regions) covers both without callers
+//! knowing. Vehicles parked on the grid are [`obstacles`] paths go around.
 
 mod build;
 mod cache;
+pub mod obstacles;
+mod patch;
 mod path;
 pub mod vehicle;
+
+#[cfg(test)]
+mod level_tests;
 
 use std::{ops::Range, sync::Arc, time::Instant};
 
@@ -33,6 +46,7 @@ use game_shared::{
     soldier::{SOLDIER_HEIGHT, SoldierTuning},
 };
 
+pub use obstacles::{NavBlocked, NavObstacles};
 pub use path::{LadderStep, NavPath, Waypoint};
 
 pub struct NavPlugin;
@@ -48,6 +62,7 @@ impl Plugin for NavPlugin {
                     .run_if(in_state(bevy_replicon::prelude::ClientState::Disconnected)),
                 finish_build.run_if(resource_exists::<NavBuild>),
                 finish_vehicle_build.run_if(resource_exists::<VehicleNavBuild>),
+                obstacles::update_obstacles.run_if(resource_exists::<Navigation>),
                 forget_level
                     .run_if(not(resource_exists::<LoadedLevel>))
                     .run_if(
@@ -154,17 +169,61 @@ pub struct CellRef {
 /// The walkable surfaces of a level. See the module docs.
 pub struct NavGrid {
     pub params: NavParams,
-    /// World XZ of the outer corner of column (0, 0).
+    /// World XZ of the outer corner of column (0, 0) of the level grid.
     pub origin: Vec2,
     pub width: u32,
     pub depth: u32,
-    /// The cells of column `z * width + x` are `cells[columns[i]..columns[i + 1]]`, bottom
-    /// to top.
+    /// The cells of level grid column `z * width + x` are `cells[columns[i]..columns[i + 1]]`,
+    /// bottom to top. The columns of the patches follow (see [`NavPatch`]).
     columns: Vec<u32>,
     cells: Vec<NavCell>,
     ladders: Vec<NavLadder>,
     /// Ladders by the cells at their ends.
     ladder_ends: HashMap<u32, Vec<u16>>,
+    /// Cells below this index are the level grid's; the patches' follow.
+    base_cells: u32,
+    patches: Vec<NavPatch>,
+    /// Links between the level grid and its patches along their edges, by the cell they
+    /// start from (one way: drops only go down).
+    portals: HashMap<u32, Vec<CellRef>>,
+}
+
+/// A detail patch: a finer grid over one object, in the object's frame. Its cells'
+/// [`CellRef::x`] and [`CellRef::z`] are columns of the patch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavPatch {
+    pub frame: build::Frame,
+    /// Local XZ of the outer corner of column (0, 0).
+    pub origin: Vec2,
+    pub cell: f32,
+    pub width: u32,
+    pub depth: u32,
+    /// Index into [`NavGrid::columns`] of column (0, 0).
+    column_base: u32,
+    /// Index of its first cell.
+    first_cell: u32,
+}
+
+/// The columns a cell belongs to: the level grid or a patch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Space {
+    origin: Vec2,
+    cell: f32,
+    width: u32,
+    depth: u32,
+    column_base: u32,
+    /// `None` for the level grid (world axes).
+    frame: Option<build::Frame>,
+}
+
+impl Space {
+    fn to_local(&self, world: Vec2) -> Vec2 {
+        self.frame.map_or(world, |f| f.to_local(world))
+    }
+
+    fn to_world(&self, local: Vec2) -> Vec2 {
+        self.frame.map_or(local, |f| f.to_world(local))
+    }
 }
 
 /// A ladder soldiers climb between two cells.
@@ -205,11 +264,96 @@ impl NavGrid {
         self.cells.len()
     }
 
-    pub fn memory_bytes(&self) -> usize {
-        self.columns.len() * 4 + self.cells.len() * size_of::<NavCell>()
+    /// Cells of the detail patches.
+    pub fn patch_cell_count(&self) -> usize {
+        self.cells.len() - self.base_cells as usize
     }
 
-    /// The column containing a world position.
+    pub fn patches(&self) -> &[NavPatch] {
+        &self.patches
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        let portals: usize = self.portals.values().map(|p| 16 + p.len() * size_of::<CellRef>()).sum();
+        self.columns.len() * 4 + self.cells.len() * size_of::<NavCell>() + portals
+    }
+
+    fn base_space(&self) -> Space {
+        Space {
+            origin: self.origin,
+            cell: self.params.cell,
+            width: self.width,
+            depth: self.depth,
+            column_base: 0,
+            frame: None,
+        }
+    }
+
+    fn patch_space(p: &NavPatch) -> Space {
+        Space {
+            origin: p.origin,
+            cell: p.cell,
+            width: p.width,
+            depth: p.depth,
+            column_base: p.column_base,
+            frame: Some(p.frame),
+        }
+    }
+
+    /// The level grid, then every patch.
+    fn spaces(&self) -> impl Iterator<Item = Space> + '_ {
+        std::iter::once(self.base_space()).chain(self.patches.iter().map(Self::patch_space))
+    }
+
+    /// The columns the cell with this index belongs to.
+    fn space(&self, index: u32) -> Space {
+        if index < self.base_cells {
+            return self.base_space();
+        }
+        self.patches
+            .iter()
+            .rev()
+            .find(|p| index >= p.first_cell)
+            .map_or_else(|| self.base_space(), Self::patch_space)
+    }
+
+    /// Which patch a cell is in (0 for the level grid, else 1 + the patch's index).
+    fn space_id(&self, index: u32) -> usize {
+        if index < self.base_cells {
+            return 0;
+        }
+        self.patches.iter().rposition(|p| index >= p.first_cell).map_or(0, |i| i + 1)
+    }
+
+    /// Horizontal size of a cell, meters.
+    pub fn cell_size(&self, c: CellRef) -> f32 {
+        self.space(c.index).cell
+    }
+
+    fn space_column(&self, s: &Space, x: u32, z: u32) -> Range<u32> {
+        let i = (s.column_base + z * s.width + x) as usize;
+        self.columns[i]..self.columns[i + 1]
+    }
+
+    /// Calls `f` with every cell (of the level grid and the patches).
+    pub fn for_each_cell(&self, mut f: impl FnMut(CellRef)) {
+        for s in self.spaces() {
+            for z in 0..s.depth {
+                for x in 0..s.width {
+                    for index in self.space_column(&s, x, z) {
+                        f(CellRef { x, z, index });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Portals from a cell into or out of a patch.
+    pub fn portals_at(&self, cell: u32) -> &[CellRef] {
+        self.portals.get(&cell).map_or(&[], |p| &p[..])
+    }
+
+    /// The column of the level grid containing a world position.
     pub fn column_at(&self, x: f32, z: f32) -> Option<(u32, u32)> {
         let cx = ((x - self.origin.x) / self.params.cell).floor();
         let cz = ((z - self.origin.y) / self.params.cell).floor();
@@ -217,7 +361,7 @@ impl NavGrid {
             .then_some((cx as u32, cz as u32))
     }
 
-    /// Cell indices of a column.
+    /// Cell indices of a column of the level grid.
     pub fn column(&self, x: u32, z: u32) -> Range<u32> {
         let i = (z * self.width + x) as usize;
         self.columns[i]..self.columns[i + 1]
@@ -229,15 +373,18 @@ impl NavGrid {
 
     /// World position of the middle of a cell's surface.
     pub fn position(&self, c: CellRef) -> Vec3 {
-        let cell = self.params.cell;
-        Vec3::new(
-            self.origin.x + (c.x as f32 + 0.5) * cell,
-            self.cells[c.index as usize].y,
-            self.origin.y + (c.z as f32 + 0.5) * cell,
-        )
+        let y = self.cells[c.index as usize].y;
+        if c.index < self.base_cells {
+            let cell = self.params.cell;
+            return Vec3::new(self.origin.x + (c.x as f32 + 0.5) * cell, y, self.origin.y + (c.z as f32 + 0.5) * cell);
+        }
+        let s = self.space(c.index);
+        let p = s.to_world(s.origin + (Vec2::new(c.x as f32, c.z as f32) + 0.5) * s.cell);
+        Vec3::new(p.x, y, p.y)
     }
 
-    /// The cell linked in direction `dir` (an index into [`Self::DIRS`]).
+    /// The cell linked in direction `dir` (an index into [`Self::DIRS`]): in the columns of
+    /// the cell's own grid (a patch's directions are the patch's axes).
     pub fn neighbour(&self, c: CellRef, dir: usize) -> Option<CellRef> {
         let link = self.cells[c.index as usize].links[dir];
         if link == Self::NONE {
@@ -245,10 +392,16 @@ impl NavGrid {
         }
         let (dx, dz) = Self::DIRS[dir];
         let (x, z) = (c.x.wrapping_add_signed(dx), c.z.wrapping_add_signed(dz));
+        let start = if c.index < self.base_cells {
+            self.columns[(z * self.width + x) as usize]
+        } else {
+            let s = self.space(c.index);
+            self.columns[(s.column_base + z * s.width + x) as usize]
+        };
         Some(CellRef {
             x,
             z,
-            index: self.column(x, z).start + link as u32,
+            index: start + link as u32,
         })
     }
 
@@ -266,30 +419,42 @@ impl NavGrid {
     /// The usable cell closest to `pos` (feet height) within `radius` meters, optionally
     /// only in `region`. Prefers surfaces at the same height.
     pub fn locate(&self, pos: Vec3, radius: f32, region: Option<u16>) -> Option<CellRef> {
-        let cell = self.params.cell;
-        let r = (radius / cell).ceil() as i32;
-        let cx = ((pos.x - self.origin.x) / cell).floor() as i32;
-        let cz = ((pos.z - self.origin.y) / cell).floor() as i32;
+        self.locate_where(pos, radius, region, |_| true)
+    }
+
+    /// [`Self::locate`] among the cells `wanted` accepts (by index).
+    pub fn locate_where(&self, pos: Vec3, radius: f32, region: Option<u16>, wanted: impl Fn(u32) -> bool) -> Option<CellRef> {
         let mut best: Option<(f32, CellRef)> = None;
-        for z in (cz - r).max(0)..=(cz + r).min(self.depth as i32 - 1) {
-            for x in (cx - r).max(0)..=(cx + r).min(self.width as i32 - 1) {
-                let (x, z) = (x as u32, z as u32);
-                let center = self.origin + (Vec2::new(x as f32, z as f32) + 0.5) * cell;
-                let d2 = center.distance_squared(pos.xz());
-                if d2 > (radius + cell) * (radius + cell) || best.is_some_and(|(b, _)| d2 >= b) {
-                    continue;
-                }
-                for index in self.column(x, z) {
-                    let c = &self.cells[index as usize];
-                    let dy = c.y - pos.y;
-                    let wanted = c.region != 0 && region.is_none_or(|r| r == c.region);
-                    if !wanted || !(-3.0..=1.0).contains(&dy) {
+        for s in self.spaces() {
+            // Distances are the same in a patch's frame.
+            let local = s.to_local(pos.xz());
+            let cell = s.cell;
+            let r = (radius / cell).ceil() as i32;
+            let cx = ((local.x - s.origin.x) / cell).floor() as i32;
+            let cz = ((local.y - s.origin.y) / cell).floor() as i32;
+            if cx + r < 0 || cz + r < 0 || cx - r >= s.width as i32 || cz - r >= s.depth as i32 {
+                continue;
+            }
+            for z in (cz - r).max(0)..=(cz + r).min(s.depth as i32 - 1) {
+                for x in (cx - r).max(0)..=(cx + r).min(s.width as i32 - 1) {
+                    let (x, z) = (x as u32, z as u32);
+                    let center = s.origin + (Vec2::new(x as f32, z as f32) + 0.5) * cell;
+                    let d2 = center.distance_squared(local);
+                    if d2 > (radius + cell) * (radius + cell) || best.is_some_and(|(b, _)| d2 >= b) {
                         continue;
                     }
-                    let edge = if c.dist == 0 { 0.2 } else { 0.0 };
-                    let score = d2 + 4.0 * dy * dy + edge;
-                    if best.is_none_or(|(b, _)| score < b) {
-                        best = Some((score, CellRef { x, z, index }));
+                    for index in self.space_column(&s, x, z) {
+                        let c = &self.cells[index as usize];
+                        let dy = c.y - pos.y;
+                        let ok = c.region != 0 && region.is_none_or(|r| r == c.region);
+                        if !ok || !(-3.0..=1.0).contains(&dy) || !wanted(index) {
+                            continue;
+                        }
+                        let edge = if c.dist == 0 { 0.2 } else { 0.0 };
+                        let score = d2 + 4.0 * dy * dy + edge;
+                        if best.is_none_or(|(b, _)| score < b) {
+                            best = Some((score, CellRef { x, z, index }));
+                        }
                     }
                 }
             }
@@ -297,25 +462,95 @@ impl NavGrid {
         best.map(|(_, c)| c)
     }
 
-    /// Usable cells in the columns within `radius` of `center` (XZ).
+    /// Usable cells in the columns within `radius` of `center` (XZ), of the level grid and
+    /// the patches.
     pub fn cells_near(&self, center: Vec2, radius: f32) -> impl Iterator<Item = CellRef> + '_ {
-        let cell = self.params.cell;
-        let lo = ((center - radius - self.origin) / cell)
-            .floor()
-            .max(Vec2::ZERO);
-        let hi = ((center + radius - self.origin) / cell)
-            .floor()
-            .min(Vec2::new(self.width as f32 - 1.0, self.depth as f32 - 1.0));
-        let (x0, z0, x1, z1) = (lo.x as u32, lo.y as u32, hi.x as i64, hi.y as i64);
-        (z0 as i64..=z1).flat_map(move |z| {
-            (x0 as i64..=x1).flat_map(move |x| {
-                let (x, z) = (x as u32, z as u32);
-                self.column(x, z)
-                    .filter(|&index| self.cells[index as usize].region != 0)
-                    .map(move |index| CellRef { x, z, index })
+        self.spaces().flat_map(move |s| {
+            let local = s.to_local(center);
+            let cell = s.cell;
+            let lo = ((local - radius - s.origin) / cell).floor().max(Vec2::ZERO);
+            let hi = ((local + radius - s.origin) / cell)
+                .floor()
+                .min(Vec2::new(s.width as f32 - 1.0, s.depth as f32 - 1.0));
+            let (x0, z0, x1, z1) = (lo.x as i64, lo.y as i64, hi.x as i64, hi.y as i64);
+            (z0..=z1).flat_map(move |z| {
+                (x0..=x1).flat_map(move |x| {
+                    let (x, z) = (x as u32, z as u32);
+                    self.space_column(&s, x, z)
+                        .filter(|&index| self.cells[index as usize].region != 0)
+                        .map(move |index| CellRef { x, z, index })
+                })
             })
         })
     }
+}
+
+/// What the grids are built from: the level's collision, split by layer.
+struct Collected {
+    geometry: build::LevelGeometry,
+    vehicle_meshes: Vec<build::MeshInstance>,
+}
+
+/// Gathers the level's collision for the grids (from the level's entities; see
+/// [`start_build`]).
+fn collect_geometry<'a>(
+    terrain: Option<Arc<game_shared::level::Heightmap>>,
+    colliders: impl Iterator<Item = (&'a Collider, &'a Transform, &'a CollisionLayers)>,
+    ladder_parts: impl Iterator<Item = (&'a Collider, &'a Transform)>,
+    layout: Option<&GameModeDesc>,
+) -> Collected {
+    let (mut meshes, mut vehicle_meshes) = (Vec::new(), Vec::new());
+    for (collider, transform, layers) in colliders {
+        let mesh = || build::MeshInstance {
+            shape: collider.shape().clone(),
+            transform: transform.compute_affine(),
+        };
+        if layers.memberships.has_all(GameLayer::World) {
+            meshes.push(mesh());
+        }
+        // The vehicle grid sees only what actually blocks a vehicle (terrain and BF2's
+        // vehicle-type collision): small plants that only carry `GameLayer::World` (soldier
+        // or projectile collision) are left out, so vehicles can path straight through them
+        // instead of routing around bushes they'd just drive over.
+        if layers.memberships.has_all(GameLayer::VehicleGround) {
+            vehicle_meshes.push(mesh());
+        }
+    }
+    // The boxes movement climbs (see `game_shared::ladder`).
+    let ladders = ladder_parts
+        .map(|(collider, transform)| {
+            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+            let half = aabb.size() * 0.5 * transform.scale.abs();
+            Ladder::from_box(transform.transform_point(aabb.center()), transform.rotation, half)
+        })
+        .collect();
+    Collected {
+        geometry: build::LevelGeometry {
+            terrain,
+            meshes,
+            ladders,
+            bounds: layout.and_then(gameplay_bounds),
+            ..default()
+        },
+        vehicle_meshes,
+    }
+}
+
+/// The detail patches of a level (see [`patch`]) that are within the grid's bounds.
+fn detail_patches(level: &LoadedLevel, geometry: &build::LevelGeometry, paths: Option<&game_shared::config::GamePaths>) -> Vec<build::Rect> {
+    let Some(paths) = paths else {
+        return Vec::new();
+    };
+    let template = |name: &str| paths.read_ron::<game_data::ObjectDesc>(format!("templates/{name}.ron")).ok();
+    patch::detail_objects(&level.desc.statics, template, &geometry.meshes)
+        .into_iter()
+        .filter(|rect| {
+            geometry.bounds.is_none_or(|(lo, hi)| {
+                let (a, b) = rect.world_aabb();
+                a.x < hi.x && b.x > lo.x && a.y < hi.y && b.y > lo.y
+            })
+        })
+        .collect()
 }
 
 /// Collects the level's collision and builds (or loads) its grid on a background task.
@@ -334,46 +569,21 @@ fn start_build(
 ) {
     commands.remove_resource::<Navigation>();
     commands.remove_resource::<vehicle::VehicleNavigation>();
+    commands.remove_resource::<NavObstacles>();
     let params = NavParams::from_tuning(&tuning);
-    let to_mesh = |(collider, transform, _): (&Collider, &Transform, &CollisionLayers)| build::MeshInstance {
-        shape: collider.shape().clone(),
-        transform: transform.compute_affine(),
-    };
-    let meshes = colliders
-        .iter()
-        .filter(|(_, _, layers)| layers.memberships.has_all(GameLayer::World))
-        .map(to_mesh)
-        .collect();
-    // The vehicle grid sees only what actually blocks a vehicle (terrain and BF2's
-    // vehicle-type collision): small plants that only carry `GameLayer::World` (soldier or
-    // projectile collision) are left out, so vehicles can path straight through them instead
-    // of routing around bushes they'd just drive over.
-    let vehicle_meshes = colliders
-        .iter()
-        .filter(|(_, _, layers)| layers.memberships.has_all(GameLayer::VehicleGround))
-        .map(to_mesh)
-        .collect();
     // Only the layout being played: the 64 player layouts of the big maps would take a lot
     // of memory. Layouts made from another (Rush from conquest) share its grid.
     let layout = match_info
         .iter()
         .next()
         .and_then(|info| level.base_layout(&info.mode, info.size));
-    // The boxes movement climbs (see `game_shared::ladder`).
-    let ladders = ladder_parts
-        .iter()
-        .map(|(collider, transform)| {
-            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-            let half = aabb.size() * 0.5 * transform.scale.abs();
-            Ladder::from_box(transform.transform_point(aabb.center()), transform.rotation, half)
-        })
-        .collect();
-    let geometry = build::LevelGeometry {
-        terrain: terrain.iter().next().map(|t| t.0.clone()),
-        meshes,
-        ladders,
-        bounds: layout.and_then(gameplay_bounds),
-    };
+    let Collected { geometry, vehicle_meshes } = collect_geometry(
+        terrain.iter().next().map(|t| t.0.clone()),
+        colliders.iter(),
+        ladder_parts.iter(),
+        layout,
+    );
+    let patches = detail_patches(&level, &geometry, paths.as_deref());
     start_vehicle_build(&mut commands, &level, layout, &geometry, vehicle_meshes, paths.as_deref());
     let cache_path = level.dir.as_ref().map(|dir| {
         dir.join(match layout {
@@ -394,38 +604,44 @@ fn start_build(
         }),
     };
     let task = AsyncComputeTaskPool::get()
-        .spawn(async move { load_or_build(&geometry, params, cache_path.as_deref(), &name) });
+        .spawn(async move { load_or_build(&geometry, &patches, params, cache_path.as_deref(), &name) });
     commands.insert_resource(NavBuild { task, spawns });
 }
 
 /// The grid from the cache if it is there and up to date, else built (and cached).
 fn load_or_build(
     geometry: &build::LevelGeometry,
+    patches: &[build::Rect],
     params: NavParams,
     cache_path: Option<&std::path::Path>,
     name: &str,
 ) -> NavGrid {
     let started = Instant::now();
-    let key = build::geometry_key(geometry, &params);
+    let key = build::geometry_key(geometry, &params) ^ build::words_key(&patch::hash_rects(patches));
     if let Some(path) = cache_path
         && let Some(grid) = cache::load(path, key, params)
     {
         info!(
-            "nav: loaded {} ({} cells, {} ladders) in {:.2} s",
+            "nav: loaded {} ({} cells, {} in {} detail patches, {} ladders, {:.1} MB) in {:.2} s",
             path.display(),
             grid.cell_count(),
+            grid.patch_cell_count(),
+            grid.patches().len(),
             grid.ladders().len(),
+            grid.memory_bytes() as f32 / 1e6,
             started.elapsed().as_secs_f32()
         );
         return grid;
     }
-    let grid = build::build(geometry, params);
+    let grid = patch::build_level(geometry, patches, params);
     info!(
-        "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells, {} ladders, {:.1} MB",
+        "nav: built {}x{} grid for `{name}` in {:.2} s: {} cells ({} in {} detail patches), {} ladders, {:.1} MB",
         grid.width,
         grid.depth,
         started.elapsed().as_secs_f32(),
         grid.cell_count(),
+        grid.patch_cell_count(),
+        grid.patches().len(),
         grid.ladders().len(),
         grid.memory_bytes() as f32 / 1e6
     );
@@ -451,6 +667,18 @@ impl SpawnCheck {
     /// is possible, so they share the deck's region). Runs in the background once the grid is
     /// there.
     fn report(&self, grid: &NavGrid) {
+        let cut_off = self.cut_off(grid);
+        if !cut_off.is_empty() {
+            warn!(
+                "nav: {} spawn points can't walk to their control point: {}",
+                cut_off.len(),
+                cut_off.join(", ")
+            );
+        }
+    }
+
+    /// The spawn points of [`Self::report`], as "control point at position".
+    fn cut_off(&self, grid: &NavGrid) -> Vec<String> {
         let mut cut_off = Vec::new();
         for (id, flag) in &self.control_points {
             let spawns: Vec<Vec3> = self.spawns.iter().filter(|(cp, _)| cp == id).map(|(_, at)| *at).collect();
@@ -478,13 +706,7 @@ impl SpawnCheck {
                 cut_off.extend(missing.map(|(at, _)| format!("{id} at {at:.1}")));
             }
         }
-        if !cut_off.is_empty() {
-            warn!(
-                "nav: {} spawn points can't walk to their control point: {}",
-                cut_off.len(),
-                cut_off.join(", ")
-            );
-        }
+        cut_off
     }
 }
 
@@ -500,8 +722,8 @@ fn start_vehicle_build(
     let geometry = build::LevelGeometry {
         terrain: infantry.terrain.clone(),
         meshes: vehicle_meshes,
-        ladders: Vec::new(),
         bounds: layout.and_then(vehicle_bounds),
+        ..default()
     };
     let water = level.desc.water.as_ref().map(|w| w.height);
     let roads_desc = level.desc.roads.clone();
@@ -558,6 +780,7 @@ fn finish_build(mut commands: Commands, mut build: ResMut<NavBuild>) {
         let for_check = grid.clone();
         AsyncComputeTaskPool::get().spawn(async move { check.report(&for_check) }).detach();
         commands.insert_resource(Navigation(grid));
+        commands.insert_resource(NavObstacles::default());
         commands.remove_resource::<NavBuild>();
     }
 }
@@ -565,6 +788,7 @@ fn finish_build(mut commands: Commands, mut build: ResMut<NavBuild>) {
 /// The match ended and the level is gone.
 fn forget_level(mut commands: Commands) {
     commands.remove_resource::<Navigation>();
+    commands.remove_resource::<NavObstacles>();
     commands.remove_resource::<NavBuild>();
     commands.remove_resource::<vehicle::VehicleNavigation>();
     commands.remove_resource::<VehicleNavBuild>();
@@ -630,8 +854,7 @@ mod tests {
         let geometry = LevelGeometry {
             terrain: Some(Arc::new(terrain)),
             meshes,
-            ladders: Vec::new(),
-            bounds: None,
+            ..default()
         };
         build::build(&geometry, NavParams::from_tuning(&SoldierTuning::default()))
     }
@@ -710,7 +933,7 @@ mod tests {
             terrain: Some(Arc::new(terrain)),
             meshes: vec![platform],
             ladders: vec![ladder(0.0, 0.0, 4.3), ladder(-3.0, 0.0, 6.0), ladder(3.0, 1.5, 4.3)],
-            bounds: None,
+            ..default()
         };
         let grid = build::build(&geometry, NavParams::from_tuning(&SoldierTuning::default()));
         let downs: Vec<bool> = grid.ladders().iter().map(|l| l.down).collect();

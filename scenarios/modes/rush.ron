@@ -1,5 +1,5 @@
 // Rush on Strike at Karkand (32), as the attacking US: the HUD (our tickets, the stage's two
-// charges, STAGE 1/3 · ATTACK), a charge up close with its beacon and HUD marker, arming it
+// charges, STAGE 1/3 | ATTACK), a charge up close with its beacon and HUD marker, arming it
 // with the use key (4 s), the armed charge with its fuse, the big map and the deploy screen
 // with the charges.
 // client --scenario scenarios/modes/rush.ron
@@ -7,7 +7,8 @@
     level: "strike_at_karkand",
     mode: "gpm_rush",
     size: 32,
-    bots: 8,
+    // No bots: nobody to shoot us while we arm the charge (defenders spawn at the Hotel).
+    bots: 0,
     team: 2,
     steps: [
         WaitReady,

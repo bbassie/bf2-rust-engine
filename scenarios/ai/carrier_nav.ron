@@ -1,0 +1,43 @@
+// Walking on the US carrier on Dalian Plant (64): its detail patch (see game_server::nav::patch)
+// lets the bots spawning on the walkways above the well deck walk up (through the ship) to the flight deck, to the
+// helicopters and down the ladders to the boats. The US team holds only the carrier, so its
+// bots leave by boat or helicopter. With --debug-nav the bots' paths and the grid are drawn.
+// client --scenario scenarios/ai/carrier_nav.ron --debug-nav
+(
+    level: "dalian_plant",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        ExpectLog("detail patches", 30.0),
+        // The stern: the spawn points on the walkways either side of the well deck, looking aft.
+        Camera((776.0, 148.5, 2.0), 180.0, -12.0),
+        Wait(3.0),
+        Screenshot("stern_3s"),
+        Wait(5.0),
+        Screenshot("stern_8s"),
+        // Down into the well deck: the ladders to the boats.
+        Camera((776.0, 150.0, 18.0), 180.0, -35.0),
+        Wait(3.0),
+        Screenshot("well_11s"),
+        // The flight deck aft, with the helicopters.
+        Camera((812.0, 178.0, -20.0), 145.0, -25.0),
+        Wait(4.0),
+        Screenshot("deck_15s"),
+        Wait(10.0),
+        Screenshot("deck_25s"),
+        Camera((786.0, 235.0, -20.0), 0.0, -89.0),
+        Wait(10.0),
+        Screenshot("top_35s"),
+        LogVehicles("after 35 s"),
+        Camera((812.0, 178.0, -20.0), 145.0, -25.0),
+        Wait(20.0),
+        Screenshot("deck_55s"),
+        Camera((786.0, 235.0, -20.0), 0.0, -89.0),
+        Wait(10.0),
+        Screenshot("top_65s"),
+        LogVehicles("after 65 s"),
+        Quit,
+    ],
+)
