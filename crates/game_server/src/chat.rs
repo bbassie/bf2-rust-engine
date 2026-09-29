@@ -1,20 +1,24 @@
 //! The server side of the chat: relays what players type to everyone, their team or their
-//! squad, greets joining players with the message of the day, announces joins and leaves,
-//! and runs admin commands typed by the host or by players who logged in with `/login`.
+//! squad, announces leaves (joins and the message of the day go out with the client's hello,
+//! see `receive_hello`), and runs admin commands typed by the host or by players who logged
+//! in with `/login`. Lines and commands are flood-limited, failed logins locked out
+//! ([`crate::limits`]).
 
-use std::collections::VecDeque;
+use std::net::IpAddr;
 
-use bevy::{platform::collections::HashMap, prelude::*};
-use bevy_replicon::prelude::*;
+use bevy::prelude::*;
+use bevy_replicon::{prelude::*, shared::backend::connected_client::NetworkId};
+use bevy_replicon_renet::netcode::NetcodeServerTransport;
 use game_shared::{
     chat::{ChatChannel, ChatLine, ChatRequest, MAX_CHAT_LENGTH, clean_text},
-    protocol::{ClientHello, Player, Team},
+    protocol::{Player, Team},
     squad::SquadMember,
 };
 
 use crate::{
     ClientPlayer, HostPlayer, PlayerClient, ServerSettings,
     admin::{self, Admin},
+    limits::{Failed, LoginBackoff, Rate, RateLimiter, client_ip, constant_time_eq},
     sender_player,
 };
 
@@ -24,16 +28,13 @@ impl Plugin for ChatPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(announce_leave).add_systems(
             PreUpdate,
-            (greet_players, receive_chat)
+            receive_chat
                 .after(ServerSystems::Receive)
                 .run_if(in_state(ClientState::Disconnected)),
         );
     }
 }
 
-/// More lines than this within [`FLOOD_SECONDS`] are dropped.
-const FLOOD_LINES: usize = 5;
-const FLOOD_SECONDS: f32 = 5.0;
 /// Longest admin answer shown in the chat, in lines.
 const MAX_REPLY_LINES: usize = 24;
 
@@ -68,40 +69,6 @@ pub fn tell(world: &mut World, player: Entity, text: &str) {
     }
 }
 
-/// Says hello to players when they tell us their name, and tells everyone else.
-fn greet_players(
-    mut hellos: MessageReader<FromClient<ClientHello>>,
-    clients: Query<&ClientPlayer>,
-    players: Query<&Player>,
-    settings: Res<ServerSettings>,
-    mut lines: MessageWriter<ToClients<ChatLine>>,
-) {
-    for hello in hellos.read() {
-        let name = clean_text(&hello.message.name, 24);
-        let name = match hello.client_id {
-            _ if !name.is_empty() => name,
-            ClientId::Client(client) => clients
-                .get(client)
-                .and_then(|c| players.get(c.0))
-                .map_or_else(|_| "Someone".into(), |p| p.name.clone()),
-            ClientId::Server => continue,
-        };
-        info!("server: {name} joined the game");
-        lines.write(ToClients {
-            targets: SendTargets::AllExcept(hello.client_id),
-            message: ChatLine::server(format!("{name} joined the game")),
-        });
-        let mut greeting = vec![format!("Welcome to {}, {name}!", settings.name)];
-        greeting.extend(settings.admin.motd.lines().map(str::to_string));
-        for line in greeting {
-            lines.write(ToClients {
-                targets: SendTargets::Single(hello.client_id),
-                message: ChatLine::private(line),
-            });
-        }
-    }
-}
-
 fn announce_leave(
     remove: On<Remove, ConnectedClient>,
     clients: Query<&ClientPlayer>,
@@ -118,6 +85,21 @@ fn announce_leave(
     });
 }
 
+/// Who failed to log in: the address of a remote player, else the player.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum LoginKey {
+    Address(IpAddr),
+    Player(Entity),
+}
+
+/// The chat's flood limits and failed logins.
+#[derive(Default)]
+struct ChatLimits {
+    lines: RateLimiter<Entity>,
+    commands: RateLimiter<Entity>,
+    logins: LoginBackoff<LoginKey>,
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn receive_chat(
     mut commands: Commands,
@@ -125,12 +107,14 @@ fn receive_chat(
     settings: Res<ServerSettings>,
     mut requests: MessageReader<FromClient<ChatRequest>>,
     clients: Query<&ClientPlayer>,
+    network_ids: Query<&NetworkId>,
+    transport: Option<Res<NetcodeServerTransport>>,
     host: Option<Res<HostPlayer>>,
     players: Query<(Entity, &Player, &Team, Option<&SquadMember>, Option<&PlayerClient>, Has<Admin>)>,
     mut lines: MessageWriter<ToClients<ChatLine>>,
-    mut recent: Local<HashMap<Entity, VecDeque<f32>>>,
+    mut limits: Local<ChatLimits>,
 ) {
-    let now = time.elapsed_secs();
+    let now = time.elapsed_secs_f64();
     let host_player = host.as_ref().map(|h| h.0);
     for request in requests.read() {
         let Some(sender) = sender_player(request.client_id, &clients, host.as_deref()) else {
@@ -149,18 +133,48 @@ fn receive_chat(
         };
 
         if let Some(command) = text.strip_prefix(['/', '!']) {
+            // Commands, `/login` above all, have their own flood limit.
+            if !limits.commands.allow(sender, Rate::CHAT_COMMANDS, now) {
+                lines.write(private("You are sending commands too fast."));
+                continue;
+            }
             let command = command.trim().to_string();
             let (word, rest) = command.split_once(' ').unwrap_or((&command, ""));
             match word.to_ascii_lowercase().as_str() {
                 "login" => {
+                    // By address, so reconnecting doesn't start over.
+                    let key = match request.client_id {
+                        ClientId::Client(client) => network_ids
+                            .get(client)
+                            .ok()
+                            .and_then(|id| client_ip(id, transport.as_deref()))
+                            .map_or(LoginKey::Player(sender), LoginKey::Address),
+                        ClientId::Server => LoginKey::Player(sender),
+                    };
+                    if let Some(left) = limits.logins.locked(key, now) {
+                        lines.write(private(&format!("Too many failed logins. Try again in {:.0} s.", left.ceil())));
+                        continue;
+                    }
                     let password = &settings.admin.password;
-                    if !password.is_empty() && rest.trim() == password {
+                    if !password.is_empty() && constant_time_eq(rest.trim().as_bytes(), password.as_bytes()) {
+                        limits.logins.succeed(key);
                         info!("{} logged in as admin", player.name);
                         commands.entity(sender).insert(Admin);
                         lines.write(private("Logged in as admin. Type /help for the commands."));
-                    } else {
-                        warn!("{} failed to log in as admin", player.name);
-                        lines.write(private("Wrong admin password."));
+                        continue;
+                    }
+                    match limits.logins.fail(key, now) {
+                        Failed::TriesLeft(_) => {
+                            info!("{} failed to log in as admin", player.name);
+                            lines.write(private("Wrong admin password."));
+                        }
+                        Failed::LockedOut(seconds) => {
+                            warn!("{} failed to log in as admin too often: kicked, locked out for {seconds:.0} s", player.name);
+                            let reason = format!("Too many failed admin logins. Try again in {seconds:.0} s.");
+                            commands.queue(move |world: &mut World| {
+                                let _ = admin::commands::kick(world, sender, &reason, false);
+                            });
+                        }
                     }
                 }
                 "logout" => {
@@ -181,13 +195,10 @@ fn receive_chat(
             continue;
         }
 
-        let history = recent.entry(sender).or_default();
-        history.retain(|at| now - at < FLOOD_SECONDS);
-        if history.len() >= FLOOD_LINES {
+        if !limits.lines.allow(sender, Rate::CHAT, now) {
             lines.write(private("You are sending messages too fast."));
             continue;
         }
-        history.push_back(now);
 
         let channel = request.message.channel;
         let line = ChatLine {
@@ -234,5 +245,4 @@ fn receive_chat(
             ChatChannel::Server | ChatChannel::Private => {}
         }
     }
-    recent.retain(|player, _| players.contains(*player));
 }

@@ -235,6 +235,8 @@ pub struct WeaponState {
     pub fire_dev: f32,
     pub speed_dev: f32,
     pub misc_dev: f32,
+    /// Whether the soldier was on the ground last tick, to catch the moment he leaves it.
+    pub was_grounded: bool,
     /// Thrown weapons: seconds the trigger has been held for the throw being wound up.
     pub wind_up: Option<f32>,
     /// The throw being wound up or launched is underhand (the alternative fire button).
@@ -288,8 +290,11 @@ impl WeaponState {
         desc.min * stance_mod * zoom_mod + self.fire_dev + self.speed_dev + self.misc_dev
     }
 
-    /// Advances timers and decays spread. `forward`/`strafe` are speeds in m/s.
-    pub fn tick(&mut self, desc: &DeviationDesc, dt: f32, forward: f32, strafe: f32, jumped: bool) {
+    /// Advances timers and decays spread. `forward`/`strafe` are speeds in m/s. `grounded` is
+    /// whether the soldier is on the ground *this* tick: the spread penalty is a one-time
+    /// bump on the tick he leaves it (a jump, or walking off a ledge), not a level held the
+    /// whole time he's airborne, so falling or parachuting doesn't pin it at maximum.
+    pub fn tick(&mut self, desc: &DeviationDesc, dt: f32, forward: f32, strafe: f32, grounded: bool) {
         let frames = dt / BF2_FRAME;
         self.cooldown = (self.cooldown - dt).max(0.0);
         self.deploy = (self.deploy - dt).max(0.0);
@@ -301,9 +306,10 @@ impl WeaponState {
         } else {
             (self.speed_dev - speed_decay * frames).max(target)
         };
-        if jumped {
+        if self.was_grounded && !grounded {
             self.misc_dev = (self.misc_dev + desc.misc[1]).min(desc.misc[0]);
         }
+        self.was_grounded = grounded;
         self.misc_dev = (self.misc_dev - desc.misc[2] * frames).max(0.0);
     }
 

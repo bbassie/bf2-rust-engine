@@ -1,6 +1,9 @@
 //! Turning keyboard and mouse into [`InputFrame`]s, once per simulation tick.
 
-use std::{collections::VecDeque, f32::consts::FRAC_PI_2};
+use std::{
+    collections::VecDeque,
+    f32::consts::{FRAC_PI_2, TAU},
+};
 
 use bevy::{
     input::{
@@ -179,6 +182,8 @@ fn mouse_look(
             look.pitch = (look.pitch - gv * rate * time.delta_secs()).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
         }
     }
+    // Keeps `f32` precision from degrading over a long session of turning the same way.
+    look.yaw = look.yaw.rem_euclid(TAU);
     if actions.just_pressed(Action::Jump) {
         look.jump_latched = true;
     }

@@ -39,13 +39,24 @@ use game_shared::{
     },
     join::CONTENT_PURPOSE,
 };
-use game_auth::Identity;
+use game_auth::{Identity, admission::Limiter};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::{ServerSettings, rotation::MapRotation};
 
 /// Requests handled at once; more wait in line.
 const WORKERS: usize = 8;
+/// Requests admitted at once, in total and per source address (S8): `tiny_http` doesn't
+/// expose the accepted sockets, so it can't give us OS-level read/write timeouts or a hard
+/// connection cap (see `game_auth::admission`). Generous per-address headroom, since a single
+/// client's own downloader opens several connections at once, and several players can share
+/// one address behind NAT.
+const MAX_TOTAL_REQUESTS: u32 = 256;
+const MAX_REQUESTS_PER_IP: u32 = 32;
+/// Concurrent file transfers, out of `WORKERS`: the only slow part (manifest/identity answers
+/// are tiny), so this is capped well under `WORKERS` to keep threads free for those even when
+/// every transfer slot is busy.
+const MAX_TRANSFERS: u32 = 5;
 
 /// What a server shares with joining clients, and how.
 #[derive(Clone, Debug, Default)]
@@ -127,6 +138,13 @@ struct Shared {
     server_name: String,
     /// The last level's requirement, and the manifest it was worked out from.
     required: Mutex<Option<(Arc<Served>, Arc<Required>)>>,
+    /// The manifest's RON encoding, cached: `serve_manifest` used to re-serialise the whole
+    /// thing on every unauthenticated GET (S22).
+    manifest_cache: Mutex<Option<(Arc<Served>, Vec<String>, Arc<String>)>>,
+    /// Admission control (S8/S22): see [`MAX_TOTAL_REQUESTS`].
+    admission: Limiter,
+    /// Concurrent file transfers (see [`MAX_TRANSFERS`]).
+    transfers: AtomicU32,
 }
 
 /// A built manifest, and the size and time of each served file when it was hashed.
@@ -327,6 +345,9 @@ pub fn start(world: &mut World) {
         identity: world.get_resource::<crate::join::ServerIdentity>().map(|i| i.0.clone()),
         server_name: settings.name.clone(),
         required: Mutex::new(None),
+        manifest_cache: Mutex::new(None),
+        admission: Limiter::new(MAX_TOTAL_REQUESTS, MAX_REQUESTS_PER_IP),
+        transfers: AtomicU32::new(0),
     });
     spawn_build(&shared);
     for i in 0..WORKERS {
@@ -380,6 +401,11 @@ fn text(status: u16, body: impl Into<String>) -> Response<std::io::Cursor<Vec<u8
 }
 
 fn handle(request: Request, shared: &Arc<Shared>) {
+    let ip = request.remote_addr().map_or(Ipv4Addr::LOCALHOST.into(), |a| a.ip());
+    let Some(_admitted) = shared.admission.enter(ip) else {
+        let _ = request.respond(text(429, "too many requests from this address").with_header(header("Retry-After", "2")));
+        return;
+    };
     if !matches!(request.method(), Method::Get | Method::Head) {
         let _ = request.respond(text(405, "only GET"));
         return;
@@ -411,12 +437,27 @@ fn serve_manifest(request: Request, shared: &Shared) {
         let _ = request.respond(response);
         return;
     };
-    let mut manifest = built.built.manifest.clone();
-    manifest.playing = shared.playing.read().unwrap().clone();
+    let playing = shared.playing.read().unwrap().clone();
+    let encoded = {
+        let mut cache = shared.manifest_cache.lock().unwrap();
+        match cache.as_ref() {
+            // Cached (S22): re-encoding the whole manifest to RON on every unauthenticated
+            // GET is wasted work an attacker could lean on; only redo it when the manifest or
+            // the playing levels actually changed.
+            Some((for_built, for_playing, encoded)) if Arc::ptr_eq(for_built, &built) && *for_playing == playing => encoded.clone(),
+            _ => {
+                let mut manifest = built.built.manifest.clone();
+                manifest.playing = playing.clone();
+                let encoded = Arc::new(manifest.to_ron());
+                *cache = Some((built.clone(), playing, encoded.clone()));
+                encoded
+            }
+        }
+    };
     if let Some(from) = request.remote_addr() {
-        info!("content: {from} fetched the manifest");
+        debug!("content: {from} fetched the manifest");
     }
-    let _ = request.respond(text(200, manifest.to_ron()));
+    let _ = request.respond(text(200, (*encoded).clone()));
 }
 
 /// Proves the server's identity to a client about to download: signs the client's nonce and
@@ -460,6 +501,15 @@ fn parse_range(value: &str, len: u64) -> Option<Option<(u64, u64)>> {
     Some(range)
 }
 
+/// Releases one concurrent-transfer slot on drop (see [`MAX_TRANSFERS`]).
+struct TransferGuard<'a>(&'a Shared);
+
+impl Drop for TransferGuard<'_> {
+    fn drop(&mut self) {
+        self.0.transfers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn serve_file(request: Request, shared: &Arc<Shared>, hash: &str) {
     let served = shared.built.read().unwrap().clone();
     let Some((path, hashed)) = served.as_ref().and_then(|s| Some((s.built.files.get(hash)?.clone(), *s.stamps.get(hash)?)))
@@ -471,6 +521,15 @@ fn serve_file(request: Request, shared: &Arc<Shared>, hash: &str) {
         let _ = request.respond(response);
         return;
     };
+    // From here on this is an actual (potentially slow) transfer: cap how many run at once
+    // (S8), so slow downloads can't starve manifest/identity requests out of every worker
+    // thread (those stay fast, and there's always at least `WORKERS - MAX_TRANSFERS` free).
+    if shared.transfers.fetch_add(1, Ordering::AcqRel) >= MAX_TRANSFERS {
+        shared.transfers.fetch_sub(1, Ordering::AcqRel);
+        let _ = request.respond(text(503, "busy, try again shortly").with_header(header("Retry-After", "1")));
+        return;
+    }
+    let _transfer = TransferGuard(shared);
     let mut file = match File::open(&path) {
         Ok(file) => file,
         Err(err) => {

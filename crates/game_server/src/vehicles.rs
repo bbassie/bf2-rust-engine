@@ -340,6 +340,7 @@ fn ride_vehicles(
     >,
     mut buffers: Query<&mut InputBuffer>,
     mut vehicles: Query<(&VehicleData, &VehicleState, &Position, &Rotation, &LinearVelocity, &mut SeatInputs)>,
+    bots: Query<(), With<crate::bots::BotBrain>>,
 ) {
     for (.., mut inputs) in &mut vehicles {
         inputs.0.iter_mut().for_each(|seat| *seat = None);
@@ -349,7 +350,12 @@ fn ride_vehicles(
         let Ok(mut buffer) = buffers.get_mut(controlled_by.0) else {
             continue;
         };
-        let input = buffer.next();
+        let mut input = buffer.next();
+        // Only players predict from the acks (theirs and their vehicle's); a bot's input number
+        // goes up every tick and would replicate both every tick for nothing.
+        if bots.contains(controlled_by.0) {
+            input.seq = 0;
+        }
         ack.set_if_neq(InputAck(input.seq));
         // Hands off the soldier's own weapons while seated. The use button stays, so a press
         // that got us out isn't seen as a new press to get back in.

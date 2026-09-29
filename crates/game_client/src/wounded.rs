@@ -619,8 +619,8 @@ fn update_target(
         text.0 = line;
     }
     let (node, background) = &mut *fill;
-    node.width = percent(share.clamp(0.0, 1.0) * 100.0);
-    background.0 = color;
+    crate::hud::set_width(node, percent(share.clamp(0.0, 1.0) * 100.0));
+    background.set_if_neq(BackgroundColor(color));
 }
 
 /// Share of the ammo a soldier carries when full that he has (gadgets that recharge don't

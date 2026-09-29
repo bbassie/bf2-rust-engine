@@ -97,7 +97,7 @@ fn engines(
                 engine.loops = audio
                     .engine
                     .iter()
-                    .map(|e| {
+                    .filter_map(|e| {
                         let held = HeldVoice { at: Some(hull), level: 0.0, speed: 1.0, channel: Channel::Effects };
                         spawn_held(&mut commands, &mut cache, &assets, listener, &e.sound, held)
                     })
@@ -169,7 +169,7 @@ fn engines(
         match (&audio.interior, engine.interior, inside) {
             (Some(interior), None, true) => {
                 let held = HeldVoice { at: None, level: interior.volume, speed: interior.pitch[0], channel: Channel::Effects };
-                engine.interior = Some(spawn_held(&mut commands, &mut cache, &assets, listener, interior, held));
+                engine.interior = spawn_held(&mut commands, &mut cache, &assets, listener, interior, held);
             }
             (_, Some(voice), false) => {
                 commands.entity(voice).try_despawn();

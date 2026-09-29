@@ -20,6 +20,7 @@ use bevy_replicon_renet::{
 };
 use game_shared::{
     PROTOCOL_ID,
+    chat::ChatLine,
     config::GamePaths,
     conquest::{ControlPoint, Deployment, FlagState, RoundState},
     squad::SquadMember,
@@ -46,6 +47,7 @@ pub mod coop;
 pub mod discovery;
 pub mod gear;
 pub mod join;
+pub mod limits;
 pub mod modes;
 pub mod radio;
 pub mod rotation;
@@ -219,18 +221,42 @@ pub struct InputBuffer {
     queue: VecDeque<InputFrame>,
     last_received: Option<u32>,
     current: InputFrame,
+    /// Frames in a row that were too far ahead of `last_received` (see [`Self::push`]).
+    ahead: u32,
 }
 
 impl InputBuffer {
     /// Frames queued beyond this (plus the ticks about to run) are dropped to keep input
     /// latency bounded.
     const MAX_QUEUED: usize = 6;
+    /// Most a frame's sequence number may be ahead of the last one received (10 s of ticks,
+    /// far more than any packet loss the connection survives). Further ahead is refused, so a
+    /// client can't jump to `u32::MAX` and have every later frame count as old.
+    const MAX_SEQ_JUMP: u32 = 600;
+    /// Unless frames keep coming that far ahead: then the client really moved on (a long
+    /// stall), and its numbers are taken as they are.
+    const RESYNC_AFTER: u32 = 60;
 
+    /// Queues a frame received from the network: dropped if it isn't newer than the last one,
+    /// or if it isn't valid ([`game_shared::validate::input_frame`]: NaN or infinite angles).
     pub fn push(&mut self, frame: InputFrame) {
-        if self.last_received.is_none_or(|last| frame.seq > last) {
-            self.queue.push_back(frame);
-            self.last_received = Some(frame.seq);
+        let Some(frame) = game_shared::validate::input_frame(frame) else {
+            return;
+        };
+        if let Some(last) = self.last_received {
+            if frame.seq <= last {
+                return;
+            }
+            if frame.seq - last > Self::MAX_SEQ_JUMP {
+                self.ahead += 1;
+                if self.ahead < Self::RESYNC_AFTER {
+                    return;
+                }
+            }
         }
+        self.ahead = 0;
+        self.queue.push_back(frame);
+        self.last_received = Some(frame.seq);
     }
 
     /// Drops the oldest frames the coming `ticks` and [`Self::MAX_QUEUED`] won't use. Once per
@@ -448,23 +474,78 @@ fn sender_player(
     }
 }
 
+/// Where to send messages meant for a player's human, if it has one (the host's own player
+/// plays on the server). The inverse of [`sender_player`].
+fn player_client(player: Entity, clients: &Query<&PlayerClient>, host: Option<&HostPlayer>) -> Option<ClientId> {
+    if host.is_some_and(|h| h.0 == player) {
+        return Some(ClientId::Server);
+    }
+    clients.get(player).ok().map(|c| ClientId::Client(c.0))
+}
+
+/// Server-side: the player's client said hello; further hellos are ignored.
+#[derive(Component)]
+pub struct Greeted;
+
+/// A client's hello, once per connection: its name (cleaned, and made unique among the
+/// players; a verified account keeps its own), a line to everyone that it joined, the
+/// greeting and the message of the day to it, and its career stats kept from now on
+/// ([`stats::Identified`]).
+#[allow(clippy::type_complexity)]
 fn receive_hello(
+    mut commands: Commands,
     mut hellos: MessageReader<FromClient<ClientHello>>,
     clients: Query<&ClientPlayer>,
     host: Option<Res<HostPlayer>>,
-    mut players: Query<&mut Player, Without<game_shared::join::AccountBadge>>,
+    settings: Res<ServerSettings>,
+    mut players: Query<(Entity, &mut Player, Has<game_shared::join::AccountBadge>, Has<Greeted>)>,
+    mut lines: MessageWriter<ToClients<ChatLine>>,
 ) {
+    // Greeted in this pass (the marker is inserted later).
+    let mut greeted = Vec::new();
     for hello in hellos.read() {
         let Some(entity) = sender_player(hello.client_id, &clients, host.as_deref()) else {
             continue;
         };
-        // Players with a verified account keep its name.
-        if let Ok(mut player) = players.get_mut(entity) {
-            let name: String = hello.message.name.trim().chars().take(24).collect();
-            if !name.is_empty() {
+        let Ok((_, player, verified, already)) = players.get(entity) else {
+            continue;
+        };
+        if already || greeted.contains(&entity) {
+            debug!("ignoring another hello from {}", player.name);
+            continue;
+        }
+        greeted.push(entity);
+        let wanted = game_shared::validate::player_name(&hello.message.name).filter(|_| !verified);
+        if let Some(wanted) = wanted {
+            let name = game_shared::validate::unique_name(&wanted, |name| {
+                players
+                    .iter()
+                    .any(|(other, player, ..)| other != entity && player.name.eq_ignore_ascii_case(name))
+            });
+            if let Ok((_, mut player, ..)) = players.get_mut(entity)
+                && player.name != name
+            {
                 info!("{} is now known as {name}", player.name);
                 player.name = name;
             }
+        }
+        let Ok((_, player, ..)) = players.get(entity) else {
+            continue;
+        };
+        let name = player.name.clone();
+        commands.entity(entity).insert((Greeted, stats::Identified));
+        info!("server: {name} joined the game");
+        lines.write(ToClients {
+            targets: SendTargets::AllExcept(hello.client_id),
+            message: ChatLine::server(format!("{name} joined the game")),
+        });
+        let greeting = std::iter::once(format!("Welcome to {}, {name}!", settings.name))
+            .chain(settings.admin.motd.lines().map(str::to_string));
+        for line in greeting {
+            lines.write(ToClients {
+                targets: SendTargets::Single(hello.client_id),
+                message: ChatLine::private(line),
+            });
         }
     }
 }
@@ -482,7 +563,9 @@ fn receive_inputs(
             continue;
         };
         if let Ok(mut buffer) = buffers.get_mut(entity) {
-            for frame in &packet.message.frames {
+            // The newest frames only: clients send a few; a packet of thousands is no input.
+            let frames = &packet.message.frames;
+            for frame in &frames[frames.len().saturating_sub(game_shared::validate::MAX_INPUT_FRAMES)..] {
                 buffer.push(*frame);
             }
         }
@@ -514,6 +597,7 @@ fn apply_inputs(
         (With<Soldier>, Without<Seated>),
     >,
     mut buffers: Query<&mut InputBuffer>,
+    bots: Query<(), With<bots::BotBrain>>,
 ) {
     let dt = time.delta_secs();
     let water = water_height(level.as_deref());
@@ -531,7 +615,7 @@ fn apply_inputs(
     }
     // Movement, in parallel: soldiers only move against the world and vehicles, never each
     // other (`GameLayer::soldier_movement_mask`), so the order makes no difference.
-    let buffers = &buffers;
+    let (buffers, bots) = (&buffers, &bots);
     soldiers
         .par_iter_mut()
         .for_each(|(controlled_by, mut motion, mut ack, mut transform, applied, _)| {
@@ -542,7 +626,11 @@ fn apply_inputs(
             let mut next = *motion;
             step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover, water);
             motion.set_if_neq(next);
-            ack.set_if_neq(InputAck(input.seq));
+            // Only players predict their soldier from the ack; a bot's input number goes up every
+            // tick and would replicate its ack every tick for nothing.
+            if !bots.contains(controlled_by.0) {
+                ack.set_if_neq(InputAck(input.seq));
+            }
             let body = next.body_transform();
             if transform.translation != body.translation || transform.rotation != body.rotation {
                 *transform = body;
@@ -711,4 +799,99 @@ fn pick_spawn(
         position.y = position.y.max(ground + 0.1);
     }
     Some((position, yaw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(seq: u32) -> InputFrame {
+        InputFrame {
+            seq,
+            yaw: 1.0,
+            ..default()
+        }
+    }
+
+    fn queued(buffer: &InputBuffer) -> Vec<u32> {
+        buffer.queue.iter().map(|f| f.seq).collect()
+    }
+
+    #[test]
+    fn frames_with_nan_angles_are_dropped() {
+        let mut buffer = InputBuffer::default();
+        buffer.push(InputFrame { yaw: f32::NAN, ..frame(1) });
+        buffer.push(InputFrame { pitch: f32::INFINITY, ..frame(2) });
+        assert!(queued(&buffer).is_empty());
+        buffer.push(frame(3));
+        assert_eq!(queued(&buffer), [3]);
+        assert!(buffer.next().yaw.is_finite());
+    }
+
+    #[test]
+    fn a_huge_sequence_jump_does_not_block_later_input() {
+        let mut buffer = InputBuffer::default();
+        buffer.push(frame(10));
+        buffer.push(frame(u32::MAX));
+        buffer.push(frame(11));
+        assert_eq!(queued(&buffer), [10, 11]);
+        // Old and repeated frames are still ignored.
+        buffer.push(frame(11));
+        buffer.push(frame(5));
+        assert_eq!(queued(&buffer), [10, 11]);
+    }
+
+    #[test]
+    fn a_hello_names_the_player_once_and_uniquely() {
+        let mut app = App::new();
+        app.add_message::<FromClient<ClientHello>>()
+            .add_message::<ToClients<ChatLine>>()
+            .insert_resource(ServerSettings::default())
+            .add_systems(Update, receive_hello);
+        app.world_mut().spawn(Player {
+            name: "Bob".into(),
+            is_bot: true,
+        });
+        let player = app
+            .world_mut()
+            .spawn(Player {
+                name: "Player 1".into(),
+                is_bot: false,
+            })
+            .id();
+        let client = app.world_mut().spawn(ClientPlayer(player)).id();
+        let hello = |name: &str| FromClient {
+            client_id: ClientId::Client(client),
+            message: ClientHello { name: name.into() },
+        };
+        // Two in one packet: the first counts.
+        app.world_mut().write_message(hello("  bob  "));
+        app.world_mut().write_message(hello("Alice"));
+        app.update();
+        let name = |app: &App| app.world().get::<Player>(player).unwrap().name.clone();
+        assert_eq!(name(&app), "bob (2)", "cleaned, and not the bot's name");
+        assert!(app.world().entity(player).contains::<Greeted>());
+        assert!(app.world().entity(player).contains::<stats::Identified>());
+        // Later hellos change nothing and greet nobody.
+        let before = name(&app);
+        let mut lines = app.world().resource::<Messages<ToClients<ChatLine>>>().get_cursor_current();
+        app.world_mut().write_message(hello("Alice"));
+        app.update();
+        assert_eq!(name(&app), before);
+        let sent = lines.read(app.world().resource::<Messages<ToClients<ChatLine>>>()).count();
+        assert_eq!(sent, 0, "no second greeting");
+    }
+
+    #[test]
+    fn frames_that_keep_coming_far_ahead_are_taken_eventually() {
+        let mut buffer = InputBuffer::default();
+        buffer.push(frame(1));
+        let far = 1 + InputBuffer::MAX_SEQ_JUMP + 1000;
+        for seq in far..far + InputBuffer::RESYNC_AFTER {
+            buffer.push(frame(seq));
+        }
+        assert_eq!(buffer.last_received, Some(far + InputBuffer::RESYNC_AFTER - 1));
+        buffer.push(frame(far + InputBuffer::RESYNC_AFTER));
+        assert_eq!(buffer.last_received, Some(far + InputBuffer::RESYNC_AFTER));
+    }
 }

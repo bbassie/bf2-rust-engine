@@ -50,6 +50,7 @@ impl Plugin for NetPlugin {
             )
             .add_systems(OnExit(ClientState::Connected), || warn!("disconnected"))
             .add_systems(OnEnter(ClientState::Disconnected), connection_lost)
+            .add_observer(level_load_failed)
             .add_systems(
                 PreUpdate,
                 (tag_local_entities, receive_kick).after(ClientSystems::Receive),
@@ -283,6 +284,18 @@ fn connection_lost(world: &mut World) {
     warn!("{notice}");
     leave_match(world);
     world.insert_resource(MatchNotice(Some(notice)));
+}
+
+/// The server's level can't be loaded here (missing, or a name that isn't a folder name):
+/// leave, rather than play another level than the one the server simulates.
+fn level_load_failed(failed: On<game_shared::level::LevelLoadFailed>, mut commands: Commands) {
+    let level: String = failed.level.escape_debug().take(64).collect();
+    let notice = format!("Can't load the server's level `{level}`: {}", failed.error);
+    commands.queue(move |world: &mut World| {
+        warn!("{notice}");
+        leave_match(world);
+        world.insert_resource(MatchNotice(Some(notice)));
+    });
 }
 
 fn tag_local_entities(

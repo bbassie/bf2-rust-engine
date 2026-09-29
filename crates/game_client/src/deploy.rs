@@ -36,6 +36,7 @@ impl Plugin for DeployPlugin {
             .add_systems(
                 Update,
                 (
+                    clear_stale_choice,
                     open_and_close,
                     set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
                     rebuild_markers,
@@ -71,6 +72,20 @@ impl DeployScreen {
     fn choice(&mut self, server: &Deployment) -> &mut (u8, Option<u8>, bool) {
         self.choice
             .get_or_insert((server.kit, server.control_point, server.on_squad_leader))
+    }
+}
+
+/// The picked control point is an index into the current level's layout, on the current
+/// team's side: stale (pointing at nothing, or the other team's spawn) after a map change or
+/// switching teams. Clearing it falls back to [`Deployment::choice`]'s default of whatever the
+/// server already has for us.
+fn clear_stale_choice(
+    mut screen: ResMut<DeployScreen>,
+    level: Option<Res<LoadedLevel>>,
+    switched: Query<(), (With<LocalPlayer>, Changed<Team>)>,
+) {
+    if level.is_some_and(|l| l.is_changed()) || !switched.is_empty() {
+        screen.choice = None;
     }
 }
 
@@ -565,8 +580,13 @@ fn rebuild_squads(
     local: Query<(Entity, &Team, &Deployment, Option<&SquadMember>), With<LocalPlayer>>,
     players: Query<(Entity, &Player, &Team, Option<&SquadMember>)>,
     list: Single<(Entity, Option<&Children>), With<SquadList>>,
+    screen: Res<DeployScreen>,
     mut built: Local<String>,
 ) {
+    // Only while the screen shows: opening it rebuilds the list if anything changed meanwhile.
+    if !screen.open {
+        return;
+    }
     let Ok((me, team, deployment, mine)) = local.single() else {
         return;
     };

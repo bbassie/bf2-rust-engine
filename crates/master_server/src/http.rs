@@ -3,15 +3,19 @@
 //!
 //! Plain HTTP only: in production the master runs behind a reverse proxy that terminates
 //! TLS (see docs/MODDING.md), with `trust_proxy` so rate limits see the players' addresses.
+//! `tiny_http` doesn't expose the accepted sockets, so it can't give us OS-level read/write
+//! timeouts or a hard connection cap; [`ADMISSION`] and [`BODY_READ_TIMEOUT`] are the
+//! practical substitute (see `game_auth::admission`).
 
 use std::{
     collections::HashMap,
     io::Read,
     net::{IpAddr, Ipv4Addr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
 };
 
-use game_auth::{Identity, api::MAX_BODY_BYTES};
+use game_auth::{Identity, admission::Limiter, api::MAX_BODY_BYTES};
 
 use crate::{auth::RateLimits, config::Config, db::Db, list::SharedList};
 
@@ -23,6 +27,9 @@ pub struct Master {
     pub db: Mutex<Db>,
     pub list: SharedList,
     pub limits: Mutex<RateLimits>,
+    /// Bounds how many requests are worked on at once, in total and per address (S8/S22: no
+    /// real connection cap is reachable through `tiny_http`, see the module docs).
+    pub admission: Limiter,
 }
 
 impl Master {
@@ -30,6 +37,26 @@ impl Master {
         self.key.public_key()
     }
 }
+
+/// Locks a mutex, recovering from poisoning instead of panicking: one request that panics
+/// while holding a lock must not take every other request down with it (they'd all panic on
+/// the same poisoned lock forever after). The data can't be left in a worse state than a
+/// normal early return would leave it in, since every write here goes through `rusqlite`
+/// (itself `?`-based, not panic-based) or plain map/vec operations.
+pub fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Total, and per source address, requests admitted at once (see the module docs).
+pub(crate) const MAX_TOTAL_REQUESTS: u32 = 256;
+pub(crate) const MAX_REQUESTS_PER_IP: u32 = 32;
+
+/// How long we wait, in total, for a request's body to arrive. `tiny_http` gives no way to
+/// set a real socket read timeout (see the module docs), so this bounds our own reads
+/// instead: it stops a body that trickles in from occupying a worker thread forever, though a
+/// peer that sends nothing at all after the headers can still block on the first read (the
+/// admission cap above limits how many of those can pile up at once).
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -196,8 +223,43 @@ pub fn parse_form(text: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Whether `peer` (the request's real, immediate TCP source) is one we take
+/// `X-Forwarded-For`/`X-Real-IP` from. Honouring those headers from just anyone would let a
+/// client that reaches this port directly spoof its address and dodge rate limits; only the
+/// configured reverse proxy (loopback by default: that's how the documented deployment runs)
+/// is trusted to have set them correctly.
+fn is_trusted_proxy(config: &Config, peer: IpAddr) -> bool {
+    if !config.trust_proxy {
+        return false;
+    }
+    if config.trusted_proxies.is_empty() { peer.is_loopback() } else { config.trusted_proxies.contains(&peer) }
+}
+
+/// Reads a request's body with an overall wall-clock deadline (see [`BODY_READ_TIMEOUT`]) and
+/// the usual byte cap.
+fn read_body(request: &mut tiny_http::Request, max_len: usize) -> Result<Vec<u8>, Resp> {
+    let mut reader = request.as_reader().take(max_len as u64 + 1);
+    let deadline = Instant::now() + BODY_READ_TIMEOUT;
+    let mut body = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        if Instant::now() > deadline {
+            return Err(Resp::error(408, "the request body took too long"));
+        }
+        let n = reader.read(&mut buf).map_err(|_| Resp::error(400, "can't read the request"))?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&buf[..n]);
+        if body.len() > max_len {
+            return Err(Resp::error(413, "request too big"));
+        }
+    }
+    Ok(body)
+}
+
 /// Reads a `tiny_http` request.
-fn read_request(request: &mut tiny_http::Request, trust_proxy: bool) -> Result<Req, Resp> {
+fn read_request(request: &mut tiny_http::Request, config: &Config) -> Result<Req, Resp> {
     let method = match request.method() {
         tiny_http::Method::Get | tiny_http::Method::Head => Method::Get,
         tiny_http::Method::Post => Method::Post,
@@ -208,7 +270,7 @@ fn read_request(request: &mut tiny_http::Request, trust_proxy: bool) -> Result<R
         req.headers.insert(header.field.as_str().as_str().to_ascii_lowercase(), header.value.as_str().to_string());
     }
     req.ip = request.remote_addr().map_or(Ipv4Addr::LOCALHOST.into(), |a| a.ip());
-    if trust_proxy {
+    if is_trusted_proxy(config, req.ip) {
         // The proxy appends the address it saw last.
         if let Some(ip) = req
             .header("x-forwarded-for")
@@ -222,16 +284,7 @@ fn read_request(request: &mut tiny_http::Request, trust_proxy: bool) -> Result<R
     if request.body_length().is_some_and(|len| len > MAX_BODY_BYTES) {
         return Err(Resp::error(413, "request too big"));
     }
-    let mut body = Vec::new();
-    request
-        .as_reader()
-        .take(MAX_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|_| Resp::error(400, "can't read the request"))?;
-    if body.len() > MAX_BODY_BYTES {
-        return Err(Resp::error(413, "request too big"));
-    }
-    req.body = body;
+    req.body = read_body(request, MAX_BODY_BYTES)?;
     Ok(req)
 }
 
@@ -259,8 +312,19 @@ pub fn serve(server: tiny_http::Server, master: Arc<Master>, workers: usize) {
                 .name(format!("http {i}"))
                 .spawn(move || {
                     while let Ok(mut request) = server.recv() {
-                        let resp = match read_request(&mut request, master.config.trust_proxy) {
-                            Ok(req) => handle(&master, &req),
+                        let ip = request.remote_addr().map_or(Ipv4Addr::LOCALHOST.into(), |a| a.ip());
+                        let Some(_admitted) = master.admission.enter(ip) else {
+                            respond(request, Resp::error(429, "too many requests from your address; try again shortly"));
+                            continue;
+                        };
+                        let resp = match read_request(&mut request, &master.config) {
+                            Ok(req) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&master, &req))) {
+                                Ok(resp) => resp,
+                                Err(_) => {
+                                    eprintln!("error: a request handler panicked on {} {}", req.path, req.ip);
+                                    Resp::error(500, "internal error")
+                                }
+                            },
                             Err(resp) => resp,
                         };
                         respond(request, resp);
@@ -303,5 +367,62 @@ mod tests {
         assert_eq!(req.cookie("bf2r_session").as_deref(), Some("abc"));
         req.headers.insert("authorization".into(), "Bearer tok".into());
         assert_eq!(req.bearer(), Some("tok"));
+    }
+
+    fn tiny_request(remote: &str, headers: &[(&str, &str)]) -> tiny_http::Request {
+        let mut test = tiny_http::TestRequest::new()
+            .with_method(tiny_http::Method::Post)
+            .with_path("/api/v1/login")
+            .with_remote_addr(remote.parse().unwrap())
+            .with_body("{}");
+        for (name, value) in headers {
+            test = test.with_header(tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap());
+        }
+        test.into()
+    }
+
+    #[test]
+    fn x_forwarded_for_only_from_a_trusted_proxy() {
+        let mut config = Config::default();
+        config.trust_proxy = true;
+        // Loopback is trusted by default (the documented reverse-proxy setup).
+        let mut request = tiny_request("127.0.0.1:9", &[("X-Forwarded-For", "203.0.113.9")]);
+        let req = read_request(&mut request, &config).unwrap();
+        assert_eq!(req.ip, "203.0.113.9".parse::<IpAddr>().unwrap());
+        // A direct client (not the proxy) can't spoof its address this way.
+        let mut request = tiny_request("198.51.100.1:9", &[("X-Forwarded-For", "203.0.113.9")]);
+        let req = read_request(&mut request, &config).unwrap();
+        assert_eq!(req.ip, "198.51.100.1".parse::<IpAddr>().unwrap());
+        // Without trust_proxy at all, nobody's X-Forwarded-For is honoured, even loopback's.
+        let mut off = Config::default();
+        let mut request = tiny_request("127.0.0.1:9", &[("X-Forwarded-For", "203.0.113.9")]);
+        assert_eq!(read_request(&mut request, &off).unwrap().ip, "127.0.0.1".parse::<IpAddr>().unwrap());
+        // An explicit allow-list can trust a proxy that isn't on this machine.
+        off.trust_proxy = true;
+        off.trusted_proxies = vec!["10.0.0.5".parse().unwrap()];
+        let mut request = tiny_request("10.0.0.5:9", &[("X-Forwarded-For", "203.0.113.9")]);
+        assert_eq!(read_request(&mut request, &off).unwrap().ip, "203.0.113.9".parse::<IpAddr>().unwrap());
+        let mut request = tiny_request("127.0.0.1:9", &[("X-Forwarded-For", "203.0.113.9")]);
+        assert_eq!(read_request(&mut request, &off).unwrap().ip, "127.0.0.1".parse::<IpAddr>().unwrap(), "loopback isn't in the allow-list");
+    }
+
+    #[test]
+    fn body_too_big_is_rejected() {
+        let config = Config::default();
+        let big = "x".repeat(MAX_BODY_BYTES + 1);
+        let test = tiny_http::TestRequest::new().with_method(tiny_http::Method::Post).with_path("/x").with_body(Box::leak(big.into_boxed_str()));
+        let mut request: tiny_http::Request = test.into();
+        assert_eq!(read_request(&mut request, &config).unwrap_err().status, 413);
+    }
+
+    #[test]
+    fn poisoned_mutex_recovers() {
+        let mutex = Mutex::new(5);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("boom");
+        }));
+        assert!(mutex.is_poisoned());
+        assert_eq!(*lock(&mutex), 5);
     }
 }

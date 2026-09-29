@@ -176,8 +176,22 @@ fn serve(config: Config, db: Db) -> Result<(), String> {
     if !config.public_url.starts_with("https://") && !config.http_bind.ip().is_loopback() {
         println!("warning: serving accounts over plain HTTP; put a TLS reverse proxy in front (docs/MODDING.md)");
     }
+    if config.http_bind.ip().is_loopback() && !config.trust_proxy {
+        println!(
+            "warning: listening on loopback without trust_proxy: if this runs behind a reverse proxy, every \
+             player's login/registration rate limit will share the proxy's address unless you set trust_proxy \
+             (docs/MODDING.md)"
+        );
+    }
     let list = Arc::new(Mutex::new(list::ServerList::default()));
-    let master = Arc::new(Master { config, key, db: Mutex::new(db), list: list.clone(), limits: Mutex::new(Default::default()) });
+    let master = Arc::new(Master {
+        config,
+        key,
+        db: Mutex::new(db),
+        list: list.clone(),
+        limits: Mutex::new(Default::default()),
+        admission: game_auth::admission::Limiter::new(http::MAX_TOTAL_REQUESTS, http::MAX_REQUESTS_PER_IP),
+    });
     std::thread::Builder::new()
         .name("udp".into())
         .spawn(move || list::run_udp(udp, list))
@@ -188,8 +202,11 @@ fn serve(config: Config, db: Db) -> Result<(), String> {
         .spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(600));
-                pruner.limits.lock().unwrap().prune();
-                let _ = pruner.db.lock().unwrap().remove_expired(unix_now());
+                let now = unix_now();
+                http::lock(&pruner.limits).prune();
+                let _ = http::lock(&pruner.db).remove_expired(now);
+                let ticket_cutoff = now.saturating_sub(pruner.config.ticket_window_hours * 3600);
+                let _ = http::lock(&pruner.db).prune_tickets(ticket_cutoff);
             }
         })
         .map_err(|err| err.to_string())?;

@@ -34,6 +34,7 @@ pub mod soldier;
 pub mod squad;
 pub mod statics;
 pub mod summary;
+pub mod validate;
 pub mod vehicle;
 pub mod weapons;
 

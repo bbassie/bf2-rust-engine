@@ -8,14 +8,17 @@ use bevy_replicon::prelude::*;
 use game_shared::{
     PROTOCOL_ID,
     discovery::{
-        DISCOVERY_PORTS, HEARTBEAT_SECONDS, MASTER_PORT, ServerInfo, encode_bye, encode_heartbeat_with, encode_reply,
-        parse_query,
+        DISCOVERY_PORTS, HEARTBEAT_SECONDS, MASTER_PORT, QUERY_SIZE, ServerInfo, encode_bye, encode_heartbeat_with,
+        encode_reply, parse_query,
     },
     level::LoadedLevel,
     protocol::Player,
 };
 
-use crate::ServerSettings;
+use crate::{
+    ServerSettings,
+    limits::{Rate, RateLimiter},
+};
 
 pub struct DiscoveryPlugin;
 
@@ -136,15 +139,28 @@ fn heartbeat(
     }
 }
 
+/// Queries answered, per sender and from everyone: a query's reply is no bigger than the query
+/// (see [`QUERY_SIZE`]), and nobody gets more than a few a second.
+#[derive(Default)]
+struct QueryLimits {
+    per_address: RateLimiter<IpAddr>,
+    total: RateLimiter<()>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn answer_queries(
+    time: Res<Time<Real>>,
     responder: Res<DiscoveryResponder>,
     settings: Res<ServerSettings>,
     level: Option<Res<LoadedLevel>>,
     players: Query<&Player>,
     content: Option<Res<crate::content::ContentServer>>,
     accounts: Option<Res<crate::accounts::Accounts>>,
+    mut limits: Local<QueryLimits>,
 ) {
-    let mut buffer = [0u8; 64];
+    let now = time.elapsed_secs_f64();
+    // Room for a query and a bit, so a longer one isn't cut (or an error on Windows).
+    let mut buffer = [0u8; QUERY_SIZE + 64];
     let mut info: Option<ServerInfo> = None;
     // A handful per frame is plenty; the rest waits.
     for _ in 0..16 {
@@ -154,10 +170,16 @@ fn answer_queries(
         let Some(token) = parse_query(&buffer[..len]) else {
             continue;
         };
+        if !limits.per_address.allow(from.ip(), Rate::DISCOVERY_PER_ADDRESS, now)
+            || !limits.total.allow((), Rate::DISCOVERY_TOTAL, now)
+        {
+            continue;
+        }
         let info = info.get_or_insert_with(|| {
             let bots = players.iter().filter(|p| p.is_bot).count() as u32;
             ServerInfo {
-                name: settings.name.clone(),
+                // Keeps the reply well below the query's size.
+                name: settings.name.chars().take(64).collect(),
                 level: settings.level.clone(),
                 level_name: level
                     .as_ref()
@@ -173,6 +195,10 @@ fn answer_queries(
                 ranked: accounts.as_ref().is_some_and(|a| a.required()),
             }
         });
-        let _ = responder.socket.send_to(&encode_reply(token, info), from);
+        let reply = encode_reply(token, info);
+        // Never more than was asked with (no amplification).
+        if reply.len() <= len {
+            let _ = responder.socket.send_to(&reply, from);
+        }
     }
 }

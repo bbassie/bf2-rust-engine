@@ -8,6 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy_replicon::prelude::ClientState;
 use game_data::{
     ControlPointDesc, GameModeDesc, LevelDesc, Placement, SpawnPointDesc, TerrainDesc,
 };
@@ -173,11 +174,21 @@ impl Heightmap {
     }
 }
 
+/// Triggered on a client connected to a remote server when the level the server plays can't
+/// be loaded. The client leaves the match: playing another level than the server simulates
+/// would only look broken (the server and singleplayer fall back to [`TEST_RANGE`]).
+#[derive(Event, Clone, Debug)]
+pub struct LevelLoadFailed {
+    pub level: String,
+    pub error: String,
+}
+
 fn load_level_for_match(
     add: On<Add, MatchInfo>,
     infos: Query<&MatchInfo>,
     old: Query<Entity, With<LevelEntity>>,
     paths: Res<GamePaths>,
+    client_state: Option<Res<State<ClientState>>>,
     mut commands: Commands,
 ) {
     let Ok(info) = infos.get(add.entity) else {
@@ -187,8 +198,19 @@ fn load_level_for_match(
         commands.entity(entity).despawn();
     }
 
+    // A client of a remote server (the server and singleplayer run as `Disconnected`).
+    let remote = client_state.is_some_and(|s| *s.get() != ClientState::Disconnected);
     let level = match load_level(&paths, &info.level) {
         Ok(level) => level,
+        Err(err) if remote => {
+            error!("failed to load the server's level `{}`: {err:#}", info.level);
+            commands.remove_resource::<LoadedLevel>();
+            commands.trigger(LevelLoadFailed {
+                level: info.level.clone(),
+                error: format!("{err:#}"),
+            });
+            return;
+        }
         Err(err) => {
             error!(
                 "failed to load level `{}`: {err:#}. Falling back to `{TEST_RANGE}`",
@@ -210,6 +232,10 @@ fn load_level_for_match(
 pub fn load_level(paths: &GamePaths, name: &str) -> anyhow::Result<LoadedLevel> {
     if name == TEST_RANGE {
         return Ok(test_range());
+    }
+    // The name may come from a server: it must stay a folder name inside `levels/`.
+    if !crate::validate::path_component(name) {
+        anyhow::bail!("`{}` isn't a valid level name", name.escape_debug());
     }
     let dir = paths.level_dir(name);
     let mut desc: LevelDesc = paths.read_ron(format!("levels/{name}/level.ron"))?;
@@ -414,4 +440,68 @@ fn test_range_props() -> Vec<(Placement, Vec3, Color)> {
         ));
     }
     props
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+
+    fn paths() -> GamePaths {
+        GamePaths {
+            imported: std::env::temp_dir().join("bf2_no_such_imported_dir"),
+            mods: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn level_names_from_a_server_stay_inside_levels() {
+        for name in ["../../etc", "..", "a/b", r"C:\x", ""] {
+            let err = load_level(&paths(), name).err().expect(name);
+            assert!(err.to_string().contains("valid level name"), "{name}: {err}");
+        }
+    }
+
+    #[derive(Resource, Default)]
+    struct Failures(Vec<String>);
+
+    fn app(state: ClientState) -> App {
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin)
+            .insert_state(state)
+            .insert_resource(paths())
+            .init_resource::<Failures>()
+            .add_plugins(LevelPlugin)
+            .add_observer(|failed: On<LevelLoadFailed>, mut failures: ResMut<Failures>| {
+                failures.0.push(failed.level.clone());
+            });
+        app
+    }
+
+    #[test]
+    fn a_client_does_not_fall_back_to_the_test_range() {
+        let mut app = app(ClientState::Connected);
+        app.world_mut().spawn(MatchInfo {
+            level: "no_such_level".into(),
+            mode: "gpm_cq".into(),
+            size: 16,
+        });
+        app.world_mut().flush();
+        assert!(app.world().get_resource::<LoadedLevel>().is_none());
+        assert_eq!(app.world().resource::<Failures>().0, ["no_such_level"]);
+    }
+
+    #[test]
+    fn the_server_falls_back_to_the_test_range() {
+        let mut app = app(ClientState::Disconnected);
+        app.world_mut().spawn(MatchInfo {
+            level: "no_such_level".into(),
+            mode: "gpm_cq".into(),
+            size: 16,
+        });
+        app.world_mut().flush();
+        assert!(app.world().get_resource::<LoadedLevel>().is_some());
+        assert!(app.world().resource::<Failures>().0.is_empty());
+    }
 }

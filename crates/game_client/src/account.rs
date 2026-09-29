@@ -67,6 +67,11 @@ pub struct AccountState {
     /// Bumped on every change, so pages rebuild.
     pub version: u32,
     file: Option<PathBuf>,
+    /// The master's key fingerprint as of our last successful login at `master_url`
+    /// (`account.ron`). If `/info` ever answers with a different one, we refuse to talk to it
+    /// rather than silently trust a possibly different server (S20): the same trust-on-first-
+    /// use model the game already uses for content servers.
+    pinned_fingerprint: Option<String>,
 }
 
 impl AccountState {
@@ -82,7 +87,7 @@ impl AccountState {
             master_url: self.master_url.clone().unwrap_or_default(),
             name: self.name.clone(),
             refresh_token: self.refresh_token.clone().unwrap_or_default(),
-            master_fingerprint: self.master.as_ref().map(|m| m.fingerprint.clone()).unwrap_or_default(),
+            master_fingerprint: self.pinned_fingerprint.clone().unwrap_or_default(),
         };
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -155,6 +160,10 @@ impl Account {
         state.refresh_token = Some(session.refresh_token);
         state.session = Some((session.session_token, session.session_expires));
         state.profile = Some(session.profile);
+        // A successful login is when we start (or renew) trusting this master's key.
+        if let Some(master) = &state.master {
+            state.pinned_fingerprint = Some(master.fingerprint.clone());
+        }
         state.save();
         state.version += 1;
     }
@@ -162,6 +171,16 @@ impl Account {
     fn fetch_master(&self) -> Result<MasterInfo, String> {
         let url = self.url("/info").ok_or("no master server set")?;
         let info: MasterInfo = read(agent().get(url).call())?;
+        let pinned = self.state().pinned_fingerprint.clone();
+        if let Some(pinned) = pinned.as_deref().filter(|pinned| pinned_mismatch(pinned, &info.fingerprint)) {
+            // The master's key changed since we last logged in at this address: refuse to
+            // talk to it rather than silently trust a possibly different server (S20).
+            return Err(format!(
+                "the master server's key changed since you last logged in (was {pinned}, now {}); if you're sure this is \
+                 still the right master server, log out and back in to trust the new key",
+                info.fingerprint
+            ));
+        }
         self.state().master = Some(info.clone());
         Ok(info)
     }
@@ -312,6 +331,7 @@ fn load_account(mut commands: Commands, cli: Res<Cli>, settings_file: Res<Settin
         master_url: master_url.clone(),
         name: stored.name,
         refresh_token: (same_master && !stored.refresh_token.is_empty()).then_some(stored.refresh_token),
+        pinned_fingerprint: (same_master && !stored.master_fingerprint.is_empty()).then_some(stored.master_fingerprint),
         file,
         ..default()
     };
@@ -322,11 +342,19 @@ fn load_account(mut commands: Commands, cli: Res<Cli>, settings_file: Res<Settin
     commands.insert_resource(account);
 }
 
-/// `https://host[:port][/path]` without a trailing slash; `None` for nothing or garbage.
+/// Whether a freshly-fetched master fingerprint differs from the one we pinned at our last
+/// successful login there.
+fn pinned_mismatch(pinned: &str, fetched: &str) -> bool {
+    game_auth::identity::normalize_fingerprint(pinned) != game_auth::identity::normalize_fingerprint(fetched)
+}
+
+/// `https://host[:port][/path]` without a trailing slash; `None` for nothing, garbage, or a
+/// `http://` address that isn't loopback (accounts need `https://` except for local testing,
+/// S20: passwords, tokens and the master's key would otherwise cross the network in the
+/// clear, and a server the client won't retry probing could go stale for good).
 pub fn clean_url(url: Option<&str>) -> Option<String> {
     let url = url?.trim().trim_end_matches('/');
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
-    (!rest.is_empty() && !rest.contains(char::is_whitespace)).then(|| url.to_string())
+    (!url.is_empty() && !url.contains(char::is_whitespace) && game_auth::https_or_loopback(url)).then(|| url.to_string())
 }
 
 /// The master URL changed in the settings: log out of the old one.
@@ -347,7 +375,30 @@ fn follow_master_url(settings: Res<Settings>, account: Option<Res<Account>>) {
         state.session = None;
         state.profile = None;
         state.error = None;
+        state.pinned_fingerprint = None;
         state.save();
         state.version += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_need_https_or_loopback() {
+        assert_eq!(clean_url(Some("https://master.example.com/")), Some("https://master.example.com".into()));
+        assert_eq!(clean_url(Some("http://127.0.0.1:16581")), Some("http://127.0.0.1:16581".into()));
+        assert_eq!(clean_url(Some("http://localhost:16581")), Some("http://localhost:16581".into()));
+        assert_eq!(clean_url(Some("http://master.example.com")), None, "plain http to a real host");
+        assert_eq!(clean_url(Some("ftp://x")), None);
+        assert_eq!(clean_url(Some("  ")), None);
+        assert_eq!(clean_url(None), None);
+    }
+
+    #[test]
+    fn pinned_key_change_is_detected() {
+        assert!(!pinned_mismatch("3f2a 91bc", "3f2a91bc"), "spacing/case only");
+        assert!(pinned_mismatch("3f2a 91bc", "aaaa bbbb"));
     }
 }

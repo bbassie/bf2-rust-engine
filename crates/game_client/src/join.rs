@@ -150,6 +150,10 @@ fn on_challenge(world: &mut World, challenge: JoinChallenge) {
         Ok(key) => key,
         Err(err) => return fail(world, format!("{server}: {err}. Not joining.")),
     };
+    // The level name becomes a folder name here (`levels/<level>/`).
+    if !game_shared::validate::path_component(&challenge.level) {
+        return fail(world, format!("{server} named a level that isn't a valid folder name. Not joining."));
+    }
     let identity = ServerIdentity {
         name: challenge.server_name.clone(),
         address: server.to_string(),

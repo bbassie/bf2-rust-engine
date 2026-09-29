@@ -35,7 +35,10 @@ impl Plugin for LampsPlugin {
         app.insert_resource(PointLightShadowMap { size: SHADOW_MAP_SIZE })
             .add_systems(
                 Update,
-                spawn_lamps.run_if(resource_exists_and_changed::<LevelLight>),
+                (
+                    spawn_lamps.run_if(resource_exists_and_changed::<LevelLight>),
+                    clear_lamps.run_if(resource_removed::<LoadedLevel>),
+                ),
             )
             .add_systems(
                 PostUpdate,
@@ -149,6 +152,15 @@ fn lumens(desc: &LampDesc, lamp: f32) -> f32 {
         }
     }
     if n == 0 { 0.0 } else { (log_sum / n as f32).exp() }
+}
+
+/// Leaving the match: `spawn_lamps` only clears and respawns lamps when [`LevelLight`]
+/// changes, which never happens on the way out (the resource is removed, not changed), so
+/// they'd otherwise keep shining in the menu.
+fn clear_lamps(mut commands: Commands, existing: Query<Entity, With<Lamp>>) {
+    for entity in &existing {
+        commands.entity(entity).despawn();
+    }
 }
 
 fn spawn_lamps(

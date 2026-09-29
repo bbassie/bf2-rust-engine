@@ -980,11 +980,13 @@ fn update_visuals(
     third_person: Res<crate::camera::ThirdPerson>,
     soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Option<&Seated>, Has<game_shared::revive::Downed>)>,
     vehicles: Query<(&VehicleView, &VehicleData)>,
-    mut visuals: Query<(&SoldierVisual, &mut Transform, &mut Visibility)>,
+    mut visuals: Query<(Entity, &SoldierVisual, &mut Transform, &mut Visibility, Option<&SoldierAnimator>)>,
     tuning: Res<game_shared::soldier::SoldierTuning>,
+    mut frame: Local<u32>,
 ) {
     let zipline_hang = tuning.zipline_hang;
-    for (visual, mut transform, mut visibility) in &mut visuals {
+    *frame = frame.wrapping_add(1);
+    for (entity, visual, mut transform, mut visibility, animator) in &mut visuals {
         let Ok((render, local, seated, downed)) = soldiers.get(visual.soldier) else {
             continue;
         };
@@ -1001,7 +1003,15 @@ fn update_visuals(
         // camera looks at it then).
         let hidden = (local && !third_person.0 && !downed) || (seated.is_some() && seat.is_none());
         visibility.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
-        *transform = seat.unwrap_or_else(|| {
+        // Moving a soldier moves its whole skeleton (about a hundred transforms to propagate
+        // and meshes to upload). Nobody sees a sleeping one (see `sleep_unseen`), so it only
+        // needs to be about where it is, to be seen again when it comes into view: move it
+        // every fourth frame.
+        let sleeping = animator.is_some_and(|a| a.sleeping.is_some());
+        if sleeping && (frame.wrapping_add(entity.index_u32())) % 4 != 0 {
+            continue;
+        }
+        transform.set_if_neq(seat.unwrap_or_else(|| {
             // The zipline clip hangs the body from the handle, the rope clip holds it low.
             let raise = match (render.riding, render.climbing && render.on_rope) {
                 (true, _) => zipline_hang,
@@ -1010,7 +1020,7 @@ fn update_visuals(
             };
             let yaw = if render.parachute { glide_heading(render).unwrap_or(render.yaw) } else { render.yaw };
             Transform::from_translation(render.position + Vec3::Y * raise).with_rotation(Quat::from_rotation_y(yaw))
-        });
+        }));
     }
 }
 

@@ -125,7 +125,7 @@ fn update_probes(
     spatial: SpatialQuery,
     mut cells: ResMut<SkyCells>,
     camera: Query<&GlobalTransform, With<PlayerCamera>>,
-    mut probes: Query<(&GlobalTransform, &mut SkyProbe, &mut MeshTag)>,
+    mut probes: Query<(&GlobalTransform, &mut SkyProbe, &mut MeshTag, &ViewVisibility)>,
 ) {
     let now = time.elapsed_secs();
     let cells = &mut *cells;
@@ -134,7 +134,7 @@ fn update_probes(
         cells.level = Some(level.desc.name.clone());
     }
     if !settings.baked_ao {
-        for (_, _, mut tag) in &mut probes {
+        for (_, _, mut tag, _) in &mut probes {
             if tag.0 != 0 {
                 tag.0 = 0;
             }
@@ -145,9 +145,10 @@ fn update_probes(
     let filter = SpatialQueryFilter::from_mask(GameLayer::World);
     let smoothing = 1.0 - (-time.delta_secs() * RATE).exp();
     let mut budget = BUDGET;
-    for (transform, mut probe, mut tag) in &mut probes {
+    for (transform, mut probe, mut tag, seen) in &mut probes {
         let origin = transform.translation() + Vec3::Y * PROBE_HEIGHT;
-        if origin.distance_squared(eye) > RANGE * RANGE && tag.0 != 0 {
+        // Meshes nobody saw last frame (other LODs, soldiers out of view) keep their value.
+        if (!seen.get() || origin.distance_squared(eye) > RANGE * RANGE) && tag.0 != 0 {
             continue;
         }
         let key = (origin / CELL).floor().as_ivec3();

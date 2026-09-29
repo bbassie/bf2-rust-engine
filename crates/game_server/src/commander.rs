@@ -27,6 +27,7 @@ use game_shared::{
         Commander, CommanderAssets, CommanderRequest, MUTINY_SHARE, OrderKind, SCAN_SECONDS, ScanContact, ScanReport,
         SquadOrder, TeamAssets, UAV_SECONDS,
     },
+    conquest::team_index,
     effects::PlayEffect,
     flight::{BodyState, Controls as FlightControls, FlightState, GRAVITY},
     input::Buttons,
@@ -38,7 +39,10 @@ use game_shared::{
     soldier::{Health, Soldier, SoldierMotion},
     squad::SquadMember,
     statics::DestroyedStatics,
-    vehicle::{Seated, Vehicle, VehicleData, VehicleHealth, VehicleModel, VehicleMotion, VehicleShot, VehicleState, step_joints},
+    vehicle::{
+        Seated, Vehicle, VehicleData, VehicleHealth, VehicleModel, VehicleMotion, VehicleShot, VehicleState, VehicleSystems,
+        step_joints,
+    },
     weapons::{Armory, Inventory, Loadout},
 };
 
@@ -46,6 +50,9 @@ use crate::{
     AppliedInput, ClientPlayer, Controls, HostPlayer, PlayerClient,
     combat::{self, Attacker, Explosion},
     destruction::{Materials, ObjectHealth},
+    limits::{Rate, RateLimiter},
+    modes::RoundReset,
+    player_client,
     radio::Spot,
     sender_player,
 };
@@ -66,6 +73,8 @@ impl Plugin for CommanderPlugin {
                 Update,
                 (
                     setup_teams.run_if(resource_exists_and_changed::<LoadedLevel>),
+                    reset_on_round,
+                    prune_mutiny,
                     tag_asset_vehicles,
                     handle_commands,
                     track_assets,
@@ -83,7 +92,9 @@ impl Plugin for CommanderPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                (fire_artillery, fly_uav_vehicles)
+                // After the vehicles turned their joints for their gunners: a fire mission
+                // aims the piece this tick, whoever sits in it.
+                (fire_artillery.after(VehicleSystems::Simulate), fly_uav_vehicles)
                     .run_if(resource_exists::<LoadedLevel>)
                     .run_if(in_state(ClientState::Disconnected)),
             );
@@ -201,28 +212,88 @@ struct SupplyCrate {
     next_round: f32,
 }
 
-fn team_index(team: Team) -> Option<usize> {
-    match team {
-        Team::One => Some(0),
-        Team::Two => Some(1),
-        Team::Spectator => None,
-    }
-}
-
+/// Requests from clients, rate-limited per player (each one plays a radio line to the team).
 fn receive_requests(
+    time: Res<Time<Real>>,
     mut requests: MessageReader<FromClient<CommanderRequest>>,
     clients: Query<&ClientPlayer>,
     host: Option<Res<HostPlayer>>,
     mut commands: MessageWriter<CommanderCommand>,
+    mut limits: Local<RateLimiter<Entity>>,
 ) {
+    let now = time.elapsed_secs_f64();
     for request in requests.read() {
-        if let Some(player) = sender_player(request.client_id, &clients, host.as_deref()) {
-            commands.write(CommanderCommand {
-                player,
-                request: request.message,
-            });
+        let Some(player) = sender_player(request.client_id, &clients, host.as_deref()) else {
+            continue;
+        };
+        if matches!(request.client_id, ClientId::Client(_)) && !limits.allow(player, Rate::COMMANDER, now) {
+            debug!("commander request from {player}: too many, dropped");
+            continue;
         }
+        commands.write(CommanderCommand {
+            player,
+            request: request.message,
+        });
     }
+}
+
+/// Targets beyond the map are clamped to this box on levels without terrain (meters).
+const MAP_LIMIT: f32 = 8192.0;
+
+/// Where a commander's target lies: `None` unless it is a finite point, else clamped onto the
+/// level's terrain (or a generous box without one). NaN targets would end up in orders,
+/// UAV circles, shells and crates.
+fn map_target(level: &LoadedLevel, target: Vec3) -> Option<Vec3> {
+    let target = game_shared::validate::finite_point(target)?;
+    Some(match &level.heightmap {
+        Some(heightmap) => {
+            let (min, size) = (heightmap.origin, heightmap.world_size());
+            Vec3::new(
+                target.x.clamp(min.x, min.x + size),
+                target.y.clamp(-MAP_LIMIT, MAP_LIMIT),
+                target.z.clamp(min.z, min.z + size),
+            )
+        }
+        None => target.clamp(Vec3::splat(-MAP_LIMIT), Vec3::splat(MAP_LIMIT)),
+    })
+}
+
+/// A request with its target checked by [`map_target`]; `None` if it has no valid target.
+fn checked_request(level: &LoadedLevel, request: CommanderRequest) -> Option<CommanderRequest> {
+    Some(match request {
+        CommanderRequest::Order { squad, kind, target } => CommanderRequest::Order {
+            squad,
+            kind,
+            target: map_target(level, target)?,
+        },
+        CommanderRequest::Use { asset, target } => CommanderRequest::Use {
+            asset,
+            target: map_target(level, target)?,
+        },
+        CommanderRequest::Spot { target } => CommanderRequest::Spot {
+            target: map_target(level, target)?,
+        },
+        other => other,
+    })
+}
+
+/// Whether a team's asset stands right now: its object (or at least one artillery piece that
+/// isn't a wreck), read from the live state rather than the replicated [`TeamAssets`], which
+/// is only rewritten after the requests are handled.
+#[allow(clippy::type_complexity)]
+fn asset_intact(
+    asset: Asset,
+    team: Team,
+    assets: &CommanderAssets,
+    destroyed: Option<&DestroyedStatics>,
+    guns: &Query<(Entity, &AssetVehicle, &VehicleData, &VehicleState, &VehicleHealth, &VehicleMotion)>,
+) -> bool {
+    asset.object().is_none_or(|kind| {
+        assets.of(team, kind).any(|a| match a.vehicle {
+            true => guns.iter().any(|(_, gun, .., health, _)| gun.instance == a.instance && !health.wrecked()),
+            false => !destroyed.is_some_and(|d| d.0.contains(&a.instance)),
+        })
+    })
 }
 
 /// A new level: no commanders, fresh assets.
@@ -244,6 +315,64 @@ fn setup_teams(
             Replicated,
             LevelEntity,
         ));
+    }
+}
+
+/// A round starting over on the same level (see [`RoundReset`]): the assets in play don't
+/// belong to the new round, so they end along with their recharge and mutiny votes. A full
+/// map change instead despawns them as [`LevelEntity`]s and `setup_teams` rebuilds
+/// `CommanderState` from scratch; this covers the case that leaves the level standing.
+#[allow(clippy::type_complexity)]
+fn reset_on_round(
+    mut commands: Commands,
+    mut resets: MessageReader<RoundReset>,
+    mut state: ResMut<CommanderState>,
+    strikes: Query<Entity, With<Strike>>,
+    uavs: Query<(Entity, &Uav)>,
+    scans: Query<Entity, With<Scan>>,
+    supply: Query<Entity, With<SupplyCrate>>,
+    guns: Query<Entity, With<FireMission>>,
+) {
+    if resets.read().last().is_none() {
+        return;
+    }
+    for team in &mut state.teams {
+        team.recharge = [0.0; 4];
+        team.mutiny.clear();
+    }
+    for entity in &strikes {
+        commands.entity(entity).despawn();
+    }
+    for (entity, uav) in &uavs {
+        if let Some(vehicle) = uav.vehicle {
+            commands.entity(vehicle).despawn();
+        }
+        commands.entity(entity).despawn();
+    }
+    for entity in &scans {
+        commands.entity(entity).despawn();
+    }
+    for entity in &supply {
+        commands.entity(entity).despawn();
+    }
+    for gun in &guns {
+        commands.entity(gun).remove::<FireMission>();
+    }
+    info!("round reset: commander assets and recharge cleared");
+}
+
+/// Mutiny votes for a commander who resigned, or from a player who left the team or the
+/// match, no longer count: otherwise stale votes from an earlier commander or a player who
+/// since left can tip a mutiny nobody currently active asked for.
+fn prune_mutiny(players: Query<(Entity, &Team)>, mut state: ResMut<CommanderState>) {
+    let [one, two] = &mut state.teams;
+    for (team, team_state) in [(Team::One, one), (Team::Two, two)] {
+        if team_state.mutiny.is_empty() {
+            continue;
+        }
+        team_state
+            .mutiny
+            .retain(|&voter| players.get(voter).is_ok_and(|(_, &t)| t == team));
     }
 }
 
@@ -348,7 +477,6 @@ fn handle_commands(
     motions: Query<&SoldierMotion>,
     enemies: Query<(Entity, &ControlledBy, Option<&Seated>), (With<Soldier>, Without<Downed>)>,
     orders: Query<(Entity, &SquadOrder)>,
-    team_assets: Query<&TeamAssets>,
     destroyed: Query<&DestroyedStatics>,
     guns: Query<(Entity, &AssetVehicle, &VehicleData, &VehicleState, &VehicleHealth, &VehicleMotion)>,
     vehicle_positions: Query<&VehicleMotion>,
@@ -356,26 +484,39 @@ fn handle_commands(
     mut radio: MessageWriter<ToClients<RadioMessage>>,
     mut spots: MessageWriter<Spot>,
 ) {
+    // What this pass changed that the queries only see once its commands are applied: who
+    // holds each team's post, and the order entity of each squad (`None`: cancelled).
+    let mut posts: HashMap<Team, Option<Entity>> = HashMap::new();
+    let mut squad_orders: HashMap<(Team, u8), Option<Entity>> = HashMap::new();
     for command in requests.read() {
         let player = command.player;
-        let Ok((_, info, &team, _, is_commander, controls)) = players.get(player) else {
+        let Ok((_, info, &team, _, _, controls)) = players.get(player) else {
             continue;
         };
         let Some(team_state) = state.team(team) else {
             continue;
         };
+        let Some(request) = checked_request(&level, command.request) else {
+            debug!("{} sent a commander request without a valid target: {:?}", info.name, command.request);
+            continue;
+        };
         let position = controls.and_then(|c| motions.get(c.0).ok()).map_or(Vec3::ZERO, |m| m.position);
-        let commander = players.iter().find(|p| *p.2 == team && p.4).map(|p| p.0);
-        match command.request {
+        let commander = *posts
+            .entry(team)
+            .or_insert_with(|| players.iter().find(|p| *p.2 == team && p.4).map(|p| p.0));
+        let is_commander = commander == Some(player);
+        match request {
             CommanderRequest::Apply if commander.is_none() => {
                 // Like BF2, the commander leads no squad.
                 commands.entity(player).insert(Commander).remove::<SquadMember>();
+                posts.insert(team, Some(player));
                 team_state.mutiny.clear();
                 info!("{} is now {team:?}'s commander", info.name);
                 say(&mut radio, player, position, RadioCommand::NewCommander, None);
             }
             CommanderRequest::Resign if is_commander => {
                 commands.entity(player).remove::<Commander>();
+                posts.insert(team, None);
                 info!("{} resigned as commander", info.name);
                 say(&mut radio, player, position, RadioCommand::CommanderResigned, None);
             }
@@ -389,6 +530,7 @@ fn handle_commands(
                     && let Some(commander) = commander
                 {
                     commands.entity(commander).remove::<Commander>();
+                    posts.insert(team, None);
                     team_state.mutiny.clear();
                     say(&mut radio, commander, position, RadioCommand::CommanderResigned, None);
                 }
@@ -403,12 +545,17 @@ fn handle_commands(
                     kind,
                     position: ground(&level, target),
                 };
-                match orders.iter().find(|(_, o)| o.team == team && o.squad == squad) {
-                    Some((entity, _)) => {
+                // One order entity per squad, also for several orders in one pass.
+                let existing = *squad_orders.entry((team, squad)).or_insert_with(|| {
+                    orders.iter().find(|(_, o)| o.team == team && o.squad == squad).map(|(entity, _)| entity)
+                });
+                match existing {
+                    Some(entity) => {
                         commands.entity(entity).insert(order);
                     }
                     None => {
-                        commands.spawn((order, Replicated, LevelEntity));
+                        let entity = commands.spawn((order, Replicated, LevelEntity)).id();
+                        squad_orders.insert((team, squad), Some(entity));
                     }
                 }
                 let line = match kind {
@@ -445,14 +592,24 @@ fn handle_commands(
                 }
             }
             CommanderRequest::CancelOrder { squad } if is_commander => {
-                for (entity, order) in &orders {
-                    if order.team == team && order.squad == squad {
-                        commands.entity(entity).despawn();
-                    }
+                let mut cancelled: Vec<Entity> = orders
+                    .iter()
+                    .filter(|(_, order)| order.team == team && order.squad == squad)
+                    .map(|(entity, _)| entity)
+                    .collect();
+                cancelled.extend(squad_orders.get(&(team, squad)).copied().flatten());
+                cancelled.sort();
+                cancelled.dedup();
+                for entity in cancelled {
+                    commands.entity(entity).try_despawn();
                 }
+                squad_orders.insert((team, squad), None);
             }
             CommanderRequest::Use { asset, target } if is_commander => {
-                let ready = team_assets.iter().find(|t| t.team == team).is_some_and(|t| t.get(asset).ready());
+                // The live recharge (set below for this pass's earlier requests), not the
+                // replicated `TeamAssets`: several requests in one packet get one strike.
+                let ready = team_state.recharge[asset.index()] <= 0.0
+                    && asset_intact(asset, team, &assets, destroyed.single().ok(), &guns);
                 if !ready {
                     debug!("{team:?} commander: {asset:?} not ready");
                     continue;
@@ -978,14 +1135,6 @@ fn run_uavs(
     }
 }
 
-/// The client a player plays on (the host's own player plays on the server).
-fn player_client(player: Entity, clients: &Query<&PlayerClient>, host: Option<&HostPlayer>) -> Option<ClientId> {
-    if host.is_some_and(|h| h.0 == player) {
-        return Some(ClientId::Server);
-    }
-    clients.get(player).ok().map(|c| ClientId::Client(c.0))
-}
-
 /// Satellite scans show the commander every enemy on his map, once a second while they last
 /// (BF2: "your map will show the position of every enemy"); he spots them for his team. An
 /// AI commander has no map to look at: what its scan shows is spotted for its team, as a
@@ -1201,5 +1350,143 @@ mod tests {
         let right = rotation * Vec3::X;
         assert!(right.dot(flight.center - position) > 0.0, "the middle is to the right");
         assert!(right.y < 0.0, "banked right");
+    }
+}
+
+/// The request handler's rules for requests that arrive together (one packet, or a client and
+/// an AI commander in the same frame) and for bad targets.
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_message::<CommanderCommand>()
+            .add_message::<ToClients<RadioMessage>>()
+            .add_message::<Spot>()
+            .insert_resource(game_shared::level::test_range())
+            .init_resource::<CommanderAssets>()
+            .init_resource::<CommanderState>()
+            .add_systems(Update, handle_commands);
+        app
+    }
+
+    fn player(app: &mut App, name: &str, team: Team) -> Entity {
+        app.world_mut()
+            .spawn((
+                Player {
+                    name: name.into(),
+                    is_bot: false,
+                },
+                team,
+            ))
+            .id()
+    }
+
+    fn send(app: &mut App, player: Entity, request: CommanderRequest) {
+        app.world_mut().write_message(CommanderCommand { player, request });
+    }
+
+    fn count<C: Component>(app: &mut App) -> usize {
+        let world = app.world_mut();
+        world.query_filtered::<(), With<C>>().iter(world).count()
+    }
+
+    fn supply(target: Vec3) -> CommanderRequest {
+        CommanderRequest::Use {
+            asset: Asset::Supply,
+            target,
+        }
+    }
+
+    #[test]
+    fn a_double_use_in_one_frame_gives_one_strike() {
+        let mut app = app();
+        let commander = player(&mut app, "Commander", Team::One);
+        app.world_mut().entity_mut(commander).insert(Commander);
+        for _ in 0..3 {
+            send(&mut app, commander, supply(Vec3::new(5.0, 0.0, 5.0)));
+        }
+        app.update();
+        assert_eq!(count::<SupplyCrate>(&mut app), 1);
+        // Recharging now: the next frame's request is refused too.
+        send(&mut app, commander, supply(Vec3::new(5.0, 0.0, 5.0)));
+        app.update();
+        assert_eq!(count::<SupplyCrate>(&mut app), 1);
+    }
+
+    #[test]
+    fn two_applications_in_one_frame_give_one_commander() {
+        let mut app = app();
+        let (a, b) = (player(&mut app, "A", Team::One), player(&mut app, "B", Team::One));
+        let other_team = player(&mut app, "C", Team::Two);
+        send(&mut app, a, CommanderRequest::Apply);
+        send(&mut app, b, CommanderRequest::Apply);
+        send(&mut app, other_team, CommanderRequest::Apply);
+        app.update();
+        assert!(app.world().entity(a).contains::<Commander>());
+        assert!(!app.world().entity(b).contains::<Commander>());
+        assert!(app.world().entity(other_team).contains::<Commander>(), "one per team");
+    }
+
+    #[test]
+    fn two_orders_for_a_squad_in_one_frame_give_one_order() {
+        let mut app = app();
+        let commander = player(&mut app, "Commander", Team::One);
+        app.world_mut().entity_mut(commander).insert(Commander);
+        let member = player(&mut app, "Member", Team::One);
+        app.world_mut().entity_mut(member).insert(SquadMember { squad: 1, leader: true });
+        for x in [10.0, 20.0] {
+            send(
+                &mut app,
+                commander,
+                CommanderRequest::Order {
+                    squad: 1,
+                    kind: OrderKind::Attack,
+                    target: Vec3::new(x, 0.0, 0.0),
+                },
+            );
+        }
+        app.update();
+        let world = app.world_mut();
+        let orders: Vec<SquadOrder> = world.query::<&SquadOrder>().iter(world).copied().collect();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].position.x, 20.0, "the last order counts");
+        // Cancelled and given again in one frame: still one.
+        send(&mut app, commander, CommanderRequest::CancelOrder { squad: 1 });
+        send(
+            &mut app,
+            commander,
+            CommanderRequest::Order {
+                squad: 1,
+                kind: OrderKind::Defend,
+                target: Vec3::ZERO,
+            },
+        );
+        app.update();
+        assert_eq!(count::<SquadOrder>(&mut app), 1);
+    }
+
+    #[test]
+    fn targets_must_be_finite_and_on_the_map() {
+        let mut app = app();
+        let commander = player(&mut app, "Commander", Team::One);
+        app.world_mut().entity_mut(commander).insert(Commander);
+        send(&mut app, commander, supply(Vec3::new(f32::NAN, 0.0, 0.0)));
+        send(&mut app, commander, supply(Vec3::new(0.0, 0.0, f32::INFINITY)));
+        app.update();
+        assert_eq!(count::<SupplyCrate>(&mut app), 0, "refused");
+        // And refusing it didn't use the asset up.
+        send(&mut app, commander, supply(Vec3::new(1e9, 0.0, -1e9)));
+        app.update();
+        let world = app.world_mut();
+        let effects: Vec<AssetEffect> = world.query::<&AssetEffect>().iter(world).copied().collect();
+        assert_eq!(effects.len(), 1);
+        let level = app.world().resource::<LoadedLevel>();
+        let heightmap = level.heightmap.as_ref().unwrap();
+        let (min, size) = (heightmap.origin, heightmap.world_size());
+        let at = effects[0].position;
+        assert!(at.is_finite());
+        assert!((min.x..=min.x + size).contains(&at.x) && (min.z..=min.z + size).contains(&at.z), "{at}");
     }
 }

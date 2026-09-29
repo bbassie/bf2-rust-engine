@@ -86,7 +86,12 @@ fn dress_charges(
         *transform = placement(charge);
     }
     for (entity, charge) in &new {
-        let template = charge.template.as_deref().unwrap_or(DEFAULT_TEMPLATE);
+        // The template replicates from the server: only a plain file name inside `templates/`.
+        let template = charge
+            .template
+            .as_deref()
+            .filter(|t| game_shared::validate::path_component(t))
+            .unwrap_or(DEFAULT_TEMPLATE);
         let desc: Option<ObjectDesc> = paths
             .as_ref()
             .filter(|p| p.find(format!("templates/{template}.ron")).is_file())

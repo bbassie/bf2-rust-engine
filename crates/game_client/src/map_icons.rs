@@ -302,7 +302,7 @@ fn vehicle_markers(
                             .is_some_and(|j| j.axes[0].input == Some(game_data::JointInput::AimYaw))
                 })
             });
-            let part = model.part_transforms(&view.joints).get(turret?).copied()?;
+            let part = model.part_transform(&view.joints, turret?)?;
             Some(heading(view.transform.rotation * part.rotation * Vec3::NEG_Z))
         });
         let (size, aspect) = match icon.and_then(|i| i.image.clone()) {

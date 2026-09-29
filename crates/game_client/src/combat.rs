@@ -361,7 +361,7 @@ fn predict_local_shots(
     }
     let state = &mut local.state;
     let local_velocity = Quat::from_rotation_y(-input.yaw) * motion.velocity;
-    state.tick(&weapon.deviation, dt, -local_velocity.z, local_velocity.x, !motion.grounded);
+    state.tick(&weapon.deviation, dt, -local_velocity.z, local_velocity.x, motion.grounded);
     let zoomed = input.pressed(Buttons::AIM);
     let cone = state.deviation(&weapon.deviation, motion.stance, zoomed);
     feedback.spread = cone;
@@ -567,15 +567,15 @@ fn receive_kills(
     local: Query<Entity, With<LocalPlayer>>,
     mut feedback: ResMut<CombatFeedback>,
 ) {
-    let name = |e: Option<Entity>| e.and_then(|e| players.get(e).ok()).map(|p| p.name.clone());
     for kill in kills.read() {
-        let victim = name(Some(kill.victim)).unwrap_or_else(|| "?".into());
+        let victim = players.get(kill.victim).map_or_else(|_| "?".into(), |p| p.name.clone());
         let weapon = weapon_display_name(&kill.weapon);
         let headshot = if kill.headshot { " (headshot)" } else { "" };
         // Kills are announced when a soldier goes down; without a killer (falls, wrecks) he
-        // may still be revived.
-        let line = match name(kill.killer) {
-            Some(killer) if kill.killer != Some(kill.victim) => format!("{killer}  [{weapon}{headshot}]  {victim}"),
+        // may still be revived. The killer comes as a name (not an entity): it always gets
+        // here, even for a killer this client hasn't been sent the entity of.
+        let line = match &kill.killer_name {
+            Some(killer) if *killer != victim => format!("{killer}  [{weapon}{headshot}]  {victim}"),
             Some(_) => format!("[{weapon}]  {victim}"),
             None => format!("{victim} is down"),
         };
@@ -584,7 +584,7 @@ fn receive_kills(
             feedback.kills.pop_front();
         }
         if local.single().is_ok_and(|me| me == kill.victim) {
-            feedback.killed_by = Some(name(kill.killer).unwrap_or_else(|| "the environment".into()));
+            feedback.killed_by = Some(kill.killer_name.clone().unwrap_or_else(|| "the environment".into()));
         }
     }
 }
@@ -716,8 +716,14 @@ pub(crate) fn apply_zoom(
     };
     *was_scoped = zoom.scoped;
     look.zoom_scale = feedback.zoom;
-    if let Projection::Perspective(perspective) = camera.as_mut() {
-        perspective.fov = settings.field_of_view.to_radians() * feedback.zoom;
+    // Only when it changes: a changed projection makes Bevy rebuild the camera's frustum and
+    // light clusters.
+    let fov = settings.field_of_view.to_radians() * feedback.zoom;
+    if let Projection::Perspective(perspective) = &**camera
+        && perspective.fov != fov
+        && let Projection::Perspective(perspective) = camera.as_mut()
+    {
+        perspective.fov = fov;
     }
     feedback.hit_marker = (feedback.hit_marker - time.delta_secs()).max(0.0);
 }

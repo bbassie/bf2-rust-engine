@@ -91,7 +91,7 @@ impl Plugin for MenuPlugin {
             .add_systems(
                 Update,
                 (
-                    (collect_levels, open_browser, poll_browser),
+                    (collect_levels, open_browser, poll_browser, poll_dns),
                     gamepad_menu_nav,
                     (press_buttons, drag_sliders, sync_text_fields),
                     (sync_pause_overlay, build_pages, build_level_details, build_server_list),

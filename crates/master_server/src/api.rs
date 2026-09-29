@@ -1,10 +1,7 @@
 //! The REST API (see `game_auth::api` for the endpoints and types).
 
 use game_auth::{
-    api::{
-        Credentials, MasterInfo, RefreshRequest, RoundReport, RoundResult, ServerEntry, ServerHeartbeat, Session,
-        TicketRequest, TicketResponse,
-    },
+    api::{Credentials, MasterInfo, RefreshRequest, RoundReport, ServerEntry, ServerHeartbeat, Session, TicketRequest, TicketResponse},
     fingerprint,
     identity::normalize_fingerprint,
     token::{self, Claims, TOKEN_VERSION, TokenKind, verify_token},
@@ -14,7 +11,7 @@ use game_auth::{
 use crate::{
     auth::{self, check_password, dummy_hash, hash_password, new_secret},
     db::{Account, RankedServer},
-    http::{Master, Method, Req, Resp},
+    http::{Master, Method, Req, Resp, lock},
 };
 
 /// Refresh tokens of the game client.
@@ -42,22 +39,29 @@ pub fn handle(master: &Master, req: &Req, path: &str) -> Answer {
         (Method::Post, "/refresh") => refresh(master, req),
         (Method::Post, "/logout") => {
             let body: RefreshRequest = req.json()?;
-            master.db.lock().unwrap().remove_token(&body.refresh_token).map_err(internal)?;
+            lock(&master.db).remove_token(&body.refresh_token).map_err(internal)?;
             Ok(Resp::ok(&serde_json::json!({})))
         }
         (Method::Get, "/me") => {
             let account = session_account(master, req)?;
-            let profile = master.db.lock().unwrap().profile(&account, &master.config.progression).map_err(internal)?;
+            let profile = lock(&master.db).profile(&account, &master.config.progression).map_err(internal)?;
             Ok(Resp::ok(&profile))
         }
         (Method::Post, "/ticket") => ticket(master, req),
         (Method::Get, "/leaderboard") => {
             let sort = req.query.get("sort").map_or("xp", String::as_str);
             let limit = req.query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(50usize).clamp(1, 200);
-            let board = master.db.lock().unwrap().leaderboard(sort, limit, &master.config.progression).map_err(internal)?;
+            let board = lock(&master.db).leaderboard(sort, limit, &master.config.progression).map_err(internal)?;
             Ok(Resp::ok(&board))
         }
-        (Method::Get, "/servers") => Ok(Resp::ok(&master.list.lock().unwrap().entries())),
+        (Method::Get, "/servers") => {
+            // Paginated (S7): heartbeats are unauthenticated UDP, so the list can grow large;
+            // don't hand it all out in one answer by default.
+            let limit = req.query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(100usize).clamp(1, 200);
+            let offset = req.query.get("offset").and_then(|o| o.parse().ok()).unwrap_or(0usize);
+            let page = lock(&master.list).entries().into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+            Ok(Resp::ok(&page))
+        }
         (Method::Get, "/quickjoin") => {
             let ranked = match req.query.get("ranked").map(String::as_str) {
                 Some("yes" | "true" | "1") => Some(true),
@@ -65,13 +69,13 @@ pub fn handle(master: &Master, req: &Req, path: &str) -> Answer {
                 _ => None,
             };
             let region = req.query.get("region").cloned().unwrap_or_default();
-            Ok(Resp::ok(&master.list.lock().unwrap().quick_join(ranked, &region)))
+            Ok(Resp::ok(&lock(&master.list).quick_join(ranked, &region)))
         }
         (Method::Post, "/server/heartbeat") => server_heartbeat(master, req),
         (Method::Post, "/server/round") => server_round(master, req),
         (Method::Get, other) if other.starts_with("/players/") => {
             let name = crate::http::url_decode(&other["/players/".len()..]);
-            let db = master.db.lock().unwrap();
+            let db = lock(&master.db);
             let account = db.account_by_name(&name).map_err(internal)?.filter(|a| !a.disabled);
             let Some(account) = account else {
                 return Err(Resp::error(404, "no such player"));
@@ -103,7 +107,7 @@ pub fn issue_session(master: &Master, account: &Account) -> Result<Session, Resp
     };
     let refresh_token = new_secret();
     let refresh_expires = now + config.refresh_days * 86_400;
-    let db = master.db.lock().unwrap();
+    let db = lock(&master.db);
     db.add_token(&refresh_token, account.id, REFRESH, now, refresh_expires).map_err(internal)?;
     db.touch_login(account.id, now).map_err(internal)?;
     let _ = db.remove_expired(now);
@@ -118,14 +122,23 @@ pub fn issue_session(master: &Master, account: &Account) -> Result<Session, Resp
 
 /// Checks name and password (with rate limits); the account on success.
 pub fn authenticate(master: &Master, req: &Req, name: &str, password: &str) -> Result<Account, Resp> {
-    if let Err(minutes) = master.limits.lock().unwrap().check_login(req.ip, name) {
-        return Err(Resp::error(429, &format!("Too many failed logins. Try again in {minutes} minutes.")));
+    // The address itself is blocked after too many failures (S17): this only ever punishes
+    // the attacker's own traffic.
+    if let Err(minutes) = lock(&master.limits).check_login(req.ip) {
+        return Err(Resp::error(429, &format!("Too many failed logins from your address. Try again in {minutes} minutes.")));
     }
-    let account = master.db.lock().unwrap().account_by_name(name).map_err(internal)?;
+    // Repeated failures against one *name* only slow it down, never block it: anyone can
+    // trigger those against someone else's name, so blocking would let an attacker lock the
+    // real owner out just by failing a few logins.
+    let delay = lock(&master.limits).name_delay(name);
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
+    let account = lock(&master.db).account_by_name(name).map_err(internal)?;
     // Hashing takes a while: outside the database lock, and as long for unknown names.
     let hash = account.as_ref().map_or(dummy_hash(), |a| a.password_hash.as_str());
     let good = check_password(password, hash) && account.as_ref().is_some_and(|a| !a.disabled);
-    let mut limits = master.limits.lock().unwrap();
+    let mut limits = lock(&master.limits);
     match account {
         Some(account) if good => {
             limits.login_succeeded(name);
@@ -150,11 +163,11 @@ pub fn create_account(master: &Master, req: &Req, credentials: &Credentials) -> 
     if let Some(email) = email {
         auth::validate_email(email).map_err(|err| Resp::error(400, &err))?;
     }
-    if !master.limits.lock().unwrap().register(req.ip) {
+    if !lock(&master.limits).register(req.ip) {
         return Err(Resp::error(429, "Too many new accounts from your address. Try again later."));
     }
     let hash = hash_password(&credentials.password);
-    let db = master.db.lock().unwrap();
+    let db = lock(&master.db);
     let Some(id) = db.create_account(name, email, &hash, unix_now()).map_err(internal)? else {
         return Err(Resp::error(409, "That name is taken."));
     };
@@ -178,7 +191,7 @@ fn login(master: &Master, req: &Req) -> Answer {
 fn refresh(master: &Master, req: &Req) -> Answer {
     let body: RefreshRequest = req.json()?;
     let account = {
-        let db = master.db.lock().unwrap();
+        let db = lock(&master.db);
         let id = db.token_account(&body.refresh_token, REFRESH, unix_now()).map_err(internal)?;
         let account = id.map(|id| db.account(id)).transpose().map_err(internal)?.flatten();
         match account {
@@ -197,7 +210,7 @@ fn session_account(master: &Master, req: &Req) -> Result<Account, Resp> {
     let token = req.bearer().ok_or_else(|| Resp::error(401, "log in first"))?;
     let claims = verify_token(&master.public_key(), token, unix_now(), TokenKind::Session, None)
         .map_err(|err| Resp::error(401, &format!("{err}: log in again")))?;
-    let account = master.db.lock().unwrap().account(claims.sub).map_err(internal)?;
+    let account = lock(&master.db).account(claims.sub).map_err(internal)?;
     account.filter(|a| !a.disabled).ok_or_else(|| Resp::error(401, "no such account"))
 }
 
@@ -208,6 +221,11 @@ fn ticket(master: &Master, req: &Req) -> Answer {
     let server = normalize_fingerprint(&body.server);
     if server.len() != 32 || !server.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(Resp::error(400, "server: a key fingerprint (32 hex digits)"));
+    }
+    // S23: each ticket upserts a row keyed by an arbitrary server fingerprint the caller
+    // supplies, so an account could otherwise grow the tickets table without bound.
+    if let Err(minutes) = lock(&master.limits).check_ticket(account.id) {
+        return Err(Resp::error(429, &format!("Too many ticket requests. Try again in {minutes} minutes.")));
     }
     let now = unix_now();
     let rank = master.config.progression.info(account.xp);
@@ -225,20 +243,25 @@ fn ticket(master: &Master, req: &Req) -> Answer {
         aud: Some(server.clone()),
         jti: game_auth::hex(&game_auth::random_bytes::<12>()),
     };
-    master.db.lock().unwrap().note_ticket(account.id, &server, now).map_err(internal)?;
+    lock(&master.db).note_ticket(account.id, &server, now).map_err(internal)?;
+    lock(&master.limits).ticket_issued(account.id);
     Ok(Resp::ok(&TicketResponse { ticket: token::sign(&master.key, &claims), expires }))
 }
 
 /// The ranked server of the request's API key.
 fn ranked_server(master: &Master, req: &Req) -> Result<RankedServer, Resp> {
     let key = req.bearer().ok_or_else(|| Resp::error(401, "API key needed"))?;
-    master
-        .db
-        .lock()
-        .unwrap()
-        .server_by_key(key)
-        .map_err(internal)?
-        .ok_or_else(|| Resp::error(403, "unknown API key"))
+    lock(&master.db).server_by_key(key).map_err(internal)?.ok_or_else(|| Resp::error(403, "unknown API key"))
+}
+
+/// Whether `ip` is private, loopback or link-local: the connection to the master didn't come
+/// from a routable address, so it's plausibly a game server reaching the master over an
+/// internal network (NAT, VPN, container network, or the same machine).
+fn is_internal(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
 }
 
 fn server_heartbeat(master: &Master, req: &Req) -> Answer {
@@ -247,7 +270,15 @@ fn server_heartbeat(master: &Master, req: &Req) -> Answer {
     let Some(key) = unhex_array::<32>(&beat.public_key) else {
         return Err(Resp::error(400, "public_key: 64 hex digits"));
     };
-    let ip = beat.address.as_deref().and_then(|a| a.trim().parse().ok()).unwrap_or(req.ip);
+    // S38: the listed address must match the requester, with one exception. `address` exists
+    // for a server behind NAT/a proxy whose outbound connection to the master isn't the
+    // address players should use; we only honour it when the heartbeat itself arrived over a
+    // non-routable path, which is what that setup looks like. A server reachable directly
+    // can't use it to advertise an unrelated address.
+    let ip = match beat.address.as_deref().and_then(|a| a.trim().parse().ok()) {
+        Some(addr) if is_internal(req.ip) => addr,
+        _ => req.ip,
+    };
     let clean = |s: &str, max: usize| s.chars().filter(|c| !c.is_control()).take(max).collect::<String>();
     let entry = ServerEntry {
         address: ip.to_string(),
@@ -263,8 +294,8 @@ fn server_heartbeat(master: &Master, req: &Req) -> Answer {
         region: clean(&beat.region, 24),
         fingerprint: fingerprint(&key),
     };
-    master.db.lock().unwrap().server_seen(server.id, &beat.public_key.to_ascii_lowercase(), unix_now()).map_err(internal)?;
-    if !master.list.lock().unwrap().beat(ip, entry) {
+    lock(&master.db).server_seen(server.id, &beat.public_key.to_ascii_lowercase(), unix_now()).map_err(internal)?;
+    if !lock(&master.list).beat(ip, entry) {
         return Err(Resp::error(429, "too many servers at this address"));
     }
     Ok(Resp::ok(&serde_json::json!({})))
@@ -281,42 +312,40 @@ fn server_round(master: &Master, req: &Req) -> Answer {
     let server_fingerprint = normalize_fingerprint(&fingerprint(&key));
     let now = unix_now();
     let since = now.saturating_sub(master.config.ticket_window_hours * 3600);
-    let progression = &master.config.progression;
-    let mut db = master.db.lock().unwrap();
-    let mut result = RoundResult::default();
-    let fresh = db
-        .add_round(server.id, &report.round_id, &report.level, &report.mode, report.winner, report.players.len(), now)
-        .map_err(internal)?;
-    if !fresh {
-        result.duplicate = true;
-        return Ok(Resp::ok(&result));
-    }
-    let mut counted = std::collections::HashSet::new();
-    for player in &report.players {
-        let account = db.account(player.account).map_err(internal)?;
-        let joined = db.ticket_since(player.account, &server_fingerprint, since).map_err(internal)?;
-        let Some(account) = account.filter(|a| !a.disabled && joined && counted.insert(a.id)) else {
-            result.rejected.push(player.account);
-            continue;
-        };
-        let won = (report.winner != 0).then_some(player.team == report.winner);
-        let xp = progression.round_xp(player.score, player.seconds, won == Some(true));
-        let total = db.add_player_round(player, won, xp, now).map_err(internal)?;
-        if progression.rank_index(total) > progression.rank_index(account.xp) {
-            let rank = progression.info(total).name;
-            println!("{} promoted to {rank}", account.name);
-            result.promotions.push((account.id, rank));
+    // S19: the round is recorded and every player credited in one transaction, so a failure
+    // partway through can't leave the round permanently marked done with some players missed.
+    let result =
+        lock(&master.db).record_round(server.id, &server_fingerprint, &report, since, now, &master.config.progression).map_err(internal)?;
+    if !result.duplicate {
+        for (id, rank) in &result.promotions {
+            println!("account {id} promoted to {rank}");
         }
-        result.accepted += 1;
+        println!(
+            "server {} ({}): round {} on {} counted for {} players, {} refused",
+            server.id,
+            server.name,
+            report.round_id,
+            report.level,
+            result.accepted,
+            result.rejected.len()
+        );
     }
-    println!(
-        "server {} ({}): round {} on {} counted for {} players, {} refused",
-        server.id,
-        server.name,
-        report.round_id,
-        report.level,
-        result.accepted,
-        result.rejected.len()
-    );
     Ok(Resp::ok(&result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_addresses() {
+        assert!(is_internal("127.0.0.1".parse().unwrap()));
+        assert!(is_internal("10.1.2.3".parse().unwrap()));
+        assert!(is_internal("192.168.1.1".parse().unwrap()));
+        assert!(is_internal("169.254.1.1".parse().unwrap()));
+        assert!(is_internal("::1".parse().unwrap()));
+        assert!(is_internal("fc00::1".parse().unwrap()));
+        assert!(!is_internal("203.0.113.5".parse().unwrap()));
+        assert!(!is_internal("2001:db8::1".parse().unwrap()));
+    }
 }

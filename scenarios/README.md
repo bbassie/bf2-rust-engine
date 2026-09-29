@@ -32,6 +32,7 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | `menu/` | Main menu, hosting and joining, settings |
 | `modes/` | Rush (arming a charge, HUD, maps, deploy screen), Breakthrough (sectors, locked flags), the level page's modes |
 | `movement/` | Soldier movement, ladders, ropes, stamina, roadkill, carrier ladders |
+| `perf/` | Frame times with many bots (Karkand, AIX 2 Archipelago): at spawn, a fixed view, in the fight |
 | `terrain/` | Terrain, undergrowth, trees, water, horizon, view distance |
 | `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures |
 

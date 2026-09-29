@@ -23,11 +23,17 @@ fn master() -> Master {
         db: Mutex::new(Db::in_memory().unwrap()),
         list: Arc::new(Mutex::new(ServerList::default())),
         limits: Mutex::new(Default::default()),
+        admission: game_auth::admission::Limiter::new(1000, 1000),
     }
 }
 
 fn post(master: &Master, path: &str, body: &impl serde::Serialize, bearer: Option<&str>) -> Resp {
+    post_from(master, "127.0.0.1".parse().unwrap(), path, body, bearer)
+}
+
+fn post_from(master: &Master, ip: std::net::IpAddr, path: &str, body: &impl serde::Serialize, bearer: Option<&str>) -> Resp {
     let mut req = Req::new(Method::Post, path);
+    req.ip = ip;
     req.body = serde_json::to_vec(body).unwrap();
     if let Some(token) = bearer {
         req.headers.insert("authorization".into(), format!("Bearer {token}"));
@@ -157,13 +163,28 @@ fn accounts_tokens_and_stats() {
 fn login_rate_limit() {
     let master = master();
     post(&master, "/api/v1/register", &credentials("carol", "correct horse"), None);
-    let mut last = 0;
+    // Repeated wrong guesses against carol's name slow it down, but a request from the same
+    // (test) address with the *right* password still gets through (S17): a per-name block
+    // would let anyone lock carol out just by guessing wrong a few times.
     for _ in 0..10 {
-        last = post(&master, "/api/v1/login", &credentials("carol", "nope nope"), None).status;
+        post(&master, "/api/v1/login", &credentials("carol", "nope nope"), None).status;
     }
-    assert_eq!(last, 429);
-    // Even the right password waits now.
+    assert_eq!(post(&master, "/api/v1/login", &credentials("carol", "correct horse"), None).status, 200);
+    // Enough failed attempts from one address blocks that address regardless of the name.
+    for _ in 0..30 {
+        post(&master, "/api/v1/login", &credentials("someone-else", "nope"), None);
+    }
     assert_eq!(post(&master, "/api/v1/login", &credentials("carol", "correct horse"), None).status, 429);
+}
+
+/// The CSRF token a `GET /login` or `/register` handed out, from its `Set-Cookie` (the same
+/// value is also in the page's hidden `csrf` field: double-submit).
+fn csrf_of(resp: &Resp) -> String {
+    resp.headers
+        .iter()
+        .find(|(k, v)| k == "Set-Cookie" && v.starts_with("bf2r_csrf="))
+        .map(|(_, v)| v.split(';').next().unwrap().trim_start_matches("bf2r_csrf=").to_string())
+        .expect("the form set a csrf cookie")
 }
 
 #[test]
@@ -173,12 +194,28 @@ fn web_pages() {
     assert_eq!(home.status, 200);
     assert!(home.text().contains("Top players"));
     assert!(home.headers.iter().any(|(k, v)| k == "Content-Security-Policy" && v.contains("default-src 'none'")));
-    // Register through the form: a session cookie and the profile.
+
+    // A form submission with no CSRF cookie/field at all (as a cross-site forger would send)
+    // is refused, not processed.
     let mut req = Req::new(Method::Post, "/register");
-    req.body = b"name=dave&password=correct+horse&email=".to_vec();
+    req.body = b"name=nocsrf&password=correct+horse&email=".to_vec();
+    assert_eq!(http::handle(&master, &req).status, 400);
+    assert!(get(&master, "/api/v1/players/nocsrf", None).status != 200, "not actually registered");
+    // ...and so is one with a mismatched cookie and field.
+    let mut req = Req::new(Method::Post, "/register");
+    req.headers.insert("cookie".into(), "bf2r_csrf=aaa".into());
+    req.body = b"name=nocsrf&password=correct+horse&email=&csrf=bbb".to_vec();
+    assert_eq!(http::handle(&master, &req).status, 400);
+
+    // Register through the form (with the csrf cookie/field a browser would carry from the
+    // page): a session cookie and the profile.
+    let csrf = csrf_of(&get(&master, "/register", None));
+    let mut req = Req::new(Method::Post, "/register");
+    req.headers.insert("cookie".into(), format!("bf2r_csrf={csrf}"));
+    req.body = format!("name=dave&password=correct+horse&email=&csrf={csrf}").into_bytes();
     let resp = http::handle(&master, &req);
     assert_eq!(resp.status, 303, "{}", resp.text());
-    let cookie = resp.headers.iter().find(|(k, _)| k == "Set-Cookie").unwrap().1.clone();
+    let cookie = resp.headers.iter().find(|(k, v)| k == "Set-Cookie" && v.starts_with("bf2r_session=")).unwrap().1.clone();
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
     let session = cookie.split(';').next().unwrap().to_string();
     let mut req = Req::new(Method::Get, "/players/dave");
@@ -186,9 +223,19 @@ fn web_pages() {
     let page = http::handle(&master, &req);
     assert!(page.text().contains("Logged in as dave"));
     assert!(page.text().contains("Private"));
-    // Names are escaped: no markup from players reaches the page.
+    // A cross-origin POST is refused even with a matching csrf cookie/field.
+    let csrf = csrf_of(&get(&master, "/login", None));
     let mut req = Req::new(Method::Post, "/login");
-    req.body = b"name=%3Cscript%3E&password=x".to_vec();
+    req.headers.insert("cookie".into(), format!("bf2r_csrf={csrf}"));
+    req.headers.insert("origin".into(), "https://evil.example".into());
+    req.headers.insert("host".into(), "master.example.com".into());
+    req.body = format!("name=dave&password=correct+horse&csrf={csrf}").into_bytes();
+    assert_eq!(http::handle(&master, &req).status, 400);
+    // Names are escaped: no markup from players reaches the page.
+    let csrf = csrf_of(&get(&master, "/login", None));
+    let mut req = Req::new(Method::Post, "/login");
+    req.headers.insert("cookie".into(), format!("bf2r_csrf={csrf}"));
+    req.body = format!("name=%3Cscript%3E&password=x&csrf={csrf}").into_bytes();
     let failed = http::handle(&master, &req);
     assert_eq!(failed.status, 400);
     assert!(!failed.text().contains("<script>") && failed.text().contains("&lt;script&gt;"));

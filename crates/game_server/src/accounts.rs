@@ -195,6 +195,12 @@ pub fn start(world: &mut World) {
         return;
     }
     let url = url.unwrap_or_default();
+    // S20: the master's key (and, if ranked, this server's API key) travel over `master_url`,
+    // so it must be https unless it's plainly local testing (no reverse proxy in front yet).
+    if !url.is_empty() && !game_auth::https_or_loopback(&url) {
+        warn!("accounts: master_url must be https:// (http:// only to localhost, for local testing); ignoring accounts");
+        return;
+    }
     let ranked = config.ranked && config.api_key.as_ref().is_some_and(|k| !k.trim().is_empty()) && !url.is_empty();
     if config.ranked && !ranked {
         warn!("accounts: `ranked` needs `master_url` and the `api_key` the master's admin gave this server; running unranked");
@@ -379,7 +385,38 @@ pub fn report_round(world: &mut World, winner: Team) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::app::App;
     use game_auth::{Identity, token};
+
+    /// A pinned key so `start` never spawns its background `fetch_key` thread (which would
+    /// otherwise retry a real network request every 30 s for the rest of the test process).
+    fn pinned_key() -> Option<String> {
+        Some(game_auth::hex(&Identity::generate().public_key()))
+    }
+
+    #[test]
+    fn refuses_an_insecure_non_loopback_master_url() {
+        let mut app = App::new();
+        app.insert_resource(ServerSettings {
+            accounts: AccountSettings { master_url: Some("http://master.example.com".into()), master_key: pinned_key(), ranked: true, ..default() },
+            ..default()
+        });
+        start(app.world_mut());
+        assert!(app.world().get_resource::<Accounts>().is_none(), "plain http to a real host is refused, not silently used");
+    }
+
+    #[test]
+    fn allows_https_and_local_http() {
+        for url in ["https://master.example.com", "http://127.0.0.1:16581", "http://localhost:16581"] {
+            let mut app = App::new();
+            app.insert_resource(ServerSettings {
+                accounts: AccountSettings { master_url: Some(url.into()), master_key: pinned_key(), ..default() },
+                ..default()
+            });
+            start(app.world_mut());
+            assert!(app.world().get_resource::<Accounts>().is_some(), "{url} should be accepted");
+        }
+    }
 
     #[test]
     fn tickets_are_checked_and_used_once() {

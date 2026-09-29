@@ -123,6 +123,7 @@ pub struct ModesPlugin;
 impl Plugin for ModesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RoundClock>()
+            .add_message::<RoundReset>()
             .configure_sets(
                 FixedUpdate,
                 (ModeSystems::Objectives, ModeSystems::Tickets, ModeSystems::Round)
@@ -161,6 +162,20 @@ pub struct RoundClock {
     pub round: f32,
     pub stage: f32,
 }
+
+/// Sent once a round starts over on the same level: after the break, or a round ended early
+/// by an admin's `/tickets` (unlike `/restart` and `/map`, which reload the level and go
+/// through the level-teardown path below instead). Fresh flags, tickets and spawns.
+///
+/// This is the round half of the two lifecycle hooks modules clean up on: a full map change
+/// or leaving to the menu instead despawns everything tagged [`game_shared::level::LevelEntity`]
+/// (`game_shared::level::load_level_for_match`, and `net::leave_match` on the client), which
+/// modules also see through `resource_exists_and_changed::<LoadedLevel>` /
+/// `resource_removed::<LoadedLevel>`. A round reset keeps the level and its `LevelEntity`s, so
+/// per-round state that isn't level-scoped (the commander's assets and recharge, per-round
+/// `Local` caches keyed by entity) needs this event instead.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct RoundReset;
 
 fn tick_clock(time: Res<Time>, rounds: Query<&RoundState>, mut clock: ResMut<RoundClock>) {
     if rounds.iter().next() == Some(&RoundState::Playing) {
@@ -312,9 +327,14 @@ fn receive_deploy_requests(
             continue;
         };
         if let Ok(mut deployment) = players.get_mut(player) {
-            deployment.kit = request.message.kit.min(15);
-            deployment.control_point = request.message.control_point;
-            deployment.on_squad_leader = request.message.on_squad_leader;
+            // Replicated: only a real change goes out.
+            let wanted = Deployment {
+                kit: request.message.kit.min(15),
+                control_point: request.message.control_point,
+                on_squad_leader: request.message.on_squad_leader,
+                ..*deployment
+            };
+            deployment.set_if_neq(wanted);
         }
     }
 }
@@ -332,6 +352,7 @@ fn next_round(
     mut remaining: Local<Option<f32>>,
     mut clock: ResMut<RoundClock>,
     rotation: Res<crate::rotation::MapRotation>,
+    mut reset: MessageWriter<RoundReset>,
 ) {
     let (match_entity, match_info, mut round, _) = match_state.into_inner();
     let RoundState::Ended { winner, restart_in } = *round else {
@@ -364,6 +385,7 @@ fn next_round(
         *score = Score::default();
         deployment.respawn_in = 0.0;
     }
+    reset.write(RoundReset);
     start_round(&mut commands, &level, match_entity, match_info, &old, &mut clock);
 }
 

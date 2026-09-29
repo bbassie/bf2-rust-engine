@@ -79,8 +79,9 @@ fn emitters(
                     speed: (emitter.sound.pitch[0] + emitter.sound.pitch[1]) * 0.5,
                     channel: emitter.channel,
                 };
-                let voice = spawn_held(&mut commands, &mut cache, &assets, listener, &emitter.sound, voice);
-                voices.insert(entity, voice);
+                if let Some(voice) = spawn_held(&mut commands, &mut cache, &assets, listener, &emitter.sound, voice) {
+                    voices.insert(entity, voice);
+                }
             }
             (Some(voice), false) => {
                 commands.entity(voice).try_despawn();

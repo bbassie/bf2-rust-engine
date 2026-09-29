@@ -626,8 +626,8 @@ fn update_flag_pills(
     }
     for (bar, mut node, mut background) in &mut bars {
         if let Ok(state) = flags.get(bar.0) {
-            node.width = percent(state.height * 100.0);
-            background.0 = team_color(state.flag, local);
+            crate::hud::set_width(&mut node, percent(state.height * 100.0));
+            background.set_if_neq(BackgroundColor(team_color(state.flag, local)));
         }
     }
 }
@@ -674,8 +674,8 @@ fn update_charge_pills(
                 ChargeState::Armed { progress, .. } => (*progress, team_color(mode.defender(), local)),
                 _ => (0.0, TEXT),
             };
-            node.width = percent(progress * 100.0);
-            background.0 = color;
+            crate::hud::set_width(&mut node, percent(progress * 100.0));
+            background.set_if_neq(BackgroundColor(color));
         }
     }
 }
@@ -778,10 +778,10 @@ fn update_capture_panel(
             ChargeState::Armed { .. } => String::new(),
             _ => String::new(),
         });
-        text.0 = format!("CHARGE {}   {line}{}", charge.name, if progress > 0.0 { "" } else { &seconds });
+        crate::hud::set_text(&mut text, format!("CHARGE {}   {line}{}", charge.name, if progress > 0.0 { "" } else { &seconds }));
         let (node, background) = &mut *fill;
-        node.width = percent(progress * 100.0);
-        background.0 = color;
+        crate::hud::set_width(node, percent(progress * 100.0));
+        background.set_if_neq(BackgroundColor(color));
         return;
     }
     let inside = control_points
@@ -803,10 +803,10 @@ fn update_capture_panel(
         _ => "Enemy flag",
     };
     let owner = team_name(level.as_deref(), state.owner);
-    text.0 = format!("{}   {action}   ({owner})", cp.name.to_uppercase());
+    crate::hud::set_text(&mut text, format!("{}   {action}   ({owner})", cp.name.to_uppercase()));
     let (node, background) = &mut *fill;
-    node.width = percent(state.height * 100.0);
-    background.0 = team_color(state.flag, local);
+    crate::hud::set_width(node, percent(state.height * 100.0));
+    background.set_if_neq(BackgroundColor(team_color(state.flag, local)));
 }
 
 /// Recent capture messages with the time they arrived.
@@ -899,6 +899,6 @@ fn update_round_banner(
         Team::Spectator => "Draw".to_string(),
         team => format!("{} wins", team_name(level.as_deref(), team)),
     };
-    text.0 = format!("{headline}\nNext round in {restart_in:.0} s");
+    crate::hud::set_text(text, format!("{headline}\nNext round in {restart_in:.0} s"));
     color.0 = if winner == Team::Spectator { TEXT } else { team_color(winner, local) };
 }

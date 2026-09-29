@@ -17,7 +17,7 @@ pub struct FlagRenderPlugin;
 impl Plugin for FlagRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FlagAnimations>()
-            .add_systems(Update, (add_poles, update_flags).chain());
+            .add_systems(Update, (add_poles, update_flags, sleep_unseen_flags).chain());
     }
 }
 
@@ -119,7 +119,10 @@ fn update_flags(
         for child in children.into_iter().flatten() {
             if let Ok((cloth, mut transform)) = cloths.get_mut(*child) {
                 if cloth.team == state.flag {
-                    transform.translation.y = y;
+                    // Only when it moves: a write moves the whole flag's skeleton.
+                    if transform.translation.y != y {
+                        transform.translation.y = y;
+                    }
                     current = Some(*child);
                 } else {
                     commands.entity(*child).despawn();
@@ -182,6 +185,40 @@ fn update_flags(
                         })),
                         Transform::from_xyz(0.66, -0.4, 0.0),
                     ));
+            }
+        }
+    }
+}
+
+/// A flag's animation graph while nobody sees the flag, taken off its player meanwhile.
+#[derive(Component)]
+struct SleepingFlag(Handle<AnimationGraph>);
+
+/// Flags nobody sees (every mesh culled or out of view, shadows included, last frame) stop
+/// waving: their animation graph comes off the player, which Bevy then skips, and goes back on
+/// once a mesh is seen again (like `soldiers::sleep_unseen`). A 24-flag level animated and
+/// moved some 600 bones a frame for flags mostly out of sight.
+fn sleep_unseen_flags(
+    mut commands: Commands,
+    cloths: Query<Entity, With<FlagCloth>>,
+    children: Query<&Children>,
+    seen: Query<&ViewVisibility, With<Mesh3d>>,
+    players: Query<(Option<&AnimationGraphHandle>, Option<&SleepingFlag>), With<AnimationPlayer>>,
+) {
+    for cloth in &cloths {
+        let visible = children.iter_descendants(cloth).any(|e| seen.get(e).is_ok_and(|v| v.get()));
+        for entity in children.iter_descendants(cloth) {
+            let Ok((graph, sleeping)) = players.get(entity) else {
+                continue;
+            };
+            match (visible, graph, sleeping) {
+                (false, Some(graph), None) => {
+                    commands.entity(entity).insert(SleepingFlag(graph.0.clone())).remove::<AnimationGraphHandle>();
+                }
+                (true, None, Some(sleeping)) => {
+                    commands.entity(entity).insert(AnimationGraphHandle(sleeping.0.clone())).remove::<SleepingFlag>();
+                }
+                _ => {}
             }
         }
     }

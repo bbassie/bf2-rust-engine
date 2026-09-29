@@ -223,11 +223,19 @@ pub fn upload(
 
         // Far to near, so alpha blending comes out right.
         batch.depths.sort_unstable_by_key(|&(depth, _)| std::cmp::Reverse(depth));
-        let mut data = vec![0; batch.capacity * STRIDE];
-        for (slot, &(_, index)) in data.chunks_exact_mut(STRIDE).zip(&batch.depths) {
-            batch.particles[index as usize].write(slot);
-        }
+        // Into the buffer's own bytes (no new allocation a frame). Slots past this frame's
+        // particles are cleared up to the end of the last chunk drawn now or last frame (the
+        // rest is never drawn).
         if let Some(mut buffer) = buffers.get_mut(buffer) {
+            let mut data = buffer.data.take().unwrap_or_default();
+            data.resize(batch.capacity * STRIDE, 0);
+            for (slot, &(_, index)) in data.chunks_exact_mut(STRIDE).zip(&batch.depths) {
+                batch.particles[index as usize].write(slot);
+            }
+            let drawn = (count.max(batch.shown).div_ceil(CHUNK) * CHUNK).min(batch.capacity);
+            if drawn > count {
+                data[count * STRIDE..drawn * STRIDE].fill(0);
+            }
             buffer.data = Some(data);
         }
 

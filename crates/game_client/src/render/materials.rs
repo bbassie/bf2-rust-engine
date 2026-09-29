@@ -29,7 +29,14 @@ impl Plugin for MaterialsPlugin {
         .add_systems(
             Update,
             (
-                (load_env_map, apply_tree_light, load_static_lightmaps).run_if(resource_exists_and_changed::<LoadedLevel>),
+                // A map change or leaving the match: the old level's materials and their
+                // textures would otherwise stay referenced (and loaded) forever.
+                // (One instance: `.after` below can't order against a system added twice.)
+                clear_material_cache
+                    .run_if(resource_exists_and_changed::<LoadedLevel>.or_else(resource_removed::<LoadedLevel>)),
+                (load_env_map, apply_tree_light, load_static_lightmaps)
+                    .run_if(resource_exists_and_changed::<LoadedLevel>)
+                    .after(clear_material_cache),
                 apply_baked_sky.run_if(resource_changed::<crate::settings::Settings>),
             ),
         )
@@ -362,6 +369,21 @@ struct Bf2MaterialCache {
     lightmap: Option<Handle<Image>>,
     static_users: Vec<Handle<Bf2Material>>,
     baked_sky: f32,
+}
+
+/// A map change or leaving the match: the previous level's materials, their textures and its
+/// environment map, tree light and lightmaps would otherwise stay alive for the rest of the
+/// session (they're asset handles the cache holds; nothing else keeps most of them once the
+/// level's own entities are gone, but they still count as loaded and used until dropped).
+/// `swap_scene_materials` and [`Bf2Materials`] repopulate whatever the new level's glTF scenes
+/// ask for.
+fn clear_material_cache(mut cache: ResMut<Bf2MaterialCache>) {
+    let before = cache.materials.len() + cache.standard.len();
+    if before == 0 {
+        return;
+    }
+    *cache = Bf2MaterialCache::default();
+    info!("material cache cleared ({before} materials)");
 }
 
 /// Makes BF2 materials from glTF materials: the `StandardMaterial` Bevy's glTF loader

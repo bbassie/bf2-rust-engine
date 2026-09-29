@@ -71,7 +71,7 @@ use bevy::{
     render::render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError},
     shader::ShaderRef,
 };
-use game_shared::level::LoadedLevel;
+use game_shared::level::{LevelEntity, LoadedLevel};
 
 use super::sky_light::SkyGradient;
 use crate::camera::PlayerCamera;
@@ -91,6 +91,7 @@ impl Plugin for EnvironmentPlugin {
                 Update,
                 (
                     apply_environment.run_if(resource_exists_and_changed::<LoadedLevel>),
+                    clear_environment.run_if(resource_removed::<LoadedLevel>),
                     spawn_sky_mesh,
                     attach_sky_light.after(apply_environment),
                 ),
@@ -711,6 +712,25 @@ struct SkyDome {
     spawned: bool,
 }
 
+/// Leaving the match: `Sun` and `SkyDome` are [`LevelEntity`]s and go with the rest, but the
+/// level's light, sky and fog are resources and a per-camera fog value, which would otherwise
+/// keep lighting and fogging the menu in whatever state the level left them.
+fn clear_environment(
+    mut commands: Commands,
+    mut clear: ResMut<ClearColor>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    mut cameras: Query<&mut DistanceFog, With<PlayerCamera>>,
+) {
+    commands.remove_resource::<LevelLight>();
+    commands.remove_resource::<SkyLight>();
+    commands.remove_resource::<LevelFog>();
+    *clear = ClearColor(Color::srgb(0.55, 0.68, 0.85));
+    *ambient = GlobalAmbientLight::default();
+    for mut fog in &mut cameras {
+        *fog = DistanceFog::default();
+    }
+}
+
 fn apply_environment(
     mut commands: Commands,
     level: Res<LoadedLevel>,
@@ -750,6 +770,7 @@ fn apply_environment(
     commands.insert_resource(light);
     commands.spawn((
         Sun,
+        LevelEntity,
         DirectionalLight {
             color: sun_color,
             illuminance,
@@ -799,8 +820,7 @@ fn apply_environment(
         let scale = fog_end * 0.5 / sky.radius.max(1.0);
         commands.spawn((
             SkyDome {
-                mesh: asset_server
-                    .load(GltfAssetLabel::Mesh(0).from_asset(format!("imported://{}", sky.mesh))),
+                mesh: asset_server.load(GltfAssetLabel::Mesh(0).from_asset(format!("imported://{}", sky.mesh))),
                 material: sky_materials.add(SkyMaterial {
                     texture: asset_server.load(format!("imported://{}", sky.texture)),
                     params: SkyParams {
@@ -810,6 +830,7 @@ fn apply_environment(
                 }),
                 spawned: false,
             },
+            LevelEntity,
             Transform::from_rotation(Quat::from_rotation_y(-sky.rotation.to_radians()))
                 .with_scale(Vec3::splat(scale)),
             Visibility::default(),
@@ -940,8 +961,10 @@ fn update_view_distance(
                 end,
             };
         }
-        if let Projection::Perspective(perspective) = projection.as_mut()
+        // Looked at before writing: `as_mut` alone marks the projection changed.
+        if let Projection::Perspective(perspective) = &*projection
             && differs(end + 100.0, perspective.far)
+            && let Projection::Perspective(perspective) = projection.as_mut()
         {
             perspective.far = end + 100.0;
         }

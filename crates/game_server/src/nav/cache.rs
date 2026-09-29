@@ -183,10 +183,6 @@ fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
     let ladder_count = r.u32()? as usize;
     let words = r.words(ladder_count * LADDER_WORDS)?;
     let ladders: Vec<NavLadder> = words.chunks_exact(LADDER_WORDS).map(ladder_from_words).collect();
-    ensure!(
-        ladders.iter().all(|l| (l.bottom.index as usize) < count && (l.top.index as usize) < count),
-        "bad ladder"
-    );
     let mut ladder_ends: bevy::platform::collections::HashMap<u32, Vec<u16>> = default();
     for (i, ladder) in ladders.iter().enumerate() {
         ladder_ends.entry(ladder.bottom.index).or_default().push(i as u16);
@@ -196,13 +192,33 @@ fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
     let patch_count = r.u32()? as usize;
     let words = r.words(patch_count * PATCH_WORDS)?;
     let patches: Vec<NavPatch> = words.chunks_exact(PATCH_WORDS).map(patch_from_words).collect();
+    ensure!(patches.windows(2).all(|w| w[0].first_cell <= w[1].first_cell), "inconsistent patches");
+    // A cell's `x`/`z` are columns of its own space: the level grid's `width`/`depth`, or
+    // (`NavPatch::width`/`depth`) of whichever patch its index falls in (patches occupy
+    // contiguous, increasing ranges of cells from `first_cell`; see `NavGrid::patch_of`). A
+    // ladder or portal can end on a patch (an aircraft carrier's ladders and its doors onto
+    // the level grid), so checking every cell against just the level grid's bounds would
+    // either wrongly reject those or, checked too loosely, let a corrupt cache through with an
+    // `x`/`z` that doesn't actually match its `index`.
+    let space = |index: u32| match patches.iter().rposition(|p| index >= p.first_cell) {
+        Some(i) => (patches[i].width, patches[i].depth),
+        None => (width, depth),
+    };
+    let in_grid = |c: &CellRef| {
+        (c.index as usize) < count && {
+            let (w, d) = space(c.index);
+            c.x < w && c.z < d
+        }
+    };
+    ensure!(ladders.iter().all(|l| in_grid(&l.bottom) && in_grid(&l.top)), "bad ladder");
     let portal_count = r.u32()? as usize;
     let words = r.words(portal_count * 4)?;
     ensure!(r.at == data.len(), "wrong size");
     let mut portals: bevy::platform::collections::HashMap<u32, Vec<CellRef>> = default();
     for w in words.chunks_exact(4) {
-        ensure!((w[0] as usize) < count && (w[3] as usize) < count, "bad portal");
-        portals.entry(w[0]).or_default().push(CellRef { x: w[1], z: w[2], index: w[3] });
+        let target = CellRef { x: w[1], z: w[2], index: w[3] };
+        ensure!((w[0] as usize) < count && in_grid(&target), "bad portal");
+        portals.entry(w[0]).or_default().push(target);
     }
     ensure!(columns[base_columns - 1] == base_cells, "inconsistent columns");
     ensure!(columns.last() == Some(&(count as u32)), "inconsistent columns");

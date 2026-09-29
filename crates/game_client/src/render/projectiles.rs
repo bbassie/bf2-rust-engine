@@ -229,7 +229,9 @@ fn move_visuals(
                 visual.offset = shown - server.position;
                 visual.stopped = false;
             }
-            None if !visual.stopped => {
+            // Lying still (mines, claymores, charges): nothing to predict until the server says
+            // it moves again, which saves a support ray a frame for each.
+            None if !visual.stopped && !visual.motion.resting => {
                 let mut filter = SpatialQueryFilter::from_mask(collision_layers(desc));
                 if let Some(hitbox) = hitbox.filter(|_| visual.source.is_none()) {
                     filter = filter.with_excluded_entities([hitbox]);
@@ -248,9 +250,8 @@ fn move_visuals(
         } else {
             Visibility::Inherited
         });
-        transform.translation = visual.motion.position + visual.offset;
         let motion = &visual.motion;
-        transform.rotation = if motion.resting {
+        let rotation = if motion.resting {
             motion.rotation
         } else if desc.impact == Impact::Stop {
             // Shells and rockets point along their flight.
@@ -260,6 +261,11 @@ fn move_visuals(
         } else {
             motion.rotation * Quat::from_scaled_axis(visual.spin * visual.age)
         };
+        let translation = motion.position + visual.offset;
+        if transform.translation != translation || transform.rotation != rotation {
+            transform.translation = translation;
+            transform.rotation = rotation;
+        }
     }
 }
 

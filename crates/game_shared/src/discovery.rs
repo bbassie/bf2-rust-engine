@@ -1,8 +1,8 @@
-//! Finding servers on the LAN: a client sends a small UDP query (broadcast, or to a known
+//! Finding servers on the LAN: a client sends a padded UDP query (broadcast, or to a known
 //! address) to the discovery ports; every server answers with a [`ServerInfo`].
 //!
 //! ```text
-//! query: "BF2R?" token (u64 LE)
+//! query: "BF2R?" token (u64 LE), zeros up to QUERY_SIZE (1024) bytes
 //! reply: "BF2R!" token (u64 LE) ServerInfo as RON
 //! ```
 //!
@@ -49,13 +49,24 @@ pub struct ServerInfo {
     pub ranked: bool,
 }
 
+/// Queries are padded with zeros to this many bytes, and servers ignore shorter ones, so a
+/// reply (a few hundred bytes) is never larger than the query that asked for it: a spoofed
+/// query can't make a server send more to its victim than the spoofer sent.
+pub const QUERY_SIZE: usize = 1024;
+
 pub fn encode_query(token: u64) -> Vec<u8> {
-    [QUERY.as_slice(), &token.to_le_bytes()].concat()
+    let mut query = [QUERY.as_slice(), &token.to_le_bytes()].concat();
+    query.resize(QUERY_SIZE, 0);
+    query
 }
 
-/// The token of a query packet.
+/// The token of a query packet (padded to [`QUERY_SIZE`]).
 pub fn parse_query(packet: &[u8]) -> Option<u64> {
-    let token = packet.strip_prefix(QUERY)?;
+    if packet.len() < QUERY_SIZE {
+        return None;
+    }
+    let rest = packet.strip_prefix(QUERY)?;
+    let (token, _padding) = rest.split_at_checked(8)?;
     Some(u64::from_le_bytes(token.try_into().ok()?))
 }
 
@@ -135,8 +146,12 @@ mod tests {
             port: 16567,
             ..Default::default()
         };
+        assert!(encode_reply(7, &info).len() < QUERY_SIZE, "replies are smaller than queries");
         assert_eq!(parse_reply(&encode_reply(7, &info)), Some((7, info)));
         assert_eq!(parse_query(b"BF2R!12345678"), None);
+        // Unpadded (amplifying) queries get no answer.
+        assert_eq!(parse_query(b"BF2R?12345678"), None);
+        assert_eq!(encode_query(1).len(), QUERY_SIZE);
         let list = parse_server_list(b"BF2R-SERVERS127.0.0.1 16567 16568
 10.0.0.2 16600 16569
 ").unwrap();

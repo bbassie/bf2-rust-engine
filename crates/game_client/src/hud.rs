@@ -354,7 +354,16 @@ fn update_status(
     cursor: Single<&bevy::window::CursorOptions>,
     actions: Actions,
     mut text: Single<&mut Text, With<StatusText>>,
+    time: Res<Time<Real>>,
+    mut shown_at: Local<f32>,
 ) {
+    // A changed text is laid out again, and the frame rate changes every frame: four times a
+    // second is plenty to read it.
+    let now = time.elapsed_secs();
+    if now - *shown_at < 0.25 && !text.0.is_empty() {
+        return;
+    }
+    *shown_at = now;
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
@@ -403,7 +412,31 @@ fn update_status(
     } else {
         String::new()
     };
-    text.0 = format!("{level}  |  {mode}  |  {fps:.0} fps{net}{help}");
+    set_text(&mut text, format!("{level}  |  {mode}  |  {fps:.0} fps{net}{help}"));
+}
+
+/// Sets a text only when it changes: a changed `Text` (or `Node`) lays the UI out again.
+pub(crate) fn set_text(text: &mut Mut<Text>, value: impl Into<String> + AsRef<str>) {
+    if text.0 != value.as_ref() {
+        text.0 = value.into();
+    }
+}
+
+/// Sets a node's width only when it changes (see [`set_text`]).
+pub(crate) fn set_width(node: &mut Mut<Node>, width: Val) {
+    if node.width != width {
+        node.width = width;
+    }
+}
+
+/// Sets a node's size and offset only when they change (see [`set_text`]).
+pub(crate) fn set_box(node: &mut Mut<Node>, width: Val, height: Val, left: Val, top: Val) {
+    if node.width != width || node.height != height || node.left != left || node.top != top {
+        node.width = width;
+        node.height = height;
+        node.left = left;
+        node.top = top;
+    }
 }
 
 fn update_crosshair(
@@ -428,23 +461,18 @@ fn update_crosshair(
         visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
         background.set_if_neq(BackgroundColor(crosshair_color));
         if dot {
-            node.width = px(4);
-            node.height = px(4);
-            node.left = px(-2.0);
-            node.top = px(-2.0);
+            set_box(&mut node, px(4), px(4), px(-2.0), px(-2.0));
             continue;
         }
         let horizontal = matches!(line.0, 0 | 1);
-        node.width = px(if horizontal { 10 } else { 2 });
-        node.height = px(if horizontal { 2 } else { 10 });
         let (left, top) = match line.0 {
             0 => (-gap - 10.0, -1.0),
             1 => (gap, -1.0),
             2 => (-1.0, -gap - 10.0),
             _ => (-1.0, gap),
         };
-        node.left = px(left);
-        node.top = px(top);
+        let (width, height) = if horizontal { (px(10), px(2)) } else { (px(2), px(10)) };
+        set_box(&mut node, width, height, px(left), px(top));
     }
     let alpha = (feedback.hit_marker / 0.2).clamp(0.0, 1.0);
     let color = if feedback.hit_killed {
@@ -453,7 +481,7 @@ fn update_crosshair(
         Color::srgba(1.0, 1.0, 1.0, alpha)
     };
     for mut background in &mut marker {
-        background.0 = color;
+        background.set_if_neq(BackgroundColor(color));
     }
 }
 
@@ -467,9 +495,12 @@ fn update_stamina(
     };
     let stamina = predicted.map_or(motion, |p| p.motion()).stamina.clamp(0.0, 1.0);
     let (node, color) = &mut *fill;
-    node.width = percent(stamina * 100.0);
+    let width = percent(stamina * 100.0);
+    if node.width != width {
+        node.width = width;
+    }
     // Amber when too low to start sprinting again soon.
-    color.0 = if stamina < 0.2 { ACCENT } else { STAMINA };
+    color.set_if_neq(BackgroundColor(if stamina < 0.2 { ACCENT } else { STAMINA }));
 }
 
 #[allow(clippy::type_complexity)]
@@ -493,10 +524,13 @@ fn update_vitals(
         visibility.set_if_neq(if ammo && seated { Visibility::Hidden } else { Visibility::Inherited });
     }
     let fraction = (health.current / health.max.max(1.0)).clamp(0.0, 1.0);
-    health_text.0 = format!("{:.0}", health.current.max(0.0));
+    set_text(&mut health_text, format!("{:.0}", health.current.max(0.0)));
     let (node, color) = &mut *health_fill;
-    node.width = percent(fraction * 100.0);
-    color.0 = Color::srgb(0.95 - 0.5 * fraction, 0.35 + 0.5 * fraction, 0.35);
+    let width = percent(fraction * 100.0);
+    if node.width != width {
+        node.width = width;
+    }
+    color.set_if_neq(BackgroundColor(Color::srgb(0.95 - 0.5 * fraction, 0.35 + 0.5 * fraction, 0.35)));
 
     let active = inventory.active as usize;
     let weapon = loadout.weapons.get(active).and_then(|w| armory.weapon(w));
@@ -515,26 +549,28 @@ fn update_vitals(
         (None, true) => "  DETONATOR".into(),
         _ => mode,
     };
-    weapon_text.0 = format!("{name}{mode}");
+    set_text(&mut weapon_text, format!("{name}{mode}"));
     let [in_mag, spare] = inventory.ammo.get(active).copied().unwrap_or([0, 0]);
-    ammo_text.0 = if inventory.reloading {
+    let ammo = if inventory.reloading {
         "RELOADING".into()
     } else if weapon.is_some_and(|w| w.magazine_size > 0) {
         format!("{in_mag}  |  {spare}")
     } else {
         String::new()
     };
+    set_text(&mut ammo_text, ammo);
 }
 
 fn update_kill_feed(time: Res<Time<Real>>, feedback: Res<CombatFeedback>, mut text: Single<&mut Text, With<KillFeedText>>) {
     let now = time.elapsed_secs_f64();
-    text.0 = feedback
+    let feed = feedback
         .kills
         .iter()
         .filter(|(_, at)| now - at < 8.0)
         .map(|(line, _)| line.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    set_text(&mut text, feed);
 }
 
 fn update_death_notice(
@@ -543,10 +579,11 @@ fn update_death_notice(
     soldier: Query<(), With<LocalSoldier>>,
     mut text: Single<&mut Text, With<DeathNotice>>,
 ) {
-    text.0 = match (&feedback.killed_by, player.is_empty(), soldier.is_empty()) {
+    let notice = match (&feedback.killed_by, player.is_empty(), soldier.is_empty()) {
         (Some(killer), false, true) => format!("Killed by {killer}\nRespawning shortly"),
         _ => String::new(),
     };
+    set_text(&mut text, notice);
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]

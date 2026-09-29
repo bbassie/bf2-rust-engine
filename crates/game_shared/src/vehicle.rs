@@ -36,6 +36,8 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VehicleLibrary>()
             .add_observer(add_vehicle_physics)
+            .add_observer(pause_easing_asleep)
+            .add_observer(resume_easing_awake)
             .add_systems(
                 FixedUpdate,
                 (simulate_vehicles, aim_stationary)
@@ -49,6 +51,22 @@ impl Plugin for VehiclePlugin {
                     .after(PhysicsSystems::Writeback)
                     .run_if(in_state(ClientState::Disconnected)),
             );
+    }
+}
+
+/// Interpolation writes an interpolated body's `Transform` every frame, even while it sleeps
+/// where it stands, and every write moves the whole visual hierarchy under it (a parked vehicle:
+/// about seventy transforms to propagate and meshes to upload a frame). Sleeping bodies don't
+/// move: no easing until they wake up.
+fn pause_easing_asleep(add: On<Add, Sleeping>, interpolated: Query<(), With<TransformInterpolation>>, mut commands: Commands) {
+    if interpolated.contains(add.entity) {
+        commands.entity(add.entity).try_insert((NoTranslationEasing, NoRotationEasing));
+    }
+}
+
+fn resume_easing_awake(remove: On<Remove, Sleeping>, interpolated: Query<(), With<TransformInterpolation>>, mut commands: Commands) {
+    if interpolated.contains(remove.entity) {
+        commands.entity(remove.entity).try_remove::<(NoTranslationEasing, NoRotationEasing)>();
     }
 }
 
@@ -364,6 +382,19 @@ impl VehicleModel {
         out
     }
 
+    /// Transform of one part in hull space (its chain of parents only), with joints at the
+    /// given angles.
+    pub fn part_transform(&self, joints: &[[f32; 3]], part: usize) -> Option<Transform> {
+        let mut local = *self.rest.get(part)?;
+        if let Some(angles) = self.joint_index[part].and_then(|j| joints.get(j)) {
+            local.rotation *= joint_rotation(*angles);
+        }
+        Some(match self.desc.parts[part].parent {
+            Some(parent) if (parent as usize) < part => self.part_transform(joints, parent as usize)? * local,
+            _ => local,
+        })
+    }
+
     /// A point on a part in hull space.
     pub fn attachment(&self, transforms: &[Transform], attachment: &game_data::Attachment) -> Transform {
         let part = transforms.get(attachment.part as usize).copied().unwrap_or_default();
@@ -552,6 +583,11 @@ pub struct VehicleLibrary {
 
 impl VehicleLibrary {
     pub fn get(&mut self, name: &str, paths: &GamePaths) -> Option<Arc<VehicleModel>> {
+        // Templates replicate from the server: a file name inside `vehicles/`, nothing else.
+        if !crate::validate::path_component(name) {
+            debug!("`{}` isn't a valid vehicle template name", name.escape_debug());
+            return None;
+        }
         self.models
             .entry(name.to_string())
             .or_insert_with(|| {

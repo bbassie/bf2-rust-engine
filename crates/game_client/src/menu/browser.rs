@@ -5,7 +5,10 @@
 //! scripted runs (scenarios) only ask this machine (and a master on it), so they never open
 //! a network socket.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+};
 
 use game_shared::discovery::{
     DISCOVERY_PORTS, LIST_QUERY, MASTER_PORT, ServerInfo, encode_query, parse_reply, parse_server_list,
@@ -28,6 +31,12 @@ pub struct ServerBrowser {
     asked: Vec<((IpAddr, u16), f32)>,
     /// Bumped when the list changes.
     pub version: u32,
+    /// DNS lookups already answered, by the address text asked for.
+    resolved: HashMap<String, IpAddr>,
+    /// Lookups under way on a background thread (`resolve`): `to_socket_addrs` blocks, and a
+    /// name that doesn't resolve can take seconds per try, which used to stall opening the
+    /// server list and handling every reply for as long as a saved server's name took.
+    resolving: Vec<(String, Task<Option<IpAddr>>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,9 +66,11 @@ pub(super) struct ServerList;
 #[derive(Component)]
 pub(super) struct BrowserStatus;
 
-fn resolve(address: &str, port: u16) -> Option<IpAddr> {
+/// The blocking DNS lookup itself, run on a background thread (see [`ServerBrowser::resolve`]).
+/// The port doesn't affect the resolved address; it's only needed for `to_socket_addrs`'s type.
+fn resolve_blocking(address: &str) -> Option<IpAddr> {
     use std::net::ToSocketAddrs;
-    let addresses: Vec<SocketAddr> = (address.trim(), port).to_socket_addrs().ok()?.collect();
+    let addresses: Vec<SocketAddr> = (address.trim(), 0u16).to_socket_addrs().ok()?.collect();
     addresses.iter().find(|a| a.is_ipv4()).or(addresses.first()).map(|a| a.ip())
 }
 
@@ -86,10 +97,11 @@ impl ServerBrowser {
             if self.entries.iter().any(|e| e.address.eq_ignore_ascii_case(&server.address) && e.port == server.port) {
                 continue;
             }
+            let ip = self.resolve(&server.address);
             self.entries.push(BrowserEntry {
                 address: server.address.clone(),
                 port: server.port,
-                ip: resolve(&server.address, server.port),
+                ip,
                 info: None,
                 ping_ms: None,
                 favourite: settings.favourite_servers.iter().any(|f| f.is(&server.address, server.port)),
@@ -160,6 +172,61 @@ impl ServerBrowser {
         self.local = None;
         self.network = None;
         self.query = None;
+    }
+
+    /// The IP `address` resolves to, from the cache if it's already been asked; else starts
+    /// resolving it on a background thread (`poll_dns` picks up the answer next) and returns
+    /// `None` for now.
+    fn resolve(&mut self, address: &str) -> Option<IpAddr> {
+        if let Some(&ip) = self.resolved.get(address) {
+            return Some(ip);
+        }
+        if !self.resolving.iter().any(|(a, _)| a == address) {
+            let owned = address.to_string();
+            let task = AsyncComputeTaskPool::get().spawn(async move { resolve_blocking(&owned) });
+            self.resolving.push((address.to_string(), task));
+        }
+        None
+    }
+}
+
+/// Picks up finished background DNS lookups (see [`ServerBrowser::resolve`]): fills in any
+/// entry still waiting on that address, and asks it directly now that its IP is known, like
+/// `refresh` does for one it already had.
+pub(super) fn poll_dns(mut browser: ResMut<ServerBrowser>) {
+    if browser.resolving.is_empty() {
+        return;
+    }
+    let mut done = Vec::new();
+    browser.resolving.retain_mut(|(address, task)| match check_ready(task) {
+        Some(ip) => {
+            done.push((address.clone(), ip));
+            false
+        }
+        None => true,
+    });
+    for (address, ip) in done {
+        let Some(ip) = ip else { continue };
+        browser.resolved.insert(address.clone(), ip);
+        let mut changed = false;
+        for entry in &mut browser.entries {
+            if entry.ip.is_none() && entry.address.eq_ignore_ascii_case(&address) {
+                entry.ip = Some(ip);
+                changed = true;
+            }
+        }
+        if changed {
+            browser.version += 1;
+        }
+        if let Some((token, _)) = browser.query
+            && !ip.is_loopback()
+            && let Some(socket) = &browser.network
+        {
+            let query = encode_query(token);
+            for port in DISCOVERY_PORTS {
+                let _ = socket.send_to(&query, (ip, port));
+            }
+        }
     }
 }
 
@@ -239,7 +306,7 @@ pub(super) fn poll_browser(
             .favourite_servers
             .iter()
             .chain(&settings.recent_servers)
-            .filter(|s| s.port == info.port && resolve(&s.address, s.port) == Some(ip) && s.name != info.name)
+            .filter(|s| s.port == info.port && browser.resolved.get(&s.address) == Some(&ip) && s.name != info.name)
             .cloned()
             .collect();
         // Remember the names of saved servers.

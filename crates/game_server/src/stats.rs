@@ -11,7 +11,7 @@ use game_shared::{
     config::GamePaths,
     conquest::{ControlPoint, FlagEvent, FlagEventKind, RoundState},
     level::LoadedLevel,
-    protocol::{ClientHello, ControlledBy, KillFeed, Player, Score, Team},
+    protocol::{ControlledBy, Player, Score, Team},
     soldier::{Soldier, SoldierMotion},
     summary::{PersonalSummary, RoundSummary, StatLine, SummaryRow},
     weapons::{Armory, Loadout},
@@ -19,7 +19,8 @@ use game_shared::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClientPlayer, Controls, HostPlayer, ServerSettings,
+    Controls, HostPlayer, ServerSettings,
+    abilities::KillScored,
     admin::bans::unix_now,
     combat::Died,
     chat::{announce, client_of},
@@ -31,12 +32,6 @@ pub struct StatsPlugin;
 impl Plugin for StatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StatsDb>()
-            .add_systems(
-                PreUpdate,
-                identify_players
-                    .after(ServerSystems::Receive)
-                    .run_if(in_state(ClientState::Disconnected)),
-            )
             .add_systems(
                 Update,
                 (add_round_stats, track_score, track_time, round_transitions, save_now_and_then)
@@ -127,7 +122,8 @@ impl StatsDb {
     }
 }
 
-/// Server-side: a human whose name we know, so their stats are kept.
+/// Server-side: a human whose name we know, so their stats are kept (the host, and clients
+/// once they said hello: see `receive_hello`).
 #[derive(Component)]
 pub struct Identified;
 
@@ -153,20 +149,6 @@ pub fn start(world: &mut World) {
 /// Saves the stats file.
 pub fn stop(world: &mut World) {
     world.resource_mut::<StatsDb>().save();
-}
-
-fn identify_players(
-    mut commands: Commands,
-    mut hellos: MessageReader<FromClient<ClientHello>>,
-    clients: Query<&ClientPlayer>,
-) {
-    for hello in hellos.read() {
-        if let ClientId::Client(client) = hello.client_id
-            && let Ok(player) = clients.get(client)
-        {
-            commands.entity(player.0).insert(Identified);
-        }
-    }
 }
 
 fn add_round_stats(
@@ -263,16 +245,18 @@ fn weapon_label(name: &str) -> String {
     name.replace('_', " ").to_uppercase()
 }
 
-/// Kills as BF2 scores them: when the victim goes down (the kill feed).
+/// Kills as BF2 scores them: when the victim goes down (the kill feed). Reads [`KillScored`]
+/// (the server-only counterpart of the replicated `KillFeed`, which carries the killer's name
+/// rather than its entity: see `game_shared::protocol::KillFeed`) rather than the outgoing
+/// message itself, so this doesn't depend on how or whether that message gets mapped for
+/// clients.
 fn track_kills(
-    mut feed: MessageReader<ToClients<KillFeed>>,
+    mut scored: MessageReader<KillScored>,
     mut db: ResMut<StatsDb>,
     mut players: Query<(&Player, &mut RoundStats, Has<Identified>)>,
 ) {
-    for ToClients { message: kill, .. } in feed.read() {
-        if let Some(killer) = kill.killer.filter(|k| *k != kill.victim)
-            && let Ok((player, mut round, identified)) = players.get_mut(killer)
-        {
+    for kill in scored.read() {
+        if let Ok((player, mut round, identified)) = players.get_mut(kill.killer) {
             let weapon = weapon_label(&kill.weapon);
             *round.weapon_kills.entry(weapon.clone()).or_default() += 1;
             if let Some(career) = db.career(player, identified) {

@@ -40,6 +40,7 @@ use crate::{
     AppliedInput, HostPlayer, PlayerClient, ServerSettings, ServerSimSystems,
     abilities::{BleedOut, Deaths, hurts_downed},
     destruction::Materials,
+    player_client,
     vehicles::Decoy,
 };
 
@@ -181,8 +182,9 @@ const HEADSHOT_MULTIPLIER: f32 = 2.5;
 pub const MAX_REWIND: u32 = 15;
 /// Ticks of pose history kept per soldier.
 const POSE_HISTORY: usize = MAX_REWIND as usize + 4;
-/// Soldiers' `armor.defaultMaterial` (Human_body): the damage table column for explosions.
-const SOLDIER_ARMOR_MATERIAL: u32 = 24;
+/// Soldiers' `armor.defaultMaterial` (Human_body): the damage table column for hits and
+/// explosions alike (also used by `abilities` for the medic bag and repairs).
+pub(crate) const SOLDIER_MATERIAL: u32 = 24;
 /// How far wire-guided missiles look for what the shooter aims at.
 const GUIDANCE_RANGE: f32 = 2000.0;
 /// Guided missiles only follow an aim point at most this far off their nose (radians; BF2's
@@ -288,28 +290,35 @@ fn record_poses(
     }
 }
 
-/// Ticks to rewind for an input made looking at `view_tick` (0: the present).
-/// `BF2_NO_LAG_COMPENSATION` turns rewinding off, for comparison.
-fn rewind_for(view_tick: u32, now: u32) -> u32 {
+/// Ticks to rewind for an input made looking at `view_tick` (0: the present), at most
+/// `limit` ([`rewind_limit`]). `BF2_NO_LAG_COMPENSATION` turns rewinding off, for comparison.
+fn rewind_for(view_tick: u32, now: u32, limit: u32) -> u32 {
     static OFF: std::sync::LazyLock<bool> =
         std::sync::LazyLock::new(|| std::env::var_os("BF2_NO_LAG_COMPENSATION").is_some());
     match view_tick {
         0 => 0,
         _ if *OFF => 0,
-        view => now.checked_sub(view).unwrap_or(0).min(MAX_REWIND),
+        view => now.checked_sub(view).unwrap_or(0).min(limit).min(MAX_REWIND),
     }
 }
 
-/// Where to send messages meant for a player's human, if it has one.
-fn player_client(
-    player: Entity,
-    clients: &Query<&PlayerClient>,
-    host: Option<&HostPlayer>,
-) -> Option<ClientId> {
-    if host.is_some_and(|h| h.0 == player) {
-        return Some(ClientId::Server);
+/// How far back a client shows other soldiers: its interpolation delay (seconds).
+const VIEW_DELAY: f64 = 0.1;
+/// Ticks of rewind allowed beyond the client's round trip and view delay, for input queued on
+/// the server and jitter.
+const REWIND_SLACK: u32 = 6;
+
+/// The most a client with this round-trip time (seconds, as measured by the connection) may
+/// be rewound: what it can have seen, not whatever `view_tick` it claims. Without a
+/// measurement (the host, bots), [`MAX_REWIND`].
+fn rewind_limit(rtt: Option<f64>) -> u32 {
+    match rtt {
+        Some(rtt) if rtt.is_finite() => {
+            let ticks = ((rtt.max(0.0) + VIEW_DELAY) * game_shared::TICK_HZ).ceil() as u32;
+            (ticks + REWIND_SLACK).min(MAX_REWIND)
+        }
+        _ => MAX_REWIND,
     }
-    clients.get(player).ok().map(|c| ClientId::Client(c.0))
 }
 
 /// A new round starts with no charges or smoke lying around, and those of players who
@@ -348,6 +357,7 @@ fn fire_weapons(
     spatial: SpatialQuery,
     host: Option<Res<HostPlayer>>,
     clients: Query<&PlayerClient>,
+    client_stats: Query<&ConnectedClientStats>,
     players: Query<&Player>,
     mut soldiers: Query<(
         Entity,
@@ -367,6 +377,8 @@ fn fire_weapons(
 ) {
     let dt = time.delta_secs();
     let now = current_tick(&tick);
+    // A client's measured round trip, which caps how far its shots are rewound.
+    let rtt = |player: Entity| clients.get(player).ok().and_then(|c| client_stats.get(c.0).ok()).map(|s| s.rtt);
     for (soldier, controlled_by, motion, applied, loadout, mut inventory, mut state, hitbox) in
         &mut soldiers
     {
@@ -390,7 +402,7 @@ fn fire_weapons(
         };
 
         let local = Quat::from_rotation_y(-motion.yaw) * motion.velocity;
-        state.tick(&weapon.deviation, dt, -local.z, local.x, !motion.grounded);
+        state.tick(&weapon.deviation, dt, -local.z, local.x, motion.grounded);
 
         // Not on ladders, nor just after a jump or getting up.
         let trigger = Trigger {
@@ -511,7 +523,7 @@ fn fire_weapons(
                             fuse: desc.time_to_live - cooked,
                             guided: weapon.fire.guidance == Guidance::Wire,
                             target: None,
-                            rewind: rewind_for(input.view_tick, now),
+                            rewind: rewind_for(input.view_tick, now, rewind_limit(rtt(player))),
                         },
                         ProjectileMotion::new(origin, launch_velocity(&weapon, direction, soft, motion.velocity), motion.yaw),
                     ));
@@ -542,7 +554,7 @@ fn fire_weapons(
                 debug!(
                     "{name} ({player:?}) fires {} ({} ticks back, saw tick {} at {now})",
                     weapon.name,
-                    rewind_for(input.view_tick, now),
+                    rewind_for(input.view_tick, now, rewind_limit(rtt(player))),
                     input.view_tick
                 );
                 if desc.is_object() {
@@ -990,7 +1002,7 @@ fn explode(
     for explosion in explosions.read() {
         let factor = materials
             .as_ref()
-            .map_or(1.0, |m| m.0.damage_mod(explosion.material, SOLDIER_ARMOR_MATERIAL));
+            .map_or(1.0, |m| m.0.damage_mod(explosion.material, SOLDIER_MATERIAL));
         for (soldier, motion, seated) in &soldiers {
             let exposed = seated.is_none_or(|s| {
                 vehicles
@@ -1266,10 +1278,25 @@ mod tests {
 
     #[test]
     fn rewinding_is_capped_and_off_for_the_present() {
-        assert_eq!(rewind_for(0, 500), 0);
-        assert_eq!(rewind_for(494, 500), 6);
-        assert_eq!(rewind_for(400, 500), MAX_REWIND);
-        assert_eq!(rewind_for(510, 500), 0, "a view from the future is the present");
+        assert_eq!(rewind_for(0, 500, MAX_REWIND), 0);
+        assert_eq!(rewind_for(494, 500, MAX_REWIND), 6);
+        assert_eq!(rewind_for(400, 500, MAX_REWIND), MAX_REWIND);
+        assert_eq!(rewind_for(510, 500, MAX_REWIND), 0, "a view from the future is the present");
+        assert_eq!(rewind_for(480, 500, 12), 12);
+    }
+
+    #[test]
+    fn rewinding_is_capped_by_the_round_trip() {
+        // On a LAN, what the view delay and some slack allow, not the 250 ms maximum.
+        assert_eq!(rewind_limit(Some(0.0)), 12);
+        assert!(rewind_limit(Some(0.002)) < MAX_REWIND);
+        // An honest client's view: its round trip plus the view delay back.
+        let honest = ((0.03 + VIEW_DELAY) * game_shared::TICK_HZ).round() as u32;
+        assert!(rewind_limit(Some(0.03)) >= honest);
+        // Slow connections get the maximum, and so do the host and bots (no measurement).
+        assert_eq!(rewind_limit(Some(0.2)), MAX_REWIND);
+        assert_eq!(rewind_limit(None), MAX_REWIND);
+        assert_eq!(rewind_limit(Some(f64::NAN)), MAX_REWIND);
     }
 
     #[test]

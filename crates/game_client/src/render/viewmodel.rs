@@ -150,6 +150,9 @@ fn add_view_model_camera(add: On<Add, PlayerCamera>, mut commands: Commands) {
             ..default()
         }),
         RenderLayers::layer(VIEW_MODEL_LAYER),
+        // No lamp lights this layer (lights draw on theirs): one light cluster instead of
+        // Bevy's thousands, rebuilt every frame for nothing.
+        bevy::light::cluster::ClusterConfig::Single,
         ChildOf(add.entity),
     ));
 }

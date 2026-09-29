@@ -11,7 +11,7 @@
 //! /logout            POST
 //! ```
 
-use std::fmt::Write as _;
+use std::{collections::HashMap, fmt::Write as _};
 
 use game_auth::{
     api::{Credentials, Profile, RankInfo, Tally},
@@ -22,13 +22,18 @@ use crate::{
     api::{WEB, authenticate, create_account},
     auth::new_secret,
     db::Account,
-    http::{Master, Method, Req, Resp, url_encode},
+    http::{Master, Method, Req, Resp, lock, url_encode},
 };
 
 /// The web session cookie.
 const COOKIE: &str = "bf2r_session";
 /// Web sessions last a week.
 const WEB_SESSION_SECS: u64 = 7 * 86_400;
+/// The CSRF double-submit cookie: set alongside a form, and compared against a hidden field
+/// of the same value on the POST (S38). No JavaScript is needed since the server sets and
+/// checks both sides itself.
+const CSRF_COOKIE: &str = "bf2r_csrf";
+const CSRF_COOKIE_SECS: u64 = 3600;
 
 type Answer = Result<Resp, Resp>;
 
@@ -116,7 +121,7 @@ fn page(master: &Master, title: &str, active: &str, user: Option<&Account>, body
 /// The logged-in account of a web session cookie.
 fn web_user(master: &Master, req: &Req) -> Option<Account> {
     let secret = req.cookie(COOKIE)?;
-    let db = master.db.lock().unwrap();
+    let db = lock(&master.db);
     let id = db.token_account(&secret, WEB, unix_now()).ok()??;
     db.account(id).ok()?.filter(|a| !a.disabled)
 }
@@ -126,6 +131,30 @@ fn session_cookie(master: &Master, secret: &str, max_age: u64) -> String {
         "{COOKIE}={secret}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
         if master.config.secure_cookies() { "; Secure" } else { "" }
     )
+}
+
+fn csrf_cookie(master: &Master, value: &str) -> String {
+    format!(
+        "{CSRF_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={CSRF_COOKIE_SECS}{}",
+        if master.config.secure_cookies() { "; Secure" } else { "" }
+    )
+}
+
+/// Whether a POST's `Origin` matches its `Host` (defense in depth alongside the CSRF token
+/// and `SameSite=Strict` cookies). Browsers always send `Origin` on a cross-origin POST, and
+/// on same-origin ones too for a plain form submission; when it's missing we don't block, so
+/// this never becomes the only thing standing between a form and a forged request.
+fn origin_ok(req: &Req) -> bool {
+    let (Some(origin), Some(host)) = (req.header("origin"), req.header("host")) else {
+        return true;
+    };
+    origin.split_once("://").map_or(origin, |(_, rest)| rest) == host
+}
+
+/// Whether the CSRF cookie and the form's hidden `csrf` field match (and aren't empty).
+fn csrf_ok(req: &Req, form: &HashMap<String, String>) -> bool {
+    let cookie = req.cookie(CSRF_COOKIE).unwrap_or_default();
+    !cookie.is_empty() && form.get("csrf").is_some_and(|token| *token == cookie)
 }
 
 /// `1h 23m`.
@@ -159,8 +188,10 @@ pub fn handle(master: &Master, req: &Req) -> Answer {
         (Method::Post, "/login") => Ok(login(master, req)),
         (Method::Post, "/register") => Ok(register(master, req)),
         (Method::Post, "/logout") => {
-            if let Some(secret) = req.cookie(COOKIE) {
-                let _ = master.db.lock().unwrap().remove_token(&secret);
+            if origin_ok(req) {
+                if let Some(secret) = req.cookie(COOKIE) {
+                    let _ = lock(&master.db).remove_token(&secret);
+                }
             }
             Ok(Resp::redirect("/").with_header("Set-Cookie", session_cookie(master, "", 0)))
         }
@@ -181,10 +212,10 @@ fn not_found(master: &Master, user: Option<&Account>) -> Resp {
 
 fn overview(master: &Master, user: Option<&Account>) -> Resp {
     let (accounts, board) = {
-        let db = master.db.lock().unwrap();
+        let db = lock(&master.db);
         (db.account_count().unwrap_or(0), db.leaderboard("xp", 10, &master.config.progression).unwrap_or_default())
     };
-    let servers = master.list.lock().unwrap().entries();
+    let servers = lock(&master.list).entries();
     let players: u32 = servers.iter().map(|s| s.players).sum();
     let mut body = format!(
         r#"<h1>{}</h1><p class="sub">Optional accounts, stats and ranks for BF2 Rust Engine servers. Playing never needs an account: LAN and unranked servers work without one.</p>
@@ -256,7 +287,7 @@ fn server_table(servers: &[game_auth::api::ServerEntry]) -> String {
 fn leaderboard(master: &Master, req: &Req, user: Option<&Account>) -> Resp {
     let sort = req.query.get("sort").map_or("xp", String::as_str);
     let sort = if ["xp", "score", "kills", "kd", "time"].contains(&sort) { sort } else { "xp" };
-    let board = master.db.lock().unwrap().leaderboard(sort, 100, &master.config.progression).unwrap_or_default();
+    let board = lock(&master.db).leaderboard(sort, 100, &master.config.progression).unwrap_or_default();
     let mut chips = String::from(r#"<div class="chips">"#);
     for (key, label) in [("xp", "Rank"), ("score", "Score"), ("kills", "Kills"), ("kd", "K/D"), ("time", "Time played")] {
         let _ = write!(chips, r#"<a href="/leaderboard?sort={key}"{}>{label}</a>"#, if key == sort { r#" class="on""# } else { "" });
@@ -266,11 +297,17 @@ fn leaderboard(master: &Master, req: &Req, user: Option<&Account>) -> Resp {
     page(master, "Leaderboard", "/leaderboard", user, &body)
 }
 
+/// Shown on the page (S7): the list can grow large (heartbeats are unauthenticated UDP), and
+/// this is a page for people, not the paginated `/api/v1/servers`.
+const MAX_SERVERS_SHOWN: usize = 200;
+
 fn servers(master: &Master, user: Option<&Account>) -> Resp {
-    let servers = master.list.lock().unwrap().entries();
+    let servers = lock(&master.list).entries();
+    let shown = servers.len().min(MAX_SERVERS_SHOWN);
+    let note = if servers.len() > shown { format!(" Showing the first {shown} of {}.", servers.len()) } else { String::new() };
     let body = format!(
-        r#"<h1>Servers</h1><p class="sub">Servers that announce themselves to this master. Ranked servers need an account and count your stats; join them from the game's Join page.</p>{}"#,
-        server_table(&servers)
+        r#"<h1>Servers</h1><p class="sub">Servers that announce themselves to this master. Ranked servers need an account and count your stats; join them from the game's Join page.{note}</p>{}"#,
+        server_table(&servers[..shown])
     );
     page(master, "Servers", "/servers", user, &body)
 }
@@ -350,7 +387,7 @@ fn profile_body(profile: &Profile) -> String {
 
 fn profile_page(master: &Master, name: &str, user: Option<&Account>) -> Resp {
     let profile = {
-        let db = master.db.lock().unwrap();
+        let db = lock(&master.db);
         db.account_by_name(name)
             .ok()
             .flatten()
@@ -365,14 +402,15 @@ fn profile_page(master: &Master, name: &str, user: Option<&Account>) -> Resp {
 
 fn login_form(master: &Master, user: Option<&Account>, notice: Option<&str>, name: &str) -> Resp {
     let notice = notice.map(|n| format!(r#"<div class="notice">{}</div>"#, escape(n))).unwrap_or_default();
+    let csrf = new_secret();
     let body = format!(
         r#"<h1>Log in</h1><p class="sub">The same account works in the game (Account page).</p>{notice}
-<form method="post" action="/login"><label for="name">Name</label><input id="name" name="name" value="{}" maxlength="24" autocomplete="username" required>
+<form method="post" action="/login"><input type="hidden" name="csrf" value="{csrf}"><label for="name">Name</label><input id="name" name="name" value="{}" maxlength="24" autocomplete="username" required>
 <label for="password">Password</label><input id="password" name="password" type="password" maxlength="128" autocomplete="current-password" required>
 <div style="margin-top:8px"><button type="submit">Log in</button> <a class="dim" style="margin-left:12px" href="/register">No account yet?</a></div></form>"#,
         escape(name)
     );
-    let mut resp = page(master, "Log in", "", user, &body);
+    let mut resp = page(master, "Log in", "", user, &body).with_header("Set-Cookie", csrf_cookie(master, &csrf));
     if notice.is_empty() {
         return resp;
     }
@@ -382,15 +420,16 @@ fn login_form(master: &Master, user: Option<&Account>, notice: Option<&str>, nam
 
 fn register_form(master: &Master, user: Option<&Account>, notice: Option<&str>, name: &str) -> Resp {
     let notice = notice.map(|n| format!(r#"<div class="notice">{}</div>"#, escape(n))).unwrap_or_default();
+    let csrf = new_secret();
     let body = format!(
         r#"<h1>Register</h1><p class="sub">An account keeps your stats and rank from ranked servers. You never need one to play.</p>{notice}
-<form method="post" action="/register"><label for="name">Name (3-24 letters, digits, _ - .)</label><input id="name" name="name" value="{}" maxlength="24" autocomplete="username" required>
+<form method="post" action="/register"><input type="hidden" name="csrf" value="{csrf}"><label for="name">Name (3-24 letters, digits, _ - .)</label><input id="name" name="name" value="{}" maxlength="24" autocomplete="username" required>
 <label for="password">Password (at least 8 characters)</label><input id="password" name="password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required>
 <label for="email">Email (optional)</label><input id="email" name="email" type="email" maxlength="254" autocomplete="email">
 <div style="margin-top:8px"><button type="submit">Create account</button></div></form>"#,
         escape(name)
     );
-    let mut resp = page(master, "Register", "", user, &body);
+    let mut resp = page(master, "Register", "", user, &body).with_header("Set-Cookie", csrf_cookie(master, &csrf));
     if !notice.is_empty() {
         resp.status = 400;
     }
@@ -401,7 +440,7 @@ fn register_form(master: &Master, user: Option<&Account>, notice: Option<&str>, 
 fn start_session(master: &Master, account: &Account) -> Resp {
     let secret = new_secret();
     let now = unix_now();
-    if let Err(err) = master.db.lock().unwrap().add_token(&secret, account.id, WEB, now, now + WEB_SESSION_SECS) {
+    if let Err(err) = lock(&master.db).add_token(&secret, account.id, WEB, now, now + WEB_SESSION_SECS) {
         eprintln!("error: {err}");
         return Resp::error(500, "internal error");
     }
@@ -415,6 +454,9 @@ fn message_of(resp: &Resp) -> String {
 fn login(master: &Master, req: &Req) -> Resp {
     let form = req.form();
     let name = form.get("name").map_or("", |n| n.trim());
+    if !origin_ok(req) || !csrf_ok(req, &form) {
+        return login_form(master, None, Some("Your session expired; please try again."), name);
+    }
     let password = form.get("password").map_or("", String::as_str);
     match authenticate(master, req, name, password) {
         Ok(account) => start_session(master, &account),
@@ -429,6 +471,9 @@ fn register(master: &Master, req: &Req) -> Resp {
         password: form.get("password").cloned().unwrap_or_default(),
         email: form.get("email").cloned(),
     };
+    if !origin_ok(req) || !csrf_ok(req, &form) {
+        return register_form(master, None, Some("Your session expired; please try again."), credentials.name.trim());
+    }
     match create_account(master, req, &credentials) {
         Ok(account) => start_session(master, &account),
         Err(resp) => register_form(master, None, Some(&message_of(&resp)), credentials.name.trim()),

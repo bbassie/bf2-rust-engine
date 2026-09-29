@@ -284,7 +284,9 @@ pub struct HeldVoice {
     pub channel: Channel,
 }
 
-/// Starts a held voice playing `desc` (looping) from `listener`'s point of view.
+/// Starts a held voice playing `desc` (looping) from `listener`'s point of view. `None` if
+/// `desc` has no files (a sound description without one the importer skipped, or `desc`
+/// never checked against level/mod data that doesn't guarantee it).
 pub fn spawn_held(
     commands: &mut Commands,
     cache: &mut SoundCache,
@@ -292,8 +294,8 @@ pub fn spawn_held(
     listener: Option<(Entity, &Transform)>,
     desc: &SoundDesc,
     held: HeldVoice,
-) -> Entity {
-    let file = &desc.files[fastrand::usize(..desc.files.len().max(1))];
+) -> Option<Entity> {
+    let file = desc.files.get(fastrand::usize(..desc.files.len().max(1)))?;
     let at = held.at.map(|at| (at, desc.falloff.unwrap_or(DEFAULT_FALLOFF)));
     let positional = at.is_some() && listener.is_some();
     let settings = PlaybackSettings {
@@ -319,7 +321,7 @@ pub fn spawn_held(
         entity.insert((ChildOf(listener), Transform::from_translation(pan_offset(transform, at))));
     }
     debug!(target: "audio", "loop {file} starts");
-    entity.id()
+    Some(entity.id())
 }
 
 #[derive(Resource, Default)]

@@ -260,11 +260,19 @@ fn update_minimap(
     let heading_angle = forward.x.atan2(-forward.z);
     let map_angle = if settings.rotating { heading_angle } else { 0.0 };
     let (transform, visibility) = &mut *heading;
-    transform.rotation = Rot2::radians(heading_angle - map_angle);
+    let rotation = Rot2::radians(heading_angle - map_angle);
+    if transform.rotation != rotation {
+        transform.rotation = rotation;
+    }
     // In a vehicle its icon shows where we are (the dot would cover its turret).
     visibility.set_if_neq(if seated.is_empty() { Visibility::Inherited } else { Visibility::Hidden });
-    if let Some(mut material) = map.and_then(|m| materials.get_mut(&m.0)) {
-        material.params.view = Vec4::new(center.x, center.y, map_angle, RANGE / map_meters);
+    // Only when it moved: a changed material is prepared (and uploaded) again.
+    let view = Vec4::new(center.x, center.y, map_angle, RANGE / map_meters);
+    if let Some(map) = *map
+        && materials.get(&map.0).is_some_and(|m| m.params.view != view)
+        && let Some(mut material) = materials.get_mut(&map.0)
+    {
+        material.params.view = view;
     }
 
     let (local, local_squad) = players

@@ -205,11 +205,17 @@ pub struct HitConfirmed {
 }
 
 /// Server -> everyone: someone was killed.
+///
+/// The killer is carried by name, not entity: replicon drops a mapped message outright when
+/// one of its entities can't be mapped for a given client (not yet replicated to it, or
+/// already gone), which silently ate kill feed lines whenever that happened to be true of the
+/// killer. A name always gets there; nothing here needs to look the killer up as an entity
+/// (see `game_server::abilities::Deaths::kill`, which still has the real entity for scoring
+/// before this message is built).
 #[derive(Message, Serialize, Deserialize, Clone, Debug, MapEntities)]
 pub struct KillFeed {
-    /// The killer's player, if any.
-    #[entities]
-    pub killer: Option<Entity>,
+    /// The killer's name, if any (falls, scripts and wrecks have none).
+    pub killer_name: Option<String>,
     #[entities]
     pub victim: Entity,
     pub weapon: String,

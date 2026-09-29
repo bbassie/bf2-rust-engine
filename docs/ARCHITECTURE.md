@@ -59,6 +59,11 @@ when `ClientState::Disconnected`).
   `game_shared::protocol::ProtocolPlugin`, so client and server always agree; the join
   handshake checks the protocol hash.
 - Fixed 60 Hz simulation tick; replication runs on the same tick.
+- Nothing received is trusted: values are checked where they arrive (`game_shared::validate`:
+  finite input angles and targets, clean unique player names, and names from the server that
+  become file names only as plain folder or file names), and command-like messages (chat,
+  admin logins, commander requests, content reports, browser queries, the remote console)
+  go through the shared rate limits and login lockouts of `game_server::limits`.
 - Server content: a server shares its mods (optionally the imported assets) over HTTP on TCP
   at the game port. Before connecting, clients download what they lack into a
   content-addressed cache and mount it over their own data for the session
@@ -454,10 +459,32 @@ by the view distance setting (`render::statics`, `render::unit_lods`).
   small parts with a model of their own (pintle guns, tail rotors) fade out on their own
   (40 m for a machine gun).
 - Soldiers switch the body at 11.2 and 21.2 m (3148, 1540, 360 triangles), carried weapons fade
-  out at 40 m, soldiers at 137 m. Soldiers nobody sees (culled or out of view) aren't posed
-  until they are seen again.
+  out at 40 m, soldiers at 137 m. Soldiers nobody sees (culled or out of view, shadows
+  included) aren't posed until they are seen again, and only move every fourth frame; unseen
+  vehicles keep their part poses and unseen flags stop waving the same way.
 - `BF2_STATIC_LODS=off` / `BF2_UNIT_LODS=off` draw full detail at any distance (for
   comparisons), `BF2_UNIT_LOD_STATS` logs the vehicle and soldier triangles drawn.
+
+### Frame time
+
+What a frame with 63 bots costs, and the rules that keep it low (see `render::perf_stats` and
+`scenarios/perf/`):
+
+- Nothing is written unless it changed (`set_if_neq`): every changed `Transform` moves the
+  whole hierarchy under it (a parked vehicle is about seventy transforms to propagate and
+  meshes to upload, a soldier about a hundred), and every changed BF2 material rewrites its
+  bindless slab of up to 2048 materials. Sleeping vehicles get no transform easing.
+- Each soldier plays its own copy of the team's animation graph with only the clips it is
+  playing linked to the root (`soldiers::OwnGraph`): Bevy evaluates every linked node for
+  every bone, and the team graph holds hundreds of clips.
+- The main world's schedules run single-threaded (`main::single_threaded_schedules`, like the
+  dedicated server): its systems are tiny, and handing each to a worker cost more than it saved
+  while the render thread keeps the workers busy. `BF2_SCHEDULES=parallel` switches back.
+- Measuring: `client --scenario scenarios/perf/perf_karkand.ron --bots 63` (median and p95 per
+  view in `report.txt`); `BF2_PERF_STATS=1` logs the main world's and the render thread's time a
+  frame, mesh, bone and body counts and material changes (`=full` also what moved);
+  `--diagnostics` adds the GPU time of each pass to the report; a build with
+  `--features game_server/profile` and `BF2_PROFILE_FRAMES=1` adds every system's time.
 
 ### Lighting
 

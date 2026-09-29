@@ -336,7 +336,18 @@ fn build_parts(
     let mut parts: Vec<Entity> = Vec::with_capacity(desc.parts.len());
     let (mut outside, mut interior) = (Vec::new(), Vec::new());
     for (i, part) in desc.parts.iter().enumerate() {
-        let parent = part.parent.map_or(vehicle, |p| parts[p as usize]);
+        // A part's parent must come before it (parts are built in order so each one's parent
+        // entity already exists); a vehicle description that doesn't hold that (a forward or
+        // self reference, from a bad import or a hand-edited mod) attaches to the vehicle
+        // itself instead of indexing past what's been spawned so far.
+        let parent = match part.parent {
+            Some(p) if (p as usize) < parts.len() => parts[p as usize],
+            Some(p) => {
+                warn!("{}: part {i}'s parent {p} isn't earlier in the part list; attaching to the vehicle", desc.name);
+                vehicle
+            }
+            None => vehicle,
+        };
         let entity = commands.spawn((model.rest[i], Visibility::default(), ChildOf(parent))).id();
         parts.push(entity);
         if desc.rigged {
@@ -637,42 +648,60 @@ fn pose_parts(
     time: Res<Time>,
     mut vehicles: Query<(&VehicleView, &VehicleData, &mut VehicleParts, Option<&TrackTravel>)>,
     mut transforms: Query<&mut Transform>,
+    children: Query<&Children>,
+    seen: Query<&ViewVisibility>,
+    mut poses: Local<Vec<Transform>>,
 ) {
     let dt = time.delta_secs();
     for (view, data, mut parts, travel) in &mut vehicles {
         let model = &data.0;
-        let VehicleParts { parts, spin, .. } = &mut *parts;
-        for (i, &entity) in parts.iter().enumerate() {
+        let VehicleParts { parts, spin, models, .. } = &mut *parts;
+        // Wheels keep turning while nobody looks, so they don't jump when seen again.
+        for (wi, wheel) in model.desc.wheels.iter().enumerate() {
+            if wheel.turns {
+                spin[wi] = (spin[wi] - view.speed / wheel.radius.max(0.1) * dt) % std::f32::consts::TAU;
+            }
+        }
+        // Posing moves every part and the meshes on them (transforms to propagate, meshes to
+        // upload): skip vehicles none of whose meshes were seen last frame (in any view,
+        // shadows included), like `soldiers::sleep_unseen`.
+        let is_seen = |entity: Entity| seen.get(entity).is_ok_and(|v| v.get());
+        // Meshes hang off the model entities (skinned rigs, static meshes on parts) or, when
+        // a rigged model's primitive isn't skinned, straight off its part.
+        let visible = models
+            .iter()
+            .chain(parts.iter())
+            .any(|&m| is_seen(m) || children.get(m).is_ok_and(|c| c.iter().any(is_seen)));
+        if !visible {
+            continue;
+        }
+        // Each part's pose in full, written once: writing the rest pose and then turning the
+        // wheels on it would change them (and everything on them) every frame.
+        poses.clear();
+        poses.extend((0..parts.len()).map(|i| {
             let mut local = model.rest[i];
             if let Some(angles) = model.joint_index[i].and_then(|j| view.joints.get(j)) {
                 local.rotation *= joint_rotation(*angles);
             }
-            if let Ok(mut transform) = transforms.get_mut(entity) {
-                transform.set_if_neq(local);
-            }
-        }
+            local
+        }));
         for (wi, wheel) in model.desc.wheels.iter().enumerate() {
-            let angle = &mut spin[wi];
-            if wheel.turns {
-                *angle = (*angle - view.speed / wheel.radius.max(0.1) * dt) % std::f32::consts::TAU;
-            }
             let offset = view.wheels.get(wi).copied().unwrap_or(0.0);
-            let Some(&entity) = parts.get(wheel.part as usize) else {
-                continue;
-            };
-            if let Ok(mut transform) = transforms.get_mut(entity) {
-                transform.translation.y -= offset;
-                transform.rotation *= Quat::from_rotation_x(*angle);
+            if let Some(pose) = poses.get_mut(wheel.part as usize) {
+                pose.translation.y -= offset;
+                pose.rotation *= Quat::from_rotation_x(spin[wi]);
             }
         }
         // Drive sprockets turn with their track.
         for (wheel, distance) in model.desc.track_wheels.iter().zip(travel.map_or(&[][..], |t| t.wheels.as_slice())) {
-            let Some(&entity) = parts.get(wheel.part as usize) else {
-                continue;
-            };
-            if let Ok(mut transform) = transforms.get_mut(entity) {
+            if let Some(pose) = poses.get_mut(wheel.part as usize) {
                 let angle = (-distance / wheel.radius.max(0.05)) % std::f32::consts::TAU;
-                transform.rotation *= Quat::from_rotation_x(angle);
+                pose.rotation *= Quat::from_rotation_x(angle);
+            }
+        }
+        for (&entity, pose) in parts.iter().zip(poses.iter()) {
+            if let Ok(mut transform) = transforms.get_mut(entity) {
+                transform.set_if_neq(*pose);
             }
         }
     }

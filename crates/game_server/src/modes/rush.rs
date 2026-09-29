@@ -295,8 +295,10 @@ fn advance(
     if *round != RoundState::Playing {
         return;
     }
+    // A stage with no charges of its own (a hand-written layout that skips a pair) counts as
+    // already taken instead of stalling the round forever.
     let mut current = charges.iter().filter(|(c, ..)| c.stage == mode.stage).peekable();
-    if current.peek().is_none() || current.any(|(_, state, _)| *state != ChargeState::Destroyed) {
+    if current.peek().is_some() && current.any(|(_, state, _)| *state != ChargeState::Destroyed) {
         return;
     }
     if !staged::take_stage(&mut mode, &mut tickets, &mut round, &mut clock, &mut events) {

@@ -26,6 +26,7 @@ use bevy::{ecs::system::SystemParam, platform::collections::HashMap, prelude::*}
 use bevy_replicon::prelude::*;
 use game_data::{ReplenishDesc, ReplenishKind, WeaponDesc};
 use game_shared::{
+    commander::AssetVehicle,
     conquest::RoundState,
     level::Terrain,
     physics::GameLayer,
@@ -40,8 +41,9 @@ use game_shared::{
 
 use crate::{
     AppliedInput, ClientPlayer, Controls, HostPlayer, PlayerClient, RespawnTimer, ServerSettings,
-    combat::{CombatSystems, Died},
+    combat::{CombatSystems, Died, SOLDIER_MATERIAL},
     destruction::{Materials, ObjectHealth},
+    player_client,
     sender_player,
 };
 
@@ -52,6 +54,7 @@ impl Plugin for AbilitiesPlugin {
         app.init_resource::<Assists>()
             .init_resource::<Ledger>()
             .init_resource::<AmmoCredit>()
+            .add_message::<KillScored>()
             .add_systems(
                 PreUpdate,
                 receive_give_up
@@ -81,8 +84,6 @@ impl Plugin for AbilitiesPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AbilitySystems;
 
-/// Damage table column of a soldier's body (`armor.defaultMaterial`).
-const SOLDIER_MATERIAL: u32 = 24;
 /// Damage table row of the wrench (`Engineer_repair`); without a table only it repairs.
 const REPAIR_MATERIAL: u32 = 84;
 /// Hit points or percent of a loadout per replenish score (BF2 `HEAL_POINT_LIMIT`,
@@ -191,12 +192,12 @@ impl Ledger {
     }
 }
 
-/// Where to send messages meant for a player's human, if it has one.
-fn player_client(player: Entity, clients: &Query<&PlayerClient>, host: Option<&HostPlayer>) -> Option<ClientId> {
-    if host.is_some_and(|h| h.0 == player) {
-        return Some(ClientId::Server);
-    }
-    clients.get(player).ok().map(|c| ClientId::Client(c.0))
+/// A kill for stats to book against the killer (`stats::track_kills`): server-only, not sent
+/// to clients, so it keeps the real entity where [`KillFeed`] only carries a name.
+#[derive(Message, Clone, Debug)]
+pub struct KillScored {
+    pub killer: Entity,
+    pub weapon: String,
 }
 
 /// Kills, going down and dying: the death flow `combat` and the systems here share.
@@ -206,6 +207,7 @@ pub(crate) struct Deaths<'w, 's> {
     settings: Res<'w, ServerSettings>,
     players: Query<'w, 's, (&'static mut Score, &'static Player, &'static Team)>,
     kills: MessageWriter<'w, ToClients<KillFeed>>,
+    scored: MessageWriter<'w, KillScored>,
     died: MessageWriter<'w, Died>,
     assists: ResMut<'w, Assists>,
     notices: MessageWriter<'w, ToClients<ReplenishNotice>>,
@@ -282,10 +284,16 @@ impl Deaths<'_, '_> {
                 });
             }
         }
+        if let Some(killer) = killer.filter(|&k| k != victim) {
+            self.scored.write(KillScored {
+                killer,
+                weapon: weapon.to_string(),
+            });
+        }
         self.kills.write(ToClients {
             targets: SendTargets::All,
             message: KillFeed {
-                killer,
+                killer_name: killer.map(|k| self.name(k)),
                 victim,
                 weapon: weapon.to_string(),
                 headshot,
@@ -485,9 +493,14 @@ fn revive_with_paddles(
     teams: Query<&Team>,
     medics: Query<(Entity, &ControlledBy, &SoldierMotion, &Loadout, &Inventory), (Without<Downed>, Without<Seated>)>,
     mut downed: Query<(Entity, &ControlledBy, &mut SoldierMotion, &mut Health), With<Downed>>,
+    soldiers: Query<(), With<Soldier>>,
     mut shocked: Local<HashMap<Entity, u16>>,
     mut deaths: Deaths,
 ) {
+    // A medic who died or disconnected with the paddles out never runs the "no paddles"
+    // branch below that would otherwise clear his entry: without this, `shocked` would keep
+    // growing by one stale entry per such medic for the rest of the match.
+    shocked.retain(|&medic, _| soldiers.contains(medic));
     for (medic, controlled_by, motion, loadout, inventory) in &medics {
         let active = inventory.active as usize;
         let Some(paddles) = loadout
@@ -698,7 +711,7 @@ fn pick_up_bags(
 struct Repairables<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     colliders: Query<'w, 's, &'static ColliderOf>,
-    vehicles: Query<'w, 's, (&'static VehicleData, &'static mut VehicleHealth)>,
+    vehicles: Query<'w, 's, (&'static VehicleData, &'static mut VehicleHealth, Option<&'static AssetVehicle>)>,
     crews: Query<'w, 's, (&'static Seated, &'static ControlledBy)>,
     parts: Query<'w, 's, &'static Destructible, Without<Inactive>>,
     destroyed: Query<'w, 's, &'static DestroyedStatics>,
@@ -818,7 +831,7 @@ fn replenish_in_hand(
                 }
             }
             for vehicle in vehicles_seen {
-                let Ok((data, mut health)) = vehicles.get_mut(vehicle) else {
+                let Ok((data, mut health, asset)) = vehicles.get_mut(vehicle) else {
                     continue;
                 };
                 let desc_vehicle = &data.0.desc;
@@ -830,12 +843,19 @@ fn replenish_in_hand(
                 health.current = (health.current + rate * health.max * factor).min(health.max);
                 worked = true;
                 // The crew decides whose vehicle it is: repairing the enemy's scores nothing.
+                // Empty crew, unlike no crew filter at all, is vacuously "everyone's": a
+                // commander's asset (an unmanned artillery piece, never crewed) still knows its
+                // own team, so check that instead of defaulting to friendly.
                 let crew: Vec<Entity> = crews
                     .iter()
                     .filter(|(seated, _)| seated.vehicle == vehicle)
                     .map(|(_, c)| c.0)
                     .collect();
-                if crew.iter().all(|c| teams.get(*c).ok().copied() == team) {
+                let friendly = match crew.is_empty() {
+                    true => asset.is_none_or(|a| Some(a.team) == team),
+                    false => crew.iter().all(|c| teams.get(*c).ok().copied() == team),
+                };
+                if friendly {
                     let score = ledger.give(now, player, crew.first().copied(), NoticeKind::Repair, health.current - before);
                     deaths.add_score(player, score);
                 }

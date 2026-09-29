@@ -534,8 +534,8 @@ fn update_panel(
     }
 
     let fraction = health.map_or(1.0, |h| (h.current / h.max.max(1.0)).clamp(0.0, 1.0));
-    health_node.width = percent(fraction * 100.0);
-    health_color.0 = Color::srgb(0.95 - 0.5 * fraction, 0.35 + 0.5 * fraction, 0.35);
+    crate::hud::set_width(&mut health_node, percent(fraction * 100.0));
+    health_color.set_if_neq(BackgroundColor(Color::srgb(0.95 - 0.5 * fraction, 0.35 + 0.5 * fraction, 0.35)));
 
     let mut speed = format!("{:.0} km/h", view.velocity.length() * 3.6);
     if desc.engine.gearbox.is_some() && seat == 0 {
@@ -643,7 +643,10 @@ fn update_instruments(
     let roll = (-right.y).clamp(-1.0, 1.0).asin();
     let roll = if (rotation * Vec3::Y).y < 0.0 { std::f32::consts::PI - roll } else { roll };
     roll_frame.rotation = Rot2::radians(-roll);
-    ladder.top = px(INSTRUMENT_HALF.y + pitch.to_degrees() * LADDER_SCALE);
+    let top = px(INSTRUMENT_HALF.y + pitch.to_degrees() * LADDER_SCALE);
+    if ladder.top != top {
+        ladder.top = top;
+    }
     for (rung, mut visibility) in &mut rungs {
         let near = (rung.0 - pitch.to_degrees()).abs() <= LADDER_SHOWN;
         visibility.set_if_neq(if near { Visibility::Inherited } else { Visibility::Hidden });
@@ -672,8 +675,14 @@ fn update_instruments(
     if altitude_text.0 != wanted {
         altitude_text.0 = wanted;
     }
-    throttle.height = percent(view.engine.clamp(0.0, 1.0) * 100.0);
-    boost.height = percent(if desc.afterburner.is_some() { view.boost.clamp(0.0, 1.0) * 100.0 } else { 0.0 });
+    let throttle_height = percent(view.engine.clamp(0.0, 1.0) * 100.0);
+    if throttle.height != throttle_height {
+        throttle.height = throttle_height;
+    }
+    let boost_height = percent(if desc.afterburner.is_some() { view.boost.clamp(0.0, 1.0) * 100.0 } else { 0.0 });
+    if boost.height != boost_height {
+        boost.height = boost_height;
+    }
 
     // Warnings: the ground coming up fast, or too slow to fly (jump jets that slow hover).
     let impact = if climb < -1.0 { altitude / -climb } else { f32::MAX };

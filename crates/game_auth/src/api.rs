@@ -274,7 +274,7 @@ impl RoundReport {
                 || p.kills > 5_000
                 || p.deaths > 5_000
                 || p.captures > 1_000
-                || p.score.abs() > 100_000
+                || p.score.unsigned_abs() > 100_000
                 || tallies.iter().any(|t| t.len() > MAX_TALLIES || t.iter().any(|e| e.name.len() > 64 || e.kills > 5_000 || !(0.0..=MAX_ROUND_SECONDS).contains(&e.seconds)))
             {
                 return Err(format!("implausible numbers for account {}", p.account));
@@ -294,4 +294,25 @@ pub struct RoundResult {
     pub promotions: Vec<(u64, String)>,
     /// The report was sent before and counted then.
     pub duplicate: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn player(score: i32) -> PlayerRound {
+        PlayerRound { account: 1, name: "a".into(), team: 1, score, seconds: 10.0, ..Default::default() }
+    }
+
+    #[test]
+    fn validate_rejects_implausible_and_never_panics_on_i32_min() {
+        let report = |players| RoundReport { round_id: "r".into(), level: "l".into(), mode: "m".into(), winner: 1, seconds: 10.0, players };
+        assert!(report(vec![player(100)]).validate().is_ok());
+        assert!(report(vec![player(100_001)]).validate().is_err());
+        assert!(report(vec![player(-100_001)]).validate().is_err());
+        // i32::MIN.abs() panics (debug) or wraps (release); unsigned_abs() does neither and
+        // correctly reads as an implausible score.
+        assert!(report(vec![player(i32::MIN)]).validate().is_err());
+        assert!(report(vec![player(i32::MAX)]).validate().is_err());
+    }
 }

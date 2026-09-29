@@ -8,6 +8,10 @@
 //! With `menu: true` the client starts at the main menu, to script it with `Click` steps.
 //! Scenarios use the default settings (see `settings`) unless `--settings` is given.
 //!
+//! `Measure` reports the frame times (average, p50, p95, max); with `--diagnostics` also each
+//! render pass's GPU time, and with `BF2_PROFILE_FRAMES=1` in a build with
+//! `--features game_server/profile` every system's time per frame.
+//!
 //! `ExpectLog` and `ForbidLog` steps turn a scenario into a check: they watch the log (captured
 //! only while a scenario runs) and fail the run with exit code 1. Every run writes
 //! `result.txt` (`PASS`, or `FAIL: <reason>`) next to its screenshots.

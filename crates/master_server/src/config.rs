@@ -9,8 +9,13 @@
 //!     http_bind: "127.0.0.1:16581",
 //!     // Where players reach the web pages (links, cookies): the proxy's https address.
 //!     public_url: "https://master.example.com",
-//!     // Behind a reverse proxy: take the client's address from X-Forwarded-For.
+//!     // Behind a reverse proxy: take the client's address from X-Forwarded-For, but only
+//!     // when the request's immediate peer is the proxy itself (loopback by default, since
+//!     // that's how the documented deployment runs); otherwise X-Forwarded-For is ignored,
+//!     // so a client that reaches this port directly can't spoof its address to dodge rate
+//!     // limits. Only needed if the proxy isn't on this machine.
 //!     trust_proxy: true,
+//!     trusted_proxies: ["127.0.0.1", "::1"],
 //!     // Folder for the database (master.sqlite) and the signing key (master.key).
 //!     data_dir: "/var/lib/bf2-master",
 //!     session_minutes: 15,
@@ -35,7 +40,7 @@
 //! ```
 
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -51,6 +56,11 @@ pub struct Config {
     /// Where people reach the web pages, for links (no trailing slash).
     pub public_url: String,
     pub trust_proxy: bool,
+    /// Peer addresses allowed to set `X-Forwarded-For`/`X-Real-IP` when `trust_proxy` is on.
+    /// Empty (the default): only a proxy on this machine (loopback) is trusted, which matches
+    /// the documented reverse-proxy deployment. Set this if the proxy runs elsewhere (a
+    /// separate host or container).
+    pub trusted_proxies: Vec<IpAddr>,
     pub data_dir: PathBuf,
     pub session_minutes: u64,
     pub ticket_minutes: u64,
@@ -68,6 +78,7 @@ impl Default for Config {
             http_bind: "127.0.0.1:16581".parse().unwrap(),
             public_url: String::new(),
             trust_proxy: false,
+            trusted_proxies: Vec::new(),
             data_dir: PathBuf::from("master-data"),
             session_minutes: 15,
             ticket_minutes: 5,
@@ -130,6 +141,7 @@ mod tests {
         assert_eq!(config.http_bind.port(), 16581);
         assert!(config.secure_cookies());
         assert_eq!(config.data_dir, PathBuf::from("/var/lib/bf2-master"));
+        assert_eq!(config.trusted_proxies, vec!["127.0.0.1".parse::<IpAddr>().unwrap(), "::1".parse().unwrap()]);
         let _ = std::fs::remove_file(path);
     }
 }

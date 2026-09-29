@@ -91,7 +91,9 @@ fn receive_squad_requests(
     }
 }
 
-/// Every squad has exactly one leader: the first member takes over when the leader leaves.
+/// Every squad has exactly one leader: the first (by [`keep_leaders`]'s order) member takes
+/// over when the leader leaves, several end up flagged leader at once, or a human joins a
+/// squad a bot is leading (like BF2, a human always outranks a bot for the post).
 fn keep_leaders(mut players: Query<(Entity, &Team, &mut SquadMember, Has<BotBrain>)>) {
     let mut squads: HashMap<(Team, u8), Vec<(Entity, bool, bool)>> = HashMap::default();
     for (entity, team, member, bot) in &players {
@@ -99,11 +101,14 @@ fn keep_leaders(mut players: Query<(Entity, &Team, &mut SquadMember, Has<BotBrai
     }
     for (_, mut members) in squads {
         let leaders = members.iter().filter(|(_, leader, _)| *leader).count();
-        if leaders == 1 {
+        let bot_leads_a_human =
+            members.iter().any(|(_, leader, bot)| *leader && *bot) && members.iter().any(|(_, _, bot)| !bot);
+        if leaders == 1 && !bot_leads_a_human {
             continue;
         }
-        // Humans lead before bots, then the longest-standing member.
-        members.sort_by_key(|(entity, leader, bot)| (!*leader, *bot, *entity));
+        // Humans lead before bots; ties (picking a leader with none, or breaking one with
+        // several) go to whoever already leads, then the longest-standing member.
+        members.sort_by_key(|(entity, leader, bot)| (*bot, !*leader, *entity));
         for (index, (entity, _, _)) in members.iter().enumerate() {
             if let Ok((_, _, mut member, _)) = players.get_mut(*entity) {
                 let leader = index == 0;

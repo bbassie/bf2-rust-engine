@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use game_auth::{
-    api::{CareerStats, LeaderboardEntry, PlayerRound, Profile, Tally},
+    api::{CareerStats, LeaderboardEntry, PlayerRound, Profile, RoundReport, RoundResult, Tally},
     ranks::Progression,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -240,6 +240,14 @@ impl Db {
             .map(|r| r.is_some())
     }
 
+    /// Forgets tickets issued before `before` (S23): only recent ones matter (stats acceptance
+    /// looks back `ticket_window_hours`), and a logged-in account can otherwise grow this
+    /// table forever by requesting tickets for arbitrary server fingerprints.
+    pub fn prune_tickets(&self, before: u64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM tickets WHERE issued < ?1", params![to_i64(before)])?;
+        Ok(())
+    }
+
     // Ranked servers.
 
     pub fn add_server(&self, name: &str, api_key: &str, now: u64) -> rusqlite::Result<u64> {
@@ -290,51 +298,85 @@ impl Db {
 
     // Stats.
 
-    /// Records a round once: `false` if this server reported it before.
-    pub fn add_round(&self, server: u64, round_id: &str, level: &str, mode: &str, winner: u8, players: usize, now: u64) -> rusqlite::Result<bool> {
-        Ok(self.conn.execute(
-            "INSERT OR IGNORE INTO rounds (server_id, round_id, level, mode, winner, players, ended) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![server as i64, round_id, level, mode, winner as i64, players as i64, to_i64(now)],
-        )? > 0)
-    }
-
-    /// Adds a player's round to their career and XP. Returns the new XP.
-    pub fn add_player_round(&mut self, round: &PlayerRound, won: Option<bool>, xp: u64, now: u64) -> rusqlite::Result<u64> {
+    /// Records a round and credits the players who get counted for it, all in one
+    /// transaction (S19): the round is only marked reported if every player's credit also
+    /// commits, so a failure partway through leaves nothing counted rather than the round
+    /// permanently marked done with some players missed (a retry would then see it as
+    /// already reported and skip them for good). `duplicate` on the result if this server
+    /// reported this round before; nothing is re-applied in that case.
+    pub fn record_round(
+        &mut self,
+        server: u64,
+        server_fingerprint: &str,
+        report: &RoundReport,
+        since: u64,
+        now: u64,
+        progression: &Progression,
+    ) -> rusqlite::Result<RoundResult> {
         let tx = self.conn.transaction()?;
-        let (wins, losses) = match won {
-            Some(true) => (1, 0),
-            Some(false) => (0, 1),
-            None => (0, 0),
-        };
-        tx.execute(
-            "UPDATE careers SET rounds = rounds + 1, wins = wins + ?2, losses = losses + ?3, score = score + ?4,
-             kills = kills + ?5, deaths = deaths + ?6, captures = captures + ?7, seconds = seconds + ?8, last_played = ?9
-             WHERE account_id = ?1",
-            params![
-                round.account as i64,
-                wins,
-                losses,
-                round.score as i64,
-                round.kills as i64,
-                round.deaths as i64,
-                round.captures as i64,
-                round.seconds,
-                to_i64(now)
-            ],
-        )?;
-        for (kind, tallies) in [("kit", &round.kits), ("vehicle", &round.vehicles), ("weapon", &round.weapons)] {
-            for tally in tallies {
+        let mut result = RoundResult::default();
+        let fresh = tx.execute(
+            "INSERT OR IGNORE INTO rounds (server_id, round_id, level, mode, winner, players, ended) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![server as i64, report.round_id, report.level, report.mode, report.winner as i64, report.players.len() as i64, to_i64(now)],
+        )? > 0;
+        if fresh {
+            let mut counted = std::collections::HashSet::new();
+            for player in &report.players {
+                let account = tx
+                    .query_row(
+                        "SELECT id, xp, disabled FROM accounts WHERE id = ?1",
+                        params![player.account as i64],
+                        |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? != 0)),
+                    )
+                    .optional()?;
+                let joined = tx
+                    .query_row(
+                        "SELECT 1 FROM tickets WHERE account_id = ?1 AND server = ?2 AND issued >= ?3",
+                        params![player.account as i64, server_fingerprint, to_i64(since)],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                let usable = account.filter(|(id, _, disabled)| !disabled && joined && !counted.contains(id));
+                let Some((id, xp, _)) = usable else {
+                    result.rejected.push(player.account);
+                    continue;
+                };
+                counted.insert(id);
+                let won = (report.winner != 0).then_some(player.team == report.winner);
+                let (wins, losses) = match won {
+                    Some(true) => (1, 0),
+                    Some(false) => (0, 1),
+                    None => (0, 0),
+                };
+                let gained = progression.round_xp(player.score, player.seconds, won == Some(true));
                 tx.execute(
-                    "INSERT INTO tallies (account_id, kind, name, seconds, kills) VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(account_id, kind, name) DO UPDATE SET seconds = seconds + excluded.seconds, kills = kills + excluded.kills",
-                    params![round.account as i64, kind, tally.name, tally.seconds, tally.kills as i64],
+                    "UPDATE careers SET rounds = rounds + 1, wins = wins + ?2, losses = losses + ?3, score = score + ?4,
+                     kills = kills + ?5, deaths = deaths + ?6, captures = captures + ?7, seconds = seconds + ?8, last_played = ?9
+                     WHERE account_id = ?1",
+                    params![id as i64, wins, losses, player.score as i64, player.kills as i64, player.deaths as i64, player.captures as i64, player.seconds, to_i64(now)],
                 )?;
+                for (kind, tallies) in [("kit", &player.kits), ("vehicle", &player.vehicles), ("weapon", &player.weapons)] {
+                    for tally in tallies {
+                        tx.execute(
+                            "INSERT INTO tallies (account_id, kind, name, seconds, kills) VALUES (?1, ?2, ?3, ?4, ?5)
+                             ON CONFLICT(account_id, kind, name) DO UPDATE SET seconds = seconds + excluded.seconds, kills = kills + excluded.kills",
+                            params![id as i64, kind, tally.name, tally.seconds, tally.kills as i64],
+                        )?;
+                    }
+                }
+                tx.execute("UPDATE accounts SET xp = xp + ?2 WHERE id = ?1", params![id as i64, to_i64(gained)])?;
+                let total = xp + gained;
+                if progression.rank_index(total) > progression.rank_index(xp) {
+                    result.promotions.push((id, progression.info(total).name));
+                }
+                result.accepted += 1;
             }
+        } else {
+            result.duplicate = true;
         }
-        tx.execute("UPDATE accounts SET xp = xp + ?2 WHERE id = ?1", params![round.account as i64, to_i64(xp)])?;
-        let total: i64 = tx.query_row("SELECT xp FROM accounts WHERE id = ?1", params![round.account as i64], |r| r.get(0))?;
         tx.commit()?;
-        Ok(total as u64)
+        Ok(result)
     }
 
     fn tallies(&self, account: u64, kind: &str) -> rusqlite::Result<Vec<Tally>> {
@@ -448,9 +490,13 @@ mod tests {
         let server = db.add_server("Test", "bf2r_key", 1).unwrap();
         assert_eq!(db.server_by_key("bf2r_key").unwrap().unwrap().id, server);
         assert!(db.server_by_key("other").unwrap().is_none());
-        assert!(db.add_round(server, "r1", "karkand", "gpm_cq", 1, 1, 5).unwrap());
-        assert!(!db.add_round(server, "r1", "karkand", "gpm_cq", 1, 1, 5).unwrap(), "counted once");
-        let round = PlayerRound {
+
+        db.note_ticket(id, "fp", 100).unwrap();
+        assert!(db.ticket_since(id, "fp", 50).unwrap());
+        assert!(!db.ticket_since(id, "fp", 150).unwrap());
+        assert!(!db.ticket_since(id, "other", 0).unwrap());
+
+        let player = PlayerRound {
             account: id,
             name: "Alice".into(),
             team: 1,
@@ -463,17 +509,31 @@ mod tests {
             vehicles: vec![],
             weapons: vec![Tally { name: "M16A2".into(), seconds: 0.0, kills: 5 }],
         };
-        assert_eq!(db.add_player_round(&round, Some(true), 55, 6).unwrap(), 55);
-        assert_eq!(db.add_player_round(&round, Some(false), 45, 7).unwrap(), 100);
+        let report = RoundReport { round_id: "r1".into(), level: "karkand".into(), mode: "gpm_cq".into(), winner: 1, seconds: 600.0, players: vec![player.clone()] };
+        let result = db.record_round(server, "fp", &report, 50, 6, &progression).unwrap();
+        assert_eq!((result.accepted, result.duplicate, result.rejected.len()), (1, false, 0));
+        let again = db.record_round(server, "fp", &report, 50, 7, &progression).unwrap();
+        assert!(again.duplicate && again.accepted == 0, "counted once, and nothing is re-applied for a duplicate");
+
+        let mut second = report.clone();
+        second.round_id = "r2".into();
+        second.winner = 2; // Alice's team (1) lost this one.
+        assert_eq!(db.record_round(server, "fp", &second, 50, 8, &progression).unwrap().accepted, 1);
+
         let career = db.career(id).unwrap();
         assert_eq!((career.rounds, career.wins, career.losses, career.kills, career.score), (2, 1, 1, 10, 80));
         assert_eq!(career.kits[0].seconds, 1200.0);
         assert_eq!(career.weapons[0].kills, 10);
         let board = db.leaderboard("kd", 10, &progression).unwrap();
         assert_eq!(board[0].name, "Alice");
-        db.note_ticket(id, "fp", 100).unwrap();
-        assert!(db.ticket_since(id, "fp", 50).unwrap());
-        assert!(!db.ticket_since(id, "fp", 150).unwrap());
-        assert!(!db.ticket_since(id, "other", 0).unwrap());
+
+        // No ticket for this server: not counted, and the round itself isn't wasted (a real
+        // round from an account that does have one still gets to be "fresh").
+        let bob = db.create_account("Bob", None, "hash", 1).unwrap().unwrap();
+        let mut third = report.clone();
+        third.round_id = "r3".into();
+        third.players[0].account = bob;
+        let result3 = db.record_round(server, "fp", &third, 50, 9, &progression).unwrap();
+        assert_eq!((result3.accepted, result3.rejected), (0, vec![bob]));
     }
 }

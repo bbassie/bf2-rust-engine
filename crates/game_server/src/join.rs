@@ -26,7 +26,7 @@ use game_shared::{
     chat::Kicked,
     content::{
         format_bytes,
-        verify::{self, MAX_FETCH_LISTED, MAX_REQUIRED},
+        verify::{self, MAX_FETCH_LISTED},
     },
     join::{
         AccountTicket, ContentCheck, ContentReport, JOIN_PURPOSE, JoinChallenge, JoinRequest, JoinVerdict,
@@ -38,6 +38,7 @@ use crate::{
     ClientPlayer, ServerSettings,
     accounts::Accounts,
     content::{ContentServer, Requirement},
+    limits::{Rate, RateLimiter},
 };
 
 /// A client that hasn't asked to join by then is kicked (an old client, or not a game).
@@ -384,7 +385,10 @@ fn receive_reports(
     mut reports: MessageReader<FromClient<ContentReport>>,
     mut clients: Query<(&mut Joining, Option<&ClientPlayer>)>,
     mut handshake: Handshake,
+    mut limits: Local<RateLimiter<Entity>>,
 ) {
+    let now = handshake.time.elapsed_secs_f64();
+    let mut kicked = Vec::new();
     for FromClient { client_id, message: report } in reports.read() {
         let Some(client) = client_id.entity() else {
             continue;
@@ -392,6 +396,15 @@ fn receive_reports(
         let Ok((mut joining, player)) = clients.get_mut(client) else {
             continue;
         };
+        if kicked.contains(&client) {
+            continue;
+        }
+        // Each report compares the whole required list: a handful per check is all it takes.
+        if !limits.allow(client, Rate::CONTENT_REPORTS, now) {
+            handshake.kick(client, "Your game sent too many content reports.");
+            kicked.push(client);
+            continue;
+        }
         // A report for an older challenge (the map changed meanwhile).
         if joining.challenged.as_deref() != Some(report.level.as_str()) || joining.content_ok {
             continue;
@@ -424,8 +437,13 @@ fn receive_reports(
             handshake.verdict(client, JoinVerdict::SendHashes);
             continue;
         }
+        // One hash per required file, checked before anything is compared.
+        if report.hashes.len() != required.files.len() {
+            handshake.kick(client, "Your game sent a broken content report.");
+            continue;
+        }
         let files: Vec<_> = required.files.iter().collect();
-        let wrong = if report.hashes.len() <= MAX_REQUIRED { verify::mismatches(&files, &report.hashes) } else { None };
+        let wrong = verify::mismatches(&files, &report.hashes);
         let Some(wrong) = wrong else {
             handshake.kick(client, "Your game sent a broken content report.");
             continue;

@@ -145,30 +145,30 @@ fn place_vehicles(
     for (motion, current, snapshots, predicted, previous, mut view, mut transform) in &mut vehicles {
         if let Some(mut predicted) = predicted {
             // The vehicle we drive, predicted (see `vehicle_prediction`).
-            *transform = predicted.transform(alpha, time.delta_secs());
-            view.joints = between_ticks(&predicted.previous_joints, &predicted.state.joints, alpha);
+            transform.set_if_neq(predicted.transform(alpha, time.delta_secs()));
+            between_ticks(&mut view.joints, &predicted.previous_joints, &predicted.state.joints, alpha);
             view.wheels.clone_from(&predicted.state.wheels);
             view.velocity = predicted.velocity();
             view.speed = view.velocity.dot(transform.rotation * Vec3::NEG_Z);
             view.engine = predicted.state.engine;
             view.boost = predicted.state.boost;
         } else if connected {
-            let (a, b, t) = interpolate(&snapshots.0, at).unwrap_or((
-                (*motion, current.clone()),
-                (*motion, current.clone()),
-                1.0,
-            ));
-            *transform = Transform::from_translation(a.0.position.lerp(b.0.position, t))
-                .with_rotation(a.0.rotation.slerp(b.0.rotation, t));
-            view.joints = lerp_joints(&a.1.joints, &b.1.joints, t);
-            view.wheels = a.1.wheels.iter().zip(&b.1.wheels).map(|(x, y)| x + (y - x) * t).collect();
+            let (a, b, t) = interpolate(&snapshots.0, at).unwrap_or(((motion, current), (motion, current), 1.0));
+            // Written only when it changed (a parked vehicle's whole hierarchy would move every
+            // frame otherwise), and the joints and wheels in place.
+            transform.set_if_neq(
+                Transform::from_translation(a.0.position.lerp(b.0.position, t)).with_rotation(a.0.rotation.slerp(b.0.rotation, t)),
+            );
+            lerp_joints(&mut view.joints, &a.1.joints, &b.1.joints, t);
+            view.wheels.clear();
+            view.wheels.extend(a.1.wheels.iter().zip(&b.1.wheels).map(|(x, y)| x + (y - x) * t));
             view.speed = a.0.forward_speed() + (b.0.forward_speed() - a.0.forward_speed()) * t;
             view.velocity = a.0.velocity.lerp(b.0.velocity, t);
             view.engine = a.1.engine + (b.1.engine - a.1.engine) * t;
             view.boost = b.1.boost;
         } else {
             // Hosting: avian already interpolates the body's transform between ticks.
-            view.joints = between_ticks(&previous.0, &current.joints, alpha);
+            between_ticks(&mut view.joints, &previous.0, &current.joints, alpha);
             view.wheels.clone_from(&current.wheels);
             view.speed = motion.forward_speed();
             view.velocity = motion.velocity;
@@ -179,35 +179,35 @@ fn place_vehicles(
     }
 }
 
-type Sample = (VehicleMotion, VehicleState);
+type Sample<'a> = (&'a VehicleMotion, &'a VehicleState);
 
-fn interpolate(snapshots: &VecDeque<(f64, VehicleMotion, VehicleState)>, at: f64) -> Option<(Sample, Sample, f32)> {
+fn interpolate(snapshots: &VecDeque<(f64, VehicleMotion, VehicleState)>, at: f64) -> Option<(Sample<'_>, Sample<'_>, f32)> {
     let last = snapshots.back()?;
     if at >= last.0 {
-        return Some(((last.1, last.2.clone()), (last.1, last.2.clone()), 1.0));
+        return Some(((&last.1, &last.2), (&last.1, &last.2), 1.0));
     }
     let i = snapshots.iter().rposition(|(t, ..)| *t <= at)?;
     let (t0, m0, s0) = &snapshots[i];
     let (t1, m1, s1) = &snapshots[i + 1];
     let t = ((at - t0) / (t1 - t0).max(1e-6)) as f32;
-    Some(((*m0, s0.clone()), (*m1, s1.clone()), t.clamp(0.0, 1.0)))
+    Some(((m0, s0), (m1, s1), t.clamp(0.0, 1.0)))
 }
 
 /// Joint angles `alpha` of the way through the tick from `previous` (which may be missing, a
 /// new vehicle) to `current`.
-fn between_ticks(previous: &[[f32; 3]], current: &[[f32; 3]], alpha: f32) -> Vec<[f32; 3]> {
+fn between_ticks(out: &mut Vec<[f32; 3]>, previous: &[[f32; 3]], current: &[[f32; 3]], alpha: f32) {
     if previous.len() == current.len() {
-        lerp_joints(previous, current, alpha)
+        lerp_joints(out, previous, current, alpha);
     } else {
-        current.to_vec()
+        out.clear();
+        out.extend_from_slice(current);
     }
 }
 
-fn lerp_joints(a: &[[f32; 3]], b: &[[f32; 3]], t: f32) -> Vec<[f32; 3]> {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| std::array::from_fn(|i| x[i] + wrap(y[i] - x[i]) * t))
-        .collect()
+/// Into `out` (reusing it): each joint `t` of the way from `a` to `b`.
+fn lerp_joints(out: &mut Vec<[f32; 3]>, a: &[[f32; 3]], b: &[[f32; 3]], t: f32) {
+    out.clear();
+    out.extend(a.iter().zip(b).map(|(x, y)| std::array::from_fn(|i| x[i] + wrap(y[i] - x[i]) * t)));
 }
 
 fn wrap(a: f32) -> f32 {

@@ -49,6 +49,10 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
   `python scripts/compare.py <before> <after>` (per-image change plus a before/after/diff sheet).
 - `scripts/smoke.sh` runs a quick scenario suite plus the unit tests on the Linux machine
   (about 4 minutes); run it before handing back a batch of changes.
+- Frame times: `client --scenario scenarios/perf/perf_karkand.ron --bots 63` (and
+  `perf_archipelago.ron` for a big AIX map); see "Frame time" in docs/ARCHITECTURE.md for
+  `BF2_PERF_STATS`, `--diagnostics` and per-system timings. Other agents' clients and builds
+  skew timings: compare builds in alternating runs on a quiet machine.
 - `--debug-walk` exercises prediction; the HUD shows RTT and prediction corrections.
 - Test with dev builds (`target/debug/client.exe`); release builds take much longer.
 - If the user is playing, `target/debug/client.exe` is locked and the build ends with

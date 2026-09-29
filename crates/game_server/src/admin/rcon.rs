@@ -4,7 +4,7 @@
 //! server: ### Battlefield 2 ModManager Rcon v1.0.
 //!         ### Digest seed: <seed>
 //!         <empty line>
-//! client: login <md5 hex of seed + password>     (or the password itself)
+//! client: login <md5 hex of seed + password>
 //! server: Authentication successful, rcon ready.
 //! client: \x02players                            (\x02: end the answer with \x04)
 //! server: <answer>\x04
@@ -12,27 +12,39 @@
 //!
 //! Connections are served on their own threads; commands run on the main thread between
 //! frames (see [`process_requests`]). `server rcon` is a small client ([`run_client`]).
+//!
+//! Only the digest logs in (never the plain password, which would cross the network), compared
+//! in constant time. Failed logins lock the address out for a while (see
+//! [`crate::limits::LoginBackoff`]), each address has a few sessions and connections a
+//! minute at most, and idle sessions are closed, so nobody can hold every session.
 
 use std::{
+    collections::HashMap,
     io::{self, BufRead, Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bevy::prelude::*;
 
 use super::AdminSettings;
+use crate::limits::{Failed, LoginBackoff, Rate, RateLimiter, constant_time_eq};
 
 /// BF2's remote console port.
 pub const DEFAULT_PORT: u16 = 4711;
 const MAX_SESSIONS: usize = 8;
-const MAX_LOGIN_ATTEMPTS: u32 = 3;
+/// Sessions one address may hold at once.
+const MAX_SESSIONS_PER_ADDRESS: usize = 2;
+/// A connection that hasn't logged in by then is closed.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// A logged-in session that sends nothing for this long is closed.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const END_OF_ANSWER: u8 = 0x04;
 const NON_INTERACTIVE: char = '\x02';
 
@@ -75,24 +87,75 @@ impl Drop for RconServer {
     }
 }
 
+/// What the connections share: sessions per address, connection rates and failed logins.
+struct Guard {
+    start: Instant,
+    sessions: HashMap<IpAddr, usize>,
+    connections: RateLimiter<IpAddr>,
+    logins: LoginBackoff<IpAddr>,
+}
+
+impl Guard {
+    fn now(&self) -> f64 {
+        self.start.elapsed().as_secs_f64()
+    }
+
+    /// Whether a new connection from `ip` is let in (and counts it if so); why not otherwise.
+    fn admit(&mut self, ip: IpAddr) -> Result<(), &'static str> {
+        let now = self.now();
+        if self.logins.locked(ip, now).is_some() {
+            return Err("Too many failed logins. Try again later.");
+        }
+        if self.sessions.values().sum::<usize>() >= MAX_SESSIONS
+            || self.sessions.get(&ip).copied().unwrap_or(0) >= MAX_SESSIONS_PER_ADDRESS
+        {
+            return Err("Too many sessions.");
+        }
+        if !self.connections.allow(ip, Rate::RCON_CONNECTIONS, now) {
+            return Err("Too many connections. Try again later.");
+        }
+        *self.sessions.entry(ip).or_default() += 1;
+        Ok(())
+    }
+
+    fn leave(&mut self, ip: IpAddr) {
+        if let Some(count) = self.sessions.get_mut(&ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.sessions.remove(&ip);
+            }
+        }
+    }
+}
+
 fn accept(listener: TcpListener, password: String, requests: Sender<Request>, stop: Arc<AtomicBool>) {
-    let sessions = Arc::new(AtomicUsize::new(0));
+    let guard = Arc::new(Mutex::new(Guard {
+        start: Instant::now(),
+        sessions: HashMap::new(),
+        connections: RateLimiter::default(),
+        logins: LoginBackoff::default(),
+    }));
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((stream, peer)) => {
-                if sessions.load(Ordering::Relaxed) >= MAX_SESSIONS {
+            Ok((mut stream, peer)) => {
+                let admitted = guard.lock().map_or(Err("Server error."), |mut g| g.admit(peer.ip()));
+                if let Err(why) = admitted {
+                    debug!("rcon: {peer} refused: {why}");
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                    let _ = writeln!(stream, "{why}");
                     continue;
                 }
-                sessions.fetch_add(1, Ordering::Relaxed);
-                let (password, requests, stop, sessions) =
-                    (password.clone(), requests.clone(), stop.clone(), sessions.clone());
+                let (password, requests, stop, guard) = (password.clone(), requests.clone(), stop.clone(), guard.clone());
                 thread::spawn(move || {
                     info!("rcon: {peer} connected");
-                    if let Err(err) = session(stream, peer, &password, &requests, &stop) {
+                    if let Err(err) = session(stream, peer, &password, &requests, &stop, &guard) {
                         debug!("rcon: {peer}: {err}");
                     }
                     info!("rcon: {peer} disconnected");
-                    sessions.fetch_sub(1, Ordering::Relaxed);
+                    if let Ok(mut guard) = guard.lock() {
+                        guard.leave(peer.ip());
+                    }
                 });
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(100)),
@@ -104,45 +167,73 @@ fn accept(listener: TcpListener, password: String, requests: Sender<Request>, st
     }
 }
 
+/// Whether a login answer is the digest of the seed and the password (only the digest: the
+/// plain password is refused), compared in constant time.
+fn login_accepted(answer: &str, digest: &str) -> bool {
+    constant_time_eq(answer.trim().to_ascii_lowercase().as_bytes(), digest.as_bytes())
+}
+
 fn session(
     mut stream: TcpStream,
     peer: SocketAddr,
     password: &str,
     requests: &Sender<Request>,
     stop: &AtomicBool,
+    guard: &Mutex<Guard>,
 ) -> io::Result<()> {
     // Accepted sockets may inherit the listener's non-blocking mode.
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let _ = stream.set_nodelay(true);
     let seed: String = (0..16).map(|_| fastrand::alphanumeric()).collect();
     write!(stream, "### Battlefield 2 ModManager Rcon v1.0.\n### Digest seed: {seed}\n\n")?;
     let digest = md5_hex(format!("{seed}{password}").as_bytes());
     let mut reader = Reader::default();
     let mut logged_in = false;
-    let mut failures = 0;
+    let mut last_line = Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) {
             let _ = stream.write_all(b"Server shutting down.\n");
             return Ok(());
         }
         let Some(line) = reader.line(&mut stream)? else {
+            let idle = last_line.elapsed();
+            if !logged_in && idle > LOGIN_TIMEOUT {
+                let _ = stream.write_all(b"Login timed out.\n");
+                return Ok(());
+            }
+            if idle > IDLE_TIMEOUT {
+                let _ = stream.write_all(b"Idle for too long; closing.\n");
+                return Ok(());
+            }
             continue;
         };
+        last_line = Instant::now();
         if !logged_in {
             match line.trim().strip_prefix("login ") {
-                Some(answer) if answer.trim() == digest || answer.trim() == password => {
+                Some(answer) if login_accepted(answer, &digest) => {
                     logged_in = true;
+                    if let Ok(mut guard) = guard.lock() {
+                        guard.logins.succeed(peer.ip());
+                    }
                     info!("rcon: {peer} logged in");
                     stream.write_all(b"Authentication successful, rcon ready.\n")?;
                 }
                 Some(_) => {
-                    failures += 1;
-                    warn!("rcon: {peer} failed to log in");
+                    let failed = guard.lock().ok().map(|mut g| {
+                        let now = g.now();
+                        g.logins.fail(peer.ip(), now)
+                    });
                     thread::sleep(Duration::from_secs(1));
                     stream.write_all(b"Authentication failed.\n")?;
-                    if failures >= MAX_LOGIN_ATTEMPTS {
-                        return Ok(());
+                    match failed {
+                        Some(Failed::TriesLeft(_)) => info!("rcon: {peer} failed to log in"),
+                        Some(Failed::LockedOut(seconds)) => {
+                            warn!("rcon: {peer} failed to log in too often; locked out for {seconds:.0} s");
+                            return Ok(());
+                        }
+                        None => return Ok(()),
                     }
                 }
                 None => stream.write_all(b"Authentication required: login <digest>\n")?,
@@ -321,7 +412,40 @@ pub fn md5_hex(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::md5_hex;
+    use super::*;
+
+    #[test]
+    fn only_the_digest_logs_in() {
+        let digest = md5_hex(b"seedsecret");
+        assert!(login_accepted(&digest, &digest));
+        assert!(login_accepted(&format!(" {} ", digest.to_uppercase()), &digest));
+        assert!(!login_accepted("secret", &digest), "the plain password is refused");
+        assert!(!login_accepted("", &digest));
+        assert!(!login_accepted(&digest[..31], &digest));
+    }
+
+    #[test]
+    fn addresses_get_few_sessions_and_are_locked_out_after_failed_logins() {
+        let mut guard = Guard {
+            start: Instant::now(),
+            sessions: HashMap::new(),
+            connections: RateLimiter::default(),
+            logins: LoginBackoff::default(),
+        };
+        let (a, b): (IpAddr, IpAddr) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
+        assert!(guard.admit(a).is_ok());
+        assert!(guard.admit(a).is_ok());
+        assert!(guard.admit(a).is_err(), "two sessions per address");
+        assert!(guard.admit(b).is_ok(), "others still get in");
+        guard.leave(a);
+        assert!(guard.admit(a).is_ok());
+        let now = guard.now();
+        for _ in 0..LoginBackoff::<IpAddr>::FREE_ATTEMPTS {
+            guard.logins.fail(b, now);
+        }
+        guard.leave(b);
+        assert!(guard.admit(b).is_err(), "locked out");
+    }
 
     #[test]
     fn md5_vectors() {

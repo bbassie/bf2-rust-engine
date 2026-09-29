@@ -9,6 +9,7 @@
 //! - [`api`]: the master server's REST API (JSON).
 //! - [`ranks`]: the leveling curve (XP and ranks).
 
+pub mod admission;
 pub mod api;
 pub mod identity;
 pub mod ranks;
@@ -86,6 +87,26 @@ pub fn validate_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `url` (`scheme://host[:port][/path]`) is safe for account traffic (passwords,
+/// tokens, API keys): `https://` always, `http://` only to loopback, for local testing
+/// without a reverse proxy. Used by both the game server's and the client's master-server
+/// connection so neither silently talks accounts over plain HTTP to a real host.
+pub fn https_or_loopback(url: &str) -> bool {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty();
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match host_port.strip_prefix('[') {
+        Some(inner) => inner.split(']').next().unwrap_or(""),
+        None => host_port.split(':').next().unwrap_or(""),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +132,19 @@ mod tests {
         assert!(validate_password("correct horse").is_ok());
         assert!(validate_password("short").is_err());
         assert!(validate_password(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn url_scheme() {
+        assert!(https_or_loopback("https://master.example.com"));
+        assert!(https_or_loopback("http://127.0.0.1:16581"));
+        assert!(https_or_loopback("http://localhost:16581"));
+        assert!(https_or_loopback("http://[::1]:16581"));
+        assert!(https_or_loopback("http://127.5.6.7"));
+        assert!(!https_or_loopback("http://master.example.com"));
+        assert!(!https_or_loopback("http://10.0.0.5"));
+        assert!(!https_or_loopback("ftp://x"));
+        assert!(!https_or_loopback("https://"));
+        assert!(!https_or_loopback(""));
     }
 }

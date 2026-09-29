@@ -358,12 +358,13 @@ fn main() -> AppExit {
     app.run()
 }
 
-/// Runs the simulation's schedules (the fixed tick: the server's game rules and bots when
-/// hosting, prediction) on one thread, as the dedicated server does: nearly all of their
-/// systems are tiny, and handing each to a worker thread costs more than it runs, all the more
-/// while the render thread keeps the workers busy. Systems with real work still split it
-/// themselves (`par_iter`). `BF2_SCHEDULES=parallel` keeps Bevy's multi-threaded executor,
-/// `=all` also runs the frame's own schedules on one thread.
+/// Runs the main world's schedules (the frame's and the fixed tick's: the server's game rules
+/// and bots when hosting, prediction) on one thread, as the dedicated server does: nearly all
+/// of their systems are tiny, and handing each to a worker thread costs more than it runs, all
+/// the more while the render thread keeps the workers busy. Systems with real work still split
+/// it themselves (`par_iter`). Karkand, 64 players, 63 bots, release: 9.2 -> 8.3 ms a frame,
+/// p95 11.3 -> 10.0 ms. `BF2_SCHEDULES=parallel` keeps Bevy's multi-threaded executor,
+/// `=fixed` uses one thread for the fixed tick only.
 fn single_threaded_schedules(app: &mut App) {
     use bevy::{
         app::{FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate, RunFixedMainLoop},
@@ -382,7 +383,7 @@ fn single_threaded_schedules(app: &mut App) {
         FixedPostUpdate.intern(),
         FixedLast.intern(),
     ];
-    if mode == "all" {
+    if mode != "fixed" {
         labels.extend([First.intern(), PreUpdate.intern(), Update.intern(), PostUpdate.intern(), Last.intern()]);
     }
     let mut schedules = app.world_mut().resource_mut::<bevy::ecs::schedule::Schedules>();
