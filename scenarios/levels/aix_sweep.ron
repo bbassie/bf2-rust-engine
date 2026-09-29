@@ -1,0 +1,17 @@
+// A spawn shot and a third-person shot with bots around, for sweeping a batch of newly
+// imported levels (e.g. AIX 2's 24) without a scenario file per level: `level`/`bots`/`out`
+// come from the command line, so the same file runs once per level.
+//
+//   client --scenario scenarios/levels/aix_sweep.ron --level aix2_archipelago --bots 12 \
+//       --out target/scenarios/aix/aix2_archipelago
+//   python scripts/sheet.py target/scenarios/aix   # one contact sheet of every level run
+(
+    steps: [
+        WaitReady,
+        Screenshot("spawn"),
+        ThirdPerson(true),
+        Wait(1.5),
+        Screenshot("third_person"),
+        Quit,
+    ],
+)

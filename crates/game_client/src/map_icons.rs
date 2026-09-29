@@ -144,6 +144,10 @@ fn flag_markers(
 ) {
     let (team, _) = local_side(&local);
     for (entity, cp, state) in &control_points {
+        // Rush's points nobody spawns at right now: nothing to show.
+        if cp.uncapturable && state.owner == Team::Spectator {
+            continue;
+        }
         let image = icons.side(state.owner).map_flag(cp.uncapturable);
         // The icon's pole stands on the point; its cloth gets the owner's colour behind it.
         let (size, frame) = if image.is_some() { (24.0, Some(FLAG_CLOTH)) } else { (12.0, None) };

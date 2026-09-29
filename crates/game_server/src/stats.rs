@@ -132,12 +132,14 @@ impl StatsDb {
 pub struct Identified;
 
 /// Server-side: what a player did this round beyond the replicated [`Score`].
-#[derive(Component, Default)]
+#[derive(Component, Default, Clone)]
 pub struct RoundStats {
     pub captures: u32,
     pub seconds: f32,
     pub kit_seconds: HashMap<String, f32>,
     pub weapon_kills: HashMap<String, u32>,
+    /// Seconds in each vehicle (by template), for ranked servers' reports (`accounts`).
+    pub vehicle_seconds: HashMap<String, f32>,
     /// Score already added to the career.
     last_score: i32,
 }
@@ -218,6 +220,8 @@ fn track_time(
     mut db: ResMut<StatsDb>,
     mut players: Query<(&Player, &Team, &mut RoundStats, Option<&Controls>, Has<Identified>)>,
     loadouts: Query<&Loadout>,
+    seated: Query<&game_shared::vehicle::Seated>,
+    vehicles: Query<&game_shared::vehicle::Vehicle>,
 ) {
     if rounds.single().ok() != Some(&RoundState::Playing) {
         return;
@@ -233,6 +237,12 @@ fn track_time(
             .map(|l| armory.kits.get(&l.kit).map_or(l.kit.as_str(), |k| k.kind.as_str()));
         if let Some(kit) = kit {
             add_time(&mut round.kit_seconds, kit, dt);
+        }
+        let vehicle = controls
+            .and_then(|c| seated.get(c.0).ok())
+            .and_then(|s| vehicles.get(s.vehicle).ok());
+        if let Some(vehicle) = vehicle {
+            add_time(&mut round.vehicle_seconds, &vehicle.template, dt);
         }
         if let Some(career) = db.career(player, identified) {
             career.seconds_played += dt as f64;
@@ -367,6 +377,8 @@ fn career_line(career: &CareerStats) -> StatLine {
 
 /// Counts the round for everyone who played it, tells everyone how it went, and saves.
 fn finish_round(world: &mut World, winner: Team) {
+    // Ranked servers: the players with an account, to the master server.
+    crate::accounts::report_round(world, winner);
     let mut rows: Vec<(Entity, SummaryRow, bool)> = world
         .query::<(Entity, &Player, &Team, &Score, Has<Identified>)>()
         .iter(world)

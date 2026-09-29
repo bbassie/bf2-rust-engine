@@ -81,6 +81,8 @@ pub struct TeamStats {
     pub demolitions: u32,
     /// Flares and smoke fired at incoming missiles.
     pub countermeasures: u32,
+    /// Rush: bot-seconds going to a charge to arm or defuse it and holding the use key there.
+    pub charge_seconds: f32,
 }
 
 impl TeamStats {
@@ -121,6 +123,7 @@ impl TeamStats {
         self.mines += other.mines;
         self.demolitions += other.demolitions;
         self.countermeasures += other.countermeasures;
+        self.charge_seconds += other.charge_seconds;
     }
 }
 
@@ -234,7 +237,7 @@ pub fn log_stats(
              {} rockets, {} repairs, {} flashed, {:.0} s gassed; commander: {} orders, {} artillery, {} UAVs, \
              {} scans, {} supply drops; {} of {} spawns on the squad leader; \
              vehicles: {} entered ({} stationary), {:.2} km driven, {} stuck, {} shots, {} vehicle kills, \
-             {} takeoffs, {} crashes, {} countermeasures, {} AT mines, {} C4 attacks; kits {}; {:?}, {} squads attacking, {} defending: {}",
+             {} takeoffs, {} crashes, {} countermeasures, {} AT mines, {} C4 attacks;{} kits {}; {:?}, {} squads attacking, {} defending: {}",
             t + 1,
             minute.captures,
             minute.neutralized,
@@ -276,6 +279,7 @@ pub fn log_stats(
             minute.countermeasures,
             minute.mines,
             minute.demolitions,
+            if minute.charge_seconds > 0.0 { format!(" {:.0} s at charges;", minute.charge_seconds) } else { String::new() },
             kits.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "),
             strategy.posture[t],
             attacking,

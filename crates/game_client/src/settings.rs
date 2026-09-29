@@ -8,16 +8,41 @@
 //! `Key` steps don't depend on anyone's preferences. Missing fields take their defaults.
 //! `--no-shadows` and `--no-ssao` override the graphics settings without changing them.
 //! Scenarios change settings for their run with `Setting(key, value)` ([`Settings::set`]).
+//!
+//! # Graphics presets
+//!
+//! [`GraphicsPreset::Low`]..[`GraphicsPreset::Ultra`] set [`ShadowQuality`], [`AntiAliasing`],
+//! [`SsaoQuality`], [`Anisotropy`], render scale, LOD detail scale, vegetation density,
+//! particle quality, bloom and view distance together; picking any of those individually
+//! switches the preset to [`GraphicsPreset::Custom`] (`menu::input`). The default preset
+//! (`High`) is tuned to match this engine's previous hardcoded defaults exactly, so a fresh
+//! install looks the same as before this file grew presets.
+//!
+//! # Bindings
+//!
+//! Every [`Action`] has up to three bindings at once ([`BindingSet`]): a primary key or mouse
+//! button, a secondary one, and a gamepad button. [`Actions`] (the `SystemParam` every input
+//! system already used) checks all three, so every existing call site gained secondary and
+//! gamepad bindings for free. Movement, look and vehicle throttle/steering/flight are analog
+//! and read the gamepad sticks and triggers directly instead ([`local_input`], `vehicles::fly`).
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use bevy::{
+    anti_alias::{
+        fxaa::Fxaa,
+        smaa::{Smaa, SmaaPreset},
+        taa::TemporalAntiAliasing,
+    },
     audio::{GlobalVolume, Volume},
     core_pipeline::tonemapping::Tonemapping,
+    ecs::system::SystemParam,
+    image::{ImageSampler, ImageSamplerDescriptor},
+    input::gamepad::{Gamepad, GamepadButton},
+    light::DirectionalLightShadowMap,
+    pbr::{ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel},
     post_process::bloom::Bloom,
     camera::Hdr,
-    ecs::system::SystemParam,
-    pbr::ScreenSpaceAmbientOcclusion,
     prelude::*,
     window::{
         MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode,
@@ -49,6 +74,8 @@ impl Plugin for SettingsPlugin {
                     .before(bevy::camera::CameraUpdateSystems),
                 apply_graphics,
                 apply_post_processing,
+                apply_anisotropy,
+                apply_frame_cap,
                 save_settings,
             ),
         );
@@ -111,6 +138,11 @@ pub struct Settings {
     /// Multiplier on the base mouse sensitivity.
     pub mouse_sensitivity: f32,
     pub invert_mouse_y: bool,
+    /// Exponential smoothing on the mouse delta, 0 (off) to 1 (heavy); trades latency for a
+    /// steadier aim. Bevy has no OS raw-input toggle to expose, so `mouse_raw_input` is stored
+    /// for the day it does; today the accumulated OS delta is already used directly.
+    pub mouse_smoothing: f32,
+    pub mouse_raw_input: bool,
     /// Vertical field of view in degrees (unzoomed).
     pub field_of_view: f32,
     /// 0..1.
@@ -119,12 +151,26 @@ pub struct Settings {
     pub effects_volume: f32,
     /// Level ambience.
     pub ambience_volume: f32,
+    /// Requested audio output device name; `None` uses the system default. Bevy's audio
+    /// backend doesn't expose switching devices at runtime, so this is stored for a future
+    /// engine hook and has no effect yet.
+    pub audio_output_device: Option<String>,
     pub window_mode: DisplayMode,
     /// Window size in windowed mode (logical pixels). Fullscreen uses the monitor's.
     pub window_size: (u32, u32),
     pub vsync: bool,
-    pub shadows: bool,
-    pub ambient_occlusion: bool,
+    /// Caps the frame rate (frames per second); 0 is uncapped.
+    pub frame_rate_cap: u32,
+    /// Preset the other graphics settings were last set from; `Custom` once any of them is
+    /// changed individually. See [`GraphicsPreset::apply`].
+    pub graphics_preset: GraphicsPreset,
+    pub shadow_quality: ShadowQuality,
+    pub anti_aliasing: AntiAliasing,
+    pub ssao_quality: SsaoQuality,
+    pub anisotropic_filtering: Anisotropy,
+    /// Multiplies the resolution the 3D scene renders at, before the HUD and menus (which
+    /// stay at whatever resolution `bevy_ui` draws to the same target). 0.5..2.0.
+    pub render_scale: f32,
     /// Directional sky light (brighter from above than from below) instead of one uniform
     /// ambient colour.
     pub sky_light: bool,
@@ -137,7 +183,25 @@ pub struct Settings {
     pub tone_mapping: ToneMapping,
     /// How far the world fades into the fog.
     pub view_distance: ViewDistance,
-    pub bindings: BTreeMap<Action, Binding>,
+    /// Multiplies the distance at which static, vehicle and soldier meshes switch to a lower
+    /// LOD (`render::statics::update_lod_scales`); independent of `view_distance`, which
+    /// scales draw/cull distance instead.
+    pub lod_detail_scale: f32,
+    /// Multiplies how far undergrowth (grass, small plants) is drawn.
+    pub vegetation_density: f32,
+    /// Scales the particle budget (`effects::simulate`).
+    pub particle_quality: Quality,
+    pub hud_scale: f32,
+    /// Multiplies the minimap's on-screen size.
+    pub minimap_size: f32,
+    pub crosshair_style: CrosshairStyle,
+    pub crosshair_color: [f32; 4],
+    /// Swaps the team colours for a colour-blind friendly pair. Stored; the HUD/minimap/map
+    /// colour constants (`conquest_hud::{FRIENDLY, ENEMY}` and friends) aren't parametrized on
+    /// it yet (see the settings agent's final report for the exact hooks needed).
+    pub colorblind_team_colors: bool,
+    pub bindings: BTreeMap<Action, BindingSet>,
+    pub gamepad: GamepadSettings,
     /// What the menu last started, to offer it again.
     pub last_match: LastMatch,
     /// Servers starred in the server browser.
@@ -151,6 +215,23 @@ pub struct Settings {
     pub content_downloads: ContentDownloads,
     /// Size limit of the content cache in GB; the files used longest ago go first.
     pub content_cache_gb: u32,
+    // --- Lighting (render::lamps, render::environment) ---
+    /// Real-time lights at the level's lamps (night levels, and indoors on day levels): off,
+    /// on, or on with shadows from the nearest few.
+    pub dynamic_lamps: crate::render::lamps::DynamicLamps,
+    /// Levels as made, or night versions of the day levels (applies when a level loads).
+    pub time_of_day: crate::render::environment::TimeOfDay,
+    // --- end lighting ---
+    // --- Online: trusted servers, accounts (content, join, account) ---
+    /// Servers whose content we agreed to download, by their identity key (see `content`).
+    pub trusted_servers: Vec<crate::content::TrustedServer>,
+    /// Ask before downloading from a server whose key isn't trusted yet, even with
+    /// `content_downloads: Always`.
+    pub confirm_new_servers: bool,
+    /// Master server web address for accounts, stats and quick join
+    /// (`https://master.example.com`); none by default (see `account`).
+    pub master_url: Option<String>,
+    // --- end online ---
 }
 
 impl Default for Settings {
@@ -159,88 +240,195 @@ impl Default for Settings {
             player_name: "Player".into(),
             mouse_sensitivity: 1.0,
             invert_mouse_y: false,
+            mouse_smoothing: 0.0,
+            mouse_raw_input: true,
             field_of_view: 75.0,
             master_volume: 1.0,
             effects_volume: 1.0,
             ambience_volume: 1.0,
+            audio_output_device: None,
             window_mode: DisplayMode::Windowed,
             window_size: (1280, 720),
             vsync: false,
-            shadows: true,
-            ambient_occlusion: true,
+            frame_rate_cap: 0,
+            graphics_preset: GraphicsPreset::default(),
+            shadow_quality: ShadowQuality::default(),
+            anti_aliasing: AntiAliasing::default(),
+            ssao_quality: SsaoQuality::default(),
+            anisotropic_filtering: Anisotropy::default(),
+            render_scale: 1.0,
             sky_light: true,
             baked_ao: true,
             bloom: false,
             tone_mapping: ToneMapping::default(),
             view_distance: ViewDistance::default(),
+            lod_detail_scale: 1.0,
+            vegetation_density: 1.0,
+            particle_quality: Quality::default(),
+            hud_scale: 1.0,
+            minimap_size: 1.0,
+            crosshair_style: CrosshairStyle::default(),
+            crosshair_color: [1.0, 1.0, 1.0, 0.85],
+            colorblind_team_colors: false,
             bindings: Action::ALL
                 .iter()
-                .map(|a| (*a, a.default_binding()))
+                .map(|a| (*a, a.default_bindings()))
                 .collect(),
+            gamepad: GamepadSettings::default(),
             last_match: LastMatch::default(),
             favourite_servers: Vec::new(),
             recent_servers: Vec::new(),
             master_server: None,
             content_downloads: ContentDownloads::default(),
             content_cache_gb: 10,
+            dynamic_lamps: Default::default(),
+            time_of_day: Default::default(),
+            trusted_servers: Vec::new(),
+            confirm_new_servers: true,
+            master_url: None,
         }
     }
 }
 
 impl Settings {
-    pub fn binding(&self, action: Action) -> Binding {
-        self.bindings
-            .get(&action)
-            .copied()
-            .unwrap_or(action.default_binding())
+    /// The bindings for `action`, falling back to its defaults for anything missing (an older
+    /// save, or an action added since).
+    pub fn bindings(&self, action: Action) -> BindingSet {
+        let defaults = action.default_bindings();
+        match self.bindings.get(&action) {
+            Some(set) => *set,
+            None => defaults,
+        }
     }
 
-    /// Binds `action`, giving its old binding to whichever action had `binding`.
-    pub fn rebind(&mut self, action: Action, binding: Binding) {
-        let old = self.binding(action);
+    /// The primary binding, for places that only show one (e.g. a short help text).
+    pub fn binding(&self, action: Action) -> Option<Binding> {
+        self.bindings(action).primary
+    }
+
+    /// Binds `action`'s `slot`, giving its old binding to whichever action had it in the same
+    /// slot (so two actions never silently share a key).
+    pub fn rebind(&mut self, action: Action, slot: BindSlot, binding: Binding) {
+        let old = self.bindings(action);
+        if let Some(other) = Action::ALL.iter().find(|a| {
+            **a != action && slot.get(&self.bindings(**a)) == Some(binding)
+        }) {
+            let mut set = self.bindings(*other);
+            slot.set(&mut set, slot.get(&old));
+            self.bindings.insert(*other, set);
+        }
+        let mut set = old;
+        slot.set(&mut set, Some(binding));
+        self.bindings.insert(action, set);
+    }
+
+    /// Binds `action`'s gamepad slot, stealing it from whichever action had it.
+    pub fn rebind_gamepad(&mut self, action: Action, button: GamepadButton) {
         if let Some(other) = Action::ALL
             .iter()
-            .find(|a| **a != action && self.binding(**a) == binding)
+            .find(|a| **a != action && self.bindings(**a).gamepad == Some(button))
         {
-            self.bindings.insert(*other, old);
+            let mut set = self.bindings(*other);
+            set.gamepad = self.bindings(action).gamepad;
+            self.bindings.insert(*other, set);
         }
-        self.bindings.insert(action, binding);
+        let mut set = self.bindings(action);
+        set.gamepad = Some(button);
+        self.bindings.insert(action, set);
+    }
+
+    /// Other actions whose binding collides with `action`'s current bindings, for the bindings
+    /// page's conflict warnings. Rebinding a key, mouse button or gamepad button always steals
+    /// it from the other action first (see `rebind`/`rebind_gamepad`), so conflicts only
+    /// remain across primary/secondary (e.g. one action's secondary is another's primary).
+    pub fn conflicts(&self, action: Action) -> Vec<Action> {
+        let set = self.bindings(action);
+        let keys: Vec<Binding> = [set.primary, set.secondary].into_iter().flatten().collect();
+        Action::ALL
+            .into_iter()
+            .filter(|other| *other != action)
+            .filter(|other| {
+                let o = self.bindings(*other);
+                let o_keys = [o.primary, o.secondary];
+                keys.iter().any(|k| o_keys.contains(&Some(*k)))
+                    || (set.gamepad.is_some() && set.gamepad == o.gamepad)
+            })
+            .collect()
     }
 
     fn fill_missing_bindings(&mut self) {
         for action in Action::ALL {
-            self.bindings
-                .entry(action)
-                .or_insert(action.default_binding());
+            self.bindings.entry(action).or_insert(action.default_bindings());
         }
     }
 
     /// Sun shadows, unless `--no-shadows`.
     pub fn shadows_on(&self, cli: &Cli) -> bool {
-        self.shadows && !cli.no_shadows
+        self.shadow_quality != ShadowQuality::Off && !cli.no_shadows
     }
 
     /// Ambient occlusion, unless `--no-ssao`.
     pub fn ssao_on(&self, cli: &Cli) -> bool {
-        self.ambient_occlusion && !cli.no_ssao
+        self.ssao_quality != SsaoQuality::Off && !cli.no_ssao
     }
 
-    /// Sets a graphics setting by name (for scenarios): `shadows`, `ssao`, `sky_light`,
-    /// `baked_ao`, `bloom` (`on`/`off`) or `tone_mapping` (see [`ToneMapping::parse`]).
+    /// Sets a graphics or gameplay setting by name (for scenarios), e.g.
+    /// `Setting("shadows", "off")`, `Setting("preset", "low")`, `Setting("render_scale",
+    /// "0.75")`, `Setting("tone_mapping", "agx")`.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
         let on = || match value.to_ascii_lowercase().as_str() {
             "on" | "true" | "1" | "yes" => Ok(true),
             "off" | "false" | "0" | "no" => Ok(false),
             _ => Err(format!("setting {key}: expected on or off, got {value}")),
         };
+        let num = || value.parse::<f32>().map_err(|_| format!("setting {key}: expected a number, got {value}"));
         match key {
-            "shadows" => self.shadows = on()?,
-            "ssao" | "ambient_occlusion" => self.ambient_occlusion = on()?,
+            "shadows" => self.shadow_quality = if on()? { ShadowQuality::High } else { ShadowQuality::Off },
+            "shadow_quality" => {
+                self.shadow_quality = ShadowQuality::parse(value).ok_or_else(|| format!("unknown shadow quality {value}"))?
+            }
+            "ssao" | "ambient_occlusion" => self.ssao_quality = if on()? { SsaoQuality::High } else { SsaoQuality::Off },
+            "ssao_quality" => {
+                self.ssao_quality = SsaoQuality::parse(value).ok_or_else(|| format!("unknown SSAO quality {value}"))?
+            }
+            "anti_aliasing" | "aa" => {
+                self.anti_aliasing = AntiAliasing::parse(value).ok_or_else(|| format!("unknown AA mode {value}"))?
+            }
+            "anisotropic_filtering" | "anisotropy" => {
+                self.anisotropic_filtering =
+                    Anisotropy::parse(value).ok_or_else(|| format!("unknown anisotropy {value}"))?
+            }
+            "preset" | "graphics_preset" => {
+                GraphicsPreset::parse(value).ok_or_else(|| format!("unknown preset {value}"))?.apply(self)
+            }
+            "render_scale" => self.render_scale = num()?.clamp(0.5, 2.0),
+            "lod_detail_scale" => self.lod_detail_scale = num()?.clamp(0.2, 2.0),
+            "vegetation_density" => self.vegetation_density = num()?.clamp(0.0, 2.0),
+            "particle_quality" => {
+                self.particle_quality = Quality::parse(value).ok_or_else(|| format!("unknown quality {value}"))?
+            }
+            "frame_rate_cap" => self.frame_rate_cap = num()?.max(0.0) as u32,
             "sky_light" => self.sky_light = on()?,
             "baked_ao" => self.baked_ao = on()?,
             "bloom" => self.bloom = on()?,
             "tone_mapping" => {
                 self.tone_mapping = ToneMapping::parse(value).ok_or_else(|| format!("unknown tone mapping {value}"))?
+            }
+            "view_distance" => {
+                self.view_distance = ViewDistance::parse(value).ok_or_else(|| format!("unknown view distance {value}"))?
+            }
+            "hud_scale" => self.hud_scale = num()?.clamp(0.5, 1.75),
+            "minimap_size" => self.minimap_size = num()?.clamp(0.5, 1.75),
+            "colorblind_team_colors" => self.colorblind_team_colors = on()?,
+            "gamepad_enabled" => self.gamepad.enabled = on()?,
+            // Lighting: `off`, `on` or `shadows`; `level` or `night`.
+            "dynamic_lamps" | "lamps" => {
+                self.dynamic_lamps = crate::render::lamps::DynamicLamps::parse(value)
+                    .ok_or_else(|| format!("setting {key}: expected off, on or shadows, got {value}"))?
+            }
+            "time_of_day" => {
+                self.time_of_day = crate::render::environment::TimeOfDay::parse(value)
+                    .ok_or_else(|| format!("setting {key}: expected level or night, got {value}"))?
             }
             _ => return Err(format!("unknown setting {key}")),
         }
@@ -429,6 +617,390 @@ impl ViewDistance {
             ViewDistance::Extreme => 2.5,
         }
     }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+}
+
+/// Shadow map cascades, resolution and range, from `Off` to `Ultra`. Applied in
+/// `render::environment::shadow_cascades` (cascade count and distance) and here
+/// (`DirectionalLightShadowMap`'s per-cascade texel resolution).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ShadowQuality {
+    Off,
+    Low,
+    Medium,
+    #[default]
+    High,
+    Ultra,
+}
+
+impl ShadowQuality {
+    pub const ALL: [ShadowQuality; 5] = [
+        ShadowQuality::Off,
+        ShadowQuality::Low,
+        ShadowQuality::Medium,
+        ShadowQuality::High,
+        ShadowQuality::Ultra,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ShadowQuality::Off => "Off",
+            ShadowQuality::Low => "Low",
+            ShadowQuality::Medium => "Medium",
+            ShadowQuality::High => "High",
+            ShadowQuality::Ultra => "Ultra",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+
+    /// Cascades (perspective-aliasing bands); unused when `Off`.
+    pub fn cascades(self) -> usize {
+        match self {
+            ShadowQuality::Off | ShadowQuality::Low => 1,
+            ShadowQuality::Medium => 2,
+            ShadowQuality::High => 3,
+            ShadowQuality::Ultra => 4,
+        }
+    }
+
+    /// Multiplies the cascades' maximum distance.
+    pub fn distance_scale(self) -> f32 {
+        match self {
+            ShadowQuality::Off => 1.0,
+            ShadowQuality::Low => 0.6,
+            ShadowQuality::Medium => 0.85,
+            ShadowQuality::High => 1.0,
+            ShadowQuality::Ultra => 1.4,
+        }
+    }
+
+    /// Shadow map texel resolution (`DirectionalLightShadowMap`), a power of two.
+    pub fn map_size(self) -> usize {
+        // Must be a power of two (`DirectionalLightShadowMap`'s requirement).
+        match self {
+            ShadowQuality::Off | ShadowQuality::Low => 1024,
+            ShadowQuality::Medium => 2048,
+            ShadowQuality::High => 2048,
+            ShadowQuality::Ultra => 4096,
+        }
+    }
+}
+
+/// Post-process anti-aliasing. Off leaves Bevy's default MSAA running; the others turn MSAA
+/// off (SMAA and FXAA are MSAA alternatives, TAA needs it off) and add their own pass.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AntiAliasing {
+    #[default]
+    Off,
+    Fxaa,
+    Smaa,
+    Taa,
+}
+
+impl AntiAliasing {
+    pub const ALL: [AntiAliasing; 4] = [AntiAliasing::Off, AntiAliasing::Fxaa, AntiAliasing::Smaa, AntiAliasing::Taa];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AntiAliasing::Off => "Off (MSAA)",
+            AntiAliasing::Fxaa => "FXAA",
+            AntiAliasing::Smaa => "SMAA",
+            AntiAliasing::Taa => "TAA",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| format!("{v:?}").eq_ignore_ascii_case(name))
+    }
+
+    /// MSAA must be off for SMAA, FXAA and TAA (all incompatible with it, and TAA is a
+    /// multi-frame alternative to it).
+    fn needs_msaa_off(self) -> bool {
+        self != AntiAliasing::Off
+    }
+}
+
+/// SSAO quality, wrapping Bevy's [`ScreenSpaceAmbientOcclusionQualityLevel`]; `Off` removes the
+/// component entirely (and needs MSAA on for the view model's cheaper smoothing, as before).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SsaoQuality {
+    Off,
+    Low,
+    Medium,
+    #[default]
+    High,
+    Ultra,
+}
+
+impl SsaoQuality {
+    pub const ALL: [SsaoQuality; 5] = [
+        SsaoQuality::Off,
+        SsaoQuality::Low,
+        SsaoQuality::Medium,
+        SsaoQuality::High,
+        SsaoQuality::Ultra,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SsaoQuality::Off => "Off",
+            SsaoQuality::Low => "Low",
+            SsaoQuality::Medium => "Medium",
+            SsaoQuality::High => "High",
+            SsaoQuality::Ultra => "Ultra",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+
+    fn level(self) -> Option<ScreenSpaceAmbientOcclusionQualityLevel> {
+        match self {
+            SsaoQuality::Off => None,
+            SsaoQuality::Low => Some(ScreenSpaceAmbientOcclusionQualityLevel::Low),
+            SsaoQuality::Medium => Some(ScreenSpaceAmbientOcclusionQualityLevel::Medium),
+            SsaoQuality::High => Some(ScreenSpaceAmbientOcclusionQualityLevel::High),
+            SsaoQuality::Ultra => Some(ScreenSpaceAmbientOcclusionQualityLevel::Ultra),
+        }
+    }
+}
+
+/// Anisotropic texture filtering clamp, applied to every loaded image
+/// (`apply_anisotropy`): ground and walls seen at grazing angles stay sharp.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Anisotropy {
+    Off,
+    X2,
+    X4,
+    X8,
+    #[default]
+    X16,
+}
+
+impl Anisotropy {
+    pub const ALL: [Anisotropy; 5] = [
+        Anisotropy::Off,
+        Anisotropy::X2,
+        Anisotropy::X4,
+        Anisotropy::X8,
+        Anisotropy::X16,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Anisotropy::Off => "Off",
+            Anisotropy::X2 => "2x",
+            Anisotropy::X4 => "4x",
+            Anisotropy::X8 => "8x",
+            Anisotropy::X16 => "16x",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+
+    fn clamp(self) -> u16 {
+        match self {
+            Anisotropy::Off => 1,
+            Anisotropy::X2 => 2,
+            Anisotropy::X4 => 4,
+            Anisotropy::X8 => 8,
+            Anisotropy::X16 => 16,
+        }
+    }
+}
+
+/// A generic Low/Medium/High quality knob (particle budget today).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Quality {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 3] = [Quality::Low, Quality::Medium, Quality::High];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::Low => "Low",
+            Quality::Medium => "Medium",
+            Quality::High => "High",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+
+    /// Multiplier on `effects::MAX_PARTICLES`.
+    pub fn scale(self) -> f32 {
+        match self {
+            Quality::Low => 0.35,
+            Quality::Medium => 0.65,
+            Quality::High => 1.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CrosshairStyle {
+    #[default]
+    Cross,
+    Dot,
+}
+
+impl CrosshairStyle {
+    pub const ALL: [CrosshairStyle; 2] = [CrosshairStyle::Cross, CrosshairStyle::Dot];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CrosshairStyle::Cross => "Cross",
+            CrosshairStyle::Dot => "Dot",
+        }
+    }
+}
+
+/// Presets bundling [`ShadowQuality`], [`AntiAliasing`], [`SsaoQuality`], [`Anisotropy`],
+/// render scale, LOD detail scale, vegetation density, particle quality, bloom and view
+/// distance. `High` is tuned to be a no-op against this engine's previous hardcoded defaults.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GraphicsPreset {
+    Low,
+    Medium,
+    #[default]
+    High,
+    Ultra,
+    /// At least one covered setting was changed individually.
+    Custom,
+}
+
+impl GraphicsPreset {
+    pub const ALL: [GraphicsPreset; 5] = [
+        GraphicsPreset::Low,
+        GraphicsPreset::Medium,
+        GraphicsPreset::High,
+        GraphicsPreset::Ultra,
+        GraphicsPreset::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphicsPreset::Low => "Low",
+            GraphicsPreset::Medium => "Medium",
+            GraphicsPreset::High => "High",
+            GraphicsPreset::Ultra => "Ultra",
+            GraphicsPreset::Custom => "Custom",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
+    }
+
+    /// Applies the preset's values (a no-op for `Custom`).
+    pub fn apply(self, s: &mut Settings) {
+        let (shadow, aa, ssao, aniso, scale, lod, veg, particle, bloom, view) = match self {
+            GraphicsPreset::Low => (
+                ShadowQuality::Low,
+                AntiAliasing::Off,
+                SsaoQuality::Off,
+                Anisotropy::X4,
+                0.85,
+                0.6,
+                0.4,
+                Quality::Low,
+                false,
+                ViewDistance::Short,
+            ),
+            GraphicsPreset::Medium => (
+                ShadowQuality::Medium,
+                AntiAliasing::Fxaa,
+                SsaoQuality::Medium,
+                Anisotropy::X8,
+                1.0,
+                0.85,
+                0.7,
+                Quality::Medium,
+                false,
+                ViewDistance::Normal,
+            ),
+            GraphicsPreset::High => (
+                ShadowQuality::High,
+                AntiAliasing::Off,
+                SsaoQuality::High,
+                Anisotropy::X16,
+                1.0,
+                1.0,
+                1.0,
+                Quality::High,
+                false,
+                ViewDistance::Normal,
+            ),
+            GraphicsPreset::Ultra => (
+                ShadowQuality::Ultra,
+                AntiAliasing::Taa,
+                SsaoQuality::Ultra,
+                Anisotropy::X16,
+                1.0,
+                1.3,
+                1.3,
+                Quality::High,
+                true,
+                ViewDistance::Far,
+            ),
+            GraphicsPreset::Custom => return,
+        };
+        s.shadow_quality = shadow;
+        s.anti_aliasing = aa;
+        s.ssao_quality = ssao;
+        s.anisotropic_filtering = aniso;
+        s.render_scale = scale;
+        s.lod_detail_scale = lod;
+        s.vegetation_density = veg;
+        s.particle_quality = particle;
+        s.bloom = bloom;
+        s.view_distance = view;
+        s.graphics_preset = self;
+    }
+}
+
+/// Gamepad-wide tuning; per-action bindings live in [`Settings::bindings`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct GamepadSettings {
+    pub enabled: bool,
+    /// Multiplier on the base look turn rate.
+    pub look_sensitivity: f32,
+    pub invert_look_y: bool,
+    /// Radius (0..1) of the left stick's dead zone (movement).
+    pub move_deadzone: f32,
+    /// Radius (0..1) of the right stick's dead zone (look/flight).
+    pub look_deadzone: f32,
+    /// Slows the look turn rate near a target in the crosshair; off by default.
+    pub aim_assist: bool,
+}
+
+impl Default for GamepadSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            look_sensitivity: 1.0,
+            invert_look_y: false,
+            move_deadzone: 0.18,
+            look_deadzone: 0.15,
+            aim_assist: false,
+        }
+    }
 }
 
 /// The menu's last choices.
@@ -494,7 +1066,7 @@ impl SavedServer {
 /// Recent servers kept.
 pub const MAX_RECENT_SERVERS: usize = 8;
 
-/// Something a key or mouse button does.
+/// Something a key, mouse button or gamepad button does.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
     MoveForward,
@@ -532,7 +1104,8 @@ pub enum Action {
     NightVision,
     /// Special Forces gas mask on or off.
     GasMask,
-    /// Flying: the stick on the keyboard (the mouse also moves it).
+    /// Flying: the stick on the keyboard (the mouse, or a gamepad's right stick, also moves
+    /// it directly; see `vehicles::fly`).
     PitchUp,
     PitchDown,
     RollLeft,
@@ -541,10 +1114,12 @@ pub enum Action {
     FreeLook,
     /// In a vehicle: decoy flares or smoke grenades.
     Countermeasures,
+    /// In a vehicle: move to this seat (1-based), like F1..F8.
+    Seat(u8),
 }
 
 impl Action {
-    pub const ALL: [Action; 41] = [
+    pub const ALL: [Action; 49] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -586,6 +1161,14 @@ impl Action {
         Action::WeaponSlot(7),
         Action::WeaponSlot(8),
         Action::WeaponSlot(9),
+        Action::Seat(1),
+        Action::Seat(2),
+        Action::Seat(3),
+        Action::Seat(4),
+        Action::Seat(5),
+        Action::Seat(6),
+        Action::Seat(7),
+        Action::Seat(8),
     ];
 
     pub fn label(self) -> String {
@@ -604,7 +1187,7 @@ impl Action {
             Action::FireMode => "Fire mode".into(),
             Action::Use => "Use".into(),
             Action::WeaponSlot(slot) => format!("Weapon slot {slot}"),
-            Action::ThirdPerson => "Third person view".into(),
+            Action::ThirdPerson => "Third person / chase view".into(),
             Action::Deploy => "Deploy screen".into(),
             Action::Scoreboard => "Scoreboard".into(),
             Action::Map => "Map".into(),
@@ -623,6 +1206,7 @@ impl Action {
             Action::RollRight => "Roll right (flying)".into(),
             Action::FreeLook => "Free look (flying)".into(),
             Action::Countermeasures => "Countermeasures (flares, smoke)".into(),
+            Action::Seat(seat) => format!("Vehicle seat {seat}"),
         }
     }
 
@@ -630,57 +1214,84 @@ impl Action {
     pub fn id(self) -> String {
         match self {
             Action::WeaponSlot(slot) => format!("slot{slot}"),
+            Action::Seat(seat) => format!("seat{seat}"),
             other => format!("{other:?}").to_lowercase(),
         }
     }
 
-    pub fn default_binding(self) -> Binding {
+    /// The default primary, secondary and gamepad bindings.
+    pub fn default_bindings(self) -> BindingSet {
         use Binding::{Key, Mouse};
-        match self {
-            Action::MoveForward => Key(KeyCode::KeyW),
-            Action::MoveBack => Key(KeyCode::KeyS),
-            Action::MoveLeft => Key(KeyCode::KeyA),
-            Action::MoveRight => Key(KeyCode::KeyD),
-            Action::Jump => Key(KeyCode::Space),
-            Action::Crouch => Key(KeyCode::ControlLeft),
-            Action::Prone => Key(KeyCode::KeyZ),
-            Action::Sprint => Key(KeyCode::ShiftLeft),
-            Action::Fire => Mouse(MouseButton::Left),
-            Action::Zoom => Mouse(MouseButton::Right),
-            Action::Reload => Key(KeyCode::KeyR),
-            Action::FireMode => Key(KeyCode::KeyB),
-            Action::Use => Key(KeyCode::KeyE),
-            Action::WeaponSlot(slot) => Key(match slot {
-                1 => KeyCode::Digit1,
-                2 => KeyCode::Digit2,
-                3 => KeyCode::Digit3,
-                4 => KeyCode::Digit4,
-                5 => KeyCode::Digit5,
-                6 => KeyCode::Digit6,
-                7 => KeyCode::Digit7,
-                8 => KeyCode::Digit8,
-                _ => KeyCode::Digit9,
-            }),
-            Action::ThirdPerson => Key(KeyCode::KeyV),
-            Action::Deploy => Key(KeyCode::Enter),
-            Action::Scoreboard => Key(KeyCode::Tab),
-            Action::Map => Key(KeyCode::KeyM),
-            Action::MinimapRotation => Key(KeyCode::KeyN),
-            Action::ChatAll => Key(KeyCode::KeyT),
-            Action::ChatTeam => Key(KeyCode::KeyY),
-            Action::ChatSquad => Key(KeyCode::KeyU),
-            Action::GiveUp => Key(KeyCode::KeyX),
-            Action::CommoRose => Key(KeyCode::KeyQ),
-            Action::CommanderScreen => Key(KeyCode::CapsLock),
-            Action::NightVision => Key(KeyCode::KeyL),
-            Action::GasMask => Key(KeyCode::KeyK),
-            Action::PitchUp => Key(KeyCode::ArrowDown),
-            Action::PitchDown => Key(KeyCode::ArrowUp),
-            Action::RollLeft => Key(KeyCode::ArrowLeft),
-            Action::RollRight => Key(KeyCode::ArrowRight),
-            Action::FreeLook => Key(KeyCode::AltLeft),
-            Action::Countermeasures => Key(KeyCode::KeyG),
-        }
+        use GamepadButton::{
+            DPadDown, DPadLeft, DPadRight, DPadUp, East, LeftThumb, LeftTrigger, LeftTrigger2, North,
+            RightThumb, RightTrigger, RightTrigger2, Select, South, Start, West, Z,
+        };
+        let (primary, gamepad): (Option<Binding>, Option<GamepadButton>) = match self {
+            Action::MoveForward => (Some(Key(KeyCode::KeyW)), None),
+            Action::MoveBack => (Some(Key(KeyCode::KeyS)), None),
+            Action::MoveLeft => (Some(Key(KeyCode::KeyA)), None),
+            Action::MoveRight => (Some(Key(KeyCode::KeyD)), None),
+            Action::Jump => (Some(Key(KeyCode::Space)), Some(South)),
+            Action::Crouch => (Some(Key(KeyCode::ControlLeft)), Some(East)),
+            Action::Prone => (Some(Key(KeyCode::KeyZ)), Some(RightThumb)),
+            Action::Sprint => (Some(Key(KeyCode::ShiftLeft)), Some(LeftThumb)),
+            Action::Fire => (Some(Mouse(MouseButton::Left)), Some(RightTrigger2)),
+            Action::Zoom => (Some(Mouse(MouseButton::Right)), Some(LeftTrigger2)),
+            Action::Reload => (Some(Key(KeyCode::KeyR)), Some(West)),
+            Action::FireMode => (Some(Key(KeyCode::KeyB)), Some(DPadRight)),
+            Action::Use => (Some(Key(KeyCode::KeyE)), Some(RightTrigger)),
+            Action::WeaponSlot(slot) => (
+                Some(Key(match slot {
+                    1 => KeyCode::Digit1,
+                    2 => KeyCode::Digit2,
+                    3 => KeyCode::Digit3,
+                    4 => KeyCode::Digit4,
+                    5 => KeyCode::Digit5,
+                    6 => KeyCode::Digit6,
+                    7 => KeyCode::Digit7,
+                    8 => KeyCode::Digit8,
+                    _ => KeyCode::Digit9,
+                })),
+                match slot {
+                    2 => Some(North),
+                    3 => Some(LeftTrigger),
+                    _ => None,
+                },
+            ),
+            Action::ThirdPerson => (Some(Key(KeyCode::KeyV)), Some(Z)),
+            Action::Deploy => (Some(Key(KeyCode::Enter)), Some(Start)),
+            Action::Scoreboard => (Some(Key(KeyCode::Tab)), Some(Select)),
+            Action::Map => (Some(Key(KeyCode::KeyM)), Some(DPadDown)),
+            Action::MinimapRotation => (Some(Key(KeyCode::KeyN)), None),
+            Action::ChatAll => (Some(Key(KeyCode::KeyT)), None),
+            Action::ChatTeam => (Some(Key(KeyCode::KeyY)), None),
+            Action::ChatSquad => (Some(Key(KeyCode::KeyU)), None),
+            Action::GiveUp => (Some(Key(KeyCode::KeyX)), None),
+            Action::CommoRose => (Some(Key(KeyCode::KeyQ)), Some(DPadLeft)),
+            Action::CommanderScreen => (Some(Key(KeyCode::CapsLock)), Some(DPadUp)),
+            Action::NightVision => (Some(Key(KeyCode::KeyL)), None),
+            Action::GasMask => (Some(Key(KeyCode::KeyK)), None),
+            Action::PitchUp => (Some(Key(KeyCode::ArrowDown)), None),
+            Action::PitchDown => (Some(Key(KeyCode::ArrowUp)), None),
+            Action::RollLeft => (Some(Key(KeyCode::ArrowLeft)), None),
+            Action::RollRight => (Some(Key(KeyCode::ArrowRight)), None),
+            Action::FreeLook => (Some(Key(KeyCode::AltLeft)), Some(LeftTrigger)),
+            Action::Countermeasures => (Some(Key(KeyCode::KeyG)), Some(GamepadButton::C)),
+            Action::Seat(seat) => (
+                Some(Key(match seat {
+                    1 => KeyCode::F1,
+                    2 => KeyCode::F2,
+                    3 => KeyCode::F3,
+                    4 => KeyCode::F4,
+                    5 => KeyCode::F5,
+                    6 => KeyCode::F6,
+                    7 => KeyCode::F7,
+                    _ => KeyCode::F8,
+                })),
+                None,
+            ),
+        };
+        BindingSet { primary, secondary: None, gamepad }
     }
 }
 
@@ -733,27 +1344,102 @@ impl Binding {
     }
 }
 
-/// Reads input by [`Action`] through the configured bindings.
+/// A gamepad button's name, Xbox-style (the layout the bindings page shows glyphs/names for).
+pub fn gamepad_button_label(button: GamepadButton) -> String {
+    match button {
+        GamepadButton::South => "A".into(),
+        GamepadButton::East => "B".into(),
+        GamepadButton::North => "Y".into(),
+        GamepadButton::West => "X".into(),
+        GamepadButton::C => "C".into(),
+        GamepadButton::Z => "Z".into(),
+        GamepadButton::LeftTrigger => "LB".into(),
+        GamepadButton::LeftTrigger2 => "LT".into(),
+        GamepadButton::RightTrigger => "RB".into(),
+        GamepadButton::RightTrigger2 => "RT".into(),
+        GamepadButton::Select => "Back".into(),
+        GamepadButton::Start => "Start".into(),
+        GamepadButton::Mode => "Guide".into(),
+        GamepadButton::LeftThumb => "L3".into(),
+        GamepadButton::RightThumb => "R3".into(),
+        GamepadButton::DPadUp => "D-Pad Up".into(),
+        GamepadButton::DPadDown => "D-Pad Down".into(),
+        GamepadButton::DPadLeft => "D-Pad Left".into(),
+        GamepadButton::DPadRight => "D-Pad Right".into(),
+        GamepadButton::Other(n) => format!("Button {n}"),
+    }
+}
+
+/// Which slot of a [`BindingSet`] to read or write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindSlot {
+    Primary,
+    Secondary,
+}
+
+impl BindSlot {
+    fn get(self, set: &BindingSet) -> Option<Binding> {
+        match self {
+            BindSlot::Primary => set.primary,
+            BindSlot::Secondary => set.secondary,
+        }
+    }
+
+    fn set(self, set: &mut BindingSet, binding: Option<Binding>) {
+        match self {
+            BindSlot::Primary => set.primary = binding,
+            BindSlot::Secondary => set.secondary = binding,
+        }
+    }
+}
+
+/// An action's key/mouse and gamepad bindings.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct BindingSet {
+    pub primary: Option<Binding>,
+    pub secondary: Option<Binding>,
+    pub gamepad: Option<GamepadButton>,
+}
+
+/// Reads input by [`Action`] through the configured bindings: primary and secondary key or
+/// mouse binding, and a gamepad button (any connected gamepad, if `gamepad.enabled`).
 #[derive(SystemParam)]
-pub struct Actions<'w> {
+pub struct Actions<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     mouse: Res<'w, ButtonInput<MouseButton>>,
+    gamepads: Query<'w, 's, &'static Gamepad>,
     settings: Res<'w, Settings>,
 }
 
-impl Actions<'_> {
-    pub fn pressed(&self, action: Action) -> bool {
-        match self.settings.binding(action) {
+impl Actions<'_, '_> {
+    fn binding_pressed(&self, binding: Binding) -> bool {
+        match binding {
             Binding::Key(key) => self.keys.pressed(key),
             Binding::Mouse(button) => self.mouse.pressed(button),
         }
     }
 
-    pub fn just_pressed(&self, action: Action) -> bool {
-        match self.settings.binding(action) {
+    fn binding_just_pressed(&self, binding: Binding) -> bool {
+        match binding {
             Binding::Key(key) => self.keys.just_pressed(key),
             Binding::Mouse(button) => self.mouse.just_pressed(button),
         }
+    }
+
+    pub fn pressed(&self, action: Action) -> bool {
+        let set = self.settings.bindings(action);
+        set.primary.is_some_and(|b| self.binding_pressed(b))
+            || set.secondary.is_some_and(|b| self.binding_pressed(b))
+            || (self.settings.gamepad.enabled
+                && set.gamepad.is_some_and(|g| self.gamepads.iter().any(|gp| gp.pressed(g))))
+    }
+
+    pub fn just_pressed(&self, action: Action) -> bool {
+        let set = self.settings.bindings(action);
+        set.primary.is_some_and(|b| self.binding_just_pressed(b))
+            || set.secondary.is_some_and(|b| self.binding_just_pressed(b))
+            || (self.settings.gamepad.enabled
+                && set.gamepad.is_some_and(|g| self.gamepads.iter().any(|gp| gp.just_pressed(g))))
     }
 
     /// 1 while `positive` is held, -1 while `negative` is, 0 for both or neither.
@@ -761,15 +1447,43 @@ impl Actions<'_> {
         self.pressed(positive) as i8 as f32 - self.pressed(negative) as i8 as f32
     }
 
-    /// The label of an action's binding, for help texts.
+    /// The label of an action's primary binding, for help texts.
     pub fn label(&self, action: Action) -> String {
-        self.settings.binding(action).label()
+        self.settings
+            .binding(action)
+            .map(Binding::label)
+            .unwrap_or_else(|| "unbound".into())
     }
+
+    /// The connected gamepad currently being used (most active sticks and buttons), if any
+    /// and gamepads are enabled. Picking "most active" rather than just the first means an
+    /// idle second pad (or a scenario's synthetic one, or vice versa) doesn't shadow the one
+    /// actually being moved.
+    pub fn gamepad(&self) -> Option<&Gamepad> {
+        if !self.settings.gamepad.enabled {
+            return None;
+        }
+        self.gamepads.iter().max_by(|a, b| gamepad_activity(a).total_cmp(&gamepad_activity(b)))
+    }
+
+    /// The gamepad tuning settings, for systems that would otherwise need their own `Res<Settings>`
+    /// just for this (Bevy systems top out at 16 parameters).
+    pub fn gamepad_settings(&self) -> GamepadSettings {
+        self.settings.gamepad
+    }
+}
+
+/// How much a gamepad is currently being moved: both sticks' length plus the number of
+/// digitally pressed buttons (triggers included). Used to pick which connected gamepad to
+/// read from when more than one is present.
+pub fn gamepad_activity(gamepad: &Gamepad) -> f32 {
+    gamepad.left_stick().length() + gamepad.right_stick().length() + gamepad.get_pressed().count() as f32
 }
 
 fn apply_look(settings: Res<Settings>, mut look: ResMut<LookState>) {
     look.sensitivity = BASE_SENSITIVITY * settings.mouse_sensitivity.clamp(0.05, 10.0);
     look.invert_y = settings.invert_mouse_y;
+    look.smoothing = settings.mouse_smoothing.clamp(0.0, 0.95);
 }
 
 /// Master volume as Bevy's global volume, the others as the audio mix (`audio` applies both
@@ -814,14 +1528,18 @@ fn apply_window(
     }
 }
 
-/// Shadows on the sun and ambient occlusion on the camera, when the settings change or a
-/// level adds a new sun.
+/// Shadows and their quality on the sun, ambient occlusion and anti-aliasing on the camera,
+/// when the settings change or a level adds a new sun.
+#[allow(clippy::type_complexity)]
 fn apply_graphics(
     mut commands: Commands,
     settings: Res<Settings>,
     cli: Res<Cli>,
     mut suns: Query<(Ref<Sun>, &mut DirectionalLight)>,
-    cameras: Query<(Entity, Has<ScreenSpaceAmbientOcclusion>), With<PlayerCamera>>,
+    cameras: Query<
+        (Entity, Has<ScreenSpaceAmbientOcclusion>, Has<Fxaa>, Has<Smaa>, Has<TemporalAntiAliasing>),
+        With<PlayerCamera>,
+    >,
 ) {
     let changed = settings.is_changed();
     let shadows = settings.shadows_on(&cli);
@@ -833,24 +1551,102 @@ fn apply_graphics(
     if !changed {
         return;
     }
+    commands.insert_resource(DirectionalLightShadowMap { size: settings.shadow_quality.map_size() });
     let ssao = settings.ssao_on(&cli);
-    for (camera, has_ssao) in &cameras {
+    let msaa_off = ssao || settings.anti_aliasing.needs_msaa_off();
+    for (camera, has_ssao, has_fxaa, has_smaa, has_taa) in &cameras {
+        let mut entity = commands.entity(camera);
         match (ssao, has_ssao) {
-            // SSAO needs MSAA off; the view model camera smooths the final image then.
-            (true, false) => {
-                commands
-                    .entity(camera)
-                    .insert((ScreenSpaceAmbientOcclusion::default(), Msaa::Off));
+            (true, _) => {
+                entity.insert(ScreenSpaceAmbientOcclusion {
+                    quality_level: settings.ssao_quality.level().unwrap_or_default(),
+                    ..default()
+                });
             }
             (false, true) => {
-                commands
-                    .entity(camera)
-                    .remove::<ScreenSpaceAmbientOcclusion>()
-                    .insert(Msaa::default());
+                entity.remove::<ScreenSpaceAmbientOcclusion>();
             }
             _ => {}
         }
+        entity.insert(if msaa_off { Msaa::Off } else { Msaa::default() });
+        match settings.anti_aliasing {
+            AntiAliasing::Off => {
+                entity.remove::<(Fxaa, Smaa, TemporalAntiAliasing)>();
+            }
+            AntiAliasing::Fxaa => {
+                if !has_fxaa {
+                    entity.remove::<(Smaa, TemporalAntiAliasing)>().insert(Fxaa::default());
+                }
+            }
+            AntiAliasing::Smaa => {
+                if !has_smaa {
+                    entity
+                        .remove::<(Fxaa, TemporalAntiAliasing)>()
+                        .insert(Smaa { preset: SmaaPreset::High });
+                }
+            }
+            AntiAliasing::Taa => {
+                if !has_taa {
+                    entity.remove::<(Fxaa, Smaa)>().insert(TemporalAntiAliasing::default());
+                }
+            }
+        }
     }
+}
+
+/// Overrides every loaded (and newly loading) image's anisotropic filter clamp to match the
+/// setting; `render::materials::default_sampler` still sets the loader's own default (16x, for
+/// BF2 ground and wall textures seen at grazing angles), so this only has to lower it for
+/// lighter presets and correct new images as they arrive.
+fn apply_anisotropy(
+    settings: Res<Settings>,
+    mut images: ResMut<Assets<Image>>,
+    mut events: MessageReader<AssetEvent<Image>>,
+) {
+    let mut targets: Vec<AssetId<Image>> = events
+        .read()
+        .filter_map(|event| match event {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    if settings.is_changed() {
+        targets.extend(images.ids());
+    }
+    if targets.is_empty() {
+        return;
+    }
+    let clamp = settings.anisotropic_filtering.clamp();
+    targets.sort_unstable();
+    targets.dedup();
+    for id in targets {
+        let Some(mut image) = images.get_mut(id) else { continue };
+        let mut descriptor = match &image.sampler {
+            ImageSampler::Descriptor(d) => d.clone(),
+            ImageSampler::Default => ImageSamplerDescriptor::linear(),
+        };
+        if descriptor.anisotropy_clamp != clamp {
+            descriptor.anisotropy_clamp = clamp;
+            image.sampler = ImageSampler::Descriptor(descriptor);
+        }
+    }
+}
+
+/// Sleeps out the rest of the frame's budget when a frame rate cap is set. A simple main-world
+/// throttle (Bevy has no built-in frame limiter); not exact, but keeps a laptop from running
+/// flat out for no visual benefit.
+fn apply_frame_cap(settings: Res<Settings>, mut last: Local<Option<std::time::Instant>>) {
+    let now = std::time::Instant::now();
+    if let Some(prev) = *last
+        && settings.frame_rate_cap > 0
+    {
+        let target = std::time::Duration::from_secs_f64(1.0 / settings.frame_rate_cap as f64);
+        let elapsed = now.duration_since(prev);
+        if elapsed < target {
+            std::thread::sleep(target - elapsed);
+        }
+    }
+    *last = Some(std::time::Instant::now());
 }
 
 /// Writes the settings half a second after the last change.

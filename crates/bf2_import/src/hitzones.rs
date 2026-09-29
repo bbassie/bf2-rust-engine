@@ -34,19 +34,19 @@ struct StanceClips {
     rifle: Option<Animation>,
 }
 
-fn read_clip(vfs: &Vfs, path: &str) -> Option<Animation> {
-    Animation::parse(&vfs.read(path).ok()?)
+fn read_clip(vfs: &Vfs, path: &str, skeleton: &Skeleton) -> Option<Animation> {
+    Animation::parse(&vfs.read(path).ok()?, Some(skeleton))
         .map_err(|e| log::warn!("{path}: {e}"))
         .ok()
 }
 
 /// The first rifle's third-person clip ending in `_{state}.baf`.
-fn rifle_clip(vfs: &Vfs, state: &str) -> Option<Animation> {
+fn rifle_clip(vfs: &Vfs, state: &str, skeleton: &Skeleton) -> Option<Animation> {
     let suffix = format!("_{state}.baf");
     RIFLES.iter().find_map(|rifle| {
         let dir = format!("objects/weapons/handheld/{rifle}/animations/3p/");
         let path = vfs.list(&dir).find(|p| p.ends_with(&suffix))?.to_string();
-        read_clip(vfs, &path)
+        read_clip(vfs, &path, skeleton)
     })
 }
 
@@ -97,8 +97,8 @@ pub fn hit_zones(interp: &mut Interpreter, vfs: &Vfs, skeleton: &Skeleton, name:
         .iter()
         .map(|state| {
             let clips = StanceClips {
-                body: read_clip(vfs, &format!("{BODY_CLIPS}3p_{state}.baf")),
-                rifle: rifle_clip(vfs, state),
+                body: read_clip(vfs, &format!("{BODY_CLIPS}3p_{state}.baf"), skeleton),
+                rifle: rifle_clip(vfs, state, skeleton),
             };
             pose(skeleton, &clips)
         })

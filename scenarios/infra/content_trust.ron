@@ -1,0 +1,23 @@
+// A server whose key this client hasn't trusted asks first, even with downloads on Always:
+// "New server" with its name, address and key fingerprint. Trusting it downloads, joins and
+// remembers the key in the settings. Needs downloads (an empty cache and no local copy of the
+// server's mods) and `--content` given, so the question isn't skipped like in other scripted runs:
+//   server --level sample_valley --port 29300 --identity <dir>/key-a.key
+//   client --connect 127.0.0.1 --port 29300 --mods <empty dir> --content-cache <empty dir>
+//          --settings <dir>/settings.ron --content always --scenario scenarios/infra/content_trust.ron
+// Run it again against a server with another key (`--identity <dir>/key-b.key`) and a fresh
+// cache: it asks again and says the address was trusted with another key.
+(
+    steps: [
+        ExpectLog(", new server", 60.0),
+        Wait(1.0),
+        Screenshot("new_server"),
+        Click("content:download"),
+        ExpectLog("content: trusting", 5.0),
+        ExpectLog("content verified by the server", 90.0),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("joined"),
+        Quit,
+    ],
+)

@@ -26,10 +26,11 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | `combat/` | Grenades, launchers, explosives, hit zones, lag compensation, destruction, effects, SF gadgets |
 | `commander/` | Commander screen and assets, commo rose and spotting, squads |
 | `conquest/` | Flags, capture, HUD, deploy screen, minimap and big map, co-op |
-| `infra/` | Chat, admin, stats, server browser, content download, soak client, the sample mod |
+| `infra/` | Chat, admin, stats, server browser, content download and the server's content check (trust, repair, refusal, map change), accounts on ranked servers, soak client, the sample mod |
 | `lighting/` | Per-map lighting checks and A/B runs, tonemapping, materials |
 | `lod/` | Static, vehicle and soldier levels of detail |
 | `menu/` | Main menu, hosting and joining, settings |
+| `modes/` | Rush (arming a charge, HUD, maps, deploy screen), Breakthrough (sectors, locked flags), the level page's modes |
 | `movement/` | Soldier movement, ladders, ropes, stamina, roadkill, carrier ladders |
 | `terrain/` | Terrain, undergrowth, trees, water, horizon, view distance |
 | `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures |

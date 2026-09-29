@@ -17,8 +17,27 @@
 
 struct SkyParams {
     // x: height of the view direction (sine of the elevation) above which the sky shows
-    // unhazed.
+    // unhazed; y, z: how much of their tint warm and cool colours of the texture keep (1: all,
+    // 0: grey).
     haze: vec4<f32>,
+    // Multiplies the texture (rgb): darkens it for night versions of day levels.
+    color: vec4<f32>,
+}
+
+const LUMA: vec3<f32> = vec3(0.2126, 0.7152, 0.0722);
+
+// The colour's chromaticity raised to a power at equal luminance, `warm` for colours with more
+// red than blue and `cool` for the others (as `scale_tint` in environment.rs does for the
+// level's light colours).
+fn scale_tint(c: vec3<f32>, warm: f32, cool: f32) -> vec3<f32> {
+    let y = dot(c, LUMA);
+    if y <= 1.0e-6 {
+        return c;
+    }
+    let warmth = log(max(c.r, 1.0e-6) / max(c.b, 1.0e-6));
+    let power = mix(cool, warm, clamp(warmth / 0.4, -1.0, 1.0) * 0.5 + 0.5);
+    let chroma = pow(max(c / y, vec3(1.0e-6)), vec3(power));
+    return chroma * (y / max(dot(chroma, LUMA), 1.0e-6));
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var sky_texture: texture_2d<f32>;
@@ -52,7 +71,7 @@ fn vertex(in: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let sky = textureSample(sky_texture, sky_sampler, in.uv).rgb;
+    let sky = scale_tint(textureSample(sky_texture, sky_sampler, in.uv).rgb, params.haze.y, params.haze.z) * params.color.rgb;
     let direction = normalize(in.world_position - view.world_position.xyz);
     let clear = smoothstep(0.0, params.haze.x, direction.y);
 #ifdef DISTANCE_FOG

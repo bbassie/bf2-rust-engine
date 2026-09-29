@@ -44,6 +44,9 @@ pub struct ServerInfo {
     /// What the server shares with joining clients, if anything (see [`crate::content`]).
     #[serde(default)]
     pub content: Option<crate::content::ContentAdvert>,
+    /// Needs an account from a master server (see `game_server::accounts`).
+    #[serde(default)]
+    pub ranked: bool,
 }
 
 pub fn encode_query(token: u64) -> Vec<u8> {
@@ -67,6 +70,24 @@ pub const MASTER_PORT: u16 = 16580;
 /// Server -> master, every [`HEARTBEAT_SECONDS`]: "I'm here".
 pub fn encode_heartbeat(game_port: u16, query_port: u16) -> Vec<u8> {
     [b"BF2R-HB".as_slice(), &game_port.to_le_bytes(), &query_port.to_le_bytes()].concat()
+}
+
+/// Server -> master, every [`HEARTBEAT_SECONDS`], with how full the server is (for the
+/// master's quick join): the plain heartbeat followed by `players u16, max u16, bots u16` and
+/// name, level and mode on a line each (UTF-8). Older masters read only the plain part.
+pub fn encode_heartbeat_with(game_port: u16, query_port: u16, players: u16, max_players: u16, bots: u16, text: &str) -> Vec<u8> {
+    let mut text = text.to_string();
+    while text.len() > 160 {
+        text.pop();
+    }
+    [
+        encode_heartbeat(game_port, query_port).as_slice(),
+        &players.to_le_bytes(),
+        &max_players.to_le_bytes(),
+        &bots.to_le_bytes(),
+        text.as_bytes(),
+    ]
+    .concat()
 }
 
 /// Server -> master when it stops.

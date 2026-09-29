@@ -33,6 +33,7 @@ use game_shared::{
 };
 
 pub mod abilities;
+pub mod accounts;
 pub mod admin;
 pub mod ai;
 pub mod bots;
@@ -44,6 +45,8 @@ pub mod content;
 pub mod coop;
 pub mod discovery;
 pub mod gear;
+pub mod join;
+pub mod modes;
 pub mod radio;
 pub mod rotation;
 pub mod server_config;
@@ -95,6 +98,9 @@ pub struct ServerSettings {
     pub master_server: Option<String>,
     /// What joining clients may download from this server (see [`content`]).
     pub content: content::ContentSettings,
+    /// Optional accounts: a master server whose tickets the server checks, ranked or not
+    /// (see [`accounts`]).
+    pub accounts: accounts::AccountSettings,
 }
 
 impl Default for ServerSettings {
@@ -120,6 +126,7 @@ impl Default for ServerSettings {
             coop: default(),
             master_server: None,
             content: default(),
+            accounts: default(),
         }
     }
 }
@@ -136,7 +143,7 @@ impl Plugin for GameServerPlugin {
             app.add_systems(Startup, move |world: &mut World| start_server(world, settings.clone()));
         }
         app.insert_resource(self.settings.clone().unwrap_or_default())
-            .add_plugins((bots::BotPlugin, combat::CombatPlugin, conquest::ConquestPlugin, nav::NavPlugin, squads::SquadPlugin, vehicles::VehiclesPlugin))
+            .add_plugins((bots::BotPlugin, combat::CombatPlugin, modes::ModesPlugin, nav::NavPlugin, squads::SquadPlugin, vehicles::VehiclesPlugin))
             .add_plugins((destruction::DestructionPlugin, roadkill::RoadkillPlugin, abilities::AbilitiesPlugin, gear::GearPlugin))
             .add_plugins((
                 admin::AdminPlugin,
@@ -148,6 +155,7 @@ impl Plugin for GameServerPlugin {
                 stats::StatsPlugin,
                 content::ContentPlugin,
             ))
+            .add_plugins((join::JoinPlugin, accounts::AccountsPlugin))
             .add_observer(create_client_player)
             .add_observer(remove_client_player)
             .add_systems(
@@ -310,6 +318,9 @@ pub fn start_server(world: &mut World, mut settings: ServerSettings) -> Result<(
     world.insert_resource(settings);
     world.run_system_cached::<(), _, _>(start_networking)?;
     discovery::start(world);
+    // The identity first: the content endpoint signs with it.
+    join::start(world);
+    accounts::start(world);
     content::start(world);
     admin::start(world);
     stats::start(world);
@@ -325,6 +336,8 @@ pub fn stop_server(world: &mut World) {
     admin::stop(world);
     discovery::stop(world);
     content::stop(world);
+    accounts::stop(world);
+    join::stop(world);
     if let Some(mut transport) = world.remove_resource::<NetcodeServerTransport>() {
         if let Some(mut server) = world.get_resource_mut::<RenetServer>() {
             transport.disconnect_all(&mut server);
@@ -355,11 +368,11 @@ pub fn stop_server(world: &mut World) {
 fn create_client_player(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
-    clients: Query<&NetworkId>,
+    clients: Query<(&NetworkId, Option<&join::ClientAccount>)>,
     teams: Query<&Team, With<Player>>,
     settings: Res<ServerSettings>,
 ) {
-    let Ok(network_id) = clients.get(add.entity) else {
+    let Ok((network_id, account)) = clients.get(add.entity) else {
         return;
     };
     // Co-op: all humans on one team.
@@ -371,7 +384,8 @@ fn create_client_player(
     let player = commands
         .spawn((
             Player {
-                name: format!("Player {}", network_id.get() % 10_000),
+                // A verified account's name (see `accounts`), else the hello's.
+                name: account.map_or_else(|| format!("Player {}", network_id.get() % 10_000), |a| a.0.name.clone()),
                 is_bot: false,
             },
             PlayerNetId(network_id.get()),
@@ -381,6 +395,13 @@ fn create_client_player(
             Replicated,
         ))
         .id();
+    if let Some(account) = account {
+        commands.entity(player).insert(game_shared::join::AccountBadge {
+            rank: account.0.rank,
+            rank_name: account.0.rank_name.clone(),
+            rank_short: account.0.rank_short.clone(),
+        });
+    }
     commands.entity(add.entity).insert(ClientPlayer(player));
     info!("client {} joined team {team:?}", network_id.get());
 }
@@ -431,12 +452,13 @@ fn receive_hello(
     mut hellos: MessageReader<FromClient<ClientHello>>,
     clients: Query<&ClientPlayer>,
     host: Option<Res<HostPlayer>>,
-    mut players: Query<&mut Player>,
+    mut players: Query<&mut Player, Without<game_shared::join::AccountBadge>>,
 ) {
     for hello in hellos.read() {
         let Some(entity) = sender_player(hello.client_id, &clients, host.as_deref()) else {
             continue;
         };
+        // Players with a verified account keep its name.
         if let Ok(mut player) = players.get_mut(entity) {
             let name: String = hello.message.name.trim().chars().take(24).collect();
             if !name.is_empty() {
@@ -532,17 +554,18 @@ fn respawn_players(
     time: Res<Time>,
     level: Res<LoadedLevel>,
     armory: Res<Armory>,
-    match_state: Single<(&MatchInfo, Option<&RoundState>)>,
-    control_points: Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules)>,
+    match_state: Single<(&MatchInfo, Option<&RoundState>, Option<&game_shared::modes::ModeState>, Option<&game_shared::conquest::Tickets>)>,
+    control_points: Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules, Option<&game_shared::modes::SpawnBlocked>)>,
     mut players: Query<
         (Entity, &Team, &mut Deployment, Option<&mut RespawnTimer>, Option<&SquadMember>),
-        (With<Player>, Without<Controls>),
+        // Nobody spawns while their client checks its content for a new map (`join`).
+        (With<Player>, Without<Controls>, Without<join::ContentPending>),
     >,
     leaders: Query<(&Team, &SquadMember, &Controls)>,
     // Nobody spawns on a critically wounded leader.
     soldiers: Query<&SoldierMotion, Without<Downed>>,
 ) {
-    let (match_info, round) = *match_state;
+    let (match_info, round, mode, tickets) = *match_state;
     // Where each squad's leader is, for spawning on them.
     let leader_at: HashMap<(Team, u8), (Vec3, f32)> = leaders
         .iter()
@@ -558,7 +581,8 @@ fn respawn_players(
         return;
     }
     for (player, team, mut deployment, timer, squad) in &mut players {
-        if *team == Team::Spectator {
+        // Staged modes: attackers out of tickets don't come back.
+        if *team == Team::Spectator || mode.is_some_and(|m| !m.can_spawn(*team, tickets)) {
             continue;
         }
         let ready = match timer {
@@ -640,14 +664,15 @@ fn pick_spawn(
     match_info: &MatchInfo,
     team: Team,
     deployment: &Deployment,
-    control_points: &Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules)>,
+    control_points: &Query<(&ControlPoint, &FlagState, &conquest::ControlPointRules, Option<&game_shared::modes::SpawnBlocked>)>,
 ) -> Option<(Vec3, f32)> {
     let layout = level.game_mode(&match_info.mode, match_info.size);
     let spawn_points = layout.map(|l| l.spawn_points.as_slice()).unwrap_or_default();
     let held: Vec<(u8, &str)> = control_points
         .iter()
-        .filter(|(_, state, _)| state.owner == team)
-        .map(|(cp, _, rules)| (cp.index, rules.id.as_str()))
+        // Not where the mode closed it to us (enemies at the flag, see `modes::staged`).
+        .filter(|(_, state, _, blocked)| state.owner == team && blocked.is_none_or(|b| b.0 != team))
+        .map(|(cp, _, rules, _)| (cp.index, rules.id.as_str()))
         .collect();
     let at = |ids: &[&str]| -> Vec<_> {
         spawn_points

@@ -196,7 +196,12 @@ Requests from 2026-09-29, in priority order.
   maps
 - Carriers: navigation over the whole ship (catwalks, hangar, deck) so bots use them fully
 - Vehicles: small plants must not stop vehicles; climbing slopes
-- Game modes beyond conquest (e.g. Rush and Breakthrough) that bots can play
+- [x] Game modes beyond conquest that bots play: a mode framework (rules, replicated state,
+  HUD, spawns and bot strategy per mode), Rush (pairs of charges per stage to arm and defuse,
+  attacker tickets refilled per stage) and Breakthrough (sectors of flags), their layouts
+  generated from every level's conquest layouts (hand-made ones in RON take their place),
+  team deathmatch for mods' `gpm_tdm` layouts; modes in the menu, server config, rotation and
+  browser
 - Import of BF2 mods such as AIX 2 (levels, vehicles, weapons)
 - Content verification: the server checks the client's content hashes before it lets a player
   in and sends what is missing or outdated; the client confirms downloads from unknown servers

@@ -7,6 +7,8 @@
 
 # Local settings, and the content cache next to them
 /settings.local.ron
+# A master server login (refresh token) next to a settings file given with --settings
+account.ron
 /cache/
 *.log
 

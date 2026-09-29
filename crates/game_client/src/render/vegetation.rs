@@ -173,6 +173,7 @@ fn load_vegetation(
     level: Res<LoadedLevel>,
     old_chunks: Query<Entity, With<UndergrowthChunk>>,
     asset_server: Res<AssetServer>,
+    settings: Res<crate::settings::Settings>,
 ) {
     commands.remove_resource::<Undergrowth>();
     for chunk in &old_chunks {
@@ -223,7 +224,10 @@ fn load_vegetation(
         lookup[material.id as usize] = Some(i as u8);
     }
     let atlas = asset_server.load(format!("imported://levels/{}/{}", level.desc.name, desc.atlas));
-    let view_distance = (desc.view_distance * DISTANCE_SCALE).min(MAX_DISTANCE);
+    // The `vegetation_density` graphics setting: lower presets draw undergrowth over a
+    // shorter radius, thinning how much of it is visible at once (`stream_undergrowth` keeps
+    // this current as the setting changes live).
+    let view_distance = (desc.view_distance * DISTANCE_SCALE * settings.vegetation_density).min(MAX_DISTANCE);
     commands.insert_resource(Undergrowth {
         data: Arc::new(PlantData {
             desc,
@@ -259,6 +263,9 @@ fn stream_undergrowth(
                 material.params.sky = sky;
             }
         }
+        // The vegetation density setting, live (see `load_vegetation`'s initial value).
+        let wanted = (undergrowth.data.desc.view_distance * DISTANCE_SCALE * settings.vegetation_density).min(MAX_DISTANCE);
+        undergrowth.view_distance = wanted;
     }
     let Ok(camera) = camera.single() else {
         return;

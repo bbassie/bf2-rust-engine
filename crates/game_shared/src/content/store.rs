@@ -196,6 +196,20 @@ impl ContentStore {
         Ok(true)
     }
 
+    /// Puts the stored file `hash` at `relative` in `dir` (a layer of a view), replacing what
+    /// is there: a file the server found different gets its verified copy.
+    pub fn link_into(&self, hash: &str, dir: &Path, relative: &str) -> io::Result<()> {
+        let target = join_checked(dir, relative)?;
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::remove_file(&target) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+            _ => {}
+        }
+        link_or_copy(&self.file(hash), &target).map(|_| ())
+    }
+
     /// Lays out `needed` (`(layer, file)`, every file in the store) as the server's layers
     /// under `servers/<key>/`, reusing the view if it already holds exactly these files.
     pub fn build_view(&self, key: &str, manifest: &Manifest, needed: &[(usize, FileEntry)], levels: &[String]) -> io::Result<MountedContent> {

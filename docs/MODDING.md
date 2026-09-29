@@ -97,7 +97,7 @@ ones:
 | `water` | `height` and optional colours and maps |
 | `environment` | sun direction and colours, fog, view distance, optional sky dome |
 | `statics` | placed object templates: `{"template": "name", "position": (x, y, z), "rotation": (x, y, z, w), "scale": (1, 1, 1)}` |
-| `game_modes` | layouts: `mode` (`gpm_cq`, `gpm_coop`), `size` (16/32/64), `control_points`, `spawn_points`, `vehicle_spawners`, extra `statics` |
+| `game_modes` | layouts: `mode` (`gpm_cq`, `gpm_coop`, `gpm_rush`, `gpm_breakthrough`, `gpm_tdm`), `size` (16/32/64), `control_points`, `spawn_points`, `vehicle_spawners`, extra `statics`; `staged` for Rush and Breakthrough (see [Game mode layouts](#game-mode-layouts)) |
 | `teams` | two teams: `name`, `kits` (7 slots of `(kit, soldier)`), `tickets` per size, `ticket_loss_per_minute`, `language`, `voice` |
 | `minimap` | top-down image (DDS or PNG) covering the terrain, north up, relative to the imported root |
 | `flag_models` | flag pole and flag meshes for control points |
@@ -111,6 +111,80 @@ both (see `game_server::coop`).
 Bots need nothing extra. The server builds their navigation grid from the terrain and the
 collision meshes, and their strategy from the control points. An optional
 `levels/<name>/ai.ron` adds BF2-style strategic areas (see `game_data::ai`).
+
+### Game mode layouts
+
+Rush (`gpm_rush`) and Breakthrough (`gpm_breakthrough`) are attack/defend modes played in
+stages (see `game_data::modes` and ARCHITECTURE.md, "Game modes"). A level needs nothing for
+them: when it loads, the game makes a Rush and a Breakthrough layout from every conquest
+layout it has (the attackers are the side holding fewer flags at the start; the flags between
+the bases are grouped into stages in the order they are fought over; two charges per Rush
+stage are placed beside its flags and later moved onto walkable ground). To see what it made,
+run `cargo test -p game_data generated_layouts -- --ignored --nocapture` (all imported levels,
+or `LEVELS=strike_at_karkand,...`).
+
+To make your own, write the layout by hand. It replaces the generated one of the same mode
+and size. Either put it in the level's `game_modes`, or, for a level you don't own (an
+imported one), in `levels/<name>/modes.ron` in a mod: its layouts replace the level's of the
+same mode and size or add to them, and the mod doesn't touch `level.ron`. A layout
+`based_on` another takes the control points, spawn points, vehicle spawners and objects it
+doesn't list from that one, so it holds nothing but its own stages (and no EA data):
+
+```ron
+// mods/my_rush/levels/strike_at_karkand/modes.ron
+(
+    game_modes: [
+        (
+            mode: "gpm_rush",
+            size: 32,
+            based_on: Some((mode: "gpm_cq", size: 32)),
+            staged: Some((
+                attacker: 2,                 // the team attacking: 1 or 2
+                tickets: 120.0,              // at the start and after every stage taken
+                arm_seconds: 4.0,            // optional: holding use to arm, to defuse,
+                defuse_seconds: 6.0,         // and the fuse of an armed charge
+                fuse_seconds: 30.0,
+                stages: [
+                    (
+                        name: "The Hotel",
+                        charges: [
+                            (name: "A", position: (-205.0, 156.0, -13.0), yaw: 180.0),
+                            (name: "B", position: (-185.0, 156.0, -16.0), yaw: 180.0,
+                             template: Some("woodencrate_destructible_tools")),
+                        ],
+                        // Control point ids: who spawns where during this stage (points in
+                        // neither list are neutral; nothing is captured in the Rush).
+                        attacker_spawns: ["305"],
+                        defender_spawns: ["302", "306", "307"],
+                    ),
+                    // ... more stages; the attackers win by destroying the last.
+                ],
+            )),
+        ),
+        (
+            mode: "gpm_breakthrough",
+            size: 32,
+            based_on: Some((mode: "gpm_cq", size: 32)),
+            staged: Some((
+                attacker: 2,
+                tickets: 170.0,
+                stages: [
+                    // A sector: its control points (ids), all of which the attackers must
+                    // hold at once. Spawns follow who holds the flags.
+                    (name: "Old Town", control_points: ["301", "302"]),
+                    (name: "Market", control_points: ["306", "307"]),
+                ],
+            )),
+        ),
+    ],
+)
+```
+
+Charges are placed exactly where a hand-made layout says (`approximate: true` lets the server
+move one onto walkable ground nearby). `yaw` is in degrees, counter-clockwise from north seen
+from above; `template` names any object template (`templates/<name>.ron`), BF2's
+`xp1_generator` by default (a marker box of the game's own if there is none). Team deathmatch
+(`gpm_tdm`) layouts are ordinary layouts: their control points are where each side spawns.
 
 ### Objects (templates)
 
@@ -244,6 +318,8 @@ game reads), never code, and every file is checked against its hash before it is
 | what is shared | `content: Off` / `Mods` / `All` | `--content off\|mods\|all` | `Mods` |
 | download host | `download_url: "https://..."` | `--download-url <url>` | none |
 | endpoint port (TCP) | `content_port: 16567` | `--content-port <port>` | the game port |
+| time to get the content right | `content_sync_timeout: 600` | | 600 s |
+| identity key | `identity_file: "identity.key"` | `--identity <file>` | `identity.key` in the data folder |
 
 - **`Mods`** shares every enabled mod (`mods/<name>/`). **`All`** also shares the imported
   BF2 assets. **`Off`** shares nothing; clients then need the server's mods themselves.
@@ -262,7 +338,7 @@ game reads), never code, and every file is checked against its hash before it is
   server works out which files each level uses from the references in the data, so a
   client that joins a BF2 map downloads that map and what it uses (about 0.5 GB with `All`),
   not the whole import (about 4 GB). If an admin changes to a map outside the rotation,
-  clients briefly rejoin to fetch its files.
+  clients fetch its files and briefly rejoin.
 - Files are hashed (BLAKE3) when the server starts. The hashes and the levels' files are
   remembered (`content-index.txt`, `content-levels.txt` in the server's data folder,
   `%APPDATA%\bf2-rust-engine\server` on Windows), so only the first start with `All` takes
@@ -273,6 +349,42 @@ game reads), never code, and every file is checked against its hash before it is
   and fall back to the server. Export again when the content changes (unchanged files are
   skipped).
 - Listen servers (Host in the menu) share their mods the same way.
+- **The server's identity.** On its first start a server makes an Ed25519 key,
+  `identity.key` in its data folder (`--identity` or `identity_file` put it elsewhere).
+  Players see its fingerprint (`3f2a 91bc ...`, also in the server's log) and confirm the
+  first download from it. Back the file up and keep it private: a server with a new key is
+  a new server to every player, who is asked again.
+
+### The server checks what players have
+
+The server is in charge of what its players load. When a player joins, and again on every
+map change, it compares the player's files for the level with its own, and keeps the player
+out of the match (no player on joining, no spawning after a map change) until they match:
+
+1. The server tells the client the level and the id of its manifest, and proves who it is
+   (it signs the client's random nonce with its key).
+2. The client hashes the file its game would load for each of the level's **required files**
+   and sends a digest of the list.
+3. If the digest differs, the server asks for the per-file hashes, and answers with the
+   files that differ. The client downloads them again (from the server or its download
+   URL, checked against their hash) and reports again.
+4. Once they match, the player is in. A player whose files still differ after 3 downloads,
+   who declines to download (downloads set to *Never*), or who doesn't match within
+   `content_sync_timeout` is kicked with the reason.
+
+The required files are the files of the manifest the level needs, one per path (the one of
+the highest priority layer, which is what the game loads). Only what the server actually
+shares is checked:
+
+| `content` | checked | not checked |
+|---|---|---|
+| `Off` | nothing: players join with their own content, as they have it | everything |
+| `Mods` | the mods' files the level needs (every mod's common files, the level's own) | the imported BF2 assets: every player uses their own import |
+| `All` | the mods' and the imported files the level needs | files of other levels |
+
+This catches outdated, damaged and locally edited files. It can't stop a modified game,
+which can report whatever it likes; the checks that matter for cheating stay on the server
+(movement, hits, damage).
 
 ### For players
 
@@ -283,6 +395,18 @@ game reads), never code, and every file is checked against its hash before it is
   *Ask* (default), *Always* or *Never* (join with your own content only).
   `client --content always|ask|never` overrides it for one run; scenarios and screenshots
   download without asking.
+- **New servers.** The first download from a server whose key you haven't trusted asks
+  first, even with *Always*: **New server** with the server's name, address and key
+  fingerprint, and *Trust and download*. Trusting remembers the key, so the next time only
+  the usual question (or none, with *Always*) comes up. A server that shows up with another
+  key asks again, and says so if you trusted its address with a different key before.
+  Settings > Game lists the **trusted servers**, forgets one or all, and has **New servers**
+  (on by default) to switch the question off.
+- After you connect, the server checks your files for the level (see
+  [The server checks what players have](#the-server-checks-what-players-have)); the loading
+  screen says so. If it finds files that differ from its own, you get *Download them again?*
+  (nothing to confirm with *Always* and a trusted server); on a map change the game then
+  rejoins. With *Never* you are told why you can't play there.
 - Files you already have count: a file in your own import or mods with the same hash isn't
   downloaded. If you have Battlefield 2 imported yourself, a server that shares everything
   only costs you its mods.
@@ -300,6 +424,126 @@ game reads), never code, and every file is checked against its hash before it is
   reads, at checked relative paths, of the listed size and hash. Sounds must decode.
   Nothing downloaded is ever run.
 
+## Accounts, stats and ranks (optional)
+
+A master server (`crates/master_server`, binary `master`) can keep accounts, career stats and
+ranks, list servers and find one to join. It is always optional: playing on a LAN, hosting,
+and every server that isn't *ranked* work without it and without an account.
+
+### For players
+
+- **Account** in the main menu: enter the master server's address (`https://...`, stored as
+  `master_url` in the settings), then log in or register (name, password, optional email).
+  Logged in, the page shows your rank, the XP to the next one and your career stats. The
+  same account logs in on the master's web pages (leaderboards, profiles).
+- The game keeps a **refresh token**, never your password, in `account.ron` in the config
+  folder (`%APPDATA%\bf2-rust-engine` on Windows; next to `--settings` if given). *Log out*
+  revokes it on the master and deletes it.
+- Joining a server that takes accounts, the game asks the master for a **ticket** for that
+  server (after the server proved its identity). A ticket works on that one server, once,
+  for a few minutes. **Ranked** servers need one: log in to play there. On other servers it
+  only shows your account name and rank (the scoreboard puts the rank before your name).
+- **Quick join** (Join page) asks the master for servers with free slots (only unranked ones
+  when you are logged out), pings them and joins the closest. Without a master server it
+  joins the closest server with free slots the Join page found on this machine or the LAN.
+
+### For server admins
+
+| setting | config file | command line |
+|---|---|---|
+| master's web address | `master_url: "https://master.example.com"` | `--master-url <url>` |
+| master's public key | `master_key: "<64 hex digits>"` | (default: fetched once from `master_url` and pinned in `master-keys.txt` in the data folder) |
+| ranked | `ranked: true` | `--ranked` |
+| API key (ranked) | `master_api_key: "bf2r_..."` | `--api-key <key>` |
+| region (quick join) | `region: "eu"` | `--region <name>` |
+| server list (UDP) | `master_server: "master.example.com"` | `--master <host[:port]>` |
+
+- **Unranked** (the default): leave it all out. With `master_url` set, the server checks the
+  tickets players offer (offline, with the master's key) and shows their account name and
+  rank; anyone can still join.
+- **Ranked**: the master's admin runs `master add-server --name "My server"`, which prints
+  an API key once. Put it in the config with `ranked: true` and `master_url`. The server then
+  requires accounts, sends the master a heartbeat every 30 s (so it is listed as ranked,
+  with its region) and reports the stats of its verified players when a round ends: score,
+  kills, deaths, captures, time, win or loss, seconds per kit and vehicle, kills per
+  weapon. The master only counts players who got a ticket for this server lately, and each
+  round once.
+- `master_server` (UDP) announces any server to the master's server list, ranked or not;
+  it is what the in-game browser reads.
+
+### Running a master server
+
+Build it on the machine that runs it (it needs nothing but a Rust toolchain; SQLite is
+built in):
+
+```text
+cargo build --release -p master_server        # target/release/master
+master --config master.ron                    # see crates/master_server/src/config.rs
+master add-server --name "My server"          # a ranked server's API key (shown once)
+master list-servers
+master remove-server 3                        # its API key stops working
+master set-password alice                     # reads the new password from standard input
+```
+
+It listens on UDP 16580 (server list) and HTTP 16581 (web pages and API), on 127.0.0.1 by
+default. The data folder holds `master.sqlite` (accounts, stats) and `master.key` (the key
+that signs tokens, made on the first start). **Back up both**; game servers pin the key, so
+a new key means every ranked server has to forget the old one (delete its line in
+`master-keys.txt`).
+
+**Production needs TLS**: passwords and tokens must not cross the internet in the clear.
+Run the master on 127.0.0.1 behind a reverse proxy that terminates HTTPS, set
+`public_url: "https://master.example.com"` (cookies are then `Secure`) and
+`trust_proxy: true` (rate limits see the players' addresses from `X-Forwarded-For`). On a
+Debian machine, for example:
+
+```text
+# /etc/systemd/system/bf2-master.service
+[Unit]
+Description=BF2 Rust master server
+After=network-online.target
+
+[Service]
+User=bf2master
+ExecStart=/opt/bf2-master/master --config /etc/bf2-master/master.ron
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bf2-master
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```text
+# /etc/caddy/Caddyfile (Caddy gets and renews the certificate itself)
+master.example.com {
+    reverse_proxy 127.0.0.1:16581
+}
+```
+
+With `udp_bind: "0.0.0.0:16580"` in `master.ron` for the server list, open UDP 16580 and
+TCP 443 in the firewall; keep 16581 closed. `sudo useradd --system bf2master`, create
+`/var/lib/bf2-master` owned by it, `systemctl enable --now bf2-master`. nginx works the same
+way (`proxy_pass http://127.0.0.1:16581;` with `proxy_set_header X-Forwarded-For
+$proxy_add_x_forwarded_for;`).
+
+**Security**: passwords are hashed with Argon2id; refresh tokens, web sessions and API keys
+are stored as hashes; session tokens last 15 minutes, tickets 5, refresh tokens 30 days
+(rotated on use); failed logins are limited per address and per name (429 after too many)
+and registrations per address; names, passwords, emails and stats reports are validated;
+the web pages escape everything and send a strict Content-Security-Policy.
+
+**Web pages**: `/` (overview), `/leaderboard`, `/players/<name>`, `/servers`, `/ranks`,
+`/login`, `/register`. **API** for the game: see `game_auth::api` (`/api/v1/login`,
+`/refresh`, `/me`, `/ticket`, `/quickjoin`, `/servers`, ...).
+
+**XP and ranks**: XP comes from ranked rounds: by default 1 per point of score, 0.5 per
+minute played and 10 for a win, at most 5000 a round; BF2's ranks from Private (0) to
+General (250 000). Change both in `master.ron` (`progression: (xp_per_score: ..., ranks:
+[(name: "Private", short: "Pvt", xp: 0), ...])`); ranks follow from the XP, so a new table
+applies to everyone at once.
+
 ## Testing a mod
 
 - `client --level my_level` starts it directly. Use `--mods <dir>` for mods kept elsewhere.
@@ -308,3 +552,69 @@ game reads), never code, and every file is checked against its hash before it is
 - Scenarios (`scenarios/infra/mod_sample.ron`) take screenshots without anyone at the keyboard.
 - The log says which mods are on, and names every file that fails to parse (patches
   included) with the reason.
+
+## Importing a BF2 mod (AIX 2 and similar)
+
+Don't confuse this with the mods above: a **BF2 mod** (`mods/AIX2` inside your Battlefield 2
+install, next to `mods/bf2`) is EA/community content `bf2-import` converts from; a **mod**
+above (`mods/aix2` in this project, next to `mods/sample`) is where the converted result goes.
+Importing a BF2 mod produces one of our own mods, and the same rules apply: it never touches
+`imported/`, and the game layers it on top by the usual priority.
+
+A BF2 mod ships its own levels and, often, its own versions of shared objects, weapons, kits
+and vehicles under the same BF2 names the base game uses (an AIX 2 `usrif_m4` is not the
+vanilla `usrif_m4`). Importing it into `imported/` directly, or into a mod enabled alongside
+vanilla levels, would let those silently replace the vanilla ones everywhere, not just on the
+mod's own levels. Two things keep that from happening:
+
+1. **Its own output root.** Point `--out` at the mod's own folder under this project's `mods/`
+   (`--out mods/aix2`), never at `imported/`. `bf2-import` writes a complete tree there
+   (`levels/`, `templates/`, `objects/`, `weapons/`, `kits/`, `vehicles/`, `soldiers/`) exactly
+   like `imported/`'s own layout, plus a `mod.ron` (write one by hand, `priority` high enough
+   to beat `imported/` — any positive number does, since the game already checks mods before
+   `imported/`). `game_shared::mods::discover` and `GamePaths` then find it like any other mod;
+   no runtime code needed for this part.
+2. **`--namespace` and `--bf2-mod`.** `bf2-import --bf2 <install> --out mods/aix2 level --all
+   --bf2-mod AIX2 --namespace aix2 --mod-title "AIX 2"` imports only that BF2 mod's levels
+   (`--bf2-mod`, also scoping which mod's soldier bodies get written, so vanilla ones aren't
+   duplicated into `mods/aix2/soldiers/`), and writes each one as `levels/aix2_<name>/` with
+   `display_name` prefixed `AIX 2: ` (`--namespace`/`--mod-title`). This is what stops a BF2
+   mod's level from colliding with a vanilla one of the same folder name (AIX 2 ships its own
+   `Dalian_plant`, `Dragon_Valley`, `Gulf_of_Oman` and `Sharqi_Peninsula`) and lets the CLI
+   `--level` and the menu name mod levels unambiguously (`game_data::LevelDesc::mod_title`
+   carries "AIX 2" separately from the already-prefixed `display_name`, for a menu that wants
+   to group by it — see `crates/game_client/src/menu/levels.rs`'s `LevelSummary`).
+
+   **What `--namespace` does not yet do**: rename the mod's own shared-name templates,
+   weapons, kits and vehicles (only levels). If the mod is enabled at the same time as vanilla
+   levels are played, any of those it redefines under a vanilla name still wins for every
+   level, not just its own, exactly as any two mods with the same file would. Check what a
+   mod actually redefines (not just what it shares a name with — most shared names turn out
+   byte-identical, since a BF2 mod usually reuses the base game's object library unchanged):
+
+   ```sh
+   for kind in templates weapons kits vehicles soldiers; do
+     for f in $(comm -12 <(ls imported/$kind) <(ls mods/<name>/$kind)); do
+       cmp -s "imported/$kind/$f" "mods/<name>/$kind/$f" || echo "$kind/$f differs"
+     done
+   done
+   ```
+
+   For AIX 2's real 24-level import this found almost nothing: of 622 shared templates, 45
+   weapons, 21 kits, 64 vehicles and 8 soldiers, only two files actually differ —
+   `weapons/nsrif_crossbow.ron` (AIX repurposes the crossbow's `slot` and projectile mesh,
+   apparently for its zipline launcher) and a template with a float rounding difference in
+   the 6th decimal place (not worth caring about). All 8 shared soldier bodies differ only by
+   one *added* animation clip name (`xpak_zipline_hang`, for AIX's zipline), which is additive
+   and harmless on vanilla levels. So for AIX 2 specifically, running it alongside vanilla
+   levels in the same session is safe in practice, with one known exception: `nsrif_crossbow`
+   behaves like AIX's version everywhere while the mod is enabled. Don't assume this holds for
+   every BF2 mod without checking; a total conversion that redoes the base kits/weapons from
+   scratch would show far more diffs, and then a `--mods` directory with only that mod enabled
+   (or a `bf2-import` pass that renames + rewrites references, not yet written) is the safe
+   option.
+3. **Not every folder under `mods/` in a BF2 install is a mod to import.** Some ship
+   non-game tools there (AIX 2's `mods/stats`, its bundled offline stats server) with a
+   `mod.desc` but no `ClientArchives.con`/`ServerArchives.con` to mount; `Bf2Install::mods()`
+   skips those, and one mod's archives failing to mount no longer aborts every other mod's
+   soldier import.

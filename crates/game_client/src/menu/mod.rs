@@ -6,6 +6,7 @@
 //! `start`, `pause:leave`, `tab:graphics`, `toggle:shadows`, ...) so scenarios can press it
 //! with `Click`. A scenario with `menu: true` starts here instead of in a match.
 
+mod account;
 mod browser;
 mod download;
 mod input;
@@ -49,7 +50,10 @@ use crate::{
     deploy::DeployScreen,
     net::{self, ActiveMatch, LocalPlayer, LocalSoldier, MatchNotice, MatchSetup},
     scenario::{ScenarioInput, ScenarioSystems},
-    settings::{Action, Binding, DisplayMode, Settings, ToneMapping, ViewDistance},
+    settings::{
+        Action, Anisotropy, AntiAliasing, BindSlot, Binding, CrosshairStyle, DisplayMode, GraphicsPreset,
+        Quality, Settings, ShadowQuality, SsaoQuality, ToneMapping, ViewDistance,
+    },
 };
 
 use self::{browser::*, input::*, levels::*, loading::*, pages::*, preview::*, widgets::*};
@@ -69,7 +73,7 @@ impl Plugin for MenuPlugin {
             );
         }
         app.insert_resource(compiling)
-            .add_plugins(download::DownloadUiPlugin)
+            .add_plugins((download::DownloadUiPlugin, account::AccountUiPlugin))
             .insert_state(self.start)
             .init_resource::<Menu>()
             .init_resource::<LevelCatalog>()
@@ -88,6 +92,7 @@ impl Plugin for MenuPlugin {
                 Update,
                 (
                     (collect_levels, open_browser, poll_browser),
+                    gamepad_menu_nav,
                     (press_buttons, drag_sliders, sync_text_fields),
                     (sync_pause_overlay, build_pages, build_level_details, build_server_list),
                     (
@@ -147,6 +152,8 @@ pub enum Page {
     Host,
     Join,
     Settings,
+    /// Optional master server account (`account`).
+    Account,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -156,14 +163,16 @@ pub enum SettingsTab {
     Graphics,
     Audio,
     Controls,
+    Gamepad,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [
+    const ALL: [SettingsTab; 5] = [
         SettingsTab::Game,
         SettingsTab::Graphics,
         SettingsTab::Audio,
         SettingsTab::Controls,
+        SettingsTab::Gamepad,
     ];
 
     fn label(self) -> &'static str {
@@ -172,6 +181,7 @@ impl SettingsTab {
             SettingsTab::Graphics => "Graphics",
             SettingsTab::Audio => "Audio",
             SettingsTab::Controls => "Controls",
+            SettingsTab::Gamepad => "Gamepad",
         }
     }
 }
@@ -183,8 +193,10 @@ pub struct Menu {
     tab: SettingsTab,
     /// In game: the Esc menu is open.
     pub paused: bool,
-    /// Waiting for a key or mouse button to bind to this action.
-    rebinding: Option<Action>,
+    /// Waiting for a key or mouse button to bind to this action's slot.
+    rebinding: Option<(Action, BindSlot)>,
+    /// Waiting for a gamepad button to bind to this action.
+    rebinding_gamepad: Option<Action>,
     /// The press that finished rebinding shouldn't also press a button.
     swallow_click: bool,
     /// Match to start once the loading screen has been drawn, and frames to wait for that.
@@ -195,6 +207,10 @@ pub struct Menu {
     submit: bool,
     /// Leave the match at the start of the next frame (see [`leave_when_asked`]).
     leave: bool,
+    /// The button a gamepad has moved focus to, for D-pad/stick menu navigation.
+    gamepad_focus: Option<Entity>,
+    /// Debounces gamepad navigation repeats.
+    nav_cooldown: f32,
 }
 
 const TEXT: Color = Color::srgb(0.95, 0.96, 0.98);
@@ -241,8 +257,21 @@ enum MenuButton {
     WindowSize(u32, u32),
     ViewDistance(ViewDistance),
     ToneMapping(ToneMapping),
-    Rebind(Action),
+    /// Bindings page: start waiting for a key or mouse button for this action's slot.
+    RebindSlot(Action, BindSlot),
+    /// Bindings page: start waiting for a gamepad button for this action.
+    RebindGamepad(Action),
+    /// Bindings page: clears an action's gamepad binding without waiting for a new one.
+    ClearGamepad(Action),
     ResetBindings,
+    Preset(GraphicsPreset),
+    ShadowQuality(ShadowQuality),
+    AntiAliasing(AntiAliasing),
+    SsaoQuality(SsaoQuality),
+    Anisotropy(Anisotropy),
+    ParticleQuality(Quality),
+    CrosshairStyle(CrosshairStyle),
+    FrameCap(u32),
     /// Join page: ask for servers again.
     Refresh,
     /// Join page: pick the listed server at this address and game port.
@@ -277,8 +306,19 @@ impl MenuButton {
             MenuButton::WindowSize(w, h) => format!("size:{w}x{h}"),
             MenuButton::ViewDistance(distance) => format!("view:{}", distance.label().to_lowercase()),
             MenuButton::ToneMapping(t) => format!("tonemap:{}", t.label().to_lowercase().replace(' ', "")),
-            MenuButton::Rebind(action) => format!("bind:{}", action.id()),
+            MenuButton::RebindSlot(action, BindSlot::Primary) => format!("bind:{}", action.id()),
+            MenuButton::RebindSlot(action, BindSlot::Secondary) => format!("bind2:{}", action.id()),
+            MenuButton::RebindGamepad(action) => format!("bindpad:{}", action.id()),
+            MenuButton::ClearGamepad(action) => format!("bindpad:{}:clear", action.id()),
             MenuButton::ResetBindings => "bind:reset".into(),
+            MenuButton::Preset(preset) => format!("preset:{}", preset.label().to_lowercase()),
+            MenuButton::ShadowQuality(q) => format!("shadowquality:{}", q.label().to_lowercase()),
+            MenuButton::AntiAliasing(aa) => format!("aa:{}", format!("{aa:?}").to_lowercase()),
+            MenuButton::SsaoQuality(q) => format!("ssaoquality:{}", q.label().to_lowercase()),
+            MenuButton::Anisotropy(a) => format!("anisotropy:{}", a.label().to_lowercase()),
+            MenuButton::ParticleQuality(q) => format!("particlequality:{}", q.label().to_lowercase()),
+            MenuButton::CrosshairStyle(style) => format!("crosshairstyle:{}", style.label().to_lowercase()),
+            MenuButton::FrameCap(fps) => format!("framecap:{fps}"),
             MenuButton::Refresh => "browser:refresh".into(),
             MenuButton::Server(address, port) => format!("server:{address}:{port}"),
             MenuButton::Favourite(address, port) => format!("favourite:{address}:{port}"),
@@ -309,11 +349,14 @@ enum Toggle {
     Public,
     InvertY,
     VSync,
-    Shadows,
-    Ssao,
     SkyLight,
     BakedAo,
     Bloom,
+    MouseRawInput,
+    ColorblindTeamColors,
+    GamepadEnabled,
+    GamepadInvertY,
+    GamepadAimAssist,
 }
 
 impl Toggle {
@@ -323,11 +366,14 @@ impl Toggle {
             Toggle::Public => "public",
             Toggle::InvertY => "invert_y",
             Toggle::VSync => "vsync",
-            Toggle::Shadows => "shadows",
-            Toggle::Ssao => "ssao",
             Toggle::SkyLight => "sky_light",
             Toggle::BakedAo => "baked_ao",
             Toggle::Bloom => "bloom",
+            Toggle::MouseRawInput => "mouse_raw_input",
+            Toggle::ColorblindTeamColors => "colorblind_team_colors",
+            Toggle::GamepadEnabled => "gamepad_enabled",
+            Toggle::GamepadInvertY => "gamepad_invert_y",
+            Toggle::GamepadAimAssist => "gamepad_aim_assist",
         }
     }
 
@@ -337,11 +383,14 @@ impl Toggle {
             Toggle::Public => settings.last_match.public,
             Toggle::InvertY => settings.invert_mouse_y,
             Toggle::VSync => settings.vsync,
-            Toggle::Shadows => settings.shadows,
-            Toggle::Ssao => settings.ambient_occlusion,
             Toggle::SkyLight => settings.sky_light,
             Toggle::BakedAo => settings.baked_ao,
             Toggle::Bloom => settings.bloom,
+            Toggle::MouseRawInput => settings.mouse_raw_input,
+            Toggle::ColorblindTeamColors => settings.colorblind_team_colors,
+            Toggle::GamepadEnabled => settings.gamepad.enabled,
+            Toggle::GamepadInvertY => settings.gamepad.invert_look_y,
+            Toggle::GamepadAimAssist => settings.gamepad.aim_assist,
         }
     }
 
@@ -351,11 +400,14 @@ impl Toggle {
             Toggle::Public => settings.last_match.public ^= true,
             Toggle::InvertY => settings.invert_mouse_y ^= true,
             Toggle::VSync => settings.vsync ^= true,
-            Toggle::Shadows => settings.shadows ^= true,
-            Toggle::Ssao => settings.ambient_occlusion ^= true,
             Toggle::SkyLight => settings.sky_light ^= true,
             Toggle::BakedAo => settings.baked_ao ^= true,
             Toggle::Bloom => settings.bloom ^= true,
+            Toggle::MouseRawInput => settings.mouse_raw_input ^= true,
+            Toggle::ColorblindTeamColors => settings.colorblind_team_colors ^= true,
+            Toggle::GamepadEnabled => settings.gamepad.enabled ^= true,
+            Toggle::GamepadInvertY => settings.gamepad.invert_look_y ^= true,
+            Toggle::GamepadAimAssist => settings.gamepad.aim_assist ^= true,
         }
     }
 }
@@ -363,22 +415,40 @@ impl Toggle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slider {
     Sensitivity,
+    MouseSmoothing,
     FieldOfView,
     Volume,
     EffectsVolume,
     AmbienceVolume,
     Bots,
+    RenderScale,
+    LodDetailScale,
+    VegetationDensity,
+    HudScale,
+    MinimapSize,
+    GamepadLookSensitivity,
+    GamepadMoveDeadzone,
+    GamepadLookDeadzone,
 }
 
 impl Slider {
     fn id(self) -> &'static str {
         match self {
             Slider::Sensitivity => "sensitivity",
+            Slider::MouseSmoothing => "mouse_smoothing",
             Slider::FieldOfView => "fov",
             Slider::Volume => "volume",
             Slider::EffectsVolume => "effects_volume",
             Slider::AmbienceVolume => "ambience_volume",
             Slider::Bots => "bots",
+            Slider::RenderScale => "render_scale",
+            Slider::LodDetailScale => "lod_detail_scale",
+            Slider::VegetationDensity => "vegetation_density",
+            Slider::HudScale => "hud_scale",
+            Slider::MinimapSize => "minimap_size",
+            Slider::GamepadLookSensitivity => "gamepad_look_sensitivity",
+            Slider::GamepadMoveDeadzone => "gamepad_move_deadzone",
+            Slider::GamepadLookDeadzone => "gamepad_look_deadzone",
         }
     }
 
@@ -386,20 +456,35 @@ impl Slider {
     fn range(self) -> (f32, f32, f32) {
         match self {
             Slider::Sensitivity => (0.1, 4.0, 0.05),
+            Slider::MouseSmoothing => (0.0, 0.9, 0.05),
             Slider::FieldOfView => (60.0, 100.0, 1.0),
             Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => (0.0, 1.0, 0.05),
             Slider::Bots => (0.0, 63.0, 1.0),
+            Slider::RenderScale => (0.5, 1.5, 0.05),
+            Slider::LodDetailScale | Slider::VegetationDensity => (0.2, 1.5, 0.05),
+            Slider::HudScale | Slider::MinimapSize => (0.6, 1.6, 0.05),
+            Slider::GamepadLookSensitivity => (0.2, 3.0, 0.1),
+            Slider::GamepadMoveDeadzone | Slider::GamepadLookDeadzone => (0.0, 0.5, 0.02),
         }
     }
 
     fn get(self, settings: &Settings) -> f32 {
         match self {
             Slider::Sensitivity => settings.mouse_sensitivity,
+            Slider::MouseSmoothing => settings.mouse_smoothing,
             Slider::FieldOfView => settings.field_of_view,
             Slider::Volume => settings.master_volume,
             Slider::EffectsVolume => settings.effects_volume,
             Slider::AmbienceVolume => settings.ambience_volume,
             Slider::Bots => settings.last_match.bots as f32,
+            Slider::RenderScale => settings.render_scale,
+            Slider::LodDetailScale => settings.lod_detail_scale,
+            Slider::VegetationDensity => settings.vegetation_density,
+            Slider::HudScale => settings.hud_scale,
+            Slider::MinimapSize => settings.minimap_size,
+            Slider::GamepadLookSensitivity => settings.gamepad.look_sensitivity,
+            Slider::GamepadMoveDeadzone => settings.gamepad.move_deadzone,
+            Slider::GamepadLookDeadzone => settings.gamepad.look_deadzone,
         }
     }
 
@@ -415,11 +500,26 @@ impl Slider {
         }
         match self {
             Slider::Sensitivity => settings.mouse_sensitivity = value,
+            Slider::MouseSmoothing => settings.mouse_smoothing = value,
             Slider::FieldOfView => settings.field_of_view = value,
             Slider::Volume => settings.master_volume = value,
             Slider::EffectsVolume => settings.effects_volume = value,
             Slider::AmbienceVolume => settings.ambience_volume = value,
             Slider::Bots => settings.last_match.bots = value as u32,
+            Slider::RenderScale => settings.render_scale = value,
+            Slider::LodDetailScale => settings.lod_detail_scale = value,
+            Slider::VegetationDensity => settings.vegetation_density = value,
+            Slider::HudScale => settings.hud_scale = value,
+            Slider::MinimapSize => settings.minimap_size = value,
+            Slider::GamepadLookSensitivity => settings.gamepad.look_sensitivity = value,
+            Slider::GamepadMoveDeadzone => settings.gamepad.move_deadzone = value,
+            Slider::GamepadLookDeadzone => settings.gamepad.look_deadzone = value,
+        }
+        if matches!(
+            self,
+            Slider::RenderScale | Slider::LodDetailScale | Slider::VegetationDensity
+        ) {
+            settings.graphics_preset = GraphicsPreset::Custom;
         }
     }
 
@@ -431,7 +531,15 @@ impl Slider {
     fn display(self, settings: &Settings) -> String {
         let value = self.get(settings);
         match self {
-            Slider::Sensitivity => format!("{value:.2}"),
+            Slider::Sensitivity | Slider::GamepadLookSensitivity => format!("{value:.2}"),
+            Slider::MouseSmoothing
+            | Slider::RenderScale
+            | Slider::LodDetailScale
+            | Slider::VegetationDensity
+            | Slider::HudScale
+            | Slider::MinimapSize
+            | Slider::GamepadMoveDeadzone
+            | Slider::GamepadLookDeadzone => format!("{value:.2}"),
             Slider::FieldOfView => format!("{value:.0} deg"),
             Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => format!("{:.0}%", value * 100.0),
             Slider::Bots => format!("{value:.0}"),
@@ -443,7 +551,8 @@ impl Slider {
 #[derive(Component, Clone, Copy, PartialEq)]
 enum Value {
     Slider(Slider),
-    Binding(Action),
+    Binding(Action, BindSlot),
+    GamepadBinding(Action),
 }
 
 /// The draggable part of a slider.

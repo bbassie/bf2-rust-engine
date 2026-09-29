@@ -145,15 +145,19 @@ fn chat_keys(
         if !playing {
             return;
         }
+        let pressed = |binding: Binding| match binding {
+            Binding::Key(key) => keys.just_pressed(key),
+            Binding::Mouse(button) => mouse.just_pressed(button),
+        };
         let opened = [
             (Action::ChatAll, ChatChannel::All),
             (Action::ChatTeam, ChatChannel::Team),
             (Action::ChatSquad, ChatChannel::Squad),
         ]
         .into_iter()
-        .find(|(action, _)| match settings.binding(*action) {
-            Binding::Key(key) => keys.just_pressed(key),
-            Binding::Mouse(button) => mouse.just_pressed(button),
+        .find(|(action, _)| {
+            let set = settings.bindings(*action);
+            set.primary.is_some_and(pressed) || set.secondary.is_some_and(pressed)
         });
         if let Some((_, channel)) = opened {
             chat.typing = Some(channel);

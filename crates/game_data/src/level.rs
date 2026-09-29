@@ -9,8 +9,15 @@ use crate::{Placement, SoundDesc, TeamDesc};
 pub struct LevelDesc {
     /// Folder name, e.g. `strike_at_karkand`.
     pub name: String,
-    /// Human readable name, e.g. `Strike at Karkand`.
+    /// Human readable name, e.g. `Strike at Karkand`. A namespaced level's already carries
+    /// `mod_title` as a prefix here (e.g. `AIX 2: Archipelago`) so it reads right even
+    /// wherever `mod_title` itself isn't shown.
     pub display_name: String,
+    /// Set on a level imported from a BF2 mod other than the base game (e.g. `AIX 2`), so the
+    /// menu can group or tag its levels separately from vanilla ones. `None` for vanilla BF2
+    /// (and expansion pack) levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_title: Option<String>,
     #[serde(default)]
     pub terrain: Option<TerrainDesc>,
     #[serde(default)]
@@ -187,6 +194,41 @@ pub struct EnvironmentDesc {
     /// level folder), for ambient occlusion. `None` for levels without.
     #[serde(default)]
     pub static_lightmaps: Option<String>,
+    /// The level's lamps (street lamps, flood lights, wall and ceiling lights), for real-time
+    /// lights where they matter: at night and indoors.
+    #[serde(default)]
+    pub lamps: Vec<LampDesc>,
+}
+
+/// A lamp: a light placed in the level. Its colour is relative to the level's lamp colour
+/// ([`WorldLighting::point`]), in the same gamma-space units: at `strength` 1 a surface facing
+/// the lamp is lit by exactly that colour.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct LampDesc {
+    pub position: [f32; 3],
+    /// Spot lights: the direction the light shines (unit vector). `None` for point lights.
+    #[serde(default)]
+    pub direction: Option<[f32; 3]>,
+    /// Colour, 0..1.
+    #[serde(default = "white")]
+    pub color: [f32; 3],
+    /// Strength within `range[0]`; values above 1 light a wider area fully.
+    #[serde(default = "one_f32")]
+    pub strength: f32,
+    /// The light is at full strength up to `range[0]` meters and fades out linearly to
+    /// nothing at `range[1]`.
+    pub range: [f32; 2],
+    /// Spot lights: inner and outer cone angle in degrees (full angles).
+    #[serde(default)]
+    pub cone: [f32; 2],
+    /// The level's author made it light moving objects and cast their shadows: a candidate
+    /// for real-time shadows.
+    #[serde(default)]
+    pub shadows: bool,
+    /// Placed at the head of a lamp object that had no light of its own (a street lamp on a
+    /// day level): lit only on night versions of day levels.
+    #[serde(default)]
+    pub unlit: bool,
 }
 
 /// How much sky each static object's surfaces see, baked (BF2's object lightmaps, their sky
@@ -362,6 +404,7 @@ impl Default for EnvironmentDesc {
             lighting: None,
             ground_albedo: None,
             static_lightmaps: None,
+            lamps: Vec::new(),
         }
     }
 }
@@ -386,7 +429,7 @@ pub struct RoadDesc {
 /// A game mode layout, e.g. conquest at 64 players.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GameModeDesc {
-    /// Mode id, e.g. `gpm_cq`.
+    /// Mode id, e.g. `gpm_cq` (see [`crate::modes`]).
     pub mode: String,
     /// Layout size (16, 32, 64).
     pub size: u32,
@@ -399,6 +442,18 @@ pub struct GameModeDesc {
     /// Additional objects that only exist in this layout.
     #[serde(default)]
     pub statics: Vec<StaticInstance>,
+    /// Attack/defend modes played in stages (Rush, Breakthrough): who attacks, the stages and
+    /// their objectives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<crate::modes::StagedDesc>,
+    /// Another layout of the level this one is made from: it takes the control points, spawn
+    /// points, vehicle spawners and objects it doesn't list from that one (see
+    /// [`crate::modes::ModeLayouts`]), and shares its navigation grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub based_on: Option<crate::modes::LayoutRef>,
+    /// Made by the game ([`crate::modes::generate`]) rather than written by hand.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generated: bool,
 }
 
 /// The flag pole every control point has, and the flags that go up and down on it.
@@ -480,6 +535,14 @@ fn default_ticket_loss_at_end() -> f32 {
 
 fn one() -> u32 {
     1
+}
+
+fn one_f32() -> f32 {
+    1.0
+}
+
+fn white() -> [f32; 3] {
+    [1.0; 3]
 }
 
 fn default_water_color() -> [f32; 4] {

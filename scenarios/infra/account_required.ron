@@ -1,0 +1,11 @@
+// Joins a ranked server without being logged in: the server kicks us, saying an account is
+// needed and where to make one. (Server as in account_ranked.ron; client without account.ron.)
+(
+    steps: [
+        ForbidLog("content verified by the server"),
+        ExpectLog("kicked: This is a ranked server", 60.0),
+        Wait(2.0),
+        Screenshot("account_required"),
+        Quit,
+    ],
+)

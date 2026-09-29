@@ -197,7 +197,7 @@ fn report(
     mut soak: ResMut<Soak>,
     entities: &Entities,
     level: Option<Res<LoadedLevel>>,
-    matches: Query<(&MatchInfo, Option<&Tickets>, Option<&RoundState>)>,
+    matches: Query<(&MatchInfo, Option<&Tickets>, Option<&RoundState>, Option<&game_shared::modes::ModeState>)>,
     players: Query<&Player>,
     soldiers: Query<(Entity, &ControlledBy, &SoldierMotion, Has<Downed>, Has<Seated>), With<Soldier>>,
     vehicles: Query<(), With<Vehicle>>,
@@ -260,8 +260,12 @@ fn report(
         }] += 1;
     }
     let (map, round) = match matches.iter().next() {
-        Some((info, tickets, round)) => {
-            let tickets = tickets.map_or(String::new(), |t| format!(" tickets {:.0}/{:.0}", t.remaining[0], t.remaining[1]));
+        Some((info, tickets, round, mode)) => {
+            let mut tickets = tickets.map_or(String::new(), |t| format!(" tickets {:.0}/{:.0}", t.remaining[0], t.remaining[1]));
+            // Staged modes: how far the attackers got.
+            if let Some(mode) = mode.filter(|m| m.staged()) {
+                tickets += &format!(" {} {}/{}", mode.kind.stage_noun().to_lowercase(), mode.stage + 1, mode.stages);
+            }
             let round = match round {
                 Some(RoundState::Playing) => "playing".to_string(),
                 Some(RoundState::Ended { winner, restart_in }) => format!("ended ({winner:?}, next in {restart_in:.0} s)"),

@@ -3,15 +3,19 @@
 use std::{collections::VecDeque, f32::consts::FRAC_PI_2};
 
 use bevy::{
-    input::mouse::AccumulatedMouseMotion,
+    input::{gamepad::GamepadButton, mouse::AccumulatedMouseMotion},
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
-use game_shared::input::{Buttons, INPUT_REDUNDANCY, InputFrame, InputPacket};
+use game_shared::{
+    input::{Buttons, INPUT_REDUNDANCY, InputFrame, InputPacket},
+    vehicle::Seated,
+};
 
 use crate::{
     menu::{Menu, Screen},
-    settings::{Action, Actions},
+    net::LocalSoldier,
+    settings::{Action, Actions, Settings},
 };
 
 pub struct LocalInputPlugin;
@@ -45,6 +49,10 @@ pub struct LookState {
     pub invert_y: bool,
     /// Sensitivity multiplier while zoomed in.
     pub zoom_scale: f32,
+    /// Exponential smoothing (0..0.95) applied to the mouse delta before it turns the view.
+    pub smoothing: f32,
+    /// The smoothed mouse delta kept between frames.
+    smoothed_delta: Vec2,
     /// Set when jump is pressed between ticks so short taps aren't lost.
     jump_latched: bool,
 }
@@ -57,6 +65,8 @@ impl Default for LookState {
             sensitivity: BASE_SENSITIVITY,
             invert_y: false,
             zoom_scale: 1.0,
+            smoothing: 0.0,
+            smoothed_delta: Vec2::ZERO,
             jump_latched: false,
         }
     }
@@ -110,21 +120,53 @@ fn grab_cursor(
     }
 }
 
+/// Radial dead zone: below `deadzone` the stick reads as centered, above it the remaining
+/// travel is rescaled to still reach the full range at the edge.
+pub fn deadzone(stick: Vec2, deadzone: f32) -> Vec2 {
+    let len = stick.length();
+    if len <= deadzone || len <= 0.0001 {
+        return Vec2::ZERO;
+    }
+    stick * ((len - deadzone) / (1.0 - deadzone) / len).min(1.0 / len.max(0.0001))
+}
+
 fn mouse_look(
     motion: Res<AccumulatedMouseMotion>,
     actions: Actions,
     cursor: Single<&CursorOptions>,
     flight: Res<crate::vehicles::FlightStick>,
+    settings: Res<Settings>,
+    time: Res<Time>,
     mut look: ResMut<LookState>,
 ) {
-    // Piloting, the mouse moves the stick (see `vehicles::fly`).
+    // Piloting: the mouse and the gamepad's right stick move the flight stick instead of
+    // looking around (see `vehicles::fly`).
     if !cursor_locked(&cursor) || flight.active {
         return;
     }
     let sensitivity = look.sensitivity * look.zoom_scale;
-    let vertical = if look.invert_y { -motion.delta.y } else { motion.delta.y };
-    look.yaw -= motion.delta.x * sensitivity;
+    let delta = if look.smoothing > 0.0 {
+        // Exponential smoothing: heavier smoothing lags more but shakes less.
+        let alpha = 1.0 - look.smoothing;
+        look.smoothed_delta = look.smoothed_delta.lerp(motion.delta, alpha.max(0.02));
+        look.smoothed_delta
+    } else {
+        motion.delta
+    };
+    let vertical = if look.invert_y { -delta.y } else { delta.y };
+    look.yaw -= delta.x * sensitivity;
     look.pitch = (look.pitch - vertical * sensitivity).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
+    // Gamepad look: the right stick, read as a per-second turn rate (unlike the mouse delta,
+    // which is already a per-frame pixel count).
+    if let Some(gamepad) = actions.gamepad() {
+        let stick = deadzone(gamepad.right_stick(), settings.gamepad.look_deadzone);
+        if stick != Vec2::ZERO {
+            let rate = BASE_SENSITIVITY * 60.0 * settings.gamepad.look_sensitivity.max(0.0);
+            let gv = if settings.gamepad.invert_look_y { -stick.y } else { stick.y };
+            look.yaw -= stick.x * rate * time.delta_secs();
+            look.pitch = (look.pitch - gv * rate * time.delta_secs()).clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
+        }
+    }
     if actions.just_pressed(Action::Jump) {
         look.jump_latched = true;
     }
@@ -145,6 +187,7 @@ pub fn build_input(
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
     active: Res<crate::net::ActiveMatch>,
     downed: Query<&game_shared::revive::Downed, With<crate::net::LocalSoldier>>,
+    seated: Query<&Seated, With<LocalSoldier>>,
     real: Res<Time<Real>>,
     mut delayed: Local<VecDeque<(f64, InputPacket)>>,
 ) {
@@ -170,10 +213,28 @@ pub fn build_input(
         frame.buttons.set(Buttons::SPRINT, true);
         frame.buttons.set(Buttons::JUMP, frame.seq % 150 == 0);
     } else if cursor_locked(&cursor) {
-        frame.set_movement(Vec2::new(
+        let keyboard_move = Vec2::new(
             actions.axis(Action::MoveRight, Action::MoveLeft),
             actions.axis(Action::MoveForward, Action::MoveBack),
-        ));
+        );
+        // Gamepad: the left stick, added to WASD (so either or both can be used). Driving or
+        // piloting a vehicle (any seat 0), the triggers throttle/brake instead of the stick's
+        // Y, like a racing pad; steering still comes from the stick's X.
+        let gamepad_move = actions
+            .gamepad()
+            .map(|gamepad| deadzone(gamepad.left_stick(), actions.gamepad_settings().move_deadzone))
+            .unwrap_or_default();
+        let mut movement = (keyboard_move + gamepad_move).clamp_length_max(1.0);
+        if let Some(gamepad) = actions.gamepad()
+            && seated.single().is_ok_and(|s| s.seat == 0)
+        {
+            let throttle = gamepad.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
+            let brake = gamepad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
+            if throttle > 0.02 || brake > 0.02 {
+                movement.y = (throttle - brake).clamp(-1.0, 1.0);
+            }
+        }
+        frame.set_movement(movement);
         let mut set = |button: Buttons, action: Action| frame.buttons.set(button, actions.pressed(action));
         set(Buttons::JUMP, Action::Jump);
         set(Buttons::SPRINT, Action::Sprint);

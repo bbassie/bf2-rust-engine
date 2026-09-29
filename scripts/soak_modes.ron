@@ -1,0 +1,21 @@
+// Map rotation for soak tests of the modes beyond conquest (scripts/soak.sh, or the server's
+// `--soak` straight on the Linux machine): Rush and Breakthrough on Strike at Karkand, Gulf of
+// Oman and Dalian Plant, with generated layouts. Each map plays one round (the rotation moves
+// on when a round ends), or `--soak-rotate N` minutes at most.
+//
+//   scripts/remote.sh ./target/debug/server --config scripts/soak_modes.ron --soak 60 --soak-rotate 20 --port 29200
+(
+    name: "Modes soak",
+    bots: 32,
+    respawn_time: 10.0,
+    stats_file: None,
+    ban_file: None,
+    rotation: [
+        (level: "strike_at_karkand", mode: "gpm_breakthrough", size: 32),
+        (level: "strike_at_karkand", mode: "gpm_rush", size: 32),
+        (level: "gulf_of_oman", mode: "gpm_rush", size: 32),
+        (level: "dalian_plant", mode: "gpm_breakthrough", size: 32),
+        (level: "gulf_of_oman", mode: "gpm_breakthrough", size: 64),
+        (level: "dalian_plant", mode: "gpm_rush", size: 64),
+    ],
+)

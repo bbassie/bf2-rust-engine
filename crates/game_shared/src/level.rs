@@ -42,6 +42,17 @@ impl LoadedLevel {
             .min_by_key(|g| g.size.abs_diff(size))
             .or_else(|| self.desc.game_modes.first())
     }
+
+    /// The layout a layout is based on (a generated Rush layout: the conquest one it was made
+    /// from), else the layout itself: what the navigation grid is built and cached for.
+    pub fn base_layout(&self, mode: &str, size: u32) -> Option<&GameModeDesc> {
+        let layout = self.game_mode(mode, size)?;
+        layout
+            .based_on
+            .as_ref()
+            .and_then(|base| self.desc.game_modes.iter().find(|g| g.mode == base.mode && g.size == base.size))
+            .or(Some(layout))
+    }
 }
 
 /// Marks every entity belonging to the loaded level so it can be unloaded.
@@ -201,7 +212,8 @@ pub fn load_level(paths: &GamePaths, name: &str) -> anyhow::Result<LoadedLevel> 
         return Ok(test_range());
     }
     let dir = paths.level_dir(name);
-    let desc: LevelDesc = paths.read_ron(format!("levels/{name}/level.ron"))?;
+    let mut desc: LevelDesc = paths.read_ron(format!("levels/{name}/level.ron"))?;
+    complete_layouts(paths, name, &mut desc.game_modes);
     let heightmap = desc
         .terrain
         .as_ref()
@@ -214,6 +226,22 @@ pub fn load_level(paths: &GamePaths, name: &str) -> anyhow::Result<LoadedLevel> 
     })
 }
 
+/// A level's layouts as the game plays them: those of its `level.ron`, replaced or added to by
+/// `levels/<name>/modes.ron` (from the level's folder or a mod, see
+/// [`game_data::modes::ModeLayouts`]), then Rush and Breakthrough layouts generated for every
+/// size that has none (see [`game_data::modes::generate`]).
+pub fn complete_layouts(paths: &GamePaths, name: &str, layouts: &mut Vec<GameModeDesc>) {
+    let relative = format!("levels/{name}/modes.ron");
+    let patch = format!("levels/{name}/modes.patch.ron");
+    if paths.find(&relative).is_file() || paths.find(&patch).is_file() {
+        match paths.read_ron::<game_data::modes::ModeLayouts>(&relative) {
+            Ok(extra) => game_data::modes::merge_layouts(layouts, extra.game_modes),
+            Err(err) => warn!("{relative}: {err:#}"),
+        }
+    }
+    game_data::modes::complete_layouts(layouts);
+}
+
 fn spawn_level(commands: &mut Commands, level: &LoadedLevel, paths: &GamePaths) {
     if let Some(heightmap) = &level.heightmap {
         commands.spawn((
@@ -222,7 +250,9 @@ fn spawn_level(commands: &mut Commands, level: &LoadedLevel, paths: &GamePaths) 
             Transform::from_translation(heightmap.center()),
             RigidBody::Static,
             heightmap.collider(),
-            CollisionLayers::new(GameLayer::World, LayerMask::ALL),
+            // Terrain also blocks vehicles (see `GameLayer::VehicleGround`); unlike statics
+            // it has no BF2 per-actor-type collision to draw the distinction from.
+            CollisionLayers::new([GameLayer::World, GameLayer::VehicleGround], LayerMask::ALL),
         ));
     }
     if level.dir.is_none() {
@@ -233,7 +263,7 @@ fn spawn_level(commands: &mut Commands, level: &LoadedLevel, paths: &GamePaths) 
                 placement_transform(&placement),
                 RigidBody::Static,
                 Collider::cuboid(size.x, size.y, size.z),
-                CollisionLayers::new(GameLayer::World, LayerMask::ALL),
+                CollisionLayers::new([GameLayer::World, GameLayer::VehicleGround], LayerMask::ALL),
             ));
         }
     }
@@ -339,12 +369,14 @@ pub fn test_range() -> LoadedLevel {
         .concat(),
         ..default()
     };
+    let mut game_modes = vec![conquest];
+    game_data::modes::complete_layouts(&mut game_modes);
 
     LoadedLevel {
         desc: LevelDesc {
             name: TEST_RANGE.into(),
             display_name: "Test Range".into(),
-            game_modes: vec![conquest],
+            game_modes,
             ticket_loss_at_end_per_minute: 200.0,
             ..default()
         },

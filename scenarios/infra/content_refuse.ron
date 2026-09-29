@@ -1,0 +1,15 @@
+// Joins with downloads off (`--content never`) and without the server's mods: the server
+// finds our files different, we decline to download, and it kicks us saying why. No soldier;
+// back at the menu with the reason.
+//   client --connect 127.0.0.1 --port 29300 --mods <empty dir> --content never
+//          --scenario scenarios/infra/content_refuse.ron
+(
+    steps: [
+        ForbidLog("content verified by the server"),
+        ExpectLog("differ from its own", 60.0),
+        ExpectLog("kicked: You need the server's content", 30.0),
+        Wait(2.0),
+        Screenshot("refused"),
+        Quit,
+    ],
+)

@@ -43,10 +43,15 @@ use bevy::{
     gltf::Gltf,
     input::{
         ButtonState,
+        gamepad::{
+            GamepadButton, GamepadConnection, GamepadConnectionEvent, RawGamepadAxisChangedEvent,
+            RawGamepadButtonChangedEvent, RawGamepadEvent,
+        },
         keyboard::{Key, KeyboardInput, NativeKey, NativeKeyCode},
     },
     window::PrimaryWindow,
     pbr::ScreenSpaceAmbientOcclusion,
+    platform::collections::HashSet,
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
@@ -117,6 +122,9 @@ pub enum Step {
     /// Moves our soldier next to the first entry point of the nearest vehicle with this
     /// template (e.g. `"usjep_hmmwv"`), facing it. Singleplayer and listen server only.
     NearVehicle(String),
+    /// Rush: moves our soldier 1.4 m in front of the current stage's charge of this name
+    /// (`"A"`, `"B"`), facing it (singleplayer and listen server only).
+    NearCharge(String),
     /// Walks (sprinting, by input like a player) to the first entry point of the nearest
     /// vehicle with this template; works connected to a remote server. Gives up after 150 s.
     WalkToVehicle(String),
@@ -158,6 +166,23 @@ pub enum Step {
     Release(Vec<Button>),
     /// Movement input (right, forward), each -1..1; `Move(0, 0)` stops.
     Move(f32, f32),
+    /// Plugs in a synthetic gamepad (a real one plus this one both work; tests gamepad input
+    /// without physical hardware, injected the same way `Key`/`HoldKey` inject real keyboard
+    /// events: raw gamepad events that go through the normal connection and input systems, so
+    /// `Actions`, the bindings page and gamepad menu navigation all see it as a real pad).
+    GamepadConnect,
+    GamepadDisconnect,
+    /// Gamepad buttons stay held (digital, full press) until released, e.g.
+    /// `GamepadHold([South, East])`.
+    GamepadHold(Vec<GamepadButton>),
+    GamepadRelease(Vec<GamepadButton>),
+    /// The left stick (movement, x = right, y = forward), each -1..1; held until changed.
+    GamepadLeftStick(f32, f32),
+    /// The right stick (look, or the flight stick while piloting), each -1..1; held until
+    /// changed.
+    GamepadRightStick(f32, f32),
+    /// The analog triggers, each 0..1 (left, right); held until changed.
+    GamepadTriggers(f32, f32),
     /// Weapon index in the kit.
     Weapon(u8),
     ThirdPerson(bool),
@@ -267,6 +292,53 @@ pub struct ScenarioInput {
     pub stick: Option<Vec2>,
 }
 
+/// A synthetic gamepad's held state, resent as raw gamepad events every frame by
+/// `inject_gamepad` (real controllers work the same way: gilrs polls and bevy_gilrs sends raw
+/// events for the current state each frame, which is why they have to be resent, not just
+/// sent once). `GamepadConnect` creates the entity; the other `Gamepad*` steps change what's
+/// sent while it exists.
+#[derive(Resource, Default)]
+struct ScenarioGamepad {
+    entity: Option<Entity>,
+    buttons: HashSet<GamepadButton>,
+    left_stick: Vec2,
+    right_stick: Vec2,
+    /// Left, right, 0..1.
+    triggers: Vec2,
+}
+
+/// Resends the scenario's synthetic gamepad state as raw gamepad events every frame, exactly
+/// like a real backend polling hardware would, so `Actions`, the bindings page and gamepad
+/// menu navigation see it as an ordinary connected gamepad.
+fn inject_gamepad(gamepad: Res<ScenarioGamepad>, mut events: MessageWriter<RawGamepadEvent>) {
+    let Some(entity) = gamepad.entity else {
+        return;
+    };
+    // Every trackable button, not just the held ones: a released button's analog value
+    // (`Gamepad::get`, which `dpad()` and the triggers read) only changes when a raw event
+    // says so and otherwise stays at its last value, so releasing one has to explicitly send
+    // 0.0, the same way a real backend keeps reporting every button's state each poll.
+    for button in GamepadButton::all() {
+        let held = gamepad.buttons.contains(&button) as u8 as f32;
+        events.write(RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(entity, button, held)));
+    }
+    for (button, value) in [
+        (GamepadButton::LeftTrigger2, gamepad.triggers.x),
+        (GamepadButton::RightTrigger2, gamepad.triggers.y),
+    ] {
+        events.write(RawGamepadEvent::Button(RawGamepadButtonChangedEvent::new(entity, button, value)));
+    }
+    use bevy::input::gamepad::GamepadAxis;
+    for (axis, value) in [
+        (GamepadAxis::LeftStickX, gamepad.left_stick.x),
+        (GamepadAxis::LeftStickY, gamepad.left_stick.y),
+        (GamepadAxis::RightStickX, gamepad.right_stick.x),
+        (GamepadAxis::RightStickY, gamepad.right_stick.y),
+    ] {
+        events.write(RawGamepadEvent::Axis(RawGamepadAxisChangedEvent::new(entity, axis, value)));
+    }
+}
+
 impl Scenario {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
@@ -329,7 +401,12 @@ impl Plugin for ScenarioPlugin {
         })
         .insert_resource(pipelines.clone())
         .init_resource::<ScenarioInput>()
+        .init_resource::<ScenarioGamepad>()
         .init_resource::<Readiness>()
+        .add_systems(
+            bevy::app::PreUpdate,
+            inject_gamepad.before(bevy::input::InputSystems),
+        )
         .add_systems(
             Update,
             (
@@ -434,6 +511,11 @@ struct PlayerControls<'w, 's> {
     radio: MessageWriter<'w, game_shared::radio::RadioRequest>,
     commander: MessageWriter<'w, game_shared::commander::CommanderRequest>,
     commander_screen: ResMut<'w, crate::commander::CommanderScreen>,
+    gamepad: ResMut<'w, ScenarioGamepad>,
+    /// `gamepad_connection_system` (which attaches/detaches the `Gamepad` component) listens
+    /// for this directly, not for `RawGamepadEvent::Connection` (that variant only feeds the
+    /// aggregate `GamepadEvent` stream for observers, per `gamepad_event_processing_system`).
+    gamepad_events: MessageWriter<'w, GamepadConnectionEvent>,
 }
 
 /// The vehicles around, for [`run_scenario`].
@@ -507,6 +589,9 @@ struct Soldiers<'w, 's> {
         (With<Soldier>, Without<LocalSoldier>),
     >,
     spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+    /// Rush's charges and the mode, for `NearCharge`.
+    charges: Query<'w, 's, &'static game_shared::modes::Charge>,
+    modes: Query<'w, 's, &'static game_shared::modes::ModeState>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -550,6 +635,8 @@ fn run_scenario(
         mut radio,
         mut commander,
         mut commander_screen,
+        mut gamepad,
+        mut gamepad_events,
     } = player;
     let Soldiers {
         local: mut soldier,
@@ -559,6 +646,8 @@ fn run_scenario(
         local_team,
         drawn,
         spatial,
+        charges,
+        modes,
     } = soldiers;
     let now = time.elapsed_secs();
     if runner.finished {
@@ -729,6 +818,23 @@ fn run_scenario(
                         look.pitch = -0.2;
                     }
                     _ => warn!("scenario: no {template} (or no soldier) to go to"),
+                }
+                Progress::Done
+            }
+            Step::NearCharge(name) => {
+                let stage = modes.iter().next().map(|m| m.stage);
+                let charge = charges.iter().find(|c| Some(c.stage) == stage && c.name == *name);
+                match (charge, soldier.single_mut()) {
+                    (Some(charge), Ok((mut motion, _))) => {
+                        let front = Quat::from_rotation_y(charge.yaw) * Vec3::NEG_Z;
+                        let target = charge.position + front * 1.4 + Vec3::Y * 0.1;
+                        motion.position = target;
+                        motion.velocity = Vec3::ZERO;
+                        let to = charge.position + Vec3::Y * 0.6 - (target + Vec3::Y * 1.6);
+                        look.yaw = (-to.x).atan2(-to.z);
+                        look.pitch = (to.y / to.length().max(0.01)).asin();
+                    }
+                    _ => warn!("scenario: no charge {name} (or no soldier) to go to"),
                 }
                 Progress::Done
             }
@@ -1032,6 +1138,52 @@ fn run_scenario(
             Step::Move(right, forward) => {
                 let movement = Vec2::new(*right, *forward);
                 input.movement = (movement != Vec2::ZERO).then_some(movement);
+                Progress::Done
+            }
+            Step::GamepadConnect => {
+                let entity = commands.spawn_empty().id();
+                gamepad.entity = Some(entity);
+                gamepad_events.write(GamepadConnectionEvent::new(
+                    entity,
+                    GamepadConnection::Connected {
+                        name: "Scenario gamepad".into(),
+                        vendor_id: None,
+                        product_id: None,
+                    },
+                ));
+                Progress::Done
+            }
+            Step::GamepadDisconnect => {
+                if let Some(entity) = gamepad.entity.take() {
+                    gamepad_events.write(GamepadConnectionEvent::new(entity, GamepadConnection::Disconnected));
+                    commands.entity(entity).despawn();
+                }
+                gamepad.buttons.clear();
+                gamepad.left_stick = Vec2::ZERO;
+                gamepad.right_stick = Vec2::ZERO;
+                gamepad.triggers = Vec2::ZERO;
+                Progress::Done
+            }
+            Step::GamepadHold(held) => {
+                gamepad.buttons.extend(held.iter().copied());
+                Progress::Done
+            }
+            Step::GamepadRelease(released) => {
+                for button in released {
+                    gamepad.buttons.remove(button);
+                }
+                Progress::Done
+            }
+            Step::GamepadLeftStick(x, y) => {
+                gamepad.left_stick = Vec2::new(*x, *y);
+                Progress::Done
+            }
+            Step::GamepadRightStick(x, y) => {
+                gamepad.right_stick = Vec2::new(*x, *y);
+                Progress::Done
+            }
+            Step::GamepadTriggers(left, right) => {
+                gamepad.triggers = Vec2::new(*left, *right);
                 Progress::Done
             }
             Step::Weapon(index) => {

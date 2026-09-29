@@ -24,7 +24,7 @@ use game_shared::{
     PROTOCOL_ID,
     chat::Kicked,
     level::{LevelEntity, LoadedLevel},
-    protocol::{ClientHello, ControlledBy, Player, PlayerNetId},
+    protocol::{ControlledBy, Player, PlayerNetId},
     soldier::{Soldier, SoldierMotion},
     weapons::Armory,
 };
@@ -92,6 +92,14 @@ pub struct ActiveMatch {
 impl ActiveMatch {
     pub fn spectating(&self) -> bool {
         self.setup.as_ref().is_some_and(MatchSetup::spectating)
+    }
+
+    /// The server we joined, if we joined one.
+    pub fn server(&self) -> Option<SocketAddr> {
+        match &self.setup {
+            Some(MatchSetup::Join { server, .. }) => Some(*server),
+            _ => None,
+        }
     }
 }
 
@@ -230,14 +238,11 @@ pub(crate) fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-fn send_hello(
-    mut hello: MessageWriter<ClientHello>,
-    mut active: ResMut<ActiveMatch>,
-    mut settings: ResMut<Settings>,
-) {
+/// Connected: remembers the server. The hello with our name follows once the server let us
+/// in (`crate::join`).
+fn send_hello(mut active: ResMut<ActiveMatch>, mut settings: ResMut<Settings>) {
     active.connected = true;
-    if let Some(MatchSetup::Join { name, server, .. }) = &active.setup {
-        hello.write(ClientHello { name: name.clone() });
+    if let Some(MatchSetup::Join { server, .. }) = &active.setup {
         // Newest first in the browser's recent servers.
         let address = server.ip().to_string();
         let recent = &mut settings.recent_servers;

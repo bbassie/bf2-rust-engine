@@ -34,3 +34,9 @@ game_data.workspace = true
 gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
 # Content hashes for server content downloads. No default features: Bevy uses it that way too.
 blake3 = { version = "1.8", default-features = false }
+# Server identity keys and account tickets (the join handshake, `join`).
+game_auth.workspace = true
+
+[dev-dependencies]
+# The wire format replicon uses, for round-trip tests of messages (`join`).
+postcard = { version = "1", default-features = false, features = ["alloc"] }

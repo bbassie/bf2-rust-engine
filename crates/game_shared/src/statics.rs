@@ -68,6 +68,13 @@ pub struct Destructible {
 #[derive(Component, Debug)]
 pub struct Inactive;
 
+/// Marks the vehicle-only sibling body a destroyable part's [`Destructible`] entity gets
+/// alongside it when BF2 gives that part vehicle collision (see `vehicle_collision_layers`):
+/// tells [`apply_destroyed_statics`] to restore it on [`GameLayer::VehicleGround`] rather than
+/// [`GameLayer::World`].
+#[derive(Component, Debug)]
+struct VehicleGroundPart;
+
 /// The level statics that are destroyed, by index, on the match entity. Replicated.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct DestroyedStatics(pub BTreeSet<u32>);
@@ -78,11 +85,21 @@ pub struct StaticDestroyed {
     pub instance: u32,
 }
 
+/// Preference order for the [`GameLayer::World`] collider: BF2's most detailed mesh a part
+/// has, in order (soldier includes stairs and interiors; vehicle is hull only; projectile is
+/// the most detailed but only meant for bullets). Soldiers, projectiles, the camera,
+/// footsteps and the infantry nav grid all collide with whichever this picks.
+const WORLD_PREFERENCE: &[&str] = &["soldier", "vehicle", "projectile"];
+
 /// Loads templates and colliders once per level load.
 struct Cache<'a> {
     paths: &'a GamePaths,
     templates: HashMap<String, Option<ObjectDesc>>,
     colliders: HashMap<(String, u32), Option<Collider>>,
+    /// The [`GameLayer::VehicleGround`] collider, built only from BF2's vehicle-type
+    /// (col type 1) mesh: `None` when a part has no vehicle collision at all (small plants),
+    /// so vehicles pass through it instead of colliding with whatever `colliders` picked.
+    vehicle_colliders: HashMap<(String, u32), Option<Collider>>,
 }
 
 impl Cache<'_> {
@@ -104,8 +121,23 @@ impl Cache<'_> {
         self.colliders
             .entry((path.to_string(), part))
             .or_insert_with(|| {
-                load_collider(&paths.find(path), part)
+                load_collider(&paths.find(path), part, WORLD_PREFERENCE)
                     .map_err(|err| warn!("collision {path}: {err:#}"))
+                    .ok()
+                    .flatten()
+            })
+            .clone()
+    }
+
+    /// The vehicle-only collider for a part, if BF2 gives it one (see
+    /// [`Cache::vehicle_colliders`]).
+    fn vehicle_collider(&mut self, path: &str, part: u32) -> Option<Collider> {
+        let paths = self.paths;
+        self.vehicle_colliders
+            .entry((path.to_string(), part))
+            .or_insert_with(|| {
+                load_collider(&paths.find(path), part, &["vehicle"])
+                    .map_err(|err| warn!("vehicle collision {path}: {err:#}"))
                     .ok()
                     .flatten()
             })
@@ -125,6 +157,7 @@ pub fn spawn_objects(commands: &mut Commands, statics: &[StaticInstance], first_
         paths,
         templates: HashMap::new(),
         colliders: HashMap::new(),
+        vehicle_colliders: HashMap::new(),
     };
     let (mut spawned, mut destroyable) = (0, 0);
     for (instance, placed) in statics.iter().enumerate() {
@@ -171,6 +204,35 @@ pub fn spawn_objects(commands: &mut Commands, statics: &[StaticInstance], first_
                         entity.insert((Inactive, ColliderDisabled));
                     }
                 }
+                // A second, independent static body for vehicles (see `GameLayer::VehicleGround`):
+                // BF2's vehicle (hull-only) collision, when this part has any. It is separate
+                // from the entity above so a part with no vehicle mesh (most small plants) gets
+                // no vehicle collision at all, even though it still blocks soldiers or stops
+                // bullets there; a part with vehicle collision (trees, walls, solid props)
+                // blocks vehicles exactly like it does today.
+                if let Some(collision) = collision
+                    && let Some(collider) = cache.vehicle_collider(collision, part.collision_part)
+                {
+                    let mut vehicle_entity = commands.spawn((
+                        LevelEntity,
+                        transform,
+                        RigidBody::Static,
+                        collider,
+                        vehicle_collision_layers(!wreck),
+                    ));
+                    if let Some(armor) = &armor {
+                        vehicle_entity.insert(VehicleGroundPart);
+                        vehicle_entity.insert(Destructible {
+                            instance: instance as u32,
+                            armor: armor.clone(),
+                            hit_material: part.hit_material.unwrap_or(armor.material),
+                            wreck,
+                        });
+                        if wreck {
+                            vehicle_entity.insert((Inactive, ColliderDisabled));
+                        }
+                    }
+                }
             };
             spawn(part.mesh.as_ref(), part.collision.as_ref(), false);
             if armor.is_some() && (part.wreck_mesh.is_some() || part.wreck_collision.is_some()) {
@@ -180,9 +242,10 @@ pub fn spawn_objects(commands: &mut Commands, statics: &[StaticInstance], first_
         }
     }
     info!(
-        "spawned {spawned} static parts from {} templates ({} colliders, {destroyable} destroyable objects)",
+        "spawned {spawned} static parts from {} templates ({} colliders, {} vehicle-only colliders, {destroyable} destroyable objects)",
         cache.templates.len(),
-        cache.colliders.values().filter(|c| c.is_some()).count()
+        cache.colliders.values().filter(|c| c.is_some()).count(),
+        cache.vehicle_colliders.values().filter(|c| c.is_some()).count()
     );
 }
 
@@ -196,11 +259,21 @@ fn collision_layers(present: bool) -> CollisionLayers {
     }
 }
 
+/// The vehicle-only sibling collider's layers (see [`GameLayer::VehicleGround`]): present
+/// when BF2 gives this part vehicle collision and it's actually there right now.
+fn vehicle_collision_layers(present: bool) -> CollisionLayers {
+    if present {
+        CollisionLayers::new(GameLayer::VehicleGround, LayerMask::ALL)
+    } else {
+        CollisionLayers::NONE
+    }
+}
+
 /// Takes destroyed objects away (or shows their wreck) and brings restored ones back.
 fn apply_destroyed_statics(
     mut commands: Commands,
     destroyed: Query<Ref<DestroyedStatics>>,
-    parts: Query<(Entity, &Destructible, Has<Inactive>)>,
+    parts: Query<(Entity, &Destructible, Has<Inactive>, Has<VehicleGroundPart>)>,
     new_parts: Query<(), Added<Destructible>>,
     mut news: MessageWriter<StaticDestroyed>,
 ) {
@@ -213,7 +286,7 @@ fn apply_destroyed_statics(
     let none = BTreeSet::new();
     let destroyed = destroyed.as_ref().map_or(&none, |d| &d.0);
     let mut just_destroyed = BTreeSet::new();
-    for (entity, part, inactive) in &parts {
+    for (entity, part, inactive, vehicle_ground) in &parts {
         let is_destroyed = destroyed.contains(&part.instance);
         let present = is_destroyed == part.wreck;
         if present != inactive {
@@ -225,7 +298,13 @@ fn apply_destroyed_statics(
         } else {
             entity.insert((Inactive, ColliderDisabled));
         }
-        entity.insert(collision_layers(present));
+        // The vehicle-only sibling body (see `GameLayer::VehicleGround`) is restored on its
+        // own layer, not the main entity's `GameLayer::World`.
+        entity.insert(if vehicle_ground {
+            vehicle_collision_layers(present)
+        } else {
+            collision_layers(present)
+        });
         if live && is_destroyed {
             just_destroyed.insert(part.instance);
         }
@@ -234,14 +313,15 @@ fn apply_destroyed_statics(
 }
 
 /// Reads a collision `.glb` written by the importer and builds a triangle mesh collider for
-/// one part. Prefers the soldier mesh (it includes stairs and interiors), then vehicle, then
-/// projectile.
-fn load_collider(path: &Path, part: u32) -> anyhow::Result<Option<Collider>> {
+/// one part: the first of `preference` (`part{N}_{kind}`) the part actually has, or `None` if
+/// it has none of them. [`WORLD_PREFERENCE`] falls back through BF2's meshes in detail order;
+/// `["vehicle"]` (see [`Cache::vehicle_collider`]) takes only the exact vehicle-type mesh, with
+/// no fallback, so a part BF2 gives no vehicle collision gets none from us either.
+fn load_collider(path: &Path, part: u32, preference: &[&str]) -> anyhow::Result<Option<Collider>> {
     let bytes = std::fs::read(path)?;
     let gltf = gltf::Gltf::from_slice(&bytes)?;
     let blob = gltf.blob.as_deref().unwrap_or_default();
 
-    let preference = ["soldier", "vehicle", "projectile"];
     let mesh = preference.iter().find_map(|kind| {
         let name = format!("part{part}_{kind}");
         gltf.meshes().find(|m| m.name() == Some(name.as_str()))

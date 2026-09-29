@@ -110,14 +110,15 @@ fn add_clips(doc: &mut glb::Document, clips: &[(String, Animation)], bone_count:
     }
 }
 
-/// Every `.baf` directly inside `dir`, named by file stem.
-fn load_clips(vfs: &Vfs, dir: &str) -> Vec<(String, Animation)> {
+/// Every `.baf` directly inside `dir`, named by file stem. `skeleton` resolves version 3's
+/// inline bone names (see `bf2_formats::anim`); pass the clips' own skeleton (body or weapon).
+fn load_clips(vfs: &Vfs, dir: &str, skeleton: Option<&Skeleton>) -> Vec<(String, Animation)> {
     let mut clips: Vec<(String, Animation)> = vfs
         .list(dir)
         .filter(|p| p.ends_with(".baf") && !p[dir.len()..].contains('/'))
         .filter_map(|p| {
             let name = p.rsplit('/').next()?.trim_end_matches(".baf").to_string();
-            let anim = Animation::parse(&vfs.read(p).ok()?)
+            let anim = Animation::parse(&vfs.read(p).ok()?, skeleton)
                 .map_err(|e| log::warn!("{p}: {e}"))
                 .ok()?;
             Some((name, anim))
@@ -141,7 +142,7 @@ fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, view: &str, out: &Path) ->
     dirs.dedup();
     let mut written = 0;
     for dir in dirs {
-        let mut clips = load_clips(vfs, &dir);
+        let mut clips = load_clips(vfs, &dir, Some(skeleton));
         if clips.is_empty() {
             continue;
         }
@@ -172,22 +173,28 @@ fn export_weapon_sets(vfs: &Vfs, skeleton: &Skeleton, view: &str, out: &Path) ->
     Ok(written)
 }
 
-/// Imports every soldier body of every installed mod. Returns the soldier names.
-pub fn import_all(install: &Bf2Install, out: &Path) -> Result<Vec<String>> {
+/// Imports every soldier body of `mods` (installed BF2 mod folder names, e.g. `bf2`, `AIX2`).
+/// Returns the soldier names.
+pub fn import_all(install: &Bf2Install, out: &Path, mods: &[String]) -> Result<Vec<String>> {
     let mut done = Vec::new();
-    for mod_name in install.mods() {
+    for mod_name in mods {
+        let mod_name = mod_name.as_str();
         let mut vfs = Vfs::new();
-        install.mount_mod(&mut vfs, &mod_name, Side::Both)?;
+        // One broken mod (missing/unreadable archives) must not abort the others' soldiers.
+        if let Err(err) = install.mount_mod(&mut vfs, mod_name, Side::Both) {
+            log::warn!("mounting {mod_name}: {err:#}");
+            continue;
+        }
         let Ok(skeleton_data) = vfs.read(SKELETON) else {
             continue;
         };
         let skeleton = Skeleton::parse(&skeleton_data).context("parsing 3p_setup.ske")?;
 
-        let mut clips = load_clips(&vfs, ANIMATIONS);
-        clips.extend(load_clips(&vfs, LADDER_ANIMATIONS));
-        clips.extend(load_clips(&vfs, SEAT_ANIMATIONS));
+        let mut clips = load_clips(&vfs, ANIMATIONS, Some(&skeleton));
+        clips.extend(load_clips(&vfs, LADDER_ANIMATIONS, Some(&skeleton)));
+        clips.extend(load_clips(&vfs, SEAT_ANIMATIONS, Some(&skeleton)));
         for dir in ROPE_ANIMATIONS {
-            clips.extend(load_clips(&vfs, dir));
+            clips.extend(load_clips(&vfs, dir, Some(&skeleton)));
         }
         clips.sort_by(|a, b| a.0.cmp(&b.0));
         let skeleton_1p = vfs
@@ -254,7 +261,7 @@ fn export_flags(vfs: &Vfs, converter: &MeshConverter, out: &Path) -> Result<usiz
         return Ok(0);
     };
     let skeleton = Skeleton::parse(&data).context("parsing flag_setup.ske")?;
-    let idle = Animation::parse(&vfs.read(&format!("{FLAGS}animations/flag_idle.baf"))?)?;
+    let idle = Animation::parse(&vfs.read(&format!("{FLAGS}animations/flag_idle.baf"))?, Some(&skeleton))?;
     let clips = [("idle".to_string(), idle)];
     let meshes: Vec<String> = vfs
         .list(FLAGS)

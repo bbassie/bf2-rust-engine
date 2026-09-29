@@ -36,7 +36,8 @@ struct Cli {
     /// the first map of the rotation, else `test_range`. The rotation continues after it.
     #[arg(long)]
     level: Option<String>,
-    /// Game mode.
+    /// Game mode: gpm_cq (conquest), gpm_coop, gpm_rush, gpm_breakthrough, gpm_tdm, or short:
+    /// conquest, coop, rush, bt, tdm.
     #[arg(long)]
     mode: Option<String>,
     /// Layout size: 16, 32 or 64.
@@ -89,6 +90,23 @@ struct Cli {
     /// TCP port of the content endpoint (default: the game port).
     #[arg(long)]
     content_port: Option<u16>,
+    /// The server's identity key file (default: `identity.key` in the server's data folder).
+    #[arg(long)]
+    identity: Option<PathBuf>,
+    /// Master server web address for optional accounts (`https://...`, see
+    /// crates/master_server): players' account tickets are checked.
+    #[arg(long)]
+    master_url: Option<String>,
+    /// Ranked: require accounts and report stats to the master (needs --master-url and
+    /// --api-key).
+    #[arg(long)]
+    ranked: bool,
+    /// The API key the master server's admin gave this server.
+    #[arg(long)]
+    api_key: Option<String>,
+    /// Region for the master's server list and quick join (`eu`, `us-east`, ...).
+    #[arg(long)]
+    region: Option<String>,
     /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
@@ -234,6 +252,19 @@ fn main() -> AppExit {
     if let Some(port) = cli.content_port {
         settings.content.port = Some(port);
     }
+    if let Some(file) = cli.identity {
+        settings.content.identity_file = Some(file);
+    }
+    if let Some(url) = cli.master_url {
+        settings.accounts.master_url = Some(url);
+    }
+    if let Some(key) = cli.api_key {
+        settings.accounts.api_key = Some(key);
+    }
+    if let Some(region) = cli.region {
+        settings.accounts.region = region;
+    }
+    settings.accounts.ranked |= cli.ranked;
     settings.public |= cli.public;
     settings.friendly_fire |= cli.friendly_fire;
 

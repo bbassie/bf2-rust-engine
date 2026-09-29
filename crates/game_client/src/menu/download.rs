@@ -1,14 +1,20 @@
-//! The join flow's content step (see `crate::content`): what the server shares, "Download N
-//! files, X MB?" with Download / Always / Cancel, then the download's progress. Shown over
-//! the loading screen while the content job runs. Also the setting's row on the Game tab.
+//! The join flow's content step (see `crate::content` and `crate::join`): what the server
+//! shares, "Download N files, X MB?" with Download / Always / Cancel, then the download's
+//! progress, and while connected "The server is checking your content". Shown over the
+//! loading screen while a content job runs.
+//!
+//! A server whose key isn't trusted yet gets a "New server" question instead, with its name,
+//! address and key fingerprint; downloading trusts it. Settings > Game has the download
+//! setting, the new-server question and the trusted servers (each can be forgotten).
 //!
 //! Buttons are named for scenarios: `content:download`, `content:always`, `content:cancel`,
-//! `content-setting:ask` (`always`, `never`).
+//! `content-setting:ask` (`always`, `never`), `content:confirm-new`, `trusted:forget-all`,
+//! `trusted:forget:<first 8 hex digits of the key>`.
 
 use game_shared::content::format_bytes;
 
 use super::*;
-use crate::content::{ContentDownloads, ContentJob, Offer, Phase};
+use crate::content::{ContentDownloads, ContentJob, Offer, Phase, TrustedServer};
 
 pub(super) struct DownloadUiPlugin;
 
@@ -16,29 +22,37 @@ impl Plugin for DownloadUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (sync_panel, press_download_buttons, update_panel, paint_download_buttons)
+            (sync_panel, press_download_buttons, update_panel, paint_download_buttons, build_trusted_list)
                 .chain()
                 .after(ScenarioSystems),
         );
     }
 }
 
-#[derive(Component, Clone, Copy, PartialEq, Debug)]
+#[derive(Component, Clone, PartialEq, Debug)]
 pub(super) enum DownloadButton {
     Download,
     /// Download, and from now on without asking.
     Always,
     Cancel,
     Setting(ContentDownloads),
+    /// Settings: ask before downloading from a new server (on/off).
+    ConfirmNew,
+    /// Settings: forget a trusted server (its public key).
+    Forget(String),
+    ForgetAll,
 }
 
 impl DownloadButton {
-    fn element_name(self) -> String {
+    fn element_name(&self) -> String {
         match self {
             DownloadButton::Download => "content:download".into(),
             DownloadButton::Always => "content:always".into(),
             DownloadButton::Cancel => "content:cancel".into(),
             DownloadButton::Setting(mode) => format!("content-setting:{}", mode.label().to_lowercase()),
+            DownloadButton::ConfirmNew => "content:confirm-new".into(),
+            DownloadButton::Forget(key) => format!("trusted:forget:{}", key.get(..8).unwrap_or(key)),
+            DownloadButton::ForgetAll => "trusted:forget-all".into(),
         }
     }
 }
@@ -58,15 +72,32 @@ pub(super) struct PanelDetail;
 #[derive(Component)]
 pub(super) struct PanelBar;
 
+/// The new-server box: name, address, fingerprint.
+#[derive(Component)]
+pub(super) struct IdentityBox;
+
+#[derive(Component)]
+pub(super) struct IdentityText;
+
+/// The Download button's label (it says "Trust and download" for a new server).
+#[derive(Component)]
+pub(super) struct DownloadLabel;
+
 /// Download and Always: only while asking.
 #[derive(Component)]
 pub(super) struct AskOnly;
+
+/// Settings: the trusted servers, rebuilt when they change.
+#[derive(Component)]
+pub(super) struct TrustedList;
 
 fn download_button(p: &mut ChildSpawnerCommands, action: DownloadButton, look: Look, label: &str) {
     let (padding, size) = match look {
         Look::Primary => (UiRect::axes(px(28), px(11)), 18.0),
         _ => (UiRect::axes(px(14), px(8)), 15.0),
     };
+    let ask_only = matches!(action, DownloadButton::Download | DownloadButton::Always);
+    let is_download = action == DownloadButton::Download;
     let mut button = p.spawn((
         Name::new(action.element_name()),
         action,
@@ -81,13 +112,17 @@ fn download_button(p: &mut ChildSpawnerCommands, action: DownloadButton, look: L
         },
         BackgroundColor(Color::NONE),
     ));
-    button.with_child(text(label, size, TEXT));
-    if matches!(action, DownloadButton::Download | DownloadButton::Always) {
+    if is_download {
+        button.with_child((DownloadLabel, text(label, size, TEXT)));
+    } else {
+        button.with_child(text(label, size, TEXT));
+    }
+    if ask_only {
         button.insert(AskOnly);
     }
 }
 
-/// The setting on the Game tab.
+/// The settings on the Game tab.
 pub(super) fn settings_row(p: &mut ChildSpawnerCommands) {
     row(p, "Server content", |c| {
         for mode in ContentDownloads::ALL {
@@ -105,6 +140,76 @@ pub(super) fn settings_row(p: &mut ChildSpawnerCommands) {
             ..default()
         },
     ));
+    row(p, "New servers", |c| {
+        download_button(c, DownloadButton::ConfirmNew, Look::Plain, "");
+        c.spawn(text("Ask before downloading from a server I haven't trusted yet", 14.0, DIM));
+    });
+    p.spawn((
+        TrustedList,
+        Node {
+            flex_direction: FlexDirection::Column,
+            ..default()
+        },
+    ));
+}
+
+/// Rebuilds the trusted servers list when they change.
+fn build_trusted_list(
+    mut commands: Commands,
+    settings: Res<Settings>,
+    lists: Query<(Entity, Option<&Children>), With<TrustedList>>,
+    mut built: Local<Option<(Entity, Vec<TrustedServer>)>>,
+) {
+    let Ok((list, children)) = lists.single() else {
+        return;
+    };
+    if built.as_ref().is_some_and(|(e, servers)| *e == list && *servers == settings.trusted_servers) {
+        return;
+    }
+    *built = Some((list, settings.trusted_servers.clone()));
+    for child in children.into_iter().flatten() {
+        commands.entity(*child).despawn();
+    }
+    commands.entity(list).with_children(|p| {
+        row(p, "Trusted servers", |c| {
+            if settings.trusted_servers.is_empty() {
+                c.spawn(text("None yet: you are asked before the first download from a server.", 14.0, DIM));
+            } else {
+                c.spawn(text(format!("{} servers", settings.trusted_servers.len()), 14.0, TEXT));
+                download_button(c, DownloadButton::ForgetAll, Look::Plain, "Forget all");
+            }
+        });
+        for server in &settings.trusted_servers {
+            p.spawn(Node {
+                margin: UiRect::left(px(216)),
+                column_gap: px(12),
+                align_items: AlignItems::Center,
+                min_height: px(34),
+                ..default()
+            })
+            .with_children(|r| {
+                let name = if server.name.is_empty() { "(no name)" } else { server.name.as_str() };
+                r.spawn((
+                    text(name, 14.0, TEXT),
+                    Node {
+                        width: px(170),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                ));
+                r.spawn((
+                    text(server.address.clone(), 13.0, DIM),
+                    Node {
+                        width: px(150),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                ));
+                r.spawn(text(server.fingerprint.clone(), 13.0, DIM));
+                download_button(r, DownloadButton::Forget(server.public_key.clone()), Look::Plain, "Forget");
+            });
+        }
+    });
 }
 
 /// The panel is up while a content job runs.
@@ -141,12 +246,28 @@ fn spawn_panel(commands: &mut Commands) {
         ))
         .with_children(|root| {
             root.spawn((PanelTitle, text("Joining", 30.0, TEXT)));
+            root.spawn((
+                IdentityBox,
+                Node {
+                    display: Display::None,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(6),
+                    padding: UiRect::axes(px(18), px(14)),
+                    max_width: px(600),
+                    border: UiRect::left(px(3)),
+                    border_radius: BorderRadius::all(px(8)),
+                    ..default()
+                },
+                BackgroundColor(CARD),
+                BorderColor::all(ACCENT),
+            ))
+            .with_child((IdentityText, text("", 15.0, TEXT)));
             root.spawn((PanelStatus, text("", 17.0, TEXT)));
             root.spawn((
                 PanelDetail,
                 text("", 14.0, DIM),
                 Node {
-                    max_width: px(560),
+                    max_width: px(600),
                     ..default()
                 },
                 TextLayout::justify(Justify::Center),
@@ -201,15 +322,37 @@ fn shares(offer: &Offer) -> String {
     line
 }
 
+/// The new-server box's text.
+fn identity_text(offer: &Offer) -> String {
+    let Some(identity) = &offer.identity else {
+        return String::new();
+    };
+    let mut text = format!(
+        "{}\n{}\nKey fingerprint: {}\n\nYou haven't downloaded from this server before. Only download from servers you trust: what comes down is game data (maps, models, textures, sounds), never programs, and every file is checked against the server's list.",
+        if identity.name.is_empty() { "(no name)" } else { &identity.name },
+        identity.address,
+        identity.fingerprint
+    );
+    if offer.key_changed {
+        text += "\n\nYou trusted this address with another key before: this may not be the same server.";
+    }
+    text
+}
+
 #[allow(clippy::type_complexity)]
 fn update_panel(
     time: Res<Time<Real>>,
     job: Res<ContentJob>,
-    mut title: Query<&mut Text, (With<PanelTitle>, Without<PanelStatus>, Without<PanelDetail>)>,
-    mut status: Query<&mut Text, (With<PanelStatus>, Without<PanelTitle>, Without<PanelDetail>)>,
-    mut detail: Query<&mut Text, (With<PanelDetail>, Without<PanelTitle>, Without<PanelStatus>)>,
-    mut bar: Query<&mut Node, (With<PanelBar>, Without<AskOnly>)>,
-    mut ask_only: Query<&mut Node, (With<AskOnly>, Without<PanelBar>)>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<PanelTitle>>,
+        Query<&mut Text, With<PanelStatus>>,
+        Query<&mut Text, With<PanelDetail>>,
+        Query<&mut Text, With<IdentityText>>,
+        Query<&mut Text, With<DownloadLabel>>,
+    )>,
+    mut bar: Query<&mut Node, (With<PanelBar>, Without<AskOnly>, Without<IdentityBox>)>,
+    mut ask_only: Query<&mut Node, (With<AskOnly>, Without<PanelBar>, Without<IdentityBox>)>,
+    mut identity_box: Query<&mut Node, (With<IdentityBox>, Without<PanelBar>, Without<AskOnly>)>,
     // Download speed: last sample (seconds, bytes) and the smoothed rate.
     mut speed: Local<(f32, u64, f64)>,
 ) {
@@ -230,6 +373,7 @@ fn update_panel(
         Phase::Ask(offer) | Phase::Downloading(offer) if !offer.server_name.is_empty() => offer.server_name.clone(),
         _ => job.server.to_string(),
     };
+    let new_server = matches!(&phase, Phase::Ask(offer) if offer.new_server);
     let (line, more, fraction): (String, String, Option<f32>) = match &phase {
         Phase::Contacting => ("Contacting the server...".into(), String::new(), None),
         Phase::Preparing(message) => (
@@ -241,6 +385,20 @@ fn update_panel(
             "Comparing the server's content with yours...".into(),
             if total > 0 { format!("{} of {} checked", format_bytes(done), format_bytes(total)) } else { String::new() },
             (total > 0).then(|| done as f32 / total as f32),
+        ),
+        Phase::Verifying => (
+            "The server is checking your content...".into(),
+            "You join once your files match the server's.".into(),
+            None,
+        ),
+        Phase::Ask(offer) if offer.repair => (
+            format!(
+                "The server found {} of your files different from its own. Download them again ({})?",
+                offer.files,
+                format_bytes(offer.bytes)
+            ),
+            "Outdated or changed files would make your game disagree with the server.".into(),
+            Some(0.0),
         ),
         Phase::Ask(offer) => (
             format!(
@@ -270,13 +428,36 @@ fn update_panel(
         Phase::Mounting => ("Preparing the content...".into(), String::new(), None),
         Phase::Done(_) | Phase::Failed(_) => return,
     };
-    let heading = format!("Joining {server}");
-    for (mut text, value) in [(title.single_mut().ok(), heading), (status.single_mut().ok(), line), (detail.single_mut().ok(), more)]
-        .into_iter()
-        .filter_map(|(t, v)| Some((t?, v)))
-    {
+    let heading = if new_server { "New server".to_string() } else { format!("Joining {server}") };
+    let identity = match &phase {
+        Phase::Ask(offer) if offer.new_server => identity_text(offer),
+        _ => String::new(),
+    };
+    let label = if new_server { "Trust and download" } else { "Download" };
+    let set = |text: &mut Text, value: &str| {
         if text.0 != value {
-            text.0 = value;
+            text.0 = value.to_string();
+        }
+    };
+    for mut t in &mut texts.p0() {
+        set(&mut t, &heading);
+    }
+    for mut t in &mut texts.p1() {
+        set(&mut t, &line);
+    }
+    for mut t in &mut texts.p2() {
+        set(&mut t, &more);
+    }
+    for mut t in &mut texts.p3() {
+        set(&mut t, &identity);
+    }
+    for mut t in &mut texts.p4() {
+        set(&mut t, label);
+    }
+    for mut node in &mut identity_box {
+        let display = if new_server { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
         }
     }
     if let Ok(mut node) = bar.single_mut() {
@@ -315,6 +496,16 @@ fn press_download_buttons(
         match button {
             DownloadButton::Download | DownloadButton::Always => {
                 if let Some(job) = &job.0 {
+                    // Downloading from a new server trusts its key.
+                    if let Phase::Ask(offer) = job.shared.phase()
+                        && offer.new_server
+                        && let Some(identity) = &offer.identity
+                    {
+                        let entry = identity.trusted_entry();
+                        info!("content: trusting {} ({}, key {})", entry.name, entry.address, entry.fingerprint);
+                        settings.trusted_servers.retain(|t| t.public_key != entry.public_key);
+                        settings.trusted_servers.push(entry);
+                    }
                     job.shared.decide(true);
                 }
                 if *button == DownloadButton::Always {
@@ -324,17 +515,33 @@ fn press_download_buttons(
             // Leaving stops the download.
             DownloadButton::Cancel => menu.leave = true,
             DownloadButton::Setting(mode) => settings.content_downloads = *mode,
+            DownloadButton::ConfirmNew => settings.confirm_new_servers ^= true,
+            DownloadButton::Forget(key) => {
+                if let Some(server) = settings.trusted_servers.iter().find(|t| &t.public_key == key) {
+                    info!("content: forgot trusted server {} ({}, key {})", server.name, server.address, server.fingerprint);
+                }
+                settings.trusted_servers.retain(|t| &t.public_key != key);
+            }
+            DownloadButton::ForgetAll => {
+                info!("content: forgot all {} trusted servers", settings.trusted_servers.len());
+                settings.trusted_servers.clear();
+            }
         }
     }
 }
 
 fn paint_download_buttons(
     settings: Res<Settings>,
-    mut buttons: Query<(&DownloadButton, &Look, &Interaction, &mut BackgroundColor)>,
+    mut buttons: Query<(&DownloadButton, &Look, &Interaction, &mut BackgroundColor, &Children)>,
+    mut labels: Query<&mut Text, Without<DownloadLabel>>,
 ) {
-    for (button, look, interaction, mut background) in &mut buttons {
+    for (button, look, interaction, mut background, children) in &mut buttons {
         let hovered = *interaction != Interaction::None;
-        let selected = matches!(button, DownloadButton::Setting(mode) if *mode == settings.content_downloads);
+        let selected = match button {
+            DownloadButton::Setting(mode) => *mode == settings.content_downloads,
+            DownloadButton::ConfirmNew => settings.confirm_new_servers,
+            _ => false,
+        };
         let color = match look {
             Look::Primary if hovered => ACCENT.lighter(0.08),
             Look::Primary => ACCENT,
@@ -343,5 +550,15 @@ fn paint_download_buttons(
             _ => BUTTON,
         };
         background.set_if_neq(BackgroundColor(color));
+        if *button == DownloadButton::ConfirmNew {
+            let label = if settings.confirm_new_servers { "On" } else { "Off" };
+            for child in children {
+                if let Ok(mut text) = labels.get_mut(*child)
+                    && text.0 != label
+                {
+                    text.0 = label.to_string();
+                }
+            }
+        }
     }
 }

@@ -1,0 +1,31 @@
+// Gamepad menu navigation: connect a synthetic pad (no physical controller needed; it injects
+// raw gamepad events the same way Key/HoldKey inject real keyboard ones), move focus with the
+// D-pad, confirm with South (A), and back out with East (B).
+// client --scenario scenarios/menu/gamepad_nav.ron --out target/scenarios/menu/gamepad_nav
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        GamepadConnect,
+        Wait(0.2),
+        Screenshot("home_unfocused"),
+        // First D-pad input focuses the top-left-most button (the nav column's first entry).
+        GamepadHold([DPadDown]),
+        Wait(0.35),
+        GamepadRelease([DPadDown]),
+        Wait(0.2),
+        Screenshot("home_focused"),
+        GamepadHold([South]),
+        Wait(0.3),
+        GamepadRelease([South]),
+        Wait(0.3),
+        Screenshot("opened_page"),
+        GamepadHold([East]),
+        Wait(0.3),
+        GamepadRelease([East]),
+        Wait(0.3),
+        Screenshot("back_home"),
+        GamepadDisconnect,
+        Quit,
+    ],
+)

@@ -20,7 +20,7 @@ use crate::{
     combat::{CombatFeedback, weapon_display_name},
     net::{LocalPlayer, LocalSoldier},
     prediction::{Predicted, PredictionStats},
-    settings::{Action, Actions, Settings},
+    settings::{Action, Actions, CrosshairStyle, Settings},
 };
 
 pub struct HudPlugin;
@@ -412,7 +412,7 @@ fn update_crosshair(
     window: Single<&Window, With<PrimaryWindow>>,
     soldier: Query<(), With<LocalSoldier>>,
     vehicle_sight: Res<crate::vehicles::VehicleSight>,
-    mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility)>,
+    mut lines: Query<(&CrosshairLine, &mut Node, &mut Visibility, &mut BackgroundColor), Without<HitMarker>>,
     mut marker: Query<&mut BackgroundColor, With<HitMarker>>,
 ) {
     // Zoomed in, the iron sights (or scope) do the aiming; in vehicles, their sights.
@@ -420,8 +420,23 @@ fn update_crosshair(
     let fov_degrees = settings.field_of_view * feedback.zoom;
     let px_per_degree = window.height() / fov_degrees;
     let gap = (feedback.spread * 0.5 * px_per_degree).clamp(3.0, 90.0);
-    for (line, mut node, mut visibility) in &mut lines {
-        visibility.set_if_neq(if alive { Visibility::Inherited } else { Visibility::Hidden });
+    let [r, g, b, a] = settings.crosshair_color;
+    let crosshair_color = Color::srgba(r, g, b, a);
+    let dot = settings.crosshair_style == CrosshairStyle::Dot;
+    for (line, mut node, mut visibility, mut background) in &mut lines {
+        let shown = alive && (!dot || line.0 == 0);
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        background.set_if_neq(BackgroundColor(crosshair_color));
+        if dot {
+            node.width = px(4);
+            node.height = px(4);
+            node.left = px(-2.0);
+            node.top = px(-2.0);
+            continue;
+        }
+        let horizontal = matches!(line.0, 0 | 1);
+        node.width = px(if horizontal { 10 } else { 2 });
+        node.height = px(if horizontal { 2 } else { 10 });
         let (left, top) = match line.0 {
             0 => (-gap - 10.0, -1.0),
             1 => (gap, -1.0),
@@ -537,7 +552,7 @@ fn update_death_notice(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_scoreboard(
     actions: Actions,
-    players: Query<(&Player, &Team, &Score, Option<&SquadMember>, Has<LocalPlayer>)>,
+    players: Query<(&Player, &Team, &Score, Option<&SquadMember>, Has<LocalPlayer>, Option<&game_shared::join::AccountBadge>)>,
     mut board: Single<&mut Visibility, With<Scoreboard>>,
     mut columns: Query<(&ScoreboardColumn, &mut Text), Without<ScoreboardTeam>>,
     mut headers: Query<(&ScoreboardTeam, &mut Text, &mut TextColor), Without<ScoreboardColumn>>,
@@ -577,9 +592,11 @@ fn update_scoreboard(
         let mut rows: Vec<_> = players.iter().filter(|(_, t, ..)| **t == team).collect();
         rows.sort_by(|a, b| b.2.score.cmp(&a.2.score));
         let mut out = format!("{:<22}{:<9}{:>5}{:>5}{:>7}\n", "", "SQUAD", "K", "D", "SCORE");
-        for (player, _, score, squad, local) in rows {
+        for (player, _, score, squad, local, badge) in rows {
             let marker = if local { "> " } else { "  " };
-            let name: String = player.name.chars().take(19).collect();
+            // A verified account's rank before its name (`join::AccountBadge`).
+            let name = badge.map_or_else(|| player.name.clone(), |b| format!("{} {}", b.rank_short, player.name));
+            let name: String = name.chars().take(19).collect();
             // `*` marks the squad leader.
             let squad = squad.map_or(String::new(), |s| {
                 format!("{}{}", squad_name(s.squad), if s.leader { "*" } else { "" })

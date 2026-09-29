@@ -113,8 +113,10 @@ fn update_lod_scales(
         _ => 1.0,
     };
     let view_distance = settings.as_ref().map_or(1.0, |s| s.view_distance.scale());
+    // The graphics `lod_detail_scale` setting: lower presets switch to a cheaper LOD sooner.
+    let detail = settings.as_ref().map_or(1.0, |s| s.lod_detail_scale);
     let changed = scales.set_if_neq(LodScales {
-        lod: config.lod_scale * zoom,
+        lod: config.lod_scale * zoom * detail,
         // BF2 compares the squared cull distance times the zoom.
         draw: config.draw_scale * view_distance * zoom.sqrt(),
     });

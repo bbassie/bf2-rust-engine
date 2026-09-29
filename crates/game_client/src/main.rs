@@ -51,6 +51,7 @@ macro_rules! embedded_shader {
     }};
 }
 
+mod account;
 mod announcer;
 mod audio;
 mod bigmap;
@@ -64,12 +65,14 @@ mod deploy;
 mod effects;
 mod gadgets;
 mod hud;
+mod join;
 mod local_input;
 mod map_icons;
 mod map_markers;
 mod menu;
 mod minimap;
 mod mod_assets;
+mod mode_hud;
 mod nav_debug;
 mod net;
 mod prediction;
@@ -103,6 +106,8 @@ pub struct Cli {
     /// Level to play when hosting or in singleplayer (default `test_range`).
     #[arg(long)]
     level: Option<String>,
+    /// Game mode when hosting or in singleplayer: gpm_cq (conquest), gpm_coop, gpm_rush,
+    /// gpm_breakthrough, gpm_tdm, or short: conquest, coop, rush, bt, tdm.
     #[arg(long, default_value = "gpm_cq")]
     mode: String,
     #[arg(long, default_value_t = 16)]
@@ -312,12 +317,15 @@ fn main() -> AppExit {
         map_icons::MapIconsPlugin,
         commander::ClientCommanderPlugin,
         vehicle_prediction::VehiclePredictionPlugin,
+        mode_hud::ModeHudPlugin,
     ))
     .add_plugins((
         // Idle until a match starts (see `net::start_match`).
         GameServerPlugin { settings: None },
         settings::SettingsPlugin,
         content::ContentPlugin,
+        // Optional accounts and the join handshake (see `account`, `join`).
+        (account::AccountPlugin, join::JoinPlugin),
         effects::EffectsPlugin,
         gadgets::GadgetsPlugin,
         menu::MenuPlugin {

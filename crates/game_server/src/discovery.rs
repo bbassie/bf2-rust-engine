@@ -8,7 +8,7 @@ use bevy_replicon::prelude::*;
 use game_shared::{
     PROTOCOL_ID,
     discovery::{
-        DISCOVERY_PORTS, HEARTBEAT_SECONDS, MASTER_PORT, ServerInfo, encode_bye, encode_heartbeat, encode_reply,
+        DISCOVERY_PORTS, HEARTBEAT_SECONDS, MASTER_PORT, ServerInfo, encode_bye, encode_heartbeat_with, encode_reply,
         parse_query,
     },
     level::LoadedLevel,
@@ -35,6 +35,13 @@ pub struct DiscoveryResponder {
     socket: UdpSocket,
     port: u16,
     master: Option<Master>,
+}
+
+impl DiscoveryResponder {
+    /// The UDP port browser queries go to.
+    pub fn query_port(&self) -> u16 {
+        self.port
+    }
 }
 
 /// The master server this server announces itself to.
@@ -103,7 +110,13 @@ pub fn stop(world: &mut World) {
 }
 
 /// Tells the master server we're still here, every half minute.
-fn heartbeat(time: Res<Time<Real>>, settings: Res<ServerSettings>, mut responder: ResMut<DiscoveryResponder>) {
+fn heartbeat(
+    time: Res<Time<Real>>,
+    settings: Res<ServerSettings>,
+    mut responder: ResMut<DiscoveryResponder>,
+    level: Option<Res<LoadedLevel>>,
+    players: Query<&Player>,
+) {
     let port = responder.port;
     let Some(master) = responder.master.as_mut() else {
         return;
@@ -113,7 +126,12 @@ fn heartbeat(time: Res<Time<Real>>, settings: Res<ServerSettings>, mut responder
         return;
     }
     master.next = HEARTBEAT_SECONDS;
-    if let Err(err) = master.socket.send_to(&encode_heartbeat(settings.port, port), master.address) {
+    let bots = players.iter().filter(|p| p.is_bot).count();
+    let humans = players.iter().count() - bots;
+    let level_name = level.as_ref().map_or_else(|| settings.level.clone(), |l| l.desc.display_name.clone());
+    let text = format!("{}\n{level_name}\n{}", settings.name, settings.mode);
+    let packet = encode_heartbeat_with(settings.port, port, humans as u16, settings.max_clients as u16, bots as u16, &text);
+    if let Err(err) = master.socket.send_to(&packet, master.address) {
         warn!("master server {}: {err}", master.address);
     }
 }
@@ -124,6 +142,7 @@ fn answer_queries(
     level: Option<Res<LoadedLevel>>,
     players: Query<&Player>,
     content: Option<Res<crate::content::ContentServer>>,
+    accounts: Option<Res<crate::accounts::Accounts>>,
 ) {
     let mut buffer = [0u8; 64];
     let mut info: Option<ServerInfo> = None;
@@ -151,6 +170,7 @@ fn answer_queries(
                 port: settings.port,
                 protocol: PROTOCOL_ID,
                 content: content.as_ref().map(|c| c.advert()),
+                ranked: accounts.as_ref().is_some_and(|a| a.required()),
             }
         });
         let _ = responder.socket.send_to(&encode_reply(token, info), from);

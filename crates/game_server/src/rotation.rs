@@ -1,6 +1,10 @@
 //! Map rotation and live level changes: when a round ends the server moves on to the next
-//! map of its list (see `conquest::next_round`), and admins can change the map at any time.
+//! map of its list (see `modes::next_round`), and admins can change the map at any time.
 //! Connected players stay: their clients load the new level behind the loading screen.
+//!
+//! Every map entry names its mode (`gpm_cq`, `gpm_coop`, `gpm_rush`, `gpm_breakthrough`,
+//! `gpm_tdm`, or short: `conquest`, `rush`, `bt`, ...; see `game_data::modes`). Rush and
+//! Breakthrough work on every level with a conquest layout (their layouts are generated).
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
@@ -12,6 +16,7 @@ use game_shared::{
     protocol::{MatchInfo, Player, Score, Team},
     weapons::Armory,
 };
+use game_data::modes::canonical_mode;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -44,6 +49,7 @@ struct PendingMapChange(MapEntry);
 pub struct MapEntry {
     /// Level folder name under `imported/levels`, or `test_range`.
     pub level: String,
+    /// Game mode id (see `game_data::modes`); short names like `rush` work too.
     pub mode: String,
     /// Layout size: 16, 32 or 64 (the closest available is used).
     pub size: u32,
@@ -78,6 +84,10 @@ impl MapRotation {
     /// The rotation of `settings` without levels that aren't there, positioned at the map
     /// being played (whose bots it applies).
     pub fn new(settings: &mut ServerSettings, paths: &GamePaths) -> Self {
+        settings.mode = canonical_mode(&settings.mode);
+        for map in &mut settings.rotation {
+            map.mode = canonical_mode(&map.mode);
+        }
         let (maps, missing): (Vec<MapEntry>, Vec<MapEntry>) =
             settings.rotation.iter().cloned().partition(|m| level_exists(paths, &m.level));
         for map in missing {
@@ -158,6 +168,10 @@ fn apply_map_change(world: &mut World) {
 }
 
 fn switch_map(world: &mut World, map: &MapEntry) {
+    let map = &MapEntry {
+        mode: canonical_mode(&map.mode),
+        ..map.clone()
+    };
     let name = level_display_name(world.resource::<GamePaths>(), &map.level);
     info!("changing map to {} ({} {})", map.level, map.mode, map.size);
     world.write_message(ToClients {
@@ -288,12 +302,7 @@ pub fn level_display_name(paths: &GamePaths, level: &str) -> String {
 
 /// `gpm_cq` -> `Conquest`.
 pub fn mode_label(mode: &str) -> String {
-    match mode {
-        "gpm_cq" => "Conquest".into(),
-        "gpm_coop" => "Co-op".into(),
-        "gpm_ctf" => "Capture the Flag".into(),
-        other => other.trim_start_matches("gpm_").to_uppercase(),
-    }
+    game_data::modes::mode_label(mode)
 }
 
 /// Scales the tickets of every new round by the server's ticket ratio.
@@ -308,9 +317,12 @@ fn apply_ticket_ratio(
         return;
     }
     if let Ok(mut tickets) = tickets.get_mut(insert.entity) {
+        // Teams without tickets (the defenders in the staged modes) stay without.
         for team in 0..2 {
-            tickets.start[team] = (tickets.start[team] * ratio).round().max(1.0);
-            tickets.remaining[team] = tickets.start[team];
+            if tickets.start[team] > 0.0 {
+                tickets.start[team] = (tickets.start[team] * ratio).round().max(1.0);
+                tickets.remaining[team] = tickets.start[team];
+            }
         }
         info!("ticket ratio {}%: {} / {}", settings.ticket_ratio, tickets.start[0], tickets.start[1]);
     }

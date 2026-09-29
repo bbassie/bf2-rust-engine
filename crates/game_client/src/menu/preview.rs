@@ -3,6 +3,10 @@
 //! flags (main bases crossed out: they can't be captured), and the vehicles (not the guns)
 //! each side's spawners make, turned the way they face. Names are placed so that they don't
 //! cover each other or the flags (see `map_markers::place_labels`).
+//!
+//! Staged layouts show their stages: Rush's charges as squares numbered by stage (`1A`, `1B`,
+//! `2A`...; its points only where a side spawns at the start), Breakthrough's flags with
+//! their sector's number.
 
 use game_data::VehicleClass;
 use game_shared::protocol::Team;
@@ -105,6 +109,7 @@ pub(super) fn layout_preview(
             }
         };
         let load = |path: &Option<String>| path.as_ref().map(|p| asset_server.load::<Image>(format!("imported://{p}")));
+        let staged = preview.staged.as_ref();
         // What the names keep clear of, in pixels.
         let mut obstacles = Vec::new();
         if level.minimap.is_none() {
@@ -182,11 +187,50 @@ pub(super) fn layout_preview(
             });
         }
 
+        // Rush: the charges, in the defenders' colour, numbered by stage.
+        let charge_size = 15.0 * scale;
+        for (s, stage) in staged.iter().flat_map(|st| st.stages.iter().enumerate()) {
+            let defender = side(3 - staged.map_or(2, |st| st.attacker.clamp(1, 2)));
+            for charge in &stage.charges {
+                let point = uv(charge.position);
+                obstacles.push(Obstacle {
+                    rect: Rect::from_center_half_size(point * size, Vec2::splat(charge_size / 2.0)),
+                    hard: true,
+                });
+                frame.spawn(anchor(point)).with_children(|anchor| {
+                    anchor.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(-charge_size / 2.0),
+                            top: px(-charge_size / 2.0),
+                            min_width: px(charge_size),
+                            height: px(charge_size),
+                            padding: UiRect::horizontal(px(2)),
+                            border: UiRect::all(px(1)),
+                            border_radius: BorderRadius::all(px(3)),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BackgroundColor(team_color(defender, local)),
+                        BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+                        children![text(format!("{}{}", s + 1, charge.name), 9.0 * scale, Color::WHITE)],
+                    ));
+                });
+            }
+        }
+
         // Control points: the first owner's flag (its pole on the point, the cloth on a box of
         // the owner's colour; a dot without an icon).
         let edge = FLAG * scale;
         let mut names = Vec::new();
         for cp in &preview.control_points {
+            // Rush's points nobody spawns at when the round starts.
+            if staged.is_some() && cp.uncapturable && cp.initial_team == 0 {
+                continue;
+            }
+            // Breakthrough: the sector the point belongs to.
+            let sector = staged.and_then(|st| st.stages.iter().position(|stage| stage.control_points.contains(&cp.id)));
             let owner = side(cp.initial_team);
             let icons = &level.icons[(cp.initial_team as usize).min(2)];
             let image = if cp.uncapturable {
@@ -219,6 +263,28 @@ pub(super) fn layout_preview(
                         own: Some(obstacles.len() - 1),
                     },
                 ));
+            }
+            if let Some(sector) = sector {
+                let badge = 13.0 * scale;
+                frame.spawn(anchor(point)).with_children(|anchor| {
+                    anchor.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(-edge / 2.0 - badge * 0.3),
+                            top: px(-edge / 2.0 - badge * 0.2),
+                            width: px(badge),
+                            height: px(badge),
+                            border: UiRect::all(px(1)),
+                            border_radius: BorderRadius::MAX,
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.05, 0.06, 0.08, 0.85)),
+                        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.6)),
+                        children![text(format!("{}", sector + 1), 8.5 * scale, Color::WHITE)],
+                    ));
+                });
             }
             frame.spawn(anchor(point)).with_children(|anchor| match image {
                 Some(image) => {

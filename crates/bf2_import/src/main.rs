@@ -5,7 +5,7 @@
 //! bf2-import --bf2 "C:\Program Files (x86)\EA Games\Battlefield 2" list
 //! bf2-import --bf2 ... level strike_at_karkand
 //! bf2-import --bf2 ... level --all
-//! bf2-import --bf2 ... light --all     # only the world lighting of imported levels
+//! bf2-import --bf2 ... light --all     # only the world lighting and lamps of imported levels
 //! bf2-import --bf2 ... check          # parse every mesh and collision mesh, report failures
 //! ```
 
@@ -30,6 +30,7 @@ mod destruction;
 mod effects;
 mod glb;
 mod hitzones;
+mod lamps;
 mod level;
 mod lighting;
 mod lods;
@@ -65,18 +66,41 @@ enum Command {
     Level {
         /// Level folder names (case-insensitive).
         names: Vec<String>,
-        /// Import every level of every installed mod.
+        /// Import every level of every installed mod, or (with `--bf2-mod`) of just that one.
         #[arg(long)]
         all: bool,
+        /// Only look at this installed BF2 mod's levels (e.g. `AIX2`). Also scopes the
+        /// soldier bodies this run imports, so a mod's own soldiers don't get duplicated into
+        /// a namespaced `--out` alongside every other installed mod's.
+        #[arg(long = "bf2-mod")]
+        bf2_mod: Option<String>,
+        /// Namespace every imported level so it can't collide with a vanilla one of the same
+        /// folder name (BF2 mods sometimes reuse a base level's name, e.g. AIX 2's own
+        /// `Dalian_plant`): writes `<namespace>_<level>` instead of `<level>`, and prefixes
+        /// the menu display name with `--mod-title`. See `docs/MODDING.md#bf2-mods` for the
+        /// full design (point `--out` at a `mods/<namespace>` folder of its own, on top of a
+        /// vanilla `imported/`).
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Display name prefix used with `--namespace`, e.g. "AIX 2" for "AIX 2: Archipelago".
+        /// Defaults to `--namespace` itself.
+        #[arg(long = "mod-title")]
+        mod_title: Option<String>,
     },
     /// Import soldier bodies (skinned mesh, skeleton, animations). Also done by `level`.
-    Soldiers,
+    Soldiers {
+        /// Only this installed BF2 mod's soldiers (default: every installed mod's).
+        #[arg(long = "bf2-mod")]
+        bf2_mod: Option<String>,
+    },
     /// Import only the bots' hints (strategic areas, weapon templates) of imported levels.
     /// Also done by `level`.
     Ai {
         names: Vec<String>,
         #[arg(long)]
         all: bool,
+        #[arg(long = "bf2-mod")]
+        bf2_mod: Option<String>,
     },
     /// Update only the world lighting (`sky.con`) in imported levels' `level.ron`. Also
     /// done by `level`.
@@ -84,6 +108,8 @@ enum Command {
         names: Vec<String>,
         #[arg(long)]
         all: bool,
+        #[arg(long = "bf2-mod")]
+        bf2_mod: Option<String>,
     },
     /// Parse every mesh and collision mesh of a mod and report failures.
     Check {
@@ -106,9 +132,16 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Level { names, all } => {
+        Command::Level {
+            names,
+            all,
+            bf2_mod,
+            namespace,
+            mod_title,
+        } => {
+            let mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| install.mods());
             let levels = if all {
-                install.mods().iter().flat_map(|m| install.levels(m)).collect()
+                mods.iter().flat_map(|m| install.levels(m)).collect()
             } else {
                 if names.is_empty() {
                     bail!("name at least one level, or pass --all");
@@ -120,13 +153,14 @@ fn main() -> Result<()> {
             };
             std::fs::create_dir_all(&cli.out)?;
             write_readme(&cli.out)?;
-            import_soldiers(&install, &cli.out);
+            import_soldiers(&install, &cli.out, &mods);
             let localization = Localization::load(&install, "english");
             log::info!("{} localized strings", localization.len());
+            let mod_title = mod_title.as_deref().or(namespace.as_deref());
             for level in levels {
                 let started = Instant::now();
                 log::info!("importing {} ({})", level.name, level.mod_name);
-                match level::import_level(&install, &level, &localization, &cli.out) {
+                match level::import_level(&install, &level, &localization, &cli.out, namespace.as_deref(), mod_title) {
                     Ok(report) => {
                         log::info!(
                             "{}: {} statics, {} roads, {} kits, {} weapons, {} vehicles, {} templates, {} mesh files, modes [{}] in {:.1}s",
@@ -152,10 +186,14 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Soldiers => import_soldiers(&install, &cli.out),
-        Command::Ai { names, all } => {
+        Command::Soldiers { bf2_mod } => {
+            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| install.mods());
+            import_soldiers(&install, &cli.out, &mods)
+        }
+        Command::Ai { names, all, bf2_mod } => {
+            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| install.mods());
             let levels = if all {
-                install.mods().iter().flat_map(|m| install.levels(m)).collect()
+                mods.iter().flat_map(|m| install.levels(m)).collect()
             } else {
                 names
                     .iter()
@@ -169,9 +207,10 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Light { names, all } => {
+        Command::Light { names, all, bf2_mod } => {
+            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| install.mods());
             let levels = if all {
-                install.mods().iter().flat_map(|m| install.levels(m)).collect()
+                mods.iter().flat_map(|m| install.levels(m)).collect()
             } else {
                 if names.is_empty() {
                     bail!("name at least one level, or pass --all");
@@ -203,9 +242,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn import_soldiers(install: &Bf2Install, out: &std::path::Path) {
+fn import_soldiers(install: &Bf2Install, out: &std::path::Path, mods: &[String]) {
     let started = Instant::now();
-    match soldiers::import_all(install, out) {
+    match soldiers::import_all(install, out, mods) {
         Ok(names) => log::info!(
             "soldiers: {} in {:.1}s",
             names.join(", "),

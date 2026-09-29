@@ -1,6 +1,9 @@
 //! Conquest: control points, tickets and rounds. The server runs the rules
 //! (`game_server::conquest`, after BF2's `gpm_cq`); clients read these replicated
 //! components for the HUD and the deploy screen.
+//!
+//! Every game mode has these: flags to take or to spawn at, tickets (only the attackers' in
+//! the staged modes) and rounds. What the other modes add is in [`crate::modes`].
 
 use bevy::{ecs::entity::MapEntities, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,18 @@ pub struct FlagState {
     pub height: f32,
     /// Height change per second; positive while raising.
     pub rate: f32,
+}
+
+impl FlagState {
+    /// A point held by `owner` with its flag at the top, or neutral with no flag up.
+    pub fn held_by(owner: Team) -> Self {
+        Self {
+            owner,
+            flag: owner,
+            height: if owner == Team::Spectator { 0.0 } else { 1.0 },
+            rate: 0.0,
+        }
+    }
 }
 
 /// Tickets of both teams, on the match entity. Replicated.

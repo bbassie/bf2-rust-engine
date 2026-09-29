@@ -14,7 +14,7 @@ use game_shared::{
 use crate::{Controls, ServerSettings};
 
 /// BF2's co-op mode.
-pub const COOP: &str = "gpm_coop";
+pub const COOP: &str = game_data::modes::COOP;
 
 /// Co-op settings.
 #[derive(Clone, Debug)]
@@ -39,7 +39,7 @@ impl Default for CoopSettings {
 }
 
 pub fn is_coop(mode: &str) -> bool {
-    mode.eq_ignore_ascii_case(COOP)
+    game_data::modes::ModeKind::of(mode) == game_data::modes::ModeKind::Coop
 }
 
 /// The team humans play on in co-op.

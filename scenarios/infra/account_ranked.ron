@@ -1,0 +1,38 @@
+// Joins a ranked server with an account: the client asks the master server for a ticket for
+// this server once it proved its identity, the server checks the ticket offline and shows the
+// account's rank before its name on the scoreboard. Ending the round (admin: `/tickets 0 2`)
+// sends the round's stats to the master.
+//   master --data-dir <dir> --bind 127.0.0.1:29380 --http 127.0.0.1:29381
+//   master --data-dir <dir> add-server --name Ranked            (prints the API key)
+//   server --port 29300 --ranked --master-url http://127.0.0.1:29381 --api-key <key>
+//          --admin-password test --bots 4
+//   client --connect 127.0.0.1 --port 29300 --settings <dir>/settings.ron ...
+//          --scenario scenarios/infra/account_ranked.ron
+// (settings.ron with `master_url: Some("http://127.0.0.1:29381")`, and a login: account.ron
+// next to it, or log in on the Account page first.)
+(
+    steps: [
+        ExpectLog("offering our account ticket", 60.0),
+        ExpectLog("content verified by the server", 60.0),
+        WaitReady,
+        Wait(1.0),
+        HoldKey(Tab),
+        Wait(0.5),
+        Screenshot("scoreboard"),
+        ReleaseKey(Tab),
+        Key(KeyT),
+        Frames(2),
+        Type("/login test"),
+        Frames(2),
+        Key(Enter),
+        Wait(1.0),
+        Key(KeyT),
+        Frames(2),
+        Type("/tickets 0 2"),
+        Frames(2),
+        Key(Enter),
+        Wait(6.0),
+        Screenshot("round_end"),
+        Quit,
+    ],
+)

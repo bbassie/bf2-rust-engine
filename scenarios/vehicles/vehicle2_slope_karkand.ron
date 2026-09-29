@@ -1,0 +1,73 @@
+// Climbing a Karkand slope: starts on flat ground at (-150, ., -422) (confirmed flat from -138
+// to -178 by sampling the heightmap), ~28 m of run-up before whatever is at (-178, ., -422)
+// and beyond. Jeep, APC and tank each start on the flat, already settled, and drive into it
+// under their own power at full throttle (placing a vehicle directly on a slope, level, made
+// an earlier version of this scenario spawn with one end clipped into the ground and tip over
+// on impact - a run-up avoids that and matches how a vehicle actually reaches a hill in play).
+// VehicleTrace logs speed, altitude and engine state to the report.
+//
+// CAVEAT: finer sampling found a ~6 m near-vertical step at x=-183 (not a graded hill), which
+// deflects or stops any vehicle hitting it - correct behavior for a wall, but not useful for
+// measuring climb speed. Treat this file as a starting point: retarget the two PlaceVehicle
+// positions at an actual graded hill (ideally one a human points to; the heightmap scan this
+// was built from can't tell a slope from a cliff by itself) before trusting its numbers.
+// client --scenario scenarios/vehicles/vehicle2_slope_karkand.ron --out target/scenarios/vehicle2/slope_karkand
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        NearVehicle("usjep_hmmwv"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-150.0, 151.5, -422.0), 90.0, 0.0),
+        Wait(1.5),
+        ThirdPerson(true),
+        Screenshot("hmmwv_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("hmmwv slope", 20.0),
+        Screenshot("hmmwv_climbing"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("usapc_lav25"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-150.0, 151.5, -422.0), 90.0, 0.0),
+        Wait(1.5),
+        Screenshot("lav25_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("lav25 slope", 20.0),
+        Screenshot("lav25_climbing"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("ustnk_m1a2"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-150.0, 151.5, -422.0), 90.0, 0.0),
+        Wait(1.5),
+        Screenshot("m1a2_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("m1a2 slope", 25.0),
+        Screenshot("m1a2_climbing"),
+        Move(0.0, 0.0),
+        Quit,
+    ],
+)

@@ -290,7 +290,9 @@ fn resting_position(model: &VehicleModel, spawner: Vec3, spatial: &SpatialQuery,
         .iter()
         .map(|w| w.radius - w.position[1])
         .fold(-desc.physics.bounds[0][1], f32::max);
-    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
+    // Rest it on what actually holds its wheels up, not a plant BF2 gives no vehicle
+    // collision (see `GameLayer::VehicleGround`).
+    let filter = SpatialQueryFilter::from_mask(GameLayer::vehicle_movement_mask());
     let ground = spatial
         .cast_ray(spawner + Vec3::Y * 3.0, Dir3::NEG_Y, 12.0, true, &filter)
         .map_or(spawner.y, |hit| spawner.y + 3.0 - hit.distance);

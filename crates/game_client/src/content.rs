@@ -1,8 +1,10 @@
 //! Joining a server that shares its content (see `game_shared::content`). Before connecting,
-//! the client fetches the server's manifest, works out which files of the levels the server
-//! plays it lacks (a file it has in its own import or mods with the same hash doesn't count),
-//! asks (setting `content_downloads`, default ask), downloads them into its cache, and mounts
-//! the server's content for the session:
+//! the client fetches the server's manifest and its identity (its key, proven by signing a
+//! random nonce and the manifest id), works out which files of the levels the server plays it
+//! lacks (a file it has in its own import or mods with the same hash doesn't count), asks
+//! (setting `content_downloads`, default ask; a server whose key isn't trusted yet always
+//! asks, see below), downloads them into its cache, and mounts the server's content for the
+//! session:
 //!
 //! - [`GamePaths`] becomes the server's layers (its mods, then its imported assets if it
 //!   shares them, else ours). Our own mods are off: the server's content must win wherever it
@@ -10,12 +12,20 @@
 //! - The `imported://` asset source follows (see [`crate::mod_assets::set_layers`]).
 //! - Libraries loaded at startup (sounds, effects, gadgets) are loaded again.
 //!
-//! Leaving the match unmounts it. A server that shares nothing (or an older one) is joined as
-//! before, with our own content.
+//! After connecting, the server has the last word (see `crate::join`): it compares the files
+//! we would load with its manifest, and names the ones to fetch again; [`begin_repair`]
+//! downloads those. On a map change a repair ends with joining again, since the level is
+//! already loading.
 //!
-//! The cache is `cache/` next to the settings file (`--content-cache` or `$GAME_CONTENT_CACHE`
-//! override it), content-addressed and shared by every server, limited to
-//! `content_cache_gb`.
+//! **Trust.** Downloading from a server whose key we haven't trusted before needs a yes, with
+//! the server's name, address and key fingerprint shown, even with downloads set to Always
+//! (unless `confirm_new_servers` is off). Trusted keys are kept in the settings
+//! (`trusted_servers`); Settings > Game lists them and forgets them.
+//!
+//! Leaving the match unmounts it. A server that shares nothing is joined with our own
+//! content. The cache is `cache/` next to the settings file (`--content-cache` or
+//! `$GAME_CONTENT_CACHE` override it), content-addressed and shared by every server, limited
+//! to `content_cache_gb`.
 
 use std::{
     collections::HashSet,
@@ -28,16 +38,18 @@ use std::{
 };
 
 use bevy::prelude::*;
+use game_auth::{hex, random_bytes};
 use game_shared::{
     config::GamePaths,
     content::{
-        self, ContentMode, FileEntry, HashIndex, MANIFEST_URL_PATH, MAX_MANIFEST_BYTES, Manifest,
+        self, ContentMode, FileEntry, HashIndex, IDENTITY_URL_PATH, IdentityAnswer, MANIFEST_URL_PATH, MAX_MANIFEST_BYTES,
+        Manifest,
         download::{self, Fetch, FetchResponse, Progress},
         store::{ContentStore, MountedContent, server_key},
     },
     discovery::{DISCOVERY_PORTS, ServerInfo, encode_query, parse_reply},
+    join::CONTENT_PURPOSE,
     level::TEST_RANGE,
-    protocol::MatchInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -90,26 +102,80 @@ impl FromStr for ContentDownloads {
     }
 }
 
+/// A server whose content we agreed to download, by its identity key (settings).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct TrustedServer {
+    /// 64 hex digits.
+    pub public_key: String,
+    pub fingerprint: String,
+    /// Its name and address when we trusted it.
+    pub name: String,
+    pub address: String,
+    /// Seconds since 1970.
+    pub since: u64,
+}
+
+/// Who a server is: its key, proven (see `game_auth::identity`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerIdentity {
+    pub name: String,
+    pub address: String,
+    pub public_key: [u8; 32],
+    pub fingerprint: String,
+}
+
+impl ServerIdentity {
+    pub fn trusted_entry(&self) -> TrustedServer {
+        TrustedServer {
+            public_key: hex(&self.public_key),
+            fingerprint: self.fingerprint.clone(),
+            name: self.name.clone(),
+            address: self.address.clone(),
+            since: game_auth::unix_now(),
+        }
+    }
+}
+
+/// Whether downloading from `identity` needs a first-time yes: `(new key, the address was
+/// trusted with another key)`.
+pub fn trust_status(identity: &ServerIdentity, trusted: &[TrustedServer], confirm_new: bool) -> (bool, bool) {
+    let key = hex(&identity.public_key);
+    let known = trusted.iter().any(|t| t.public_key.eq_ignore_ascii_case(&key));
+    let changed = !known && trusted.iter().any(|t| t.address == identity.address);
+    (!known && confirm_new, changed)
+}
+
 pub struct ContentPlugin;
 
 impl Plugin for ContentPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ContentJob>()
             .init_resource::<ContentMount>()
-            .add_observer(follow_map_change)
             // First thing in the frame, like leaving from the menu: connecting, mounting and
             // leaving swap resources other systems' run conditions look at.
             .add_systems(First, poll_job);
     }
 }
 
-/// The content check or download before joining, if one is running.
+/// The content check or download of a join, if one is running.
 #[derive(Resource, Default)]
 pub struct ContentJob(pub Option<Job>);
 
 pub struct Job {
     pub server: SocketAddr,
     pub shared: Arc<JobShared>,
+    pub kind: JobKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobKind {
+    /// Before connecting: then connect.
+    Join,
+    /// Connected, files the server named: then report again, or join again (`rejoin`).
+    Repair { rejoin: bool },
+    /// Connected, the server checking our files (only shows the panel; `crate::join`).
+    Verify,
 }
 
 /// Shared between the job's thread and the game.
@@ -125,13 +191,38 @@ impl JobShared {
         self.phase.lock().unwrap().clone()
     }
 
-    fn set(&self, phase: Phase) {
+    pub fn set(&self, phase: Phase) {
         *self.phase.lock().unwrap() = phase;
     }
 
     /// The player's answer to [`Phase::Ask`].
     pub fn decide(&self, download: bool) {
         *self.decision.lock().unwrap() = Some(download);
+    }
+
+    /// Waits for the player's answer to `offer`.
+    fn ask(&self, offer: &Offer) -> Result<(), String> {
+        info!(
+            "content: asking the player: {} files, {}{}",
+            offer.files,
+            content::format_bytes(offer.bytes),
+            match (&offer.identity, offer.new_server) {
+                (Some(identity), true) => format!(", new server {} ({}, key {})", identity.name, identity.address, identity.fingerprint),
+                _ => String::new(),
+            }
+        );
+        self.set(Phase::Ask(offer.clone()));
+        loop {
+            if self.progress.cancelled() {
+                return Err("cancelled".into());
+            }
+            match self.decision.lock().unwrap().take() {
+                Some(true) => return Ok(()),
+                Some(false) => return Err("cancelled".into()),
+                None => {}
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -147,7 +238,9 @@ pub enum Phase {
     Ask(Offer),
     Downloading(Offer),
     Mounting,
-    Done(Option<Box<MountedContent>>),
+    /// Connected: the server compares our files with its own.
+    Verifying,
+    Done(Box<Joined>),
     Failed(String),
 }
 
@@ -164,6 +257,29 @@ pub struct Offer {
     pub bytes: u64,
     /// Bytes needed that we already have (cache or our own files).
     pub have_bytes: u64,
+    /// Who the server is.
+    pub identity: Option<ServerIdentity>,
+    /// Its key isn't trusted yet: accepting trusts it.
+    pub new_server: bool,
+    /// We trusted this address with another key before.
+    pub key_changed: bool,
+    /// A repair: the server found these of our files different from its own.
+    pub repair: bool,
+}
+
+/// What a finished job leaves behind for the session.
+#[derive(Clone, Debug, Default)]
+pub struct Joined {
+    /// A new view of the server's content to mount.
+    pub mounted: Option<MountedContent>,
+    pub manifest: Option<Arc<Manifest>>,
+    pub identity: Option<ServerIdentity>,
+    /// The content endpoint (`http://ip:port`).
+    pub base: Option<String>,
+    /// Where files come from: the download URL (if any), then `<base>/content`.
+    pub bases: Vec<String>,
+    /// The player agreed to download from this server (or downloads are set to Always).
+    pub accepted: bool,
 }
 
 /// The server content mounted for the session, and our own paths to go back to.
@@ -171,16 +287,37 @@ pub struct Offer {
 pub struct ContentMount {
     original: Option<GamePaths>,
     pub mounted: Option<MountedContent>,
-    /// The server moved to a level we lack files for: join again (next frame).
-    rejoin: bool,
+    /// The server's manifest and identity, from before connecting.
+    pub manifest: Option<Arc<Manifest>>,
+    pub identity: Option<ServerIdentity>,
+    pub base: Option<String>,
+    pub bases: Vec<String>,
+    pub accepted: bool,
+    /// Join again next frame (after a repair during a map change).
+    pub rejoin: bool,
     /// Left for rejoining: join this next frame, once the connection's end went through
     /// (joining in the same frame would count as a failed connection).
     rejoin_next: Option<net::MatchSetup>,
 }
 
+impl ContentMount {
+    /// Our own content, whatever is mounted.
+    pub fn own_paths(&self, current: &GamePaths) -> GamePaths {
+        self.original.clone().unwrap_or_else(|| current.clone())
+    }
+
+    fn remember(&mut self, joined: &Joined) {
+        self.manifest = joined.manifest.clone();
+        self.identity = joined.identity.clone();
+        self.base = joined.base.clone();
+        self.bases = joined.bases.clone();
+        self.accepted |= joined.accepted;
+    }
+}
+
 /// The cache folder: `--content-cache`, `$GAME_CONTENT_CACHE`, else `cache` next to the
 /// settings file (or where it would be).
-fn cache_dir(world: &World) -> Option<PathBuf> {
+pub fn cache_dir(world: &World) -> Option<PathBuf> {
     let cli = world.resource::<Cli>();
     if let Some(dir) = &cli.content_cache {
         return Some(dir.clone());
@@ -199,7 +336,7 @@ fn cache_dir(world: &World) -> Option<PathBuf> {
 }
 
 /// `--content`, else the setting; scripted runs download without asking.
-fn downloads_mode(world: &World) -> ContentDownloads {
+pub fn downloads_mode(world: &World) -> ContentDownloads {
     let cli = world.resource::<Cli>();
     if let Some(mode) = cli.content {
         return mode;
@@ -208,6 +345,16 @@ fn downloads_mode(world: &World) -> ContentDownloads {
         return ContentDownloads::Always;
     }
     world.resource::<Settings>().content_downloads
+}
+
+/// Whether a new server key needs a yes. Scripted runs trust new servers unless `--content`
+/// is given (so scenarios can test the question).
+pub fn confirm_new(world: &World) -> bool {
+    let cli = world.resource::<Cli>();
+    if cli.content.is_none() && (cli.scenario.is_some() || cli.screenshot.is_some()) {
+        return false;
+    }
+    world.resource::<Settings>().confirm_new_servers
 }
 
 /// Joins `server`: first its content (unless downloads are off), then the connection, which
@@ -221,7 +368,15 @@ pub fn begin_join(world: &mut World, server: SocketAddr) -> Result<()> {
     let local = world.resource::<GamePaths>().clone();
     let limit = (world.resource::<Settings>().content_cache_gb.max(1) as u64) * 1_000_000_000;
     let shared = Arc::new(JobShared::default());
-    let job = JobInput { server, cache, local, ask: mode == ContentDownloads::Ask, limit };
+    let job = JobInput {
+        server,
+        cache,
+        local,
+        ask: mode == ContentDownloads::Ask,
+        limit,
+        trusted: world.resource::<Settings>().trusted_servers.clone(),
+        confirm_new: confirm_new(world),
+    };
     let thread_shared = shared.clone();
     std::thread::Builder::new()
         .name("content download".into())
@@ -230,11 +385,11 @@ pub fn begin_join(world: &mut World, server: SocketAddr) -> Result<()> {
             let cancelled = thread_shared.progress.cancelled();
             thread_shared.set(match result {
                 _ if cancelled => Phase::Failed("cancelled".into()),
-                Ok(mounted) => Phase::Done(mounted.map(Box::new)),
+                Ok(joined) => Phase::Done(Box::new(joined)),
                 Err(err) => Phase::Failed(err),
             });
         })?;
-    world.insert_resource(ContentJob(Some(Job { server, shared })));
+    world.insert_resource(ContentJob(Some(Job { server, shared, kind: JobKind::Join })));
     Ok(())
 }
 
@@ -244,6 +399,12 @@ pub fn leave(world: &mut World) {
         job.shared.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     unmount(world);
+    let mut mount = world.resource_mut::<ContentMount>();
+    mount.manifest = None;
+    mount.identity = None;
+    mount.base = None;
+    mount.bases.clear();
+    mount.accepted = false;
 }
 
 fn poll_job(world: &mut World) {
@@ -253,25 +414,34 @@ fn poll_job(world: &mut World) {
     if std::mem::take(&mut world.resource_mut::<ContentMount>().rejoin)
         && let Some(setup) = world.resource::<ActiveMatch>().setup.clone()
     {
+        info!("content: joining again with the fetched files");
         net::leave_match(world);
         world.resource_mut::<ContentMount>().rejoin_next = Some(setup);
     }
     let Some(job) = world.resource::<ContentJob>().0.as_ref() else {
         return;
     };
-    let server = job.server;
+    let (server, kind) = (job.server, job.kind);
     let phase = job.shared.phase();
     match phase {
-        Phase::Done(mounted) => {
+        Phase::Done(joined) => {
             world.resource_mut::<ContentJob>().0 = None;
-            if let Some(mounted) = mounted {
-                mount(world, *mounted);
+            world.resource_mut::<ContentMount>().remember(&joined);
+            if let Some(mounted) = joined.mounted.clone() {
+                mount(world, mounted);
             }
-            if let Err(err) = net::connect(world, server) {
-                let notice = format!("Can't connect to {server}: {err}");
-                error!("{notice}");
-                net::leave_match(world);
-                world.insert_resource(MatchNotice(Some(notice)));
+            match kind {
+                JobKind::Join => {
+                    if let Err(err) = net::connect(world, server) {
+                        let notice = format!("Can't connect to {server}: {err}");
+                        error!("{notice}");
+                        net::leave_match(world);
+                        world.insert_resource(MatchNotice(Some(notice)));
+                    }
+                }
+                JobKind::Repair { rejoin: true } => world.resource_mut::<ContentMount>().rejoin = true,
+                JobKind::Repair { rejoin: false } => crate::join::report_again(world),
+                JobKind::Verify => {}
             }
         }
         Phase::Failed(err) => {
@@ -320,23 +490,6 @@ fn reload_libraries(world: &mut World) {
     let _ = world.run_system_cached(crate::gadgets::load_assets);
 }
 
-/// The server moved to a level whose files we didn't get (an admin's map change outside the
-/// rotation): join again, which fetches them.
-fn follow_map_change(add: On<Add, MatchInfo>, infos: Query<&MatchInfo>, mut mount: ResMut<ContentMount>) {
-    let Ok(info) = infos.get(add.entity) else {
-        return;
-    };
-    let Some(mounted) = &mount.mounted else {
-        return;
-    };
-    let known = |levels: &[String]| levels.iter().any(|l| l.eq_ignore_ascii_case(&info.level));
-    if info.level == TEST_RANGE || known(&mounted.levels) || !known(&mounted.shared_levels) {
-        return;
-    }
-    info!("content: the server changed to {}, whose files we don't have yet: joining again", info.level);
-    mount.rejoin = true;
-}
-
 struct JobInput {
     server: SocketAddr,
     cache: PathBuf,
@@ -344,9 +497,11 @@ struct JobInput {
     local: GamePaths,
     ask: bool,
     limit: u64,
+    trusted: Vec<TrustedServer>,
+    confirm_new: bool,
 }
 
-fn agent() -> ureq::Agent {
+pub fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(4)))
         .timeout_recv_response(Some(Duration::from_secs(20)))
@@ -408,8 +563,34 @@ fn fetch_manifest(agent: &ureq::Agent, base: &str) -> Result<ManifestAnswer, ure
     })
 }
 
+/// The server's identity from its content endpoint, checked: it signed our nonce with its
+/// key. Also the manifest id it signed.
+fn fetch_identity(agent: &ureq::Agent, base: &str, server: SocketAddr) -> Result<(ServerIdentity, String), String> {
+    let nonce: [u8; 32] = random_bytes();
+    let mut response = agent
+        .get(format!("{base}{IDENTITY_URL_PATH}?nonce={}", hex(&nonce)))
+        .call()
+        .map_err(|err| format!("Can't get {server}'s identity: {err}"))?;
+    let body = response.body_mut().with_config().limit(64 * 1024).read_to_string().map_err(|err| err.to_string())?;
+    if response.status().as_u16() != 200 {
+        return Err(format!("{server} didn't prove its identity (HTTP {})", response.status().as_u16()));
+    }
+    let answer: IdentityAnswer = ron::from_str(&body).map_err(|err| format!("{server} sent a broken identity: {err}"))?;
+    let key = answer
+        .proof
+        .check(CONTENT_PURPOSE, &nonce, &answer.manifest_id, &answer.name)
+        .map_err(|err| format!("{server}: {err}"))?;
+    let identity = ServerIdentity {
+        name: answer.name,
+        address: server.to_string(),
+        public_key: key,
+        fingerprint: game_auth::fingerprint(&key),
+    };
+    Ok((identity, answer.manifest_id))
+}
+
 /// Downloads over HTTP (`ureq`).
-struct HttpFetch(ureq::Agent);
+pub struct HttpFetch(pub ureq::Agent);
 
 impl Fetch for HttpFetch {
     fn get(&self, url: &str, offset: u64, size: u64) -> Result<FetchResponse, String> {
@@ -440,7 +621,7 @@ impl Fetch for HttpFetch {
 }
 
 /// Downloaded sounds must decode: Bevy's audio panics on sounds it can't read.
-fn validate(entry: &FileEntry, file: &Path) -> Result<(), String> {
+pub fn validate(entry: &FileEntry, file: &Path) -> Result<(), String> {
     let extension = entry.path.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
     if extension != "wav" && extension != "ogg" {
         return Ok(());
@@ -497,10 +678,46 @@ fn get_manifest(
     }
 }
 
+/// The manifest for the in-match check: fetched from `base` (blocking), for clients that
+/// didn't get it before connecting.
+pub fn manifest_from(base: &str) -> Result<Manifest, String> {
+    let agent = agent();
+    for _ in 0..30 {
+        match fetch_manifest(&agent, base) {
+            Ok(ManifestAnswer::Manifest(manifest)) => return Ok(*manifest),
+            Ok(ManifestAnswer::Preparing(_)) => std::thread::sleep(Duration::from_millis(700)),
+            Ok(ManifestAnswer::None) => return Err(format!("{base} shares nothing")),
+            Err(err) => return Err(format!("can't reach the server's content at {base} ({err})")),
+        }
+    }
+    Err(format!("{base} has been preparing its content for too long"))
+}
+
 /// Attempts at fetching the manifest and downloading, for a server whose files change meanwhile.
 const JOB_ATTEMPTS: u32 = 3;
 
-fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>, String> {
+fn offer_for(manifest: &Manifest, plan: &download::Plan, identity: &ServerIdentity, trust: (bool, bool)) -> Offer {
+    Offer {
+        server_name: manifest.server_name.clone(),
+        mode: manifest.mode,
+        mods: manifest
+            .layers
+            .iter()
+            .filter(|l| !l.imported)
+            .map(|l| if l.title.is_empty() { l.name.clone() } else { l.title.clone() })
+            .collect(),
+        imported: manifest.has_imported(),
+        files: plan.download.len(),
+        bytes: plan.download_bytes,
+        have_bytes: plan.needed_bytes.saturating_sub(plan.download_bytes),
+        identity: Some(identity.clone()),
+        new_server: trust.0,
+        key_changed: trust.1,
+        repair: false,
+    }
+}
+
+fn run_job(job: &JobInput, shared: &JobShared) -> Result<Joined, String> {
     let server = job.server;
     // Where the endpoint is, if the server says.
     let info = probe(server);
@@ -508,7 +725,7 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
         && info.content.is_none()
     {
         info!("content: {server} shares no content");
-        return Ok(None);
+        return Ok(Joined::default());
     }
     let port = info.as_ref().and_then(|i| i.content.as_ref()).map_or(server.port(), |c| c.port);
     let base = format!("http://{}", SocketAddr::new(server.ip(), port));
@@ -518,15 +735,26 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
     let local_roots: Vec<PathBuf> = job.local.roots().into_iter().map(Path::to_path_buf).collect();
     let mut accepted = !job.ask;
     let mut attempt = 0;
-    let (manifest, plan) = loop {
+    let (manifest, plan, identity, bases) = loop {
         attempt += 1;
         let Some(manifest) = get_manifest(&agent, &base, server, info.is_some(), shared)? else {
-            return Ok(None);
+            return Ok(Joined::default());
         };
         manifest.check_compatible()?;
+        // Who serves it: the key, and that it signed this manifest.
+        let (identity, signed_manifest) = fetch_identity(&agent, &base, server)?;
+        if signed_manifest != manifest.content_id() {
+            if attempt < JOB_ATTEMPTS {
+                warn!("content: {server}'s manifest changed while joining; fetching it again");
+                continue;
+            }
+            return Err(format!("{server}'s content doesn't match what its key signed."));
+        }
+        let trust = trust_status(&identity, &job.trusted, job.confirm_new);
         info!(
-            "content: {} shares {} ({} files, {} in {} layers), playing {:?}",
+            "content: {} ({}) shares {} ({} files, {} in {} layers), playing {:?}",
             manifest.server_name,
+            identity.fingerprint,
             manifest.mode,
             manifest.files().count(),
             content::format_bytes(manifest.total_bytes()),
@@ -565,33 +793,9 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
                 content::format_bytes(plan.download_bytes)
             ));
         }
-        let offer = Offer {
-            server_name: manifest.server_name.clone(),
-            mode: manifest.mode,
-            mods: manifest
-                .layers
-                .iter()
-                .filter(|l| !l.imported)
-                .map(|l| if l.title.is_empty() { l.name.clone() } else { l.title.clone() })
-                .collect(),
-            imported: manifest.has_imported(),
-            files: plan.download.len(),
-            bytes: plan.download_bytes,
-            have_bytes: plan.needed_bytes.saturating_sub(plan.download_bytes),
-        };
-        if !plan.download.is_empty() && !accepted {
-            shared.set(Phase::Ask(offer.clone()));
-            loop {
-                if shared.progress.cancelled() {
-                    return Err("cancelled".into());
-                }
-                match shared.decision.lock().unwrap().take() {
-                    Some(true) => break,
-                    Some(false) => return Err("cancelled".into()),
-                    None => {}
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+        let offer = offer_for(&manifest, &plan, &identity, trust);
+        if !plan.download.is_empty() && (!accepted || trust.0) {
+            shared.ask(&offer)?;
             accepted = true;
         }
         shared.set(Phase::Downloading(offer));
@@ -599,13 +803,8 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
         if copied > 0 {
             info!("content: copied {} of our own files into the cache", content::format_bytes(copied));
         }
+        let bases: Vec<String> = manifest.download_url.iter().cloned().chain([format!("{base}/content")]).collect();
         if !plan.download.is_empty() {
-            let bases: Vec<String> = manifest
-                .download_url
-                .iter()
-                .cloned()
-                .chain([format!("{base}/content")])
-                .collect();
             let downloading = Instant::now();
             let fetch = HttpFetch(agent.clone());
             match download::download_all(&fetch, &bases, &plan.download, &store, &shared.progress, WORKERS, &validate) {
@@ -635,7 +834,7 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
             }
         }
         index.save();
-        break (manifest, plan);
+        break (manifest, plan, identity, bases);
     };
 
     shared.set(Phase::Mounting);
@@ -650,20 +849,209 @@ fn run_job(job: &JobInput, shared: &JobShared) -> Result<Option<MountedContent>,
         info!("content: cache over its limit, removed {removed} old files ({})", content::format_bytes(freed));
     }
     info!("content: laid out {} files in {:.1} s", plan.needed.len(), mounting.elapsed().as_secs_f32());
-    Ok(Some(mounted))
+    Ok(Joined {
+        mounted: Some(mounted),
+        manifest: Some(Arc::new(*manifest)),
+        identity: Some(identity),
+        base: Some(base),
+        bases,
+        accepted,
+    })
 }
 
-/// A short note on what a listed server shares, for the server browser.
-pub fn browser_tag(info: &ServerInfo) -> Option<String> {
-    let content = info.content.as_ref()?;
-    let what = match content.mode {
-        ContentMode::Off => return None,
-        ContentMode::Mods => "mods",
-        ContentMode::All => "all content",
+/// Downloads the files the server named after comparing our report (see `crate::join`) and
+/// puts them where the game loads them from. `more`: the server found more than it listed,
+/// so the whole plan for the level is redone. Ends with reporting again, or with joining
+/// again when the level was already loading (`rejoin`).
+pub fn begin_repair(world: &mut World, files: Vec<FileEntry>, more: u32, level: String, identity: ServerIdentity, rejoin: bool) {
+    let mode = downloads_mode(world);
+    let Some(server) = world.resource::<ActiveMatch>().server() else {
+        return;
     };
-    Some(if content.ready && content.bytes > 0 {
-        format!("shares {what}, {}", content::format_bytes(content.bytes))
+    let mount = world.resource::<ContentMount>();
+    let input = RepairInput {
+        files,
+        more,
+        level,
+        manifest: mount.manifest.clone(),
+        mounted: mount.mounted.clone(),
+        base: mount.base.clone(),
+        bases: mount.bases.clone(),
+        cache: cache_dir(world),
+        local: mount.own_paths(world.resource::<GamePaths>()),
+        server,
+        ask: mode == ContentDownloads::Ask && !mount.accepted,
+        trust: trust_status(&identity, &world.resource::<Settings>().trusted_servers, confirm_new(world)),
+        identity,
+        limit: (world.resource::<Settings>().content_cache_gb.max(1) as u64) * 1_000_000_000,
+    };
+    let shared = Arc::new(JobShared::default());
+    shared.set(Phase::Checking);
+    let thread_shared = shared.clone();
+    let spawned = std::thread::Builder::new().name("content repair".into()).spawn(move || {
+        let result = run_repair(input, &thread_shared);
+        let cancelled = thread_shared.progress.cancelled();
+        thread_shared.set(match result {
+            _ if cancelled => Phase::Failed("cancelled".into()),
+            Ok(joined) => Phase::Done(Box::new(joined)),
+            Err(err) => Phase::Failed(err),
+        });
+    });
+    if let Err(err) = spawned {
+        warn!("content: {err}");
+        return;
+    }
+    world.insert_resource(ContentJob(Some(Job { server, shared, kind: JobKind::Repair { rejoin } })));
+}
+
+struct RepairInput {
+    files: Vec<FileEntry>,
+    more: u32,
+    level: String,
+    manifest: Option<Arc<Manifest>>,
+    mounted: Option<MountedContent>,
+    base: Option<String>,
+    bases: Vec<String>,
+    cache: Option<PathBuf>,
+    local: GamePaths,
+    server: SocketAddr,
+    ask: bool,
+    trust: (bool, bool),
+    identity: ServerIdentity,
+    limit: u64,
+}
+
+fn run_repair(input: RepairInput, shared: &JobShared) -> Result<Joined, String> {
+    let server = input.server;
+    let (Some(manifest), Some(base), Some(cache)) = (input.manifest.clone(), input.base.clone(), input.cache.clone()) else {
+        return Err(format!(
+            "{server} needs {} files of its content that differ from yours, but its content endpoint wasn't reachable before joining.",
+            input.files.len() as u32 + input.more
+        ));
+    };
+    let store = ContentStore::open(&cache).map_err(|err| format!("content cache {}: {err}", cache.display()))?;
+    let mut index = HashIndex::load(Some(store.index_file()));
+    let bytes: u64 = input.files.iter().map(|f| f.size).sum();
+    let offer = Offer {
+        server_name: manifest.server_name.clone(),
+        mode: manifest.mode,
+        mods: Vec::new(),
+        imported: manifest.has_imported(),
+        files: input.files.len() + input.more as usize,
+        bytes,
+        have_bytes: 0,
+        identity: Some(input.identity.clone()),
+        new_server: input.trust.0,
+        key_changed: input.trust.1,
+        repair: true,
+    };
+    let accepted = if input.ask || input.trust.0 {
+        shared.ask(&offer)?;
+        true
     } else {
-        format!("shares {what}")
-    })
+        false
+    };
+    info!(
+        "content: the server wants {} files ({}) fetched again, e.g. {}",
+        offer.files,
+        content::format_bytes(bytes),
+        input.files.first().map_or("", |f| f.path.as_str())
+    );
+    shared.set(Phase::Downloading(offer));
+    // The copies we have are wrong: out of the cache (links elsewhere keep their files).
+    for file in &input.files {
+        let _ = std::fs::remove_file(store.file(&file.hash));
+    }
+    let fetch = HttpFetch(agent());
+    let mut joined = Joined { accepted, ..default() };
+    // The view's layers must still be the manifest's for fixing single files.
+    let same_layers = input.mounted.as_ref().is_some_and(|m| {
+        m.layers.len() == manifest.layers.len() && m.layers.iter().zip(&manifest.layers).all(|(a, b)| a.name == b.name)
+    });
+    match (&input.mounted, input.more) {
+        (Some(mounted), 0) if same_layers => {
+            download::download_all(&fetch, &input.bases, &input.files, &store, &shared.progress, WORKERS, &validate)
+                .map_err(|err| format!("Downloading {}'s content failed: {err}", manifest.server_name))?;
+            for file in &input.files {
+                let layer = manifest.layer_of(&file.path).ok_or_else(|| format!("{}: not in the manifest", file.path))?;
+                let dir = &mounted.layers.get(layer).ok_or("the server's layers changed")?.dir;
+                store.link_into(&file.hash, dir, &file.path).map_err(|err| format!("{}: {err}", file.path))?;
+                let stored = store.file(&file.hash);
+                if let Ok(meta) = std::fs::metadata(&stored) {
+                    index.insert(&stored, &meta, file.hash.clone());
+                }
+            }
+            index.save();
+        }
+        _ => {
+            // Lay the level's files out again.
+            let mut levels = manifest.playing.clone();
+            if !levels.iter().any(|l| l.eq_ignore_ascii_case(&input.level)) {
+                levels.insert(0, input.level.clone());
+            }
+            let local_roots: Vec<PathBuf> = input.local.roots().into_iter().map(Path::to_path_buf).collect();
+            let plan = download::plan(&manifest, &levels, &store, &local_roots, &mut index, &shared.progress)?;
+            download::adopt_all(&plan, &store, &shared.progress)?;
+            download::download_all(&fetch, &input.bases, &plan.download, &store, &shared.progress, WORKERS, &validate)
+                .map_err(|err| format!("Downloading {}'s content failed: {err}", manifest.server_name))?;
+            shared.set(Phase::Mounting);
+            let mounted = store
+                .build_view(&server_key(&server.to_string()), &manifest, &plan.needed, &levels)
+                .map_err(|err| format!("preparing {}'s content: {err}", manifest.server_name))?;
+            let keep: HashSet<String> = plan.needed.iter().map(|(_, f)| f.hash.clone()).collect();
+            store.cleanup(input.limit, &keep, mounted.layers.first().map(|l| l.dir.as_path()));
+            joined.mounted = Some(mounted);
+        }
+    }
+    joined.manifest = Some(manifest);
+    joined.identity = Some(input.identity);
+    joined.base = Some(base);
+    joined.bases = input.bases;
+    Ok(joined)
+}
+
+/// A short note on a listed server for the server browser: ranked (needs an account), and
+/// what it shares.
+pub fn browser_tag(info: &ServerInfo) -> Option<String> {
+    let shares = info.content.as_ref().and_then(|content| {
+        let what = match content.mode {
+            ContentMode::Off => return None,
+            ContentMode::Mods => "mods",
+            ContentMode::All => "all content",
+        };
+        Some(if content.ready && content.bytes > 0 {
+            format!("shares {what}, {}", content::format_bytes(content.bytes))
+        } else {
+            format!("shares {what}")
+        })
+    });
+    match (info.ranked, shares) {
+        (true, Some(shares)) => Some(format!("ranked, {shares}")),
+        (true, None) => Some("ranked".into()),
+        (false, shares) => shares,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trust_needs_a_known_key() {
+        let key = game_auth::Identity::generate();
+        let identity = ServerIdentity {
+            name: "Server".into(),
+            address: "10.0.0.2:16567".into(),
+            public_key: key.public_key(),
+            fingerprint: key.fingerprint(),
+        };
+        assert_eq!(trust_status(&identity, &[], true), (true, false));
+        assert_eq!(trust_status(&identity, &[], false), (false, false), "confirmation switched off");
+        let trusted = vec![identity.trusted_entry()];
+        assert_eq!(trust_status(&identity, &trusted, true), (false, false));
+        // Same address, new key: asked again, and told the key changed.
+        let other = game_auth::Identity::generate();
+        let new_key = ServerIdentity { public_key: other.public_key(), fingerprint: other.fingerprint(), ..identity.clone() };
+        assert_eq!(trust_status(&new_key, &trusted, true), (true, true));
+    }
 }

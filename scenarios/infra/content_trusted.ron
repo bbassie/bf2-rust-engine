@@ -1,0 +1,15 @@
+// Joins a server this client already trusts (see content_trust.ron), with an empty cache and
+// downloads on Always: the files come down without any question.
+//   client --connect 127.0.0.1 --port 29300 --mods <empty dir> --content-cache <empty dir>
+//          --settings <dir>/settings.ron --content always --scenario scenarios/infra/content_trusted.ron
+(
+    steps: [
+        ForbidLog("content: asking the player"),
+        ExpectLog("content: downloaded", 90.0),
+        ExpectLog("content verified by the server", 60.0),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("joined"),
+        Quit,
+    ],
+)

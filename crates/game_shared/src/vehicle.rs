@@ -636,7 +636,10 @@ fn add_vehicle_physics(
     let mut entity = commands.entity(add.entity);
     entity.insert((
         VehicleData(model.clone()),
-        CollisionLayers::new(GameLayer::Vehicle, [GameLayer::World, GameLayer::Vehicle]),
+        // Not `GameLayer::World`: that also carries statics BF2 gives no vehicle collision
+        // (small plants), which should neither stop the hull nor the wheel/track raycasts
+        // below (see `GameLayer::VehicleGround`).
+        CollisionLayers::new(GameLayer::Vehicle, GameLayer::vehicle_movement_mask()),
     ));
     if let Some(collider) = &model.collider {
         entity.insert(collider.clone());
@@ -706,6 +709,16 @@ const TYRE_STIFFNESS: f32 = 0.4;
 const ANTI_ROLL: f32 = 0.6;
 /// How far down aircraft look for the ground (landing gear, hovering), meters.
 const ALTITUDE_PROBE: f32 = 200.0;
+
+/// Extra pull a tracked vehicle gets near a stand, as a multiple of `drive_force` (so up to
+/// `1 + LOW_SPEED_TORQUE` times as much at a dead stop, tapering to plain `drive_force` by
+/// top speed). BF2's `setTorque` for tanks (`c_ETTank`) has no gearbox, so `bf2_import`
+/// converts it to one flat `drive_force` calibrated to reach top speed in a plausible time;
+/// that badly underestimates a real tank's low-speed pull (huge torque multiplication
+/// through the final drive), so tanks stalled well short of BF2's own hills. Scaling by
+/// speed instead of just raising `drive_force` keeps flat-ground top speed and cruising
+/// pull unchanged, boosting only the low-speed/high-load regime (climbing, starting off).
+const LOW_SPEED_TORQUE: f32 = 3.0;
 
 /// The level's water surface, if it has water.
 pub fn water_height(level: Option<&LoadedLevel>) -> Option<f32> {
@@ -823,7 +836,9 @@ pub fn step_vehicle(
     let top = desc.engine.top_speed.max(1.0);
     let com_local = Vec3::from_array(desc.physics.center_of_mass);
     let com_world = body_pos + body_rot * com_local;
-    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([entity]);
+    // Ground/wheel contact: `GameLayer::VehicleGround`, not `GameLayer::World`, so small
+    // plants BF2 gives no vehicle collision don't hold wheels up or block the hull.
+    let filter = SpatialQueryFilter::from_mask(GameLayer::vehicle_movement_mask()).with_excluded_entities([entity]);
 
     // Height above ground or water, for the landing gear and hovering.
     let altitude = if desc.aero.is_some() {
@@ -931,7 +946,9 @@ pub fn step_vehicle(
 
             let (long, lat) = if tracked {
                 // Tracks hold the hull to the commanded speed and turn rate, as hard as the
-                // engine and friction allow.
+                // engine (boosted at low speed, see `LOW_SPEED_TORQUE`) and friction allow.
+                let low_speed = (1.0 - (forward_speed.abs() / top).min(1.0)).powi(2);
+                let climb_drive = drive * (1.0 + LOW_SPEED_TORQUE * low_speed);
                 let spin = (up * yaw_rate_cmd).cross(contact - com_world);
                 let want_long = track_speed_cmd + spin.dot(*fwd);
                 let want_lat = spin.dot(side);
@@ -939,7 +956,7 @@ pub fn step_vehicle(
                 let limit = if driver.is_none() || handbrake {
                     brake
                 } else if accelerating {
-                    drive
+                    climb_drive
                 } else if throttle == 0.0 && steer == 0.0 {
                     brake * 0.3
                 } else {

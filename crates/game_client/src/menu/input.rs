@@ -1,9 +1,13 @@
-//! Keys and clicks: Esc, rebinding, buttons, sliders and text fields.
+//! Keys and clicks: Esc, rebinding, buttons, sliders, text fields and gamepad menu navigation.
+
+use bevy::input::gamepad::{Gamepad, GamepadButton};
 
 use super::*;
 
-/// Esc goes back, opens and closes the in-game menu; rebinding takes the next key. Menus
-/// take the keyboard and the wheel from the game.
+/// Esc goes back, opens and closes the in-game menu; rebinding takes the next key or gamepad
+/// button. Menus take the keyboard and the wheel from the game. A gamepad's East button (B)
+/// does what Esc does; its South button (A) does what Enter does, unless something is
+/// rebinding.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn menu_keys(
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -16,18 +20,41 @@ pub(super) fn menu_keys(
     soldier: Query<(), With<LocalSoldier>>,
     window: Single<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
     scripted: Option<Res<ScenarioInput>>,
+    gamepads: Query<&Gamepad>,
 ) {
-    if let Some(action) = menu.rebinding {
+    // East (B) is also the default gamepad Crouch binding, so it must only act like Esc while
+    // a menu is already showing; opening the pause menu from gameplay uses Start instead
+    // (mirroring Esc's own behavior below, just on a button gameplay doesn't already use).
+    let already_in_menu =
+        matches!(screen.get(), Screen::Menu | Screen::Loading) || (*screen.get() == Screen::InGame && menu.paused);
+    let gamepad_east = gamepads.iter().any(|g| g.just_pressed(GamepadButton::East));
+    let gamepad_escape = gamepads.iter().any(|g| {
+        (already_in_menu && g.just_pressed(GamepadButton::East))
+            || (!already_in_menu && !deploy.open && g.just_pressed(GamepadButton::Start))
+    });
+    let gamepad_south = gamepads.iter().any(|g| g.just_pressed(GamepadButton::South));
+
+    if let Some(action) = menu.rebinding_gamepad {
+        if gamepad_east {
+            menu.rebinding_gamepad = None;
+        } else if let Some(button) = gamepads.iter().find_map(|g| g.get_just_pressed().next().copied()) {
+            settings.rebind_gamepad(action, button);
+            menu.rebinding_gamepad = None;
+        }
+        return;
+    }
+
+    if let Some((action, slot)) = menu.rebinding {
         let key = keys.get_just_pressed().next().copied();
         let button = mouse.get_just_pressed().next().copied();
         match (key, button) {
             (Some(KeyCode::Escape), _) => menu.rebinding = None,
             (Some(key), _) => {
-                settings.rebind(action, Binding::Key(key));
+                settings.rebind(action, slot, Binding::Key(key));
                 menu.rebinding = None;
             }
             (None, Some(button)) => {
-                settings.rebind(action, Binding::Mouse(button));
+                settings.rebind(action, slot, Binding::Mouse(button));
                 menu.rebinding = None;
                 menu.swallow_click = true;
             }
@@ -38,7 +65,7 @@ pub(super) fn menu_keys(
         return;
     }
 
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) || gamepad_escape {
         let consumed = match screen.get() {
             Screen::Menu => {
                 menu.page = Page::Home;
@@ -75,7 +102,7 @@ pub(super) fn menu_keys(
         }
     }
     if *screen.get() == Screen::Menu
-        && keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter])
+        && (keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]) || gamepad_south)
     {
         menu.submit = true;
     }
@@ -100,6 +127,8 @@ pub(super) fn press_buttons(
     mut browser: ResMut<ServerBrowser>,
     time: Res<Time<Real>>,
     mut fields: Query<(&TextField, &mut EditableText)>,
+    gamepads: Query<&Gamepad>,
+    focus_targets: Query<&MenuButton>,
 ) {
     let (window, mut cursor) = window.into_inner();
     if std::mem::take(&mut menu.swallow_click) {
@@ -111,15 +140,24 @@ pub(super) fn press_buttons(
         _ => None,
     }
     .filter(|_| std::mem::take(&mut menu.submit));
+    // The gamepad's South button (A) presses whatever it last navigated focus to.
+    let gamepad_confirmed = (menu.rebinding.is_none() && menu.rebinding_gamepad.is_none())
+        .then(|| gamepads.iter().any(|g| g.just_pressed(GamepadButton::South)))
+        .unwrap_or(false)
+        .then(|| menu.gamepad_focus)
+        .flatten()
+        .and_then(|entity| focus_targets.get(entity).ok())
+        .cloned();
     let pressed: Vec<MenuButton> = buttons
         .iter()
         .filter(|(interaction, _)| **interaction == Interaction::Pressed)
         .map(|(_, button)| button.clone())
         .chain(submitted)
+        .chain(gamepad_confirmed)
         .collect();
     menu.submit = false;
     for button in &pressed {
-        if menu.rebinding.is_some() {
+        if menu.rebinding.is_some() || menu.rebinding_gamepad.is_some() {
             continue;
         }
         match button {
@@ -172,7 +210,12 @@ pub(super) fn press_buttons(
             ),
             MenuButton::Leave | MenuButton::CancelLoading => menu.leave = true,
             MenuButton::Tab(tab) => menu.tab = *tab,
-            MenuButton::Toggle(toggle) => toggle.flip(&mut settings),
+            MenuButton::Toggle(toggle) => {
+                toggle.flip(&mut settings);
+                if *toggle == Toggle::Bloom {
+                    settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+                }
+            }
             MenuButton::Step(slider, dir) => {
                 let (_, _, step) = slider.range();
                 let value = slider.get(&settings) + step * *dir as f32;
@@ -180,12 +223,44 @@ pub(super) fn press_buttons(
             }
             MenuButton::Display(mode) => settings.window_mode = *mode,
             MenuButton::WindowSize(w, h) => settings.window_size = (*w, *h),
-            MenuButton::ViewDistance(distance) => settings.view_distance = *distance,
+            MenuButton::ViewDistance(distance) => {
+                settings.view_distance = *distance;
+                settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+            }
             MenuButton::ToneMapping(t) => settings.tone_mapping = *t,
-            MenuButton::Rebind(action) => menu.rebinding = Some(*action),
+            MenuButton::RebindSlot(action, slot) => menu.rebinding = Some((*action, *slot)),
+            MenuButton::RebindGamepad(action) => menu.rebinding_gamepad = Some(*action),
+            MenuButton::ClearGamepad(action) => {
+                let mut set = settings.bindings(*action);
+                set.gamepad = None;
+                settings.bindings.insert(*action, set);
+            }
             MenuButton::ResetBindings => {
                 settings.bindings = Settings::default().bindings;
             }
+            MenuButton::Preset(preset) => preset.apply(&mut settings),
+            MenuButton::ShadowQuality(q) => {
+                settings.shadow_quality = *q;
+                settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+            }
+            MenuButton::AntiAliasing(aa) => {
+                settings.anti_aliasing = *aa;
+                settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+            }
+            MenuButton::SsaoQuality(q) => {
+                settings.ssao_quality = *q;
+                settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+            }
+            MenuButton::Anisotropy(a) => {
+                settings.anisotropic_filtering = *a;
+                settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+            }
+            MenuButton::ParticleQuality(q) => {
+                settings.particle_quality = *q;
+                settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
+            }
+            MenuButton::CrosshairStyle(style) => settings.crosshair_style = *style,
+            MenuButton::FrameCap(fps) => settings.frame_rate_cap = *fps,
             MenuButton::Refresh => browser.refresh(&settings, time.elapsed_secs(), scripted.is_none()),
             MenuButton::Server(address, port) => {
                 let last = &mut settings.last_match;
@@ -220,6 +295,76 @@ pub(super) fn press_buttons(
                 }
             }
         }
+    }
+}
+
+/// Moves [`Menu::gamepad_focus`] with the D-pad or the left stick: nearest button whose center
+/// lies in the pressed direction, penalizing how far off-axis it is. Debounced so a held
+/// direction repeats a few times a second instead of every frame.
+pub(super) fn gamepad_menu_nav(
+    mut menu: ResMut<Menu>,
+    time: Res<Time>,
+    gamepads: Query<&Gamepad>,
+    // UI nodes carry their screen position in `UiGlobalTransform` (a 2D affine transform,
+    // separate from the 3D `GlobalTransform`), computed by `bevy_ui`'s layout system.
+    nodes: Query<(Entity, &bevy::ui::UiGlobalTransform), (With<MenuButton>, With<Button>)>,
+) {
+    let Some(gamepad) = gamepads
+        .iter()
+        .max_by(|a, b| crate::settings::gamepad_activity(a).total_cmp(&crate::settings::gamepad_activity(b)))
+    else {
+        return;
+    };
+    menu.nav_cooldown = (menu.nav_cooldown - time.delta_secs()).max(0.0);
+    let dpad = gamepad.dpad();
+    let stick = gamepad.left_stick();
+    let input = if dpad.length() > stick.length() { dpad } else { stick };
+    if input.length() < 0.55 {
+        menu.nav_cooldown = 0.0;
+        return;
+    }
+    if menu.nav_cooldown > 0.0 {
+        return;
+    }
+    menu.nav_cooldown = 0.28;
+    // Gamepad up is +Y; screen space is +Y down.
+    let dir = if input.x.abs() > input.y.abs() {
+        Vec2::new(input.x.signum(), 0.0)
+    } else {
+        Vec2::new(0.0, -input.y.signum())
+    };
+    let positions: Vec<(Entity, Vec2)> =
+        nodes.iter().map(|(e, t)| (e, t.translation)).collect();
+    if positions.is_empty() {
+        return;
+    }
+    let Some(from) = menu
+        .gamepad_focus
+        .and_then(|focused| positions.iter().find(|(e, _)| *e == focused))
+        .map(|(_, p)| *p)
+    else {
+        // Nothing focused yet: pick the top-left-most button.
+        menu.gamepad_focus = positions
+            .iter()
+            .min_by(|(_, a), (_, b)| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap())
+            .map(|(e, _)| *e);
+        return;
+    };
+    let next = positions
+        .iter()
+        .filter(|(e, p)| *e != menu.gamepad_focus.unwrap() && (*p - from).dot(dir) > 2.0)
+        .min_by(|(_, a), (_, b)| {
+            let score = |p: Vec2| {
+                let delta = p - from;
+                let along = delta.dot(dir);
+                let perp = (delta - dir * along).length();
+                along + perp * 2.5
+            };
+            score(*a).total_cmp(&score(*b))
+        })
+        .map(|(e, _)| *e);
+    if let Some(next) = next {
+        menu.gamepad_focus = Some(next);
     }
 }
 

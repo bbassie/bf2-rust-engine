@@ -1,0 +1,33 @@
+// Breakthrough on Strike at Karkand (32), as the attacking US: the HUD (our tickets, the open
+// sector's flags, SECTOR 1/3 · ATTACK), lowering the Hotel's flag (sector 1), a flag of the
+// next sector that can't be taken yet (Locked), the big map and the deploy screen.
+// client --scenario scenarios/modes/breakthrough.ron
+(
+    level: "strike_at_karkand",
+    mode: "gpm_breakthrough",
+    size: 32,
+    bots: 8,
+    team: 2,
+    steps: [
+        WaitReady,
+        ExpectLog("round started: strike_at_karkand Breakthrough", 5.0),
+        Wait(1.0),
+        Screenshot("hud"),
+        // The Hotel (sector 1).
+        Teleport((-194.0, 156.0, -13.0), 60.0, 5.0),
+        Wait(6.0),
+        Screenshot("capturing"),
+        // The Market (sector 2): locked.
+        Teleport((-196.0, 150.0, -179.0), 0.0, 5.0),
+        Wait(1.0),
+        Screenshot("locked"),
+        HoldKey(KeyM),
+        Wait(0.5),
+        Screenshot("bigmap"),
+        ReleaseKey(KeyM),
+        Kill,
+        Wait(1.0),
+        Screenshot("deploy"),
+        Quit,
+    ],
+)

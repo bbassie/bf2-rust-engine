@@ -3,9 +3,11 @@
 //! only unless the server is public).
 //!
 //! ```text
-//! GET /content/manifest.ron     the manifest, with the levels the server plays now
-//!                               (503 while the files are still being hashed)
-//! GET /content/<hash>           a file of the manifest; `Range` resumes
+//! GET /content/manifest.ron              the manifest, with the levels the server plays now
+//!                                        (503 while the files are still being hashed)
+//! GET /content/identity?nonce=<64 hex>   the server's key and its signature of the nonce,
+//!                                        the manifest id and the name (see `join`)
+//! GET /content/<hash>                    a file of the manifest; `Range` resumes
 //! ```
 //!
 //! What is shared is the admin's choice ([`ContentSettings::mode`]): nothing, the mods
@@ -32,10 +34,12 @@ use bevy::prelude::*;
 use game_shared::{
     config::GamePaths,
     content::{
-        self, BuildOptions, BuildProgress, BuiltManifest, ContentAdvert, ContentMode, FILE_URL_PREFIX,
-        MANIFEST_URL_PATH, is_hash,
+        self, BuildOptions, BuildProgress, BuiltManifest, ContentAdvert, ContentMode, FILE_URL_PREFIX, FileEntry,
+        IDENTITY_URL_PATH, IdentityAnswer, MANIFEST_URL_PATH, is_hash, verify,
     },
+    join::CONTENT_PURPOSE,
 };
+use game_auth::Identity;
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::{ServerSettings, rotation::MapRotation};
@@ -56,6 +60,12 @@ pub struct ContentSettings {
     /// Where file hashes and the levels' files are remembered between runs (default: the
     /// `server` folder in the user's config directory).
     pub cache_dir: Option<PathBuf>,
+    /// The server's identity key (default: `identity.key` in the server's data folder, made on
+    /// the first start). Players see its fingerprint before downloading from the server.
+    pub identity_file: Option<PathBuf>,
+    /// Seconds a joining player has to get the content right before being kicked (see
+    /// `join`); 0: the default (10 minutes).
+    pub sync_timeout: u32,
 }
 
 pub struct ContentPlugin;
@@ -74,6 +84,30 @@ pub struct ContentServer {
     mode: ContentMode,
 }
 
+/// What a level requires of joining clients (see `game_shared::content::verify`).
+#[derive(Clone, Debug)]
+pub enum Requirement {
+    /// Nothing shared, so nothing checked.
+    Nothing,
+    /// The manifest is still being built.
+    Preparing,
+    Files(Arc<Required>),
+}
+
+/// The required files of a level and what a matching report looks like.
+#[derive(Debug)]
+pub struct Required {
+    pub manifest_id: String,
+    pub level: String,
+    pub mode: ContentMode,
+    /// Sorted by path.
+    pub files: Vec<FileEntry>,
+    pub digest: String,
+    pub bytes: u64,
+    /// TCP port of the endpoint.
+    pub port: u16,
+}
+
 struct Shared {
     /// `None` while the manifest is being built.
     built: RwLock<Option<Arc<Served>>>,
@@ -88,12 +122,25 @@ struct Shared {
     advert_files: AtomicU32,
     advert_bytes: AtomicU64,
     stop: AtomicBool,
+    /// Signs identity answers.
+    identity: Option<Arc<Identity>>,
+    server_name: String,
+    /// The last level's requirement, and the manifest it was worked out from.
+    required: Mutex<Option<(Arc<Served>, Arc<Required>)>>,
 }
 
 /// A built manifest, and the size and time of each served file when it was hashed.
 struct Served {
     built: BuiltManifest,
     stamps: HashMap<String, (u64, Option<SystemTime>)>,
+    /// [`content::Manifest::content_id`].
+    id: String,
+}
+
+impl std::fmt::Debug for Served {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Served({})", self.id)
+    }
 }
 
 fn stamp(meta: &std::fs::Metadata) -> (u64, Option<SystemTime>) {
@@ -141,7 +188,8 @@ fn spawn_build(shared: &Arc<Shared>) {
                     .iter()
                     .filter_map(|(hash, path)| Some((hash.clone(), stamp(&std::fs::metadata(path).ok()?))))
                     .collect();
-                *builder.built.write().unwrap() = Some(Arc::new(Served { built, stamps }));
+                let id = built.manifest.content_id();
+                *builder.built.write().unwrap() = Some(Arc::new(Served { built, stamps, id }));
                 *builder.failed.write().unwrap() = None;
                 builder.update_advert();
             }
@@ -168,6 +216,35 @@ impl ContentServer {
             bytes: self.shared.advert_bytes.load(Ordering::Relaxed),
             ready: self.shared.built.read().unwrap().is_some(),
         }
+    }
+
+    /// What `level` requires of joining clients: the files the server shares for it.
+    pub fn requirement(&self, level: &str) -> Requirement {
+        let Some(served) = self.shared.built.read().unwrap().clone() else {
+            // A manifest that can't be built shares nothing.
+            return if self.shared.failed.read().unwrap().is_some() { Requirement::Nothing } else { Requirement::Preparing };
+        };
+        let mut cache = self.shared.required.lock().unwrap();
+        if let Some((for_manifest, required)) = cache.as_ref()
+            && Arc::ptr_eq(for_manifest, &served)
+            && required.level == level
+        {
+            return Requirement::Files(required.clone());
+        }
+        let manifest = &served.built.manifest;
+        let files: Vec<FileEntry> = manifest.required(level).into_iter().cloned().collect();
+        let refs: Vec<&FileEntry> = files.iter().collect();
+        let required = Arc::new(Required {
+            manifest_id: served.id.clone(),
+            level: level.to_string(),
+            mode: manifest.mode,
+            digest: verify::expected_digest(&refs),
+            bytes: files.iter().map(|f| f.size).sum(),
+            files,
+            port: self.port,
+        });
+        *cache = Some((served.clone(), required.clone()));
+        Requirement::Files(required)
     }
 }
 
@@ -247,6 +324,9 @@ pub fn start(world: &mut World) {
         advert_files: AtomicU32::new(0),
         advert_bytes: AtomicU64::new(0),
         stop: AtomicBool::new(false),
+        identity: world.get_resource::<crate::join::ServerIdentity>().map(|i| i.0.clone()),
+        server_name: settings.name.clone(),
+        required: Mutex::new(None),
     });
     spawn_build(&shared);
     for i in 0..WORKERS {
@@ -307,6 +387,8 @@ fn handle(request: Request, shared: &Arc<Shared>) {
     let path = request.url().split(['?', '#']).next().unwrap_or_default().to_string();
     if path == MANIFEST_URL_PATH {
         serve_manifest(request, shared);
+    } else if path == IDENTITY_URL_PATH {
+        serve_identity(request, shared);
     } else if let Some(hash) = path.strip_prefix(FILE_URL_PREFIX).filter(|h| is_hash(h)) {
         let hash = hash.to_string();
         serve_file(request, shared, &hash);
@@ -335,6 +417,27 @@ fn serve_manifest(request: Request, shared: &Shared) {
         info!("content: {from} fetched the manifest");
     }
     let _ = request.respond(text(200, manifest.to_ron()));
+}
+
+/// Proves the server's identity to a client about to download: signs the client's nonce and
+/// the manifest id, which ties the manifest to the server's key.
+fn serve_identity(request: Request, shared: &Shared) {
+    let nonce = request
+        .url()
+        .split_once('?')
+        .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("nonce=")))
+        .and_then(game_auth::unhex_array::<32>);
+    let (Some(nonce), Some(identity)) = (nonce, shared.identity.as_ref()) else {
+        let _ = request.respond(text(400, "identity?nonce=<64 hex digits>"));
+        return;
+    };
+    let manifest_id = shared.built.read().unwrap().as_ref().map(|s| s.id.clone()).unwrap_or_default();
+    let answer = IdentityAnswer {
+        name: shared.server_name.clone(),
+        proof: identity.prove(CONTENT_PURPOSE, &nonce, &manifest_id, &shared.server_name),
+        manifest_id,
+    };
+    let _ = request.respond(text(200, ron::to_string(&answer).unwrap_or_default()));
 }
 
 /// `Range: bytes=a-b`, `bytes=a-` or `bytes=-n` for a file of `len` bytes: `None` without a

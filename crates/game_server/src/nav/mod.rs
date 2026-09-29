@@ -335,20 +335,30 @@ fn start_build(
     commands.remove_resource::<Navigation>();
     commands.remove_resource::<vehicle::VehicleNavigation>();
     let params = NavParams::from_tuning(&tuning);
+    let to_mesh = |(collider, transform, _): (&Collider, &Transform, &CollisionLayers)| build::MeshInstance {
+        shape: collider.shape().clone(),
+        transform: transform.compute_affine(),
+    };
     let meshes = colliders
         .iter()
         .filter(|(_, _, layers)| layers.memberships.has_all(GameLayer::World))
-        .map(|(collider, transform, _)| build::MeshInstance {
-            shape: collider.shape().clone(),
-            transform: transform.compute_affine(),
-        })
+        .map(to_mesh)
+        .collect();
+    // The vehicle grid sees only what actually blocks a vehicle (terrain and BF2's
+    // vehicle-type collision): small plants that only carry `GameLayer::World` (soldier or
+    // projectile collision) are left out, so vehicles can path straight through them instead
+    // of routing around bushes they'd just drive over.
+    let vehicle_meshes = colliders
+        .iter()
+        .filter(|(_, _, layers)| layers.memberships.has_all(GameLayer::VehicleGround))
+        .map(to_mesh)
         .collect();
     // Only the layout being played: the 64 player layouts of the big maps would take a lot
-    // of memory.
+    // of memory. Layouts made from another (Rush from conquest) share its grid.
     let layout = match_info
         .iter()
         .next()
-        .and_then(|info| level.game_mode(&info.mode, info.size));
+        .and_then(|info| level.base_layout(&info.mode, info.size));
     // The boxes movement climbs (see `game_shared::ladder`).
     let ladders = ladder_parts
         .iter()
@@ -364,7 +374,7 @@ fn start_build(
         ladders,
         bounds: layout.and_then(gameplay_bounds),
     };
-    start_vehicle_build(&mut commands, &level, layout, &geometry, paths.as_deref());
+    start_vehicle_build(&mut commands, &level, layout, &geometry, vehicle_meshes, paths.as_deref());
     let cache_path = level.dir.as_ref().map(|dir| {
         dir.join(match layout {
             Some(l) => format!("navgrid_{}_{}.bin", l.mode, l.size),
@@ -484,11 +494,12 @@ fn start_vehicle_build(
     level: &LoadedLevel,
     layout: Option<&GameModeDesc>,
     infantry: &build::LevelGeometry,
+    vehicle_meshes: Vec<build::MeshInstance>,
     paths: Option<&game_shared::config::GamePaths>,
 ) {
     let geometry = build::LevelGeometry {
         terrain: infantry.terrain.clone(),
-        meshes: infantry.meshes.clone(),
+        meshes: vehicle_meshes,
         ladders: Vec::new(),
         bounds: layout.and_then(vehicle_bounds),
     };

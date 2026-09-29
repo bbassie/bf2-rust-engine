@@ -1,0 +1,19 @@
+// Joins a server whose content this client has, but with one file changed on disk since
+// (see content_trust.ron for the first join, then change a file in the cache's view of the
+// server, keeping its size). The client's own check before connecting reuses the view; the
+// server compares our files after connecting, names the changed one, and we fetch it again
+// before we are let in. Downloads on Always and the server already trusted: nothing to click.
+//   client --connect 127.0.0.1 --port 29300 --mods <empty dir> --content-cache <same cache>
+//          --settings <dir>/settings.ron --content always --scenario scenarios/infra/content_verify.ron
+(
+    steps: [
+        ForbidLog("content: asking the player"),
+        ExpectLog("differ from its own", 60.0),
+        ExpectLog("wants 1 files", 10.0),
+        ExpectLog("content verified by the server", 60.0),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("joined"),
+        Quit,
+    ],
+)

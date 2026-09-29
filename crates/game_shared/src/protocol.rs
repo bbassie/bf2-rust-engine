@@ -82,7 +82,26 @@ impl Plugin for ProtocolPlugin {
             .add_client_message::<crate::commander::CommanderRequest>(Channel::Ordered)
             .add_server_message::<crate::commander::ScanReport>(Channel::Unordered)
             .add_mapped_server_message::<crate::radio::RadioMessage>(Channel::Ordered)
-            .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered);
+            .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered)
+            // Game modes beyond conquest (`crate::modes`).
+            .replicate::<crate::modes::ModeState>()
+            .replicate::<crate::modes::ChargeTimes>()
+            .replicate::<crate::modes::Charge>()
+            .replicate::<crate::modes::ChargeState>()
+            .replicate::<crate::modes::Sector>()
+            .replicate::<crate::modes::Locked>()
+            .replicate::<crate::modes::SpawnBlocked>()
+            .add_mapped_server_message::<crate::modes::ObjectiveEvent>(Channel::Ordered)
+            // The join handshake (`crate::join`): before a client is authorized, so the
+            // server's answers are independent of replication.
+            .replicate::<crate::join::AccountBadge>()
+            .add_client_message::<crate::join::JoinRequest>(Channel::Ordered)
+            .add_client_message::<crate::join::AccountTicket>(Channel::Ordered)
+            .add_client_message::<crate::join::ContentReport>(Channel::Ordered)
+            .add_server_message::<crate::join::JoinChallenge>(Channel::Ordered)
+            .add_server_message::<crate::join::JoinVerdict>(Channel::Ordered)
+            .make_message_independent::<crate::join::JoinChallenge>()
+            .make_message_independent::<crate::join::JoinVerdict>();
     }
 }
 

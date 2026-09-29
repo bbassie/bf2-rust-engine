@@ -19,8 +19,10 @@ pub mod flight;
 pub mod gear;
 pub mod hitzones;
 pub mod input;
+pub mod join;
 pub mod ladder;
 pub mod level;
+pub mod modes;
 pub mod mods;
 pub mod physics;
 pub mod projectile;
@@ -42,7 +44,7 @@ pub const TICK_HZ: f64 = 60.0;
 pub const DEFAULT_PORT: u16 = 16567;
 
 /// Bump whenever the wire protocol changes in a way the protocol hash can't detect.
-pub const PROTOCOL_ID: u64 = 0x4246_325f_0001; // "BF2_" + version
+pub const PROTOCOL_ID: u64 = 0x4246_325f_0002; // "BF2_" + version (2: the join handshake)
 
 /// Adds everything both client and server need. The messaging backend (renet) is added by
 /// the binaries so a future Steam backend can be swapped in.
@@ -53,7 +55,10 @@ impl Plugin for SharedPlugin {
         app.insert_resource(Time::<Fixed>::from_hz(TICK_HZ))
             .add_systems(Startup, config::log_mods)
             .add_plugins((
-                RepliconPlugins,
+                // The server authorizes clients itself, after the join handshake (`join`).
+                RepliconPlugins.set(RepliconSharedPlugin {
+                    auth_method: AuthMethod::Custom,
+                }),
                 PhysicsPlugins::default(),
                 protocol::ProtocolPlugin,
                 soldier::SoldierPlugin,

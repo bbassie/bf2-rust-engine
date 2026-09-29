@@ -1,0 +1,73 @@
+// Climbing a Gulf of Oman slope: from (-30, ., -934), near the bottom of a valley, toward
+// (-30, ., -814), ~21 deg on average along that one sampled line, up to ~46 deg at its
+// steepest 2 m step. Jeep, APC and tank each start at the bottom facing uphill (heading 180,
+// +Z) at full throttle; VehicleTrace logs speed, altitude and engine state to the report.
+//
+// CAVEAT: unlike vehicle2_slope_karkand.ron and vehicle2_slope_dalian.ron, this one wasn't
+// run live (the karkand and dalian runs both turned out to be on a cliff or getting deflected
+// sideways badly enough to spend the time there instead - see their headers). Given a ~46 deg
+// local step already showed up in the same single-line heightmap sampling that missed
+// karkand's cliff, expect this to need retargeting at an actual graded hill too (ideally one a
+// human points to) before trusting its numbers; PlaceVehicle also drops the vehicle right onto
+// the slope here rather than giving it a flat run-up first, which independently caused
+// tip-overs at karkand.
+// client --scenario scenarios/vehicles/vehicle2_slope_oman.ron --out target/scenarios/vehicle2/slope_oman
+(
+    level: "gulf_of_oman",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        NearVehicle("usjep_hmmwv"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-30.0, 35.9, -934.0), 180.0, 0.0),
+        Wait(2.0),
+        ThirdPerson(true),
+        Screenshot("hmmwv_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("hmmwv slope", 15.0),
+        Screenshot("hmmwv_climbing"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("usapc_lav25"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-30.0, 35.9, -934.0), 180.0, 0.0),
+        Wait(2.0),
+        Screenshot("lav25_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("lav25 slope", 15.0),
+        Screenshot("lav25_climbing"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("ustnk_m1a2"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-30.0, 35.9, -934.0), 180.0, 0.0),
+        Wait(2.0),
+        Screenshot("m1a2_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("m1a2 slope", 15.0),
+        Screenshot("m1a2_climbing"),
+        Move(0.0, 0.0),
+        Quit,
+    ],
+)

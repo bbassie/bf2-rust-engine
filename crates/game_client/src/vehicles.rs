@@ -196,21 +196,11 @@ pub fn heading(rotation: Quat) -> f32 {
 }
 
 fn read_seat_keys(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Actions,
     mut request: ResMut<SeatRequest>,
     seated: Query<&Seated, With<LocalSoldier>>,
 ) {
-    const KEYS: [KeyCode; 8] = [
-        KeyCode::F1,
-        KeyCode::F2,
-        KeyCode::F3,
-        KeyCode::F4,
-        KeyCode::F5,
-        KeyCode::F6,
-        KeyCode::F7,
-        KeyCode::F8,
-    ];
-    if let Some(index) = KEYS.iter().position(|k| keys.just_pressed(*k)) {
+    if let Some(index) = (1..=8).position(|seat| actions.just_pressed(Action::Seat(seat))) {
         request.0 = index as u8 + 1;
     }
     // Done once we sit there, or when we're not in a vehicle at all.
@@ -252,6 +242,7 @@ fn fly(
     mouse: Res<AccumulatedMouseMotion>,
     actions: Actions,
     cursor: Single<&CursorOptions>,
+    settings: Res<crate::settings::Settings>,
     mut look: ResMut<LookState>,
     mut flight: ResMut<FlightStick>,
     seated: Query<&Seated, With<LocalSoldier>>,
@@ -275,6 +266,12 @@ fn fly(
         let sensitivity = look.sensitivity;
         flight.look.x -= delta.x * sensitivity;
         flight.look.y = (flight.look.y - vertical * sensitivity).clamp(-1.4, 1.4);
+        if let Some(gamepad) = actions.gamepad() {
+            let stick = crate::local_input::deadzone(gamepad.right_stick(), settings.gamepad.look_deadzone);
+            let gv = if settings.gamepad.invert_look_y { -stick.y } else { stick.y };
+            flight.look.x -= stick.x * sensitivity * 60.0 * dt;
+            flight.look.y = (flight.look.y - gv * sensitivity * 60.0 * dt).clamp(-1.4, 1.4);
+        }
     } else {
         let scale = STICK_PER_COUNT * look.sensitivity / crate::local_input::BASE_SENSITIVITY;
         flight.mouse = (flight.mouse + Vec2::new(delta.x, vertical) * scale).clamp(Vec2::NEG_ONE, Vec2::ONE);
@@ -285,7 +282,17 @@ fn fly(
         actions.axis(Action::RollRight, Action::RollLeft),
         actions.axis(Action::PitchUp, Action::PitchDown),
     );
-    flight.stick = (flight.mouse + keys).clamp(Vec2::NEG_ONE, Vec2::ONE);
+    // Gamepad: the right stick is the flight stick directly (held, not accumulated like the
+    // mouse), unless free look is redirecting it to look around instead.
+    let gamepad_stick = if actions.pressed(Action::FreeLook) {
+        Vec2::ZERO
+    } else {
+        actions
+            .gamepad()
+            .map(|gamepad| crate::local_input::deadzone(gamepad.right_stick(), settings.gamepad.look_deadzone))
+            .unwrap_or_default()
+    };
+    flight.stick = (flight.mouse + keys + gamepad_stick).clamp(Vec2::NEG_ONE, Vec2::ONE);
     // The soldier looks where the camera does (the server aims with it, and it's the
     // facing when getting out).
     let (yaw, pitch, _) = flight_view(view.transform.rotation, flight.look).to_euler(EulerRot::YXZ);

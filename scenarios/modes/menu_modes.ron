@@ -1,0 +1,31 @@
+// The level page lists every mode a level has: its conquest and co-op layouts and the Rush and
+// Breakthrough layouts made from them, each previewed on the map (Rush's charges numbered by
+// stage, Breakthrough's flags by sector) with what the mode is about and who attacks.
+// client --scenario scenarios/modes/menu_modes.ron
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:play"),
+        Wait(0.3),
+        Click("level:strike_at_karkand"),
+        Wait(0.3),
+        Click("layout:gpm_rush:32"),
+        Wait(0.5),
+        Screenshot("karkand_rush"),
+        Click("layout:gpm_breakthrough:64"),
+        Wait(0.5),
+        Screenshot("karkand_breakthrough"),
+        Click("level:gulf_of_oman"),
+        Wait(0.3),
+        Click("layout:gpm_rush:64"),
+        Wait(0.5),
+        Screenshot("oman_rush"),
+        Click("level:dalian_plant"),
+        Wait(0.3),
+        Click("layout:gpm_breakthrough:64"),
+        Wait(0.5),
+        Screenshot("dalian_breakthrough"),
+        Quit,
+    ],
+)

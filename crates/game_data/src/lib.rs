@@ -14,6 +14,7 @@ pub mod commander;
 pub mod effect;
 pub mod level;
 pub mod material;
+pub mod modes;
 pub mod object;
 pub mod soldier;
 pub mod sound;

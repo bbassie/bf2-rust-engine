@@ -38,6 +38,7 @@ bf2_import = { path = "crates/bf2_import" }
 game_shared = { path = "crates/game_shared" }
 game_data = { path = "crates/game_data" }
 game_server = { path = "crates/game_server" }
+game_auth = { path = "crates/game_auth" }
 
 # Bevy compiles slowly without optimizations and runs far too slowly in debug.
 # Optimize dependencies, keep our own code quick to build.

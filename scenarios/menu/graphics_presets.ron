@@ -1,0 +1,30 @@
+// Frame time per graphics preset, same rooftop view on Karkand used by scenarios/lod/lod_karkand.ron
+// (a mix of nearby buildings, distant city and vegetation). Reports avg/p50/p95/max ms per preset.
+// client --scenario scenarios/menu/graphics_presets.ron --out target/scenarios/menu/graphics_presets
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-60.0, 185.0, 60.0), 45.0, -6.0),
+        Wait(1.0),
+        Setting("preset", "low"),
+        Wait(1.5),
+        Screenshot("low"),
+        Measure("low", 5.0),
+        Setting("preset", "medium"),
+        Wait(1.5),
+        Screenshot("medium"),
+        Measure("medium", 5.0),
+        Setting("preset", "high"),
+        Wait(1.5),
+        Screenshot("high"),
+        Measure("high", 5.0),
+        Setting("preset", "ultra"),
+        Wait(1.5),
+        Screenshot("ultra"),
+        Measure("ultra", 5.0),
+        Quit,
+    ],
+)

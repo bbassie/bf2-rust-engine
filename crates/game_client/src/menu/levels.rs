@@ -1,5 +1,6 @@
 //! The levels the menu offers: the built-in test range and the levels of `imported/` and
-//! the mods.
+//! the mods, with every layout the game plays on them (their own, plus the Rush and
+//! Breakthrough layouts generated from their conquest ones, see `game_data::modes`).
 
 use super::*;
 
@@ -33,16 +34,7 @@ impl Default for LevelCatalog {
                 teams: ["Team 1".into(), "Team 2".into()],
                 map_area,
                 icons: Default::default(),
-                previews: test_range
-                    .game_modes
-                    .iter()
-                    .map(|g| LayoutPreview {
-                        mode: g.mode.clone(),
-                        size: g.size,
-                        control_points: g.control_points.clone(),
-                        vehicles: g.vehicle_spawners.clone(),
-                    })
-                    .collect(),
+                previews: test_range.game_modes.iter().cloned().map(LayoutPreview::from).collect(),
                 vehicle_icons: Default::default(),
             }],
             scan: None,
@@ -76,13 +68,27 @@ pub struct LevelInfo {
     pub vehicle_icons: std::collections::BTreeMap<String, game_data::VehicleIcon>,
 }
 
-/// A layout's control points and vehicle spawners, for the map preview.
+/// A layout's control points and vehicle spawners, and the stages of the staged modes, for
+/// the map preview.
 #[derive(Clone, Debug)]
 pub struct LayoutPreview {
     pub mode: String,
     pub size: u32,
     pub control_points: Vec<game_data::ControlPointDesc>,
     pub vehicles: Vec<game_data::VehicleSpawnerDesc>,
+    pub staged: Option<game_data::modes::StagedDesc>,
+}
+
+impl From<game_data::GameModeDesc> for LayoutPreview {
+    fn from(layout: game_data::GameModeDesc) -> Self {
+        Self {
+            mode: layout.mode,
+            size: layout.size,
+            control_points: layout.control_points,
+            vehicles: layout.vehicle_spawners,
+            staged: layout.staged,
+        }
+    }
 }
 
 impl LevelInfo {
@@ -104,7 +110,7 @@ struct LevelSummary {
     #[serde(default)]
     terrain: Option<TerrainSummary>,
     #[serde(default)]
-    game_modes: Vec<ModeSummary>,
+    game_modes: Vec<game_data::GameModeDesc>,
     #[serde(default)]
     teams: Vec<TeamSummary>,
     #[serde(default)]
@@ -121,16 +127,6 @@ struct TerrainSummary {
 }
 
 #[derive(Deserialize)]
-struct ModeSummary {
-    mode: String,
-    size: u32,
-    #[serde(default)]
-    control_points: Vec<game_data::ControlPointDesc>,
-    #[serde(default)]
-    vehicle_spawners: Vec<game_data::VehicleSpawnerDesc>,
-}
-
-#[derive(Deserialize)]
 struct TeamSummary {
     name: String,
     #[serde(default)]
@@ -139,13 +135,41 @@ struct TeamSummary {
 
 /// `gpm_cq` -> `Conquest`.
 pub(super) fn mode_label(mode: &str) -> String {
-    match mode {
-        "gpm_cq" => "Conquest".into(),
-        "gpm_coop" => "Co-op".into(),
-        "gpm_ctf" => "Capture the Flag".into(),
-        "sp1" | "sp2" | "sp3" => "Singleplayer".into(),
-        other => other.trim_start_matches("gpm_").to_uppercase(),
+    game_data::modes::mode_label(mode)
+}
+
+/// What a mode is about, for the level page (host: `true` on the host page).
+pub(super) fn mode_note(mode: &str, host: bool) -> Option<String> {
+    use game_data::modes::ModeKind;
+    match ModeKind::known(mode)? {
+        ModeKind::Coop => Some(
+            if host {
+                "Co-op: everyone who joins plays on your team, bots fill both teams."
+            } else {
+                "Co-op: bots fill both teams."
+            }
+            .into(),
+        ),
+        kind => Some(format!("{}: {}", kind.label(), kind.description())),
     }
+}
+
+/// Which side attacks on a staged layout, for the level page: `US attack` (`None` for the
+/// other modes).
+pub(super) fn attackers(level: &LevelInfo, mode: &str, size: u32) -> Option<String> {
+    let staged = level.preview(mode, size)?.staged.as_ref()?;
+    let team = level.teams.get(staged.attacker.checked_sub(1)? as usize)?;
+    let stages = staged.stages.len();
+    let noun = game_data::modes::ModeKind::of(mode).stage_noun().to_lowercase();
+    Some(format!("{team} attack, {stages} {noun}s"))
+}
+
+/// Where a mode's layouts go in the list: BF2's first, then ours.
+fn mode_order(mode: &str) -> usize {
+    use game_data::modes::ModeKind;
+    ModeKind::known(mode).map_or(ModeKind::ALL.len(), |kind| {
+        ModeKind::ALL.iter().position(|k| *k == kind).unwrap_or_default()
+    })
 }
 
 pub(super) fn scan_levels(mut catalog: ResMut<LevelCatalog>, paths: Res<GamePaths>) {
@@ -157,7 +181,7 @@ pub(super) fn scan_levels(mut catalog: ResMut<LevelCatalog>, paths: Res<GamePath
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let summary: LevelSummary = match ron::from_str(&text) {
+            let mut summary: LevelSummary = match ron::from_str(&text) {
                 Ok(summary) => summary,
                 Err(err) => {
                     warn!("{}: {err}", path.display());
@@ -172,12 +196,13 @@ pub(super) fn scan_levels(mut catalog: ResMut<LevelCatalog>, paths: Res<GamePath
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| format!("Team {}", i + 1))
             };
+            game_shared::level::complete_layouts(&paths, &name, &mut summary.game_modes);
             let mut layouts: Vec<(String, u32)> = summary
                 .game_modes
                 .iter()
                 .map(|g| (g.mode.clone(), g.size))
                 .collect();
-            layouts.sort_by(|a, b| (a.0 != "gpm_cq", &a.0, a.1).cmp(&(b.0 != "gpm_cq", &b.0, b.1)));
+            layouts.sort_by(|a, b| (mode_order(&a.0), &a.0, a.1).cmp(&(mode_order(&b.0), &b.0, b.1)));
             layouts.dedup();
             let icons = |i: usize| summary.teams.get(i).map(|t| t.icons.clone()).unwrap_or_default();
             let map_area = summary.terrain.as_ref().map(|t| {
@@ -185,16 +210,7 @@ pub(super) fn scan_levels(mut catalog: ResMut<LevelCatalog>, paths: Res<GamePath
                 (Vec2::new(t.origin[0], t.origin[2]), size.max(1.0))
             });
             let icons = [summary.neutral_icons.clone(), icons(0), icons(1)];
-            let previews = summary
-                .game_modes
-                .into_iter()
-                .map(|g| LayoutPreview {
-                    mode: g.mode,
-                    size: g.size,
-                    control_points: g.control_points,
-                    vehicles: g.vehicle_spawners,
-                })
-                .collect();
+            let previews = summary.game_modes.into_iter().map(LayoutPreview::from).collect();
             levels.push(LevelInfo {
                 name: name.clone(),
                 display_name: summary.display_name.clone(),

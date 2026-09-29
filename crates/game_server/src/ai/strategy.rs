@@ -7,6 +7,10 @@
 //! all (owned flags weigh 10). On top of that the commander weighs how exposed a flag is
 //! (next to enemy ground), what the team has seen of the enemy around it, flags being taken
 //! right now, distance, and ticket bleed.
+//!
+//! Other modes value their own objectives ([`crate::modes::ServerMode::objectives`]: Rush's
+//! charges are areas too, Breakthrough only values the open sector's flags); the orders, the
+//! squads and everything below work the same in every mode.
 
 use std::{
     ops::Range,
@@ -18,6 +22,7 @@ use game_data::StrategicLayoutDesc;
 use game_shared::{
     conquest::{ControlPoint, FlagState, Tickets, team_index},
     level::LoadedLevel,
+    modes::{Charge, ChargeState, Locked, ModeState},
     protocol::{MatchInfo, Team},
 };
 
@@ -39,6 +44,8 @@ const MIN_ORDER_AGE: f32 = 25.0;
 const INTEL_MAX_AGE: f32 = 20.0;
 /// Radius of strategic areas that aren't control points, meters.
 const AREA_RADIUS: f32 = 15.0;
+/// Radius of a charge's area (Rush), meters.
+const CHARGE_RADIUS: f32 = 6.0;
 
 /// An area the commanders reason about (a BF2 strategic area).
 #[derive(Clone, Debug)]
@@ -46,6 +53,8 @@ pub struct Area {
     pub name: String,
     /// [`ControlPoint::index`] of the flag, if the area is one.
     pub control_point: Option<u8>,
+    /// [`Charge::index`] of the charge, if the area is one (Rush).
+    pub charge: Option<u8>,
     pub position: Vec3,
     /// Where infantry go when sent here.
     pub order_position: Vec3,
@@ -65,10 +74,14 @@ pub struct StrategicMap {
     pub areas: Vec<Area>,
     /// Control point entities by index.
     pub control_points: Vec<Option<Entity>>,
+    /// Charge entities by index (Rush).
+    pub charges: Vec<Option<Entity>>,
     /// Changes with every rebuild (never 0 once built): area indices kept from an older
     /// map mean nothing.
     pub generation: u32,
     built_for: Vec<Entity>,
+    /// Where the charges stood then (the server moves them onto walkable ground).
+    built_charges: Vec<(Entity, Vec3)>,
     /// Per area, the walkable region of the navigation grid it lies in (areas in different
     /// regions can't be walked between: a carrier and the island), once the grid is built.
     pub walk_regions: Vec<Option<u16>>,
@@ -83,6 +96,18 @@ impl StrategicMap {
     /// The area of a control point.
     pub fn area_of(&self, control_point: u8) -> Option<usize> {
         self.areas.iter().position(|a| a.control_point == Some(control_point))
+    }
+
+    /// The charge entity of an area, if it is one.
+    pub fn charge_of(&self, area: usize) -> Option<Entity> {
+        let index = self.areas.get(area)?.charge?;
+        self.charges.get(index as usize).copied().flatten()
+    }
+
+    /// A map of just these areas, for tests.
+    #[cfg(test)]
+    pub fn of_areas(areas: Vec<Area>) -> Self {
+        Self { areas, ..default() }
     }
 
     /// The closest area to a position.
@@ -113,7 +138,7 @@ struct PointInfo<'a> {
     has_spawns: bool,
 }
 
-/// Rebuilds the areas when the control points change (new level or round).
+/// Rebuilds the areas when the control points or charges change (new level or round).
 pub fn update_map(
     mut map: ResMut<StrategicMap>,
     mut strategy: ResMut<Strategy>,
@@ -121,11 +146,20 @@ pub fn update_map(
     level: Res<LoadedLevel>,
     match_info: Single<&MatchInfo>,
     control_points: Query<(Entity, &ControlPoint, &ControlPointRules)>,
+    charges: Query<(Entity, &Charge)>,
 ) {
     let mut points: Vec<(Entity, &ControlPoint, &ControlPointRules)> = control_points.iter().collect();
     points.sort_by_key(|(_, cp, _)| cp.index);
     let entities: Vec<Entity> = points.iter().map(|(e, ..)| *e).collect();
-    if entities == map.built_for && map.generation != 0 && !data.is_changed() && !level.is_changed() {
+    let mut charges: Vec<(Entity, &Charge)> = charges.iter().collect();
+    charges.sort_by_key(|(_, c)| c.index);
+    let charge_spots: Vec<(Entity, Vec3)> = charges.iter().map(|(e, c)| (*e, c.position)).collect();
+    if entities == map.built_for
+        && charge_spots == map.built_charges
+        && map.generation != 0
+        && !data.is_changed()
+        && !level.is_changed()
+    {
         return;
     }
     // Orders and objectives name areas of the old map: plan again right away.
@@ -146,12 +180,21 @@ pub fn update_map(
             has_spawns: spawn_ids.contains(&rules.id.as_str()),
         })
         .collect();
-    let desc = layout.and_then(|l| data.level.layout(&l.mode, l.size));
-    let areas = build_areas(desc, &infos);
+    // BF2's strategic areas are those of the layout this one is made from, if any.
+    let desc = level
+        .base_layout(&match_info.mode, match_info.size)
+        .and_then(|l| data.level.layout(&l.mode, l.size));
+    let mut areas = build_areas(desc, &infos);
+    add_charges(&mut areas, &charges);
     let max_index = points.iter().map(|(_, cp, _)| cp.index as usize + 1).max().unwrap_or(0);
     let mut by_index = vec![None; max_index];
     for (entity, cp, _) in &points {
         by_index[cp.index as usize] = Some(*entity);
+    }
+    let charge_count = charges.iter().map(|(_, c)| c.index as usize + 1).max().unwrap_or(0);
+    let mut charges_by_index = vec![None; charge_count];
+    for (entity, charge) in &charges {
+        charges_by_index[charge.index as usize] = Some(*entity);
     }
     if !areas.is_empty() {
         let links: Vec<String> = areas
@@ -170,11 +213,41 @@ pub fn update_map(
     *map = StrategicMap {
         areas,
         control_points: by_index,
+        charges: charges_by_index,
         generation: GENERATION.fetch_add(1, Ordering::Relaxed) + 1,
         built_for: entities,
+        built_charges: charge_spots,
         walk_regions: Vec::new(),
         regions_of: None,
     };
+}
+
+/// An area for every charge (Rush), linked to the nearest flag's area only: charges stand
+/// right beside flags and would otherwise cut the lines of advance between them.
+fn add_charges(areas: &mut Vec<Area>, charges: &[(Entity, &Charge)]) {
+    let flags = areas.len();
+    for (_, charge) in charges {
+        let nearest = (0..flags).filter(|&a| areas[a].control_point.is_some()).min_by(|&a, &b| {
+            let d = |i: usize| areas[i].position.xz().distance_squared(charge.position.xz());
+            d(a).total_cmp(&d(b))
+        });
+        areas.push(Area {
+            name: format!("charge {} (stage {})", charge.name, charge.stage + 1),
+            control_point: None,
+            charge: Some(charge.index),
+            position: charge.position,
+            order_position: charge.position,
+            radius: CHARGE_RADIUS,
+            uncapturable: false,
+            has_spawns: false,
+            neighbours: Vec::new(),
+            routes: Vec::new(),
+        });
+        if let Some(flag) = nearest {
+            let new = areas.len() - 1;
+            link(areas, flag, new);
+        }
+    }
 }
 
 /// Finds the walkable region of every area once the navigation grid is there.
@@ -208,6 +281,7 @@ fn build_areas(desc: Option<&StrategicLayoutDesc>, points: &[PointInfo]) -> Vec<
     let area = |name: &str, point: Option<&PointInfo>, position: Vec3, order: Option<Vec3>| Area {
         name: name.to_string(),
         control_point: point.map(|p| p.index),
+        charge: None,
         position,
         order_position: order.unwrap_or(position),
         radius: point.map_or(AREA_RADIUS, |p| p.radius),
@@ -429,7 +503,29 @@ impl TeamIntel {
     }
 }
 
-/// The commanders: every few seconds, value the flags for both teams and hand out orders.
+/// What a commander plans with: the areas and what stands on them, and the mode.
+pub struct PlanView<'a> {
+    pub map: &'a StrategicMap,
+    /// Per area, its control point's flag.
+    pub flags: &'a [Option<FlagState>],
+    /// Per area, its charge (Rush).
+    pub charges: &'a [Option<ChargeState>],
+    /// Per area, whether its control point is locked (Breakthrough's other sectors).
+    pub locked: &'a [bool],
+    pub intel: &'a TeamIntel,
+    /// Per team, whether it is bleeding tickets.
+    pub bleeding: [bool; 2],
+    pub mode: ModeState,
+}
+
+/// BF2's conquest strategies (conquest and co-op): see [`value_areas`].
+pub fn conquest_objectives(view: &PlanView, team: Team) -> (Posture, Vec<Objective>) {
+    let bleeding = team_index(team).is_some_and(|t| view.bleeding[t]);
+    value_areas(view.map, view.flags, team, view.intel, bleeding)
+}
+
+/// The commanders: every few seconds, value the objectives for both teams (the way the mode
+/// being played says) and hand out orders.
 #[allow(clippy::too_many_arguments)]
 pub fn plan(
     time: Res<Time>,
@@ -437,7 +533,7 @@ pub fn plan(
     mut strategy: ResMut<Strategy>,
     mut intel: ResMut<TeamIntel>,
     snapshot: Res<SquadSnapshot>,
-    flags: Query<&FlagState>,
+    (flags, charges, locked, modes): (Query<&FlagState>, Query<&ChargeState>, Query<(), With<Locked>>, Query<&ModeState>),
     tickets: Query<&Tickets>,
     commanders: Query<(&Team, &Player), With<Commander>>,
     commander_orders: Query<&CommanderOrder>,
@@ -476,12 +572,33 @@ pub fn plan(
             flags.get(entity).ok().copied()
         })
         .collect();
+    let charge_states: Vec<Option<ChargeState>> = (0..map.areas.len())
+        .map(|a| map.charge_of(a).and_then(|e| charges.get(e).ok().copied()))
+        .collect();
+    let locked_areas: Vec<bool> = map
+        .areas
+        .iter()
+        .map(|a| {
+            a.control_point
+                .and_then(|i| map.control_points.get(i as usize).copied().flatten())
+                .is_some_and(|e| locked.contains(e))
+        })
+        .collect();
+    let mode = modes.iter().next().copied().unwrap_or_default();
     let tickets = tickets.iter().next().copied();
 
     for team in [Team::One, Team::Two] {
         let t = team_index(team).unwrap();
-        let bleeding = tickets.is_some_and(|k| k.bleed[t] > 0.0);
-        let (posture, objectives) = value_areas(&map, &states, team, &intel, bleeding);
+        let view = PlanView {
+            map: &map,
+            flags: &states,
+            charges: &charge_states,
+            locked: &locked_areas,
+            intel: &intel,
+            bleeding: std::array::from_fn(|i| tickets.is_some_and(|k| k.bleed[i] > 0.0)),
+            mode,
+        };
+        let (posture, objectives) = (crate::modes::server_mode(mode.kind).objectives)(&view, team);
         strategy.posture[t] = posture;
 
         // Squads of the team, where they are, and who leads them.
@@ -498,8 +615,13 @@ pub fn plan(
 
         let mut load: HashMap<usize, f32> = HashMap::default();
         let weight = |human: bool| if human { 0.5 } else { 1.0 };
+        // In the staged modes things change fast (a charge armed: 30 s to defuse it): an
+        // order is only kept while its objective is worth a good part of the best one.
+        let best_value = objectives.first().map_or(0.0, |o| o.value);
         let still_valid = |order: &SquadOrder| {
-            objectives.iter().any(|o| o.area == order.area && o.kind == order.kind)
+            objectives.iter().any(|o| {
+                o.area == order.area && o.kind == order.kind && (!mode.staged() || o.value >= 0.4 * best_value)
+            })
         };
         // A human commander's orders go to the bot-led squads as they are.
         let human_commander = commanders.iter().any(|(t, player)| *t == team && !player.is_bot);

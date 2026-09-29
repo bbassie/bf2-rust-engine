@@ -1,13 +1,18 @@
 //! The deploy screen: pick a kit and a spawn point on the map. Opens when we die, toggles
 //! with Enter while alive, and closes when we spawn. Choices go to the server right away
 //! as a [`DeployRequest`]; the replicated [`Deployment`] shows what the server has.
+//!
+//! Every mode spawns at the flags a team holds; Rush's flags move with the front (points
+//! nobody spawns at are hidden) and its charges show on the map, and attackers out of
+//! tickets wait for the round to end.
 
 use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
 use game_shared::{
-    conquest::{ControlPoint, DeployRequest, Deployment, FlagState, RoundState},
+    conquest::{ControlPoint, DeployRequest, Deployment, FlagState, RoundState, Tickets},
+    modes::{Charge, ChargeState, ModeState, SpawnBlocked},
     protocol::Player,
     squad::{MAX_MEMBERS, SquadMember, SquadRequest, squad_name},
     level::LoadedLevel,
@@ -17,7 +22,7 @@ use game_shared::{
 
 use crate::{
     combat::weapon_display_name,
-    conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, team_color},
+    conquest_hud::{ENEMY, FRIENDLY, NEUTRAL, SQUAD, charge_color, team_color},
     map_markers::{LabelRequest, Obstacle, place_labels},
     net::{LocalPlayer, LocalSoldier},
 };
@@ -41,6 +46,7 @@ impl Plugin for DeployPlugin {
                     pick_squad,
                     send_choice,
                     update_markers,
+                    update_charge_markers,
                     update_kits,
                     update_status,
                 )
@@ -101,6 +107,9 @@ struct PointMarker {
 /// The owner's flag on a control point's marker.
 #[derive(Component)]
 struct PointFlag(Entity);
+/// A Rush charge on the map.
+#[derive(Component)]
+struct ChargeMarker(Entity);
 
 fn font(size: f32) -> TextFont {
     TextFont {
@@ -263,16 +272,19 @@ fn map_uv(level: &LoadedLevel, position: Vec3) -> Vec2 {
     Vec2::new((position.x - corner.x) / size, (position.z - corner.z) / size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_markers(
     mut commands: Commands,
     level: Option<Res<LoadedLevel>>,
     added: Query<(), Added<ControlPoint>>,
     mut removed: RemovedComponents<ControlPoint>,
     control_points: Query<(Entity, &ControlPoint)>,
+    added_charges: Query<(), Added<Charge>>,
+    charges: Query<(Entity, &Charge)>,
     map: Single<(Entity, Option<&Children>), With<MapImage>>,
 ) {
     let level_changed = level.as_ref().is_some_and(|l| l.is_changed());
-    if added.is_empty() && removed.read().next().is_none() && !level_changed {
+    if added.is_empty() && added_charges.is_empty() && removed.read().next().is_none() && !level_changed {
         return;
     }
     let Some(level) = level else {
@@ -309,6 +321,36 @@ fn rebuild_markers(
         })
         .collect();
     let spots = place_labels(&requests, &obstacles, Rect::new(0.0, 0.0, MAP_SIZE, MAP_SIZE));
+    // Rush's charges: small squares with their letter, under the flags.
+    for (entity, charge) in &charges {
+        let uv = map_uv(&level, charge.position).clamp(Vec2::ZERO, Vec2::ONE);
+        let size = 16.0;
+        commands.entity(map).with_child((
+            ChargeMarker(entity),
+            Node {
+                position_type: PositionType::Absolute,
+                left: percent(uv.x * 100.0),
+                top: percent(uv.y * 100.0),
+                width: px(size),
+                height: px(size),
+                margin: UiRect {
+                    left: px(-size / 2.0),
+                    top: px(-size / 2.0),
+                    ..default()
+                },
+                border: UiRect::all(px(1.5)),
+                border_radius: BorderRadius::all(px(3)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(NEUTRAL),
+            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+            Visibility::Hidden,
+            bevy::ui::FocusPolicy::Pass,
+            children![(Text::new(charge.name.clone()), font(10.0), TextColor(TEXT))],
+        ));
+    }
     for (&(entity, cp, uv), spot) in points.iter().zip(spots) {
         commands.entity(map).with_children(|map| {
             map.spawn((
@@ -481,7 +523,7 @@ fn pick_kit(
 
 fn pick_control_point(
     markers: Query<(&Interaction, &PointMarker), Changed<Interaction>>,
-    flags: Query<&FlagState>,
+    flags: Query<(&FlagState, Option<&SpawnBlocked>)>,
     players: Query<(&Team, &Deployment), With<LocalPlayer>>,
     mut screen: ResMut<DeployScreen>,
 ) {
@@ -489,7 +531,9 @@ fn pick_control_point(
         return;
     };
     for (interaction, marker) in &markers {
-        let ours = flags.get(marker.entity).is_ok_and(|f| f.owner == *team);
+        let ours = flags
+            .get(marker.entity)
+            .is_ok_and(|(f, blocked)| f.owner == *team && blocked.is_none_or(|b| b.0 != *team));
         if *interaction == Interaction::Pressed && ours {
             let choice = screen.choice(server);
             choice.1 = Some(marker.index);
@@ -658,16 +702,17 @@ fn send_choice(mut screen: ResMut<DeployScreen>, mut requests: MessageWriter<Dep
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn update_markers(
     players: Query<(&Team, &Deployment), With<LocalPlayer>>,
-    flags: Query<&FlagState>,
-    mut markers: Query<(&PointMarker, &Interaction, &mut BackgroundColor, &mut BorderColor)>,
+    flags: Query<(&ControlPoint, &FlagState, Option<&SpawnBlocked>)>,
+    mut markers: Query<(&PointMarker, &Interaction, &mut BackgroundColor, &mut BorderColor, &mut Visibility), Without<PointFlag>>,
     mut point_flags: Query<(&PointFlag, &mut ImageNode, &mut Visibility)>,
     icons: Res<crate::map_icons::UiIcons>,
 ) {
     let team = local_team(&players);
     for (flag, mut image, mut visibility) in &mut point_flags {
-        let Ok(state) = flags.get(flag.0) else { continue };
+        let Ok((_, state, _)) = flags.get(flag.0) else { continue };
         match icons.side(state.owner).flag.clone() {
             Some(handle) => {
                 if image.image != handle {
@@ -681,18 +726,45 @@ fn update_markers(
         }
     }
     let chosen = players.single().ok().and_then(|(_, d)| d.control_point);
-    for (marker, interaction, mut background, mut border) in &mut markers {
-        let Ok(state) = flags.get(marker.entity) else {
+    for (marker, interaction, mut background, mut border, mut shown) in &mut markers {
+        let Ok((cp, state, blocked)) = flags.get(marker.entity) else {
             continue;
         };
-        let ours = state.owner == team;
+        // Rush's points nobody spawns at right now aren't worth showing.
+        let hidden = cp.uncapturable && state.owner == Team::Spectator;
+        shown.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
+        // Ours, unless enemies are at it (staged modes).
+        let closed = blocked.is_some_and(|b| b.0 == team);
+        let ours = state.owner == team && !closed;
         let mut color = team_color(state.owner, team);
+        if closed {
+            color = color.with_alpha(0.35);
+        }
         if ours && *interaction == Interaction::Hovered {
             color = color.lighter(0.12);
         }
         background.0 = color;
         let selected = ours && chosen == Some(marker.index);
         *border = BorderColor::all(if selected { TEXT } else { Color::srgba(0.0, 0.0, 0.0, 0.6) });
+    }
+}
+
+/// Rush's charges in their state's colour; those of stages still to come stay hidden.
+fn update_charge_markers(
+    time: Res<Time>,
+    players: Query<(&Team, &Deployment), With<LocalPlayer>>,
+    modes: Query<&ModeState>,
+    charges: Query<&ChargeState>,
+    mut markers: Query<(&ChargeMarker, &mut BackgroundColor, &mut Visibility)>,
+) {
+    let (Ok(mode), team) = (modes.single(), local_team(&players)) else {
+        return;
+    };
+    for (marker, mut background, mut visibility) in &mut markers {
+        let Ok(state) = charges.get(marker.0) else { continue };
+        let shown = !matches!(state, ChargeState::Waiting);
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        background.0 = charge_color(state, mode, team, time.elapsed_secs());
     }
 }
 
@@ -715,8 +787,8 @@ fn update_kits(
 fn update_status(
     players: Query<(&Team, &Deployment), With<LocalPlayer>>,
     soldier: Query<(), With<LocalSoldier>>,
-    control_points: Query<(&ControlPoint, &FlagState)>,
-    rounds: Query<&RoundState>,
+    control_points: Query<(&ControlPoint, &FlagState, Option<&SpawnBlocked>)>,
+    rounds: Query<(&RoundState, Option<&ModeState>, Option<&Tickets>)>,
     mut text: Single<(&mut Text, &mut TextColor), With<StatusText>>,
 ) {
     let Ok((team, deployment)) = players.single() else {
@@ -724,16 +796,20 @@ fn update_status(
     };
     let held: Vec<&ControlPoint> = control_points
         .iter()
-        .filter(|(_, state)| state.owner == *team)
-        .map(|(cp, _)| cp)
+        .filter(|(_, state, blocked)| state.owner == *team && blocked.is_none_or(|b| b.0 != *team))
+        .map(|(cp, ..)| cp)
         .collect();
     let at = deployment
         .control_point
         .and_then(|i| held.iter().find(|cp| cp.index == i))
         .map_or("any flag we hold".to_string(), |cp| cp.name.clone());
     let at = if deployment.on_squad_leader { format!("our squad leader, else {at}") } else { at };
-    let (line, color) = if matches!(rounds.single(), Ok(RoundState::Ended { .. })) {
+    let round = rounds.single().ok();
+    let out_of_tickets = round.is_some_and(|(_, mode, tickets)| mode.is_some_and(|m| !m.can_spawn(*team, tickets)));
+    let (line, color) = if matches!(round, Some((RoundState::Ended { .. }, ..))) {
         ("Round over".to_string(), DIM)
+    } else if out_of_tickets && soldier.is_empty() {
+        ("Out of tickets: no more reinforcements this round".to_string(), ENEMY)
     } else if !soldier.is_empty() {
         (format!("Next deploy: {at}\nEnter or Esc to close"), DIM)
     } else if held.is_empty() && !control_points.is_empty() {

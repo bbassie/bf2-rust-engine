@@ -62,13 +62,21 @@ impl Bf2Install {
         self.root.join("mods").join(mod_name)
     }
 
-    /// Installed mod folder names (e.g. `bf2`, `xpack`).
+    /// Installed mod folder names (e.g. `bf2`, `xpack`). A folder with a `Mod.desc` but no
+    /// `ClientArchives.con`/`ServerArchives.con` isn't a real BF2 mod (`mods/stats`, AIX 2's
+    /// bundled offline stats server, ships a `mod.desc` for its own menu splash but no
+    /// archives to mount), so it's skipped here rather than failing every caller that tries
+    /// to mount it.
     pub fn mods(&self) -> Vec<String> {
         let mut mods: Vec<String> = std::fs::read_dir(self.root.join("mods"))
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.path().join("Mod.desc").is_file() || e.path().join("mod.desc").is_file())
+            .filter(|e| {
+                let dir = e.path();
+                (dir.join("Mod.desc").is_file() || dir.join("mod.desc").is_file())
+                    && (dir.join("ClientArchives.con").is_file() || dir.join("ServerArchives.con").is_file())
+            })
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         mods.sort();

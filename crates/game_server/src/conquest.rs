@@ -1,28 +1,29 @@
 //! Conquest rules, after BF2's `gpm_cq`: whichever team has more soldiers inside a control
 //! point's radius lowers the enemy flag and raises its own, a team bleeds tickets while the
 //! enemy holds more area value, every death costs a ticket, and the round ends when a team
-//! runs out. A new round starts after a short break.
+//! runs out. Co-op plays by the same rules.
+//!
+//! The flags are shared with the other modes that have them (Breakthrough's sectors are
+//! conquest flags, `Locked` outside the sector being fought over); rounds are common to all
+//! modes (see [`crate::modes`]).
 
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
+use game_data::{ControlPointDesc, modes::ModeKind};
 use game_shared::{
-    conquest::{
-        ControlPoint, DeployRequest, Deployment, FlagEvent, FlagEventKind, FlagState, RoundState,
-        Tickets, team_from_id, team_index,
-    },
+    conquest::{ControlPoint, FlagEvent, FlagEventKind, FlagState, RoundState, Tickets, team_from_id, team_index},
     level::LoadedLevel,
-    protocol::{ControlledBy, MatchInfo, Player, Score, Team},
+    modes::{Locked, ModeState},
+    protocol::{ControlledBy, Score, Team},
     revive::Downed,
     soldier::{Soldier, SoldierMotion},
 };
 
 use crate::{
-    ClientPlayer, Controls, HostPlayer, RespawnTimer, ServerSimSystems, combat::Died,
-    sender_player,
+    combat::Died,
+    modes::{ModeSystems, RoundClock, RoundSetup, end_round, in_modes},
 };
 
-/// Seconds between the end of a round and the next one.
-const ROUND_BREAK: f32 = 20.0;
 /// Tickets per team when the level doesn't say.
 const DEFAULT_TICKETS: f32 = 100.0;
 const DEFAULT_TICKET_LOSS_PER_MINUTE: f32 = 10.0;
@@ -34,137 +35,73 @@ pub struct ConquestPlugin;
 impl Plugin for ConquestPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
-            PreUpdate,
-            receive_deploy_requests
-                .after(ServerSystems::Receive)
-                .run_if(in_state(ClientState::Disconnected)),
-        )
-        .add_systems(
-            Update,
-            start_first_round
-                .run_if(resource_exists_and_changed::<LoadedLevel>)
-                .run_if(in_state(ClientState::Disconnected)),
-        )
-        .add_systems(
             FixedUpdate,
-            (update_flags, update_tickets, next_round)
-                .chain()
-                .after(ServerSimSystems::ApplyInputs)
-                .after(crate::combat::CombatSystems)
-                .after(crate::abilities::AbilitySystems)
-                .run_if(resource_exists::<LoadedLevel>)
-                .run_if(in_state(ClientState::Disconnected)),
+            (
+                update_flags.in_set(ModeSystems::Objectives).in_set(ConquestSystems),
+                update_tickets
+                    .in_set(ModeSystems::Tickets)
+                    .run_if(in_modes(&[ModeKind::Conquest, ModeKind::Coop, ModeKind::TeamDeathmatch])),
+            ),
         );
     }
 }
+
+/// The flags moving (in [`ModeSystems::Objectives`]).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConquestSystems;
 
 /// Server-only rules of a control point, next to its [`ControlPoint`].
 #[derive(Component, Clone, Debug)]
 pub struct ControlPointRules {
     /// Layout id; spawn points refer to it.
     pub id: String,
-    area_value: [f32; 2],
-    time_to_get_control: f32,
-    time_to_lose_control: f32,
-    only_takeable_by: Team,
-    enemy_ticket_loss_when_captured: f32,
+    pub(crate) area_value: [f32; 2],
+    pub(crate) time_to_get_control: f32,
+    pub(crate) time_to_lose_control: f32,
+    pub(crate) only_takeable_by: Team,
+    pub(crate) enemy_ticket_loss_when_captured: f32,
 }
 
-fn start_first_round(
-    mut commands: Commands,
-    level: Res<LoadedLevel>,
-    match_info: Single<(Entity, &MatchInfo)>,
-    control_points: Query<Entity, With<ControlPoint>>,
-) {
-    let (match_entity, match_info) = *match_info;
-    start_round(&mut commands, &level, match_entity, match_info, &control_points);
-}
-
-/// Resets control points and tickets to the layout's starting state.
-fn start_round(
-    commands: &mut Commands,
-    level: &LoadedLevel,
-    match_entity: Entity,
-    match_info: &MatchInfo,
-    control_points: &Query<Entity, With<ControlPoint>>,
-) {
-    for entity in control_points {
-        commands.entity(entity).despawn();
-    }
-    let layout = level.game_mode(&match_info.mode, match_info.size);
-    for (index, cp) in layout.iter().flat_map(|l| l.control_points.iter()).enumerate() {
-        let owner = team_from_id(cp.initial_team);
-        commands.spawn((
-            ControlPoint {
-                index: index as u8,
-                name: cp.name.clone(),
-                position: Vec3::from_array(cp.position),
-                radius: cp.radius,
-                uncapturable: cp.uncapturable,
-            },
-            FlagState {
-                owner,
-                flag: owner,
-                height: if owner == Team::Spectator { 0.0 } else { 1.0 },
-                rate: 0.0,
-            },
-            ControlPointRules {
-                id: cp.id.clone(),
-                area_value: cp.area_value,
-                time_to_get_control: cp.time_to_get_control,
-                time_to_lose_control: cp.time_to_lose_control,
-                only_takeable_by: team_from_id(cp.only_takeable_by_team),
-                enemy_ticket_loss_when_captured: cp.enemy_ticket_loss_when_captured,
-            },
-            Replicated,
-        ));
-    }
-
-    let start = std::array::from_fn(|team| {
-        level
-            .desc
-            .teams
-            .get(team)
-            .and_then(|t| t.tickets.iter().min_by_key(|(size, _)| size.abs_diff(match_info.size)))
-            .map_or(DEFAULT_TICKETS, |(_, tickets)| *tickets as f32)
-    });
-    commands.entity(match_entity).insert((
-        Tickets {
-            remaining: start,
-            start,
-            bleed: [0.0; 2],
-        },
-        RoundState::Playing,
-    ));
-    info!("round started: tickets {} / {}", start[0], start[1]);
-}
-
-fn receive_deploy_requests(
-    mut requests: MessageReader<FromClient<DeployRequest>>,
-    clients: Query<&ClientPlayer>,
-    host: Option<Res<HostPlayer>>,
-    mut players: Query<&mut Deployment>,
-) {
-    for request in requests.read() {
-        let Some(player) = sender_player(request.client_id, &clients, host.as_deref()) else {
-            continue;
-        };
-        if let Ok(mut deployment) = players.get_mut(player) {
-            deployment.kit = request.message.kit.min(15);
-            deployment.control_point = request.message.control_point;
-            deployment.on_squad_leader = request.message.on_squad_leader;
+impl ControlPointRules {
+    pub fn from_desc(cp: &ControlPointDesc) -> Self {
+        Self {
+            id: cp.id.clone(),
+            area_value: cp.area_value,
+            time_to_get_control: cp.time_to_get_control,
+            time_to_lose_control: cp.time_to_lose_control,
+            only_takeable_by: team_from_id(cp.only_takeable_by_team),
+            enemy_ticket_loss_when_captured: cp.enemy_ticket_loss_when_captured,
         }
     }
 }
 
+/// Conquest's round: each team's tickets from the level (the closest layout size).
+pub(crate) fn setup(setup: &mut RoundSetup) {
+    let start = std::array::from_fn(|team| {
+        setup
+            .level
+            .desc
+            .teams
+            .get(team)
+            .and_then(|t| t.tickets.iter().min_by_key(|(size, _)| size.abs_diff(setup.size)))
+            .map_or(DEFAULT_TICKETS, |(_, tickets)| *tickets as f32)
+    });
+    setup.tickets = Tickets {
+        remaining: start,
+        start,
+        bleed: [0.0; 2],
+    };
+}
+
 /// Moves every flag according to who stands around it (BF2 `onCPTrigger` and
-/// `onCPStatusChange`, evaluated continuously instead of on trigger events).
-#[allow(clippy::too_many_arguments)]
+/// `onCPStatusChange`, evaluated continuously instead of on trigger events). Locked flags
+/// (Breakthrough, outside the sector being fought over) stay as they are.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_flags(
     time: Res<Time>,
     round: Single<&RoundState>,
     mut tickets: Single<&mut Tickets>,
-    mut control_points: Query<(Entity, &ControlPoint, &mut FlagState, &ControlPointRules)>,
+    mut control_points: Query<(Entity, &ControlPoint, &mut FlagState, &ControlPointRules), Without<Locked>>,
     // The critically wounded don't hold flags (BF2 `onPlayerKilledCQ`).
     soldiers: Query<(&SoldierMotion, &ControlledBy), (With<Soldier>, Without<Downed>)>,
     teams: Query<&Team>,
@@ -259,18 +196,20 @@ fn update_flags(
     }
 }
 
-/// Deaths and area-value bleed (BF2 `updateTicketLoss`), and the end of the round.
+/// Deaths and area-value bleed (BF2 `updateTicketLoss`; none in team deathmatch), and the end
+/// of the round.
 #[allow(clippy::too_many_arguments)]
 fn update_tickets(
     time: Res<Time>,
     level: Res<LoadedLevel>,
     mut deaths: MessageReader<Died>,
-    match_state: Single<(&mut Tickets, &mut RoundState)>,
+    match_state: Single<(&mut Tickets, &mut RoundState, &ModeState)>,
     control_points: Query<(&FlagState, &ControlPointRules)>,
     soldiers: Query<&ControlledBy, With<Soldier>>,
     teams: Query<&Team>,
+    clock: Res<RoundClock>,
 ) {
-    let (mut tickets, mut round) = match_state.into_inner();
+    let (mut tickets, mut round, mode) = match_state.into_inner();
     if *round != RoundState::Playing {
         deaths.clear();
         return;
@@ -307,6 +246,7 @@ fn update_tickets(
     let has_points = !control_points.is_empty();
     let wiped_out = (0..2).find(|&team| has_points && held[team] == 0 && !alive(team));
     next.bleed = match wiped_out {
+        _ if mode.kind == ModeKind::TeamDeathmatch => [0.0; 2],
         // No flags and nobody alive: the round is lost. (BF2 applies its "per minute"
         // end-of-round rate per second.)
         Some(team) => {
@@ -337,57 +277,6 @@ fn update_tickets(
             [true, false] => Team::Two,
             _ => Team::One,
         };
-        info!("round over, winner: {winner:?}");
-        *round = RoundState::Ended {
-            winner,
-            restart_in: ROUND_BREAK,
-        };
+        end_round(&mut round, mode, &clock, winner, "out of tickets");
     }
-}
-
-/// After the break: everyone back to the start, with fresh flags and tickets.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn next_round(
-    mut commands: Commands,
-    time: Res<Time>,
-    level: Res<LoadedLevel>,
-    match_state: Single<(Entity, &MatchInfo, &mut RoundState)>,
-    control_points: Query<Entity, With<ControlPoint>>,
-    soldiers: Query<Entity, With<Soldier>>,
-    mut players: Query<(Entity, &mut Score, &mut Deployment), With<Player>>,
-    mut remaining: Local<Option<f32>>,
-    rotation: Res<crate::rotation::MapRotation>,
-) {
-    let (match_entity, match_info, mut round) = match_state.into_inner();
-    let RoundState::Ended { winner, restart_in } = *round else {
-        *remaining = None;
-        return;
-    };
-    let left = remaining.get_or_insert(restart_in);
-    *left -= time.delta_secs();
-    if *left > 0.0 {
-        // Replicate whole seconds only.
-        if left.ceil() != restart_in {
-            *round = RoundState::Ended {
-                winner,
-                restart_in: left.ceil(),
-            };
-        }
-        return;
-    }
-    *remaining = None;
-    // A server with a map rotation plays the next map instead.
-    if rotation.moves_on() {
-        commands.queue(crate::rotation::advance);
-        return;
-    }
-    for soldier in &soldiers {
-        commands.entity(soldier).despawn();
-    }
-    for (player, mut score, mut deployment) in &mut players {
-        commands.entity(player).remove::<(Controls, RespawnTimer)>();
-        *score = Score::default();
-        deployment.respawn_in = 0.0;
-    }
-    start_round(&mut commands, &level, match_entity, match_info, &control_points);
 }

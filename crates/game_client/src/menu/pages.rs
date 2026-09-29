@@ -41,6 +41,7 @@ pub(super) fn spawn_main_menu(mut commands: Commands, mut menu: ResMut<Menu>) {
                 button(nav, MenuButton::Page(Page::Play), Look::Nav, "Play");
                 button(nav, MenuButton::Page(Page::Host), Look::Nav, "Host");
                 button(nav, MenuButton::Page(Page::Join), Look::Nav, "Join");
+                button(nav, MenuButton::Page(Page::Account), Look::Nav, "Account");
                 button(nav, MenuButton::Page(Page::Settings), Look::Nav, "Settings");
                 nav.spawn(Node {
                     flex_grow: 1.0,
@@ -157,6 +158,7 @@ pub(super) fn build_pages(
             (false, Page::Play) => local_page(p, false, &catalog),
             (false, Page::Host) => local_page(p, true, &catalog),
             (false, Page::Join) => join_page(p, &settings, notice.0.as_deref()),
+            (false, Page::Account) => account::account_page(p),
             (false, Page::Settings) => settings_page(p, menu.tab, &settings, &cli, monitor),
         });
 }
@@ -396,16 +398,12 @@ pub(super) fn build_level_details(
                     switch(chips, Toggle::Spectate);
                     chips.spawn(text("Spectate", 15.0, DIM));
                 });
-            if coop {
-                options.spawn(text(
-                    if host {
-                        "Co-op: everyone who joins plays on your team, bots fill both teams."
-                    } else {
-                        "Co-op: bots fill both teams."
-                    },
-                    13.0,
-                    DIM,
-                ));
+            // What the mode is about, and who attacks in the staged modes (`levels`).
+            if let Some((mode, size)) = pick_layout(level, &last.mode, last.size) {
+                let note = [mode_note(&mode, host), attackers(level, &mode, size)];
+                for line in note.into_iter().flatten() {
+                    options.spawn(text(line, 13.0, DIM));
+                }
             }
             section(options, if coop { "Bots (both teams)" } else { "Bots" });
             options
@@ -514,7 +512,10 @@ fn join_page(p: &mut ChildSpawnerCommands, settings: &Settings, notice: Option<&
         margin: UiRect::top(px(20)),
         ..default()
     })
-    .with_children(|b| button(b, MenuButton::Connect, Look::Primary, "Connect"));
+    .with_children(|b| {
+        button(b, MenuButton::Connect, Look::Primary, "Connect");
+        account::quick_join_button(b);
+    });
 }
 
 fn settings_page(
@@ -535,22 +536,50 @@ fn settings_page(
             button(tabs, MenuButton::Tab(tab), Look::Plain, tab.label());
         }
     });
-    p.spawn(Node {
-        flex_direction: FlexDirection::Column,
-        min_width: px(640),
-        ..default()
-    })
+    p.spawn((
+        ScrollArea,
+        Node {
+            flex_direction: FlexDirection::Column,
+            min_width: px(640),
+            flex_grow: 1.0,
+            min_height: px(0),
+            overflow: Overflow::scroll_y(),
+            padding: UiRect::right(px(12)),
+            ..default()
+        },
+    ))
     .with_children(|p| match tab {
         SettingsTab::Game => {
             row(p, "Player name", |c| {
                 text_field(c, TextField::PlayerName, &settings.player_name, 300.0)
             });
             row(p, "Mouse sensitivity", |c| slider(c, Slider::Sensitivity));
+            row(p, "Mouse smoothing", |c| slider(c, Slider::MouseSmoothing));
             row(p, "Invert mouse Y", |c| switch(c, Toggle::InvertY));
+            row(p, "Raw mouse input", |c| {
+                switch(c, Toggle::MouseRawInput);
+                c.spawn(text("not yet wired to an engine hook", 12.0, DIM));
+            });
             row(p, "Field of view", |c| slider(c, Slider::FieldOfView));
+            row(p, "HUD scale", |c| slider(c, Slider::HudScale));
+            row(p, "Minimap size", |c| slider(c, Slider::MinimapSize));
+            row(p, "Crosshair style", |c| {
+                for style in CrosshairStyle::ALL {
+                    button(c, MenuButton::CrosshairStyle(style), Look::Plain, style.label());
+                }
+            });
+            row(p, "Colour-blind team colours", |c| {
+                switch(c, Toggle::ColorblindTeamColors);
+                c.spawn(text("not yet wired to an engine hook", 12.0, DIM));
+            });
             download::settings_row(p);
         }
         SettingsTab::Graphics => {
+            row(p, "Preset", |c| {
+                for preset in GraphicsPreset::ALL {
+                    button(c, MenuButton::Preset(preset), Look::Plain, preset.label());
+                }
+            });
             row(p, "Window mode", |c| {
                 for mode in DisplayMode::ALL {
                     button(c, MenuButton::Display(mode), Look::Plain, mode.label());
@@ -582,22 +611,54 @@ fn settings_page(
                     );
                 }
             });
+            row(p, "VSync", |c| switch(c, Toggle::VSync));
+            row(p, "Frame rate cap", |c| {
+                for fps in [0, 30, 60, 120, 144, 240] {
+                    button(
+                        c,
+                        MenuButton::FrameCap(fps),
+                        Look::Plain,
+                        if fps == 0 { "Uncapped".to_string() } else { format!("{fps}") },
+                    );
+                }
+            });
+            row(p, "Render scale", |c| slider(c, Slider::RenderScale));
             row(p, "View distance", |c| {
                 for distance in ViewDistance::ALL {
                     button(c, MenuButton::ViewDistance(distance), Look::Plain, distance.label());
                 }
             });
-            row(p, "VSync", |c| switch(c, Toggle::VSync));
-            row(p, "Sun shadows", |c| {
-                switch(c, Toggle::Shadows);
+            row(p, "LOD detail scale", |c| slider(c, Slider::LodDetailScale));
+            row(p, "Vegetation density", |c| slider(c, Slider::VegetationDensity));
+            row(p, "Particle quality", |c| {
+                for q in Quality::ALL {
+                    button(c, MenuButton::ParticleQuality(q), Look::Plain, q.label());
+                }
+            });
+            row(p, "Shadow quality", |c| {
+                for q in ShadowQuality::ALL {
+                    button(c, MenuButton::ShadowQuality(q), Look::Plain, q.label());
+                }
                 if cli.no_shadows {
                     c.spawn(text("off for this run (--no-shadows)", 13.0, DIM));
                 }
             });
             row(p, "Ambient occlusion", |c| {
-                switch(c, Toggle::Ssao);
+                for q in SsaoQuality::ALL {
+                    button(c, MenuButton::SsaoQuality(q), Look::Plain, q.label());
+                }
                 if cli.no_ssao {
                     c.spawn(text("off for this run (--no-ssao)", 13.0, DIM));
+                }
+            });
+            row(p, "Anti-aliasing", |c| {
+                for aa in AntiAliasing::ALL {
+                    button(c, MenuButton::AntiAliasing(aa), Look::Plain, aa.label());
+                }
+            });
+            row(p, "Anisotropic filtering", |c| {
+                for a in Anisotropy::ALL {
+                    button(c, MenuButton::Anisotropy(a), Look::Plain, a.label());
                 }
             });
             row(p, "Baked occlusion", |c| switch(c, Toggle::BakedAo));
@@ -613,31 +674,28 @@ fn settings_page(
             row(p, "Master volume", |c| slider(c, Slider::Volume));
             row(p, "Effects volume", |c| slider(c, Slider::EffectsVolume));
             row(p, "Ambience volume", |c| slider(c, Slider::AmbienceVolume));
+            row(p, "Output device", |c| {
+                c.spawn(text(
+                    settings.audio_output_device.as_deref().unwrap_or("System default"),
+                    14.0,
+                    TEXT,
+                ));
+                c.spawn(text("device switching not yet wired to an engine hook", 12.0, DIM));
+            });
         }
         SettingsTab::Controls => {
             p.spawn(Node {
-                column_gap: px(28),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
                 ..default()
             })
-            .with_children(|columns| {
-                let half = Action::ALL.len().div_ceil(2);
-                for chunk in Action::ALL.chunks(half) {
-                    columns
-                        .spawn(Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: px(3),
-                            width: px(320),
-                            ..default()
-                        })
-                        .with_children(|column| {
-                            for action in chunk {
-                                binding_row(column, *action);
-                            }
-                        });
+            .with_children(|column| {
+                for action in Action::ALL {
+                    binding_row(column, action, settings);
                 }
             });
             p.spawn(Node {
-                margin: UiRect::top(px(12)),
+                margin: UiRect::vertical(px(12)),
                 column_gap: px(12),
                 align_items: AlignItems::Center,
                 ..default()
@@ -650,40 +708,83 @@ fn settings_page(
                     "Reset to defaults",
                 );
                 b.spawn(text(
-                    "Click a key, then press the new key or mouse button. Esc cancels.",
+                    "Click a binding, then press its new key, mouse or gamepad button. Esc/B cancels.",
                     13.0,
                     DIM,
                 ));
             });
         }
+        SettingsTab::Gamepad => {
+            row(p, "Enable gamepad", |c| switch(c, Toggle::GamepadEnabled));
+            row(p, "Look sensitivity", |c| slider(c, Slider::GamepadLookSensitivity));
+            row(p, "Invert look Y", |c| switch(c, Toggle::GamepadInvertY));
+            row(p, "Move dead zone", |c| slider(c, Slider::GamepadMoveDeadzone));
+            row(p, "Look dead zone", |c| slider(c, Slider::GamepadLookDeadzone));
+            row(p, "Aim assist", |c| {
+                switch(c, Toggle::GamepadAimAssist);
+                c.spawn(text("off by default; slows the turn rate over a target", 12.0, DIM));
+            });
+            p.spawn(text(
+                "Movement, look, throttle/brake and the flight stick read the sticks and \
+                 triggers directly; buttons are bound on the Controls tab (a Gamepad column \
+                 next to each action).",
+                13.0,
+                DIM,
+            ));
+        }
     });
 }
 
-fn binding_row(p: &mut ChildSpawnerCommands, action: Action) {
+fn binding_row(p: &mut ChildSpawnerCommands, action: Action, settings: &Settings) {
+    let conflicts = settings.conflicts(action);
     p.spawn(Node {
         align_items: AlignItems::Center,
         justify_content: JustifyContent::SpaceBetween,
+        min_height: px(28),
         ..default()
     })
     .with_children(|row| {
-        row.spawn(text(action.label(), 14.0, DIM));
-        let button_action = MenuButton::Rebind(action);
-        row.spawn((
-            Name::new(button_action.element_name()),
-            button_action,
-            Look::Plain,
-            Button,
-            Node {
-                min_width: px(110),
-                padding: UiRect::axes(px(10), px(5)),
-                justify_content: JustifyContent::Center,
-                border_radius: BorderRadius::all(px(6)),
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-            children![(Value::Binding(action), text("", 14.0, TEXT))],
-        ));
+        row.spawn(Node {
+            width: px(200),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|c| {
+            c.spawn(text(action.label(), 14.0, if conflicts.is_empty() { DIM } else { ENEMY }));
+        });
+        binding_button(row, MenuButton::RebindSlot(action, BindSlot::Primary), Value::Binding(action, BindSlot::Primary));
+        binding_button(
+            row,
+            MenuButton::RebindSlot(action, BindSlot::Secondary),
+            Value::Binding(action, BindSlot::Secondary),
+        );
+        binding_button(row, MenuButton::RebindGamepad(action), Value::GamepadBinding(action));
+        if settings.bindings(action).gamepad.is_some() {
+            button(row, MenuButton::ClearGamepad(action), Look::Plain, "x");
+        }
+        if !conflicts.is_empty() {
+            let names: Vec<String> = conflicts.iter().map(|a| a.label()).collect();
+            row.spawn(text(format!("also used by {}", names.join(", ")), 11.0, ENEMY));
+        }
     });
+}
+
+fn binding_button(p: &mut ChildSpawnerCommands, action: MenuButton, value: Value) {
+    p.spawn((
+        Name::new(action.element_name()),
+        action,
+        Look::Plain,
+        Button,
+        Node {
+            min_width: px(96),
+            padding: UiRect::axes(px(10), px(5)),
+            justify_content: JustifyContent::Center,
+            border_radius: BorderRadius::all(px(6)),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        children![(value, text("", 13.0, TEXT))],
+    ));
 }
 
 fn pause_page(p: &mut ChildSpawnerCommands, active: &ActiveMatch, level: Option<&LoadedLevel>) {

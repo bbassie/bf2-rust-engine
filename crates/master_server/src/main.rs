@@ -1,102 +1,201 @@
-//! Optional master server: game servers announce themselves with a heartbeat every 30 s,
-//! and the menu's server browser fetches the list, then asks each server for its details
-//! directly (LAN discovery protocol, `game_shared::discovery`). The game works without it.
+//! Optional master server. Nothing in the game needs it: LAN games, listen servers and
+//! unranked servers work without one. It offers:
+//!
+//! - the **server list**: game servers announce themselves with a heartbeat, the menu's
+//!   browser lists them (`list`);
+//! - **accounts** with Argon2id-hashed passwords in SQLite, login rate limits, and
+//!   short-lived **session tokens and join tickets** signed with the master's Ed25519 key,
+//!   which game servers check offline (`api`, `game_auth::token`);
+//! - **ranked servers** (registered here, with an API key) that require accounts and report
+//!   **career stats**, which earn XP and **ranks** (`game_auth::ranks`);
+//! - **quick join**, and **web pages** with leaderboards and profiles (`web`).
 //!
 //! ```text
-//! master                         # 127.0.0.1:16580 (this machine only)
-//! master --bind 0.0.0.0:16580    # for everyone (open the port)
+//! master                                   # UDP 127.0.0.1:16580, HTTP 127.0.0.1:16581
+//! master --config master.ron               # see `config`
+//! master add-server --name "My server"     # a ranked server: prints its API key (once)
+//! master list-servers
+//! master remove-server 3
+//! master set-password alice                # reads the new password from standard input
 //! ```
 //!
-//! UDP messages (integers little-endian):
-//!
-//! ```text
-//! server -> master: "BF2R-HB"  game_port u16  query_port u16     heartbeat
-//! server -> master: "BF2R-BYE" game_port u16                     shutting down
-//! client -> master: "BF2R-LIST"                                  list please
-//! master -> client: "BF2R-SERVERS" then "ip game_port query_port\n" per server
-//! ```
-//!
-//! A server is dropped after [`TIMEOUT`] without a heartbeat. The address is the one the
-//! heartbeat came from.
+//! Production: run it behind a reverse proxy that terminates TLS (docs/MODDING.md).
+
+mod api;
+mod auth;
+mod config;
+mod db;
+mod http;
+mod list;
+mod web;
 
 use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr, UdpSocket},
-    time::{Duration, Instant},
+    net::{SocketAddr, UdpSocket},
+    path::PathBuf,
+    sync::{Arc, Mutex},
 };
 
-const HEARTBEAT: &[u8] = b"BF2R-HB";
-const BYE: &[u8] = b"BF2R-BYE";
-const LIST: &[u8] = b"BF2R-LIST";
-const SERVERS: &[u8] = b"BF2R-SERVERS";
-/// Servers not heard from for this long are forgotten (they beat every 30 s).
-const TIMEOUT: Duration = Duration::from_secs(95);
-/// Servers listed per answer, to stay within one datagram.
-const MAX_LISTED: usize = 60;
-/// Servers per address, against someone filling the list.
-const MAX_PER_ADDRESS: usize = 16;
+use clap::{Parser, Subcommand};
+use game_auth::{Identity, unix_now};
 
-fn main() {
-    let mut bind: SocketAddr = "127.0.0.1:16580".parse().unwrap();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match (arg.as_str(), args.next()) {
-            ("--bind", Some(value)) => match value.parse() {
-                Ok(address) => bind = address,
-                Err(err) => return eprintln!("--bind {value}: {err}"),
-            },
-            _ => {
-                return eprintln!("usage: master [--bind <ip:port>]   (default 127.0.0.1:16580)");
-            }
-        }
-    }
-    let socket = match UdpSocket::bind(bind) {
-        Ok(socket) => socket,
-        Err(err) => return eprintln!("can't listen on {bind}: {err}"),
-    };
-    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    println!("master server on UDP {bind}");
-    let mut servers: HashMap<(IpAddr, u16), (u16, Instant)> = HashMap::new();
-    let mut buffer = [0u8; 256];
-    loop {
-        let received = socket.recv_from(&mut buffer);
-        servers.retain(|(ip, port), (_, seen)| {
-            let alive = seen.elapsed() < TIMEOUT;
-            if !alive {
-                println!("{ip}:{port} timed out");
-            }
-            alive
-        });
-        let Ok((len, from)) = received else {
-            continue;
-        };
-        let packet = &buffer[..len];
-        let u16_at = |bytes: &[u8], i: usize| bytes.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-        if let Some(rest) = packet.strip_prefix(HEARTBEAT) {
-            let (Some(game_port), Some(query_port)) = (u16_at(rest, 0), u16_at(rest, 2)) else {
-                continue;
-            };
-            let key = (from.ip(), game_port);
-            let known = servers.contains_key(&key);
-            if !known && servers.keys().filter(|(ip, _)| *ip == from.ip()).count() >= MAX_PER_ADDRESS {
-                continue;
-            }
-            servers.insert(key, (query_port, Instant::now()));
-            if !known {
-                println!("{}:{game_port} registered (queries on {query_port})", from.ip());
-            }
-        } else if let Some(rest) = packet.strip_prefix(BYE) {
-            if let Some(game_port) = u16_at(rest, 0)
-                && servers.remove(&(from.ip(), game_port)).is_some()
-            {
-                println!("{}:{game_port} left", from.ip());
-            }
-        } else if packet == LIST {
-            let mut answer = SERVERS.to_vec();
-            for ((ip, game_port), (query_port, _)) in servers.iter().take(MAX_LISTED) {
-                answer.extend(format!("{ip} {game_port} {query_port}\n").as_bytes());
-            }
-            let _ = socket.send_to(&answer, from);
+use crate::{config::Config, db::Db, http::Master};
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Master server: server list, accounts, stats, ranks, web pages")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+    /// Config file (RON, see the docs of `config`).
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    /// UDP address for heartbeats and browser lists (overrides the config).
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+    /// HTTP address for the web pages and the API (overrides the config).
+    #[arg(long)]
+    http: Option<SocketAddr>,
+    /// Folder for the database and the signing key (overrides the config).
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+    /// Where players reach the web pages, e.g. `https://master.example.com`.
+    #[arg(long)]
+    public_url: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Registers a ranked server and prints its API key (shown once; stored hashed).
+    AddServer {
+        #[arg(long)]
+        name: String,
+    },
+    /// Lists the ranked servers.
+    ListServers,
+    /// Removes a ranked server (its API key stops working).
+    RemoveServer { id: u64 },
+    /// Sets an account's password (read from standard input).
+    SetPassword { name: String },
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("master: {err}");
+            std::process::ExitCode::FAILURE
         }
     }
 }
+
+fn run() -> Result<(), String> {
+    let cli = Cli::parse();
+    let mut config = match &cli.config {
+        Some(path) => Config::load(path)?,
+        None => Config::default().normalized(),
+    };
+    if let Some(bind) = cli.bind {
+        config.udp_bind = bind;
+    }
+    if let Some(http) = cli.http {
+        config.http_bind = http;
+    }
+    if let Some(dir) = &cli.data_dir {
+        config.data_dir = dir.clone();
+    }
+    if let Some(url) = &cli.public_url {
+        config.public_url = url.trim().trim_end_matches('/').to_string();
+    }
+    let db_path = config.data_dir.join("master.sqlite");
+    let db = Db::open(&db_path).map_err(|err| format!("{}: {err}", db_path.display()))?;
+    match cli.command {
+        Some(Command::AddServer { name }) => {
+            let name = name.trim();
+            if name.is_empty() || name.len() > 64 {
+                return Err("--name: 1 to 64 characters".into());
+            }
+            let key = auth::new_api_key();
+            let id = db.add_server(name, &key, unix_now()).map_err(|err| err.to_string())?;
+            println!("ranked server {id} \"{name}\" added. Its API key (shown only now):\n\n  {key}\n");
+            println!("In the game server's config: ranked: true, master_url: \"<this master's https address>\", master_api_key: \"{key}\"");
+            Ok(())
+        }
+        Some(Command::ListServers) => {
+            let servers = db.servers().map_err(|err| err.to_string())?;
+            if servers.is_empty() {
+                println!("no ranked servers (add one with `master add-server --name <name>`)");
+            }
+            for s in servers {
+                let fingerprint = game_auth::unhex_array::<32>(&s.public_key).map_or_else(|| "no heartbeat yet".into(), |k| game_auth::fingerprint(&k));
+                let seen = if s.last_seen == 0 { "never".to_string() } else { format!("{} s ago", unix_now().saturating_sub(s.last_seen)) };
+                let days = unix_now().saturating_sub(s.created) / 86_400;
+                println!("{:>4}  {:<32} key {fingerprint}  last seen {seen}, added {days} days ago", s.id, s.name);
+            }
+            Ok(())
+        }
+        Some(Command::RemoveServer { id }) => {
+            if db.remove_server(id).map_err(|err| err.to_string())? {
+                println!("removed ranked server {id}");
+                Ok(())
+            } else {
+                Err(format!("no ranked server {id}"))
+            }
+        }
+        Some(Command::SetPassword { name }) => {
+            let account = db.account_by_name(&name).map_err(|err| err.to_string())?.ok_or(format!("no account {name}"))?;
+            eprintln!("New password for {}:", account.name);
+            let mut password = String::new();
+            std::io::stdin().read_line(&mut password).map_err(|err| err.to_string())?;
+            let password = password.trim_end_matches(['\r', '\n']);
+            game_auth::validate_password(password)?;
+            db.set_password(account.id, &auth::hash_password(password)).map_err(|err| err.to_string())?;
+            println!("password of {} changed", account.name);
+            Ok(())
+        }
+        None => serve(config, db),
+    }
+}
+
+fn serve(config: Config, db: Db) -> Result<(), String> {
+    let key_path = config.data_dir.join("master.key");
+    let (key, created) = Identity::load_or_create(&key_path).map_err(|err| format!("{}: {err}", key_path.display()))?;
+    println!(
+        "{} signing key {} ({}{})",
+        if created { "made a new" } else { "using" },
+        key.fingerprint(),
+        key_path.display(),
+        if created { "; back it up: game servers pin it" } else { "" }
+    );
+    let udp = UdpSocket::bind(config.udp_bind).map_err(|err| format!("can't listen on UDP {}: {err}", config.udp_bind))?;
+    let http = tiny_http::Server::http(config.http_bind).map_err(|err| format!("can't listen on HTTP {}: {err}", config.http_bind))?;
+    println!("server list on UDP {}", config.udp_bind);
+    println!(
+        "web pages and API on http://{}{}",
+        config.http_bind,
+        if config.public_url.is_empty() { String::new() } else { format!(" (public: {})", config.public_url) }
+    );
+    if !config.public_url.starts_with("https://") && !config.http_bind.ip().is_loopback() {
+        println!("warning: serving accounts over plain HTTP; put a TLS reverse proxy in front (docs/MODDING.md)");
+    }
+    let list = Arc::new(Mutex::new(list::ServerList::default()));
+    let master = Arc::new(Master { config, key, db: Mutex::new(db), list: list.clone(), limits: Mutex::new(Default::default()) });
+    std::thread::Builder::new()
+        .name("udp".into())
+        .spawn(move || list::run_udp(udp, list))
+        .map_err(|err| err.to_string())?;
+    let pruner = master.clone();
+    std::thread::Builder::new()
+        .name("prune".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(600));
+                pruner.limits.lock().unwrap().prune();
+                let _ = pruner.db.lock().unwrap().remove_expired(unix_now());
+            }
+        })
+        .map_err(|err| err.to_string())?;
+    http::serve(http, master, 8);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

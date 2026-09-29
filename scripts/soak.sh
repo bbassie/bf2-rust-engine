@@ -127,8 +127,8 @@ for log in "${logs[@]}"; do
 done
 echo "slow server frames (over 100 ms, at most 5 logged per report): $(strip "$out/server.log" | grep -c "soak: slow frame")"
 strip "$out/server.log" | grep "soak: slow frame" | sed -E 's/^.*soak: //' | head -5 | sed 's/^/  /'
-echo "rounds and maps:"
-strip "$out/server.log" | grep -E "changing map|round over|round started|loaded level|, next map" \
+echo "rounds and maps (and stages taken in Rush and Breakthrough):"
+strip "$out/server.log" | grep -E "changing map|round over|round started|loaded level|, next map| taken after" \
     | sed -E 's/^[^T]+T([0-9:]+)\.[0-9]+Z +[A-Z]+ [a-z_:]+: /  \1 /'
 echo "per map (from the soak reports; frame times over all frames, idle = alive bots that moved under 2 m in a report):"
 strip "$out/server.log" | grep -E "soak: [0-9.]+ s," | sed -E 's/^.*soak: //' | awk '

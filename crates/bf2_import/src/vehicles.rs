@@ -1269,7 +1269,9 @@ fn seat_pose(converter: &MeshConverter, seat: &Template, category: VehicleCatego
 /// origin, in its first frame.
 fn pose_root(converter: &MeshConverter, pose: &str) -> Option<Vec3> {
     let data = converter.vfs.read(&format!("{}{pose}.baf", crate::soldiers::SEAT_ANIMATIONS)).ok()?;
-    let animation = bf2_formats::anim::Animation::parse(&data).ok()?;
+    // Seat poses are body/vehicle animations; the rare version 3 format only turns up in a
+    // couple of AIX weapon clips, never here, so no skeleton is needed to resolve names.
+    let animation = bf2_formats::anim::Animation::parse(&data, None).ok()?;
     let t = animation.tracks.iter().find(|t| t.bone == 0)?.translations.first()?;
     Some(Vec3::new(t[0], t[1], -t[2]))
 }

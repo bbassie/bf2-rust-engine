@@ -1,0 +1,20 @@
+// Quick join from the Join page: with a master server set (`master_url`) it asks the master
+// for servers with free slots, pings them and joins the closest; without, it takes the closest
+// server with free slots that the Join page found on this machine or the LAN.
+//   client --settings <dir>/settings.ron --scenario scenarios/menu/menu_quickjoin.ron
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:join"),
+        Wait(2.0),
+        Screenshot("join"),
+        Click("quickjoin"),
+        ExpectLog("quick join: joining", 20.0),
+        ExpectLog("content verified by the server", 90.0),
+        WaitReady,
+        Wait(1.0),
+        Screenshot("joined"),
+        Quit,
+    ],
+)

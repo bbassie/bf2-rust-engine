@@ -1,0 +1,20 @@
+// The Account page and the Join page's Quick join. With `--settings` naming a settings file
+// with a master server (`master_url`) and a login (account.ron next to it) it shows the
+// profile (rank, XP to the next rank, career stats); without, the master server field.
+//   client --settings <dir>/settings.ron --scenario scenarios/menu/menu_account.ron
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:account"),
+        Wait(3.0),
+        Screenshot("account"),
+        Click("menu:join"),
+        Wait(1.0),
+        Screenshot("join"),
+        Click("menu:settings"),
+        Wait(0.5),
+        Screenshot("settings_game"),
+        Quit,
+    ],
+)

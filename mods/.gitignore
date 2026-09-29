@@ -1,2 +1,8 @@
 # Caches the game writes next to levels (the bots' navigation grids).
 navgrid_*.bin
+
+# A mod imported from a BF2 mod (bf2-import ... --out mods/<name> ...) is derived from EA's
+# and the BF2 mod author's copyrighted data, exactly like /imported/: never commit it. Add a
+# line here for every such mod folder (unlike mods/sample, which is hand-authored and safe to
+# share, so it isn't listed).
+/aix2/

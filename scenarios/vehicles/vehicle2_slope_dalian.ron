@@ -1,0 +1,74 @@
+// Climbing a Dalian Plant slope: starts on gentle ground at (-676, ., 140) (under 7 deg along
+// the drive line by the heightmap), with a long climb toward (-676, ., -154) and beyond, up to
+// ~28 deg at its steepest 2 m step measured along that one line. Chinese vehicles (team 1: the
+// jeep, WZ551 APC and Type 98 tank), since team 2's usjep_hmmwv doesn't spawn without a bot to
+// capture its control point. Jeep, APC and tank each start on the gentle ground, already
+// settled, and drive into the slope under their own power at full throttle. VehicleTrace logs
+// speed, altitude and engine state to the report.
+//
+// CAVEAT: driving it, the APC and tank were thrown sideways tens of meters and tipped onto
+// their side partway up (the jeep never got in - "no jep_paratrooper to go to" - so re-check
+// that template too), so this line isn't the clean graded hill the along-the-line heightmap
+// samples suggested; something off to the side of the sampled line is interfering. Treat this
+// file as a starting point, not a validated result: retarget it at an actual graded hill
+// (ideally one a human points to) before trusting its numbers.
+// client --scenario scenarios/vehicles/vehicle2_slope_dalian.ron --out target/scenarios/vehicle2/slope_dalian
+(
+    level: "dalian_plant",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        NearVehicle("jep_paratrooper"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-676.0, 219.0, 140.0), 0.0, 0.0),
+        Wait(1.5),
+        ThirdPerson(true),
+        Screenshot("hmmwv_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("hmmwv slope", 25.0),
+        Screenshot("hmmwv_climbing"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("apc_wz551"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-676.0, 219.0, 140.0), 0.0, 0.0),
+        Wait(1.5),
+        Screenshot("lav25_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("lav25 slope", 25.0),
+        Screenshot("lav25_climbing"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("tnk_type98"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-676.0, 219.0, 140.0), 0.0, 0.0),
+        Wait(1.5),
+        Screenshot("m1a2_base"),
+        Move(0.0, 1.0),
+        VehicleTrace("m1a2 slope", 30.0),
+        Screenshot("m1a2_climbing"),
+        Move(0.0, 0.0),
+        Quit,
+    ],
+)

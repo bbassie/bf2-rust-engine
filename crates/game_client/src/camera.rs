@@ -242,15 +242,23 @@ fn update_camera(
         return;
     }
 
-    // Spectator fly-cam.
+    // Spectator fly-cam: keyboard, or a gamepad's left stick (strafe/forward) and triggers
+    // (climb/descend).
     if cursor_locked(&cursor) {
-        let local = Vec3::new(
+        let mut local = Vec3::new(
             actions.axis(Action::MoveRight, Action::MoveLeft),
             actions.axis(Action::Jump, Action::Crouch),
             -actions.axis(Action::MoveForward, Action::MoveBack),
         );
+        if let Some(gamepad) = actions.gamepad() {
+            let stick = crate::local_input::deadzone(gamepad.left_stick(), 0.2);
+            local.x += stick.x;
+            local.z -= stick.y;
+            local.y += gamepad.get(bevy::input::gamepad::GamepadButton::RightTrigger2).unwrap_or(0.0)
+                - gamepad.get(bevy::input::gamepad::GamepadButton::LeftTrigger2).unwrap_or(0.0);
+        }
         let speed = if actions.pressed(Action::Sprint) { 120.0 } else { 30.0 };
-        spectator.position += rotation * local * speed * time.delta_secs();
+        spectator.position += rotation * local.clamp_length_max(1.0) * speed * time.delta_secs();
     }
     transform.translation = spectator.position;
     transform.rotation = rotation;

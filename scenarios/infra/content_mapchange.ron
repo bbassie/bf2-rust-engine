@@ -1,0 +1,27 @@
+// Joins, then changes the map from the chat as an admin: the server checks our content again
+// for the new level, and we only spawn once it matches.
+//   server --level sample_valley --port 29300 --admin-password test ...
+//   client --connect 127.0.0.1 --port 29300 ... --scenario scenarios/infra/content_mapchange.ron
+(
+    steps: [
+        ExpectLog("content verified by the server for sample_valley", 90.0),
+        WaitReady,
+        Key(KeyT),
+        Frames(2),
+        Type("/login test"),
+        Frames(2),
+        Key(Enter),
+        Wait(1.0),
+        Key(KeyT),
+        Frames(2),
+        Type("/map test_range"),
+        Frames(2),
+        Key(Enter),
+        ExpectLog("map change to test_range", 30.0),
+        ExpectLog("content verified by the server for test_range", 60.0),
+        WaitReady,
+        Wait(2.0),
+        Screenshot("after_map_change"),
+        Quit,
+    ],
+)

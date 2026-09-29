@@ -707,13 +707,16 @@ fn simulate(
     light: Option<Res<ParticleLight>>,
     camera: Query<&Transform, With<PlayerCamera>>,
     followed: Query<EmitterPlacement, With<EffectEmitter>>,
+    settings: Res<crate::settings::Settings>,
 ) {
     let started = std::time::Instant::now();
     let dt = time.delta_secs().min(0.1);
     let light = light.map_or(Vec3::ONE, |l| l.0);
     let camera = camera.single().copied().unwrap_or_default();
     let camera_forward = camera.forward().as_vec3();
-    let mut budget = MAX_PARTICLES.saturating_sub(world.particles);
+    // The particle quality graphics setting scales the shared particle budget.
+    let cap = (MAX_PARTICLES as f32 * settings.particle_quality.scale()) as usize;
+    let mut budget = cap.saturating_sub(world.particles);
     let mut alive = 0;
     for instance in &mut world.instances {
         instance.age += dt;

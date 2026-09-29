@@ -12,18 +12,24 @@
 //! no `..`, no drive letters or alternate streams, no reserved Windows names.
 //!
 //! ```text
-//! GET /content/manifest.ron     the manifest (RON)
-//! GET /content/<hash>           a file by its hash; `Range: bytes=N-` resumes
+//! GET /content/manifest.ron              the manifest (RON)
+//! GET /content/identity?nonce=<64 hex>   the server's key, proving it holds it (RON, [`IdentityAnswer`])
+//! GET /content/<hash>                    a file by its hash; `Range: bytes=N-` resumes
 //! ```
 //!
 //! The endpoint listens on TCP at the game's port number (UDP) unless the server says
 //! otherwise in its browser answer ([`ContentAdvert`]). Clients cache files by hash
 //! ([`store`]), work out what they lack ([`download::plan`]) and only fetch the files of the
 //! levels the server plays ([`deps`]).
+//!
+//! The server stays in charge after that: when a client joins, and on every map change, it
+//! compares the client's files for the level with its manifest ([`verify`], `crate::join`)
+//! and keeps the player out of the match until they match.
 
 pub mod deps;
 pub mod download;
 pub mod store;
+pub mod verify;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -104,6 +110,19 @@ pub const MANIFEST_VERSION: u32 = 1;
 pub const MANIFEST_URL_PATH: &str = "/content/manifest.ron";
 /// URL path prefix of files by hash: `/content/<hash>`.
 pub const FILE_URL_PREFIX: &str = "/content/";
+/// URL path of the server's identity: `/content/identity?nonce=<64 hex digits>`.
+pub const IDENTITY_URL_PATH: &str = "/content/identity";
+
+/// The content endpoint's answer to an identity request: who serves this content. The proof
+/// signs the client's nonce, the manifest's [`Manifest::content_id`] and the server name
+/// (purpose [`crate::join::CONTENT_PURPOSE`]), which ties the manifest to the server's key.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct IdentityAnswer {
+    pub name: String,
+    /// Empty while the manifest is being built.
+    pub manifest_id: String,
+    pub proof: game_auth::IdentityProof,
+}
 
 /// Refuse manifests bigger than this (a full BF2 import is about 2 MB).
 pub const MAX_MANIFEST_BYTES: u64 = 32 << 20;

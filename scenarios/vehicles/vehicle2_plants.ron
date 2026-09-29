@@ -1,0 +1,56 @@
+// Vehicles vs. small plants: Karkand's me_pinebush01 (a real placed static, not procedural
+// undergrowth) at (-164.6, ., 183.9), on flat ground (checked with a height grid: under 1.5 m
+// of relief either along the drive line or across it) with the nearest other object 16.9 m
+// away, a second bush (checked against every static's position). Two earlier versions of this
+// scenario picked spots that turned out to graze a large rockpile's collision, and then a
+// steep, cross-sloped hillside - both are good reminders that a "small plant" test needs to
+// rule out neighbouring solid clutter *and* rough terrain before blaming the plant. Its
+// collision mesh has only BF2's projectile col type (bullets/leaf hits), no vehicle or soldier
+// collision, so BF2 gives vehicles nothing to collide with there. A jeep and a tank each drive
+// over it at full throttle; VehicleTrace logs speed so a stall or bounce (the bug: the old code
+// used the only collider it had, built from the projectile mesh, for vehicles too) would show
+// up as speed dropping or heading/roll swinging around, instead of acceleration matching the
+// open road in vehicle2_drive.ron.
+// client --scenario scenarios/vehicles/vehicle2_plants.ron --out target/scenarios/vehicle2/plants
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        NearVehicle("usjep_hmmwv"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-164.6, 165.2, 176.0), 180.0, 0.0),
+        Wait(1.0),
+        ThirdPerson(true),
+        Screenshot("hmmwv_before"),
+        Move(0.0, 1.0),
+        VehicleTrace("hmmwv over bush", 4.0),
+        Screenshot("hmmwv_after"),
+        Move(0.0, 0.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        NearVehicle("ustnk_m1a2"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-164.6, 165.2, 176.0), 180.0, 0.0),
+        Wait(1.0),
+        Screenshot("m1a2_before"),
+        Move(0.0, 1.0),
+        VehicleTrace("m1a2 over bush", 4.0),
+        Screenshot("m1a2_after"),
+        Move(0.0, 0.0),
+        Quit,
+    ],
+)

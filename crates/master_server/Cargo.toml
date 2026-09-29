@@ -1,6 +1,6 @@
 [package]
 name = "master_server"
-description = "Optional master server: game servers register with heartbeats, browsers fetch the list. Standard library only."
+description = "Optional master server: the server list (heartbeats), accounts, signed session tokens, career stats and ranks, quick join, and web pages. Nothing in the game needs it."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,15 @@ name = "master"
 path = "src/main.rs"
 
 [dependencies]
+game_auth.workspace = true
+serde.workspace = true
+serde_json = "1"
+ron.workspace = true
+clap.workspace = true
+# The web API and pages (plain HTTP: production runs behind a TLS reverse proxy).
+tiny_http = "0.12"
+# Accounts, stats and servers. `bundled` builds SQLite in: nothing to install on the server.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Password hashing (Argon2id).
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+blake3 = { version = "1.8", default-features = false }

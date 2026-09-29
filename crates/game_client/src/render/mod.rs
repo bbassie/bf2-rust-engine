@@ -9,6 +9,7 @@ mod far_trees;
 mod flags;
 pub mod materials;
 mod hitzones;
+pub mod lamps;
 mod projectiles;
 mod props;
 mod ropes;
@@ -48,6 +49,7 @@ impl Plugin for RenderPlugin {
             sky_occlusion::SkyOcclusionPlugin,
             static_lightmaps::StaticLightmapsPlugin,
             unit_lods::UnitLodPlugin,
+            lamps::LampsPlugin,
         ));
     }
 }

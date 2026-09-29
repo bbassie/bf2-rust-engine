@@ -43,3 +43,7 @@ flate2.workspace = true
 gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
 # Serves the server's content (mods, optionally the imported assets) to joining clients.
 tiny_http = "0.12"
+# Identity key, account tickets (`join`, `accounts`); heartbeats and stats to a master server.
+game_auth.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+serde_json = "1"

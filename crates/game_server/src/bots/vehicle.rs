@@ -312,11 +312,11 @@ impl Senses<'_, '_> {
         self.vehicle_nav.as_deref().map(|n| &n.0)
     }
 
-    /// Height above whatever is below (terrain, statics, water), up to `max`.
+    /// Height above whatever is below (terrain, vehicle-solid statics, water), up to `max`.
     fn height_above_ground(&self, at: Vec3, max: f32) -> f32 {
         let ground = self
             .spatial
-            .cast_ray(at, Dir3::NEG_Y, max, true, &SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World))
+            .cast_ray(at, Dir3::NEG_Y, max, true, &SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::vehicle_movement_mask()))
             .map_or(max, |hit| hit.distance);
         match self.level.desc.water.as_ref() {
             Some(water) => ground.min((at.y - water.height).max(0.0)),
@@ -329,7 +329,7 @@ impl Senses<'_, '_> {
 /// a few hundred meters (not a carrier deck: jump jets don't hover yet).
 fn runway_ahead(w: &Senses, motion: &VehicleMotion) -> bool {
     let forward = flat(motion.rotation * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
-    let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+    let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::vehicle_movement_mask());
     let start = motion.position + Vec3::Y * 2.0;
     let length = 320.0;
     if w.spatial.cast_ray(start, Dir3::new(forward).unwrap_or(Dir3::NEG_Z), length, true, &filter).is_some() {

@@ -92,7 +92,8 @@ pub fn level_lighting(
     Some(lighting)
 }
 
-/// `bf2-import light`: rewrites only the lighting of an imported level's `level.ron`.
+/// `bf2-import light`: rewrites only the lighting (and the lamps) of an imported level's
+/// `level.ron`.
 pub fn import_only(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Result<Option<WorldLighting>> {
     let name = level.name.to_lowercase();
     let level_dir = out.join("levels").join(&name);
@@ -100,7 +101,19 @@ pub fn import_only(install: &Bf2Install, level: &LevelInfo, out: &Path) -> Resul
     let mut desc: LevelDesc = game_data::read_ron(&path).with_context(|| format!("{name} isn't imported yet"))?;
     let vfs = install.level_vfs(level, Side::Both)?;
     let mut interp = Interpreter::new(&vfs);
-    interp.run(&format!("levels/{}/init.con", level.name), &[]);
+    let base = format!("levels/{}", level.name);
+    interp.run(&format!("{base}/init.con"), &[]);
+    // Lamps stand in `StaticObjects.con` too (as the level importer loads it).
+    interp.run(&format!("{base}/staticobjects.con"), &[]);
+    desc.environment.lamps = crate::lamps::level_lamps(&interp.world, &vfs, &interp.world.instances);
+    let lamps = &desc.environment.lamps;
+    log::info!(
+        "{}: {} lamps ({} shadow candidates), {} more at lamp heads for night versions",
+        level.name,
+        lamps.iter().filter(|l| !l.unlit).count(),
+        lamps.iter().filter(|l| l.shadows).count(),
+        lamps.iter().filter(|l| l.unlit).count()
+    );
     let lighting = level_lighting(
         &interp.world,
         desc.terrain.as_ref(),

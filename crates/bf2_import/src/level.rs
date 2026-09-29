@@ -40,6 +40,11 @@ pub fn import_level(
     level: &LevelInfo,
     localization: &Localization,
     out: &Path,
+    // Namespaces the level so it can't collide with a same-named vanilla import (BF2 mods
+    // sometimes ship their own version of a base level, e.g. AIX 2's `Dalian_plant`):
+    // `namespace` prefixes the output folder/level name, `mod_title` the menu display name.
+    namespace: Option<&str>,
+    mod_title: Option<&str>,
 ) -> Result<LevelReport> {
     let vfs = install.level_vfs(level, Side::Both)?;
     let base = format!("levels/{}", level.name);
@@ -56,7 +61,10 @@ pub fn import_level(
     let desc_text = vfs
         .read_text(&format!("{base}/info/{}.desc", level.name))
         .unwrap_or_default();
-    let display_name = xml_text(&desc_text, "name").unwrap_or_else(|| level.name.replace('_', " "));
+    let mut display_name = xml_text(&desc_text, "name").unwrap_or_else(|| level.name.replace('_', " "));
+    if let Some(title) = mod_title {
+        display_name = format!("{title}: {display_name}");
+    }
     let mut layouts = Vec::new();
     for (mode, size) in parse_modes(&desc_text) {
         let path = format!("{base}/gamemodes/{mode}/{size}/gameplayobjects.con");
@@ -79,12 +87,16 @@ pub fn import_level(
         layouts.push((mode, size, range, templates));
     }
 
-    let name = level.name.to_lowercase();
+    let name = match namespace {
+        Some(prefix) => format!("{prefix}_{}", level.name.to_lowercase()),
+        None => level.name.to_lowercase(),
+    };
     let level_dir = out.join("levels").join(&name);
     let converter = MeshConverter::new(&vfs, out);
 
     // Kits of both teams and the weapons they carry.
     let mut level_teams = teams(&interp.world);
+    fix_missing_kit_soldiers(&mut level_teams, &vfs);
     for team in &mut level_teams {
         team.voice = team_voice(&vfs, &team.language, out);
         team.icons = crate::ui_icons::team_icons(&vfs, out, &team.name);
@@ -101,7 +113,7 @@ pub fn import_level(
 
     let (terrain, water) = terrain::import(&vfs, &interp.world, &converter, &level.name, &level_dir)
         .context("importing terrain")?;
-    let vegetation = crate::vegetation::import(&mut interp, &converter, &name, &level_dir, &terrain);
+    let vegetation = crate::vegetation::import(&mut interp, &converter, &level.name, &level_dir, &terrain);
     let static_templates: HashSet<String> = interp.world.instances[static_range.clone()]
         .iter()
         .map(|i| i.template.to_ascii_lowercase())
@@ -115,6 +127,7 @@ pub fn import_level(
     let world = &interp.world;
 
     // Static objects and the meshes they need.
+    let lamps = crate::lamps::level_lamps(world, &vfs, &world.instances[static_range.clone()]);
     let static_instances: Vec<&Instance> = world.instances[static_range]
         .iter()
         .filter(|i| world.template(&i.template).is_some_and(is_visible_static))
@@ -183,9 +196,11 @@ pub fn import_level(
         .map_err(|e| log::warn!("{name}: static lightmaps: {e:#}"))
         .ok()
         .flatten();
+    environment.lamps = lamps;
     let desc = LevelDesc {
         name: name.clone(),
         display_name,
+        mod_title: mod_title.map(str::to_string),
         terrain: Some(terrain),
         water,
         environment,
@@ -227,6 +242,25 @@ pub fn import_level(
     if let Err(err) = crate::commander::import(&mut interp, &converter, &assets, &level_dir, out) {
         log::warn!("commander assets: {err:#}");
     }
+    // A namespaced level's minimap, envmaps, water reflection and ambient sounds (anything
+    // read through `MeshConverter::file`/`audio::sound` with a `levels/{level.name}/...`
+    // reference) still land under the *un*-namespaced folder, and get baked into `level.ron`
+    // / `sounds.ron` as that same un-namespaced path: those helpers mirror the VFS read path
+    // (necessarily BF2's own level folder name) to both the output file and the string they
+    // return. Move the files into `level_dir` and fix up the references in this level's own
+    // RON files, rather than auditing every such call site (and there is no other level to
+    // collide with: `level_dir` is this level's alone).
+    if namespace.is_some() {
+        let leaked_prefix = format!("levels/{}/", level.name.to_lowercase());
+        let real_prefix = format!("levels/{name}/");
+        if leaked_prefix != real_prefix {
+            let leaked_dir = out.join("levels").join(level.name.to_lowercase());
+            if leaked_dir.is_dir() {
+                relocate_dir(&leaked_dir, &level_dir);
+            }
+            repoint_level_paths(&level_dir, &leaked_prefix, &real_prefix);
+        }
+    }
 
     Ok(LevelReport {
         statics: desc.statics.len(),
@@ -244,6 +278,48 @@ pub fn import_level(
             .map(|g| format!("{}/{}", g.mode, g.size))
             .collect(),
     })
+}
+
+/// Moves every file from `from` into `into` (creating subfolders as needed, keeping whatever
+/// `into` already has on a name clash), then removes `from`'s now-empty tree. Used to relocate
+/// a namespaced level's files that a VFS-path-mirroring writer put in its un-namespaced folder.
+fn relocate_dir(from: &Path, into: &Path) {
+    let Ok(entries) = std::fs::read_dir(from) else { return };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        let dst = into.join(entry.file_name());
+        if src.is_dir() {
+            if std::fs::create_dir_all(&dst).is_ok() {
+                relocate_dir(&src, &dst);
+            }
+            let _ = std::fs::remove_dir(&src);
+        } else if !dst.exists() {
+            if std::fs::rename(&src, &dst).is_err() {
+                // Cross-device fallback (shouldn't happen: both are under `out`).
+                if std::fs::copy(&src, &dst).is_ok() {
+                    let _ = std::fs::remove_file(&src);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(from);
+}
+
+/// Rewrites every `.ron` file under `level_dir` (recursively: this level's own, nothing
+/// shared with any other), replacing a leaked un-namespaced path prefix with the real one.
+fn repoint_level_paths(level_dir: &Path, from_prefix: &str, to_prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(level_dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            repoint_level_paths(&path, from_prefix, to_prefix);
+        } else if path.extension().is_some_and(|e| e == "ron") {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            if text.contains(from_prefix) {
+                let _ = std::fs::write(&path, text.replace(from_prefix, to_prefix));
+            }
+        }
+    }
 }
 
 /// Template types that show up as static scenery.
@@ -576,6 +652,7 @@ fn environment(world: &World, converter: &MeshConverter, terrain: &TerrainDesc, 
         lighting: crate::lighting::level_lighting(world, Some(terrain), level_dir, sun_direction),
         ground_albedo: crate::lighting::ground_albedo(level_dir, terrain),
         static_lightmaps: None,
+        lamps: Vec::new(),
     }
 }
 
@@ -665,6 +742,56 @@ fn team_voice(vfs: &Vfs, language: &str, out: &Path) -> TeamVoice {
         bleed_start: lines("ticketbleedstart"),
         bleed_end: lines("ticketbleedend"),
         low_tickets: audio::sound(vfs, "common/sound/hud/lowontickets.wav", out).into_iter().collect(),
+    }
+}
+
+/// Vanilla BF2's own `Init.con` only ever pairs a kit with one of two bodies per faction:
+/// `<faction>_heavy_soldier` for Assault/Support/AT, `<faction>_light_soldier` for
+/// Specops/Sniper/Engineer/Medic. Used to guess which of the two a made-up kit class (see
+/// [`fix_missing_kit_soldiers`]) most resembles.
+const HEAVY_KIT_CLASSES: [&str; 3] = ["assault", "support", "at"];
+
+/// Some levels' `gameLogic.setKit` names a soldier body that was never made (seen throughout
+/// AIX 2: every kit slot names a body like `us_assault_soldier`, `mec_specops_soldier`, one
+/// per kit *class*, when the mod, like vanilla BF2, only ships two or three bodies per
+/// faction: `<faction>_heavy_soldier`, `<faction>_light_soldier`, or just `<faction>_soldier`.
+/// Retail BF2 apparently falls back silently; we don't, so the soldier renders as a bare
+/// capsule. Point kit slots with no matching body at the faction's actual one instead, picking
+/// heavy or light by the vanilla convention above so the classes still look different.
+fn fix_missing_kit_soldiers(teams: &mut [TeamDesc], vfs: &Vfs) {
+    let known: std::collections::HashSet<String> = vfs
+        .list("objects/soldiers/")
+        .filter(|p| p.ends_with(".skinnedmesh"))
+        .filter_map(|p| p.rsplit('/').next())
+        .map(|s| s.trim_end_matches(".skinnedmesh").to_ascii_lowercase())
+        .collect();
+    for team in teams {
+        for slot in &mut team.kits {
+            if slot.soldier.is_empty() || known.contains(&slot.soldier) {
+                continue;
+            }
+            let faction = slot.soldier.split('_').next().unwrap_or(&slot.soldier);
+            // `slot.kit` is a real kit name (e.g. `mec_specops`); its class suffix picks
+            // heavy or light. Try that weight first, then the other, then the generic body.
+            let class = slot.kit.rsplit('_').next().unwrap_or_default();
+            let preferred = if HEAVY_KIT_CLASSES.contains(&class) { "heavy_soldier" } else { "light_soldier" };
+            let other = if preferred == "heavy_soldier" { "light_soldier" } else { "heavy_soldier" };
+            let fallback = [preferred, other, "soldier"]
+                .into_iter()
+                .map(|suffix| format!("{faction}_{suffix}"))
+                .find(|name| known.contains(name));
+            match fallback {
+                Some(fallback) => {
+                    log::debug!("kit {}: soldier `{}` not found, using `{fallback}`", slot.kit, slot.soldier);
+                    slot.soldier = fallback;
+                }
+                None => log::warn!(
+                    "kit {}: soldier `{}` not found and no `{faction}_*_soldier` to fall back to",
+                    slot.kit,
+                    slot.soldier
+                ),
+            }
+        }
     }
 }
 

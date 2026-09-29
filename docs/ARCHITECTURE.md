@@ -42,6 +42,8 @@
 | `game_shared` | client + server | protocol registration, `SoldierMotion` + `step_soldier`, level + statics loading (physics) |
 | `game_server` | dedicated server, and inside the client when hosting | connections, players, spawning, input application, bots |
 | `game_client` | client | input, prediction, interpolation, camera, rendering, HUD |
+| `game_auth` | client, servers, master | identity keys, signed account tokens, the master's API types, ranks (no engine) |
+| `master_server` | an optional web server | server list, accounts, stats, ranks, quick join, web pages (no engine) |
 
 The dedicated server binary uses an explicit headless plugin list (no window, no renderer).
 The client links `game_server` too, so "host" and "singleplayer" are the same code path as a
@@ -54,14 +56,77 @@ when `ClientState::Disconnected`).
   replication, [renet](https://github.com/lucaspoffo/renet) (netcode) over UDP as transport.
   Port 16567 by default.
 - The protocol (replicated components, messages) is registered in one place,
-  `game_shared::protocol::ProtocolPlugin`, so client and server always agree; replicon
-  checks a protocol hash on connect.
+  `game_shared::protocol::ProtocolPlugin`, so client and server always agree; the join
+  handshake checks the protocol hash.
 - Fixed 60 Hz simulation tick; replication runs on the same tick.
 - Server content: a server shares its mods (optionally the imported assets) over HTTP on TCP
   at the game port. Before connecting, clients download what they lack into a
   content-addressed cache and mount it over their own data for the session
   (`game_shared::content`, `game_server::content`, `game_client::content`; see
   [MODDING.md](MODDING.md#sharing-content-from-a-server)).
+
+#### Joining: the server decides
+
+Replicon runs with custom authorization: a client that connects gets no replication and no
+player until the server lets it in (`game_shared::join`, `game_server::join`,
+`game_client::join`). Every message of the handshake is independent of replication.
+
+```
+client                                        server
+  connect (netcode)                ─────────▶  Joining: no replication, no player
+  JoinRequest {protocol hash, nonce} ───────▶  another game version: kicked
+                                   ◀─────────  JoinChallenge {identity proof, level,
+                                               content check, accounts}
+  checks the proof (the nonce signed with the server's key, the same key its
+  content endpoint showed before downloading)
+  AccountTicket {ticket}           ─────────▶  servers with accounts: checked offline
+  ContentReport {digest}           ─────────▶  compared with its manifest
+                                   ◀─────────  Accepted | SendHashes | ManifestChanged |
+                                               Fetch {files}
+  ContentReport {per-file hashes}  ─────────▶  (after SendHashes) which files differ
+  downloads what Fetch names over HTTP, reports again
+                                   ◀─────────  Accepted: replication starts, player created
+```
+
+- **Identity.** Every server has an Ed25519 key, made on its first start (`identity.key` in
+  its data folder). It proves the key by signing the client's random nonce, together with its
+  manifest id and name, so it can't pose as another server by copying its public key. The
+  content endpoint does the same before downloads (`/content/identity`), which also ties the
+  manifest to the key. Players see the key's fingerprint and confirm downloads from a key
+  they haven't trusted before (`game_client::content`).
+- **What is checked** (`game_shared::content::verify`): the level's required files, one per
+  path (the highest priority layer's), from the server's manifest. Servers that share
+  nothing (`Off`) check nothing; `Mods` checks the mods' files and leaves the imported BF2
+  assets to each client's own import; `All` checks everything. The client hashes the file
+  its game would load for each path and sends a digest; on a mismatch the per-file hashes,
+  and the server names the files to download again (by hash, from the same endpoint or the
+  download URL). This catches outdated, damaged and locally changed files, not a modified
+  client, which can report anything.
+- **Map changes** challenge every player again for the new level; nobody spawns
+  (`ContentPending`) until their report matches. A repair during a map change ends with the
+  client joining again, since the level is already loading.
+- **Kicked, with the reason:** another version, no request within 30 s, a declined download
+  (downloads off), no valid ticket on a ranked server, still different after 3 downloads, or
+  no match within the sync timeout (10 minutes).
+
+#### Accounts (optional)
+
+A master server (`crates/master_server`) can hold accounts, stats and ranks; nothing needs
+it. It signs short-lived **session tokens** (15 minutes, for its API) and **join tickets**
+(5 minutes, for one game server: the audience is that server's key fingerprint) with its own
+Ed25519 key (`game_auth::token`). Game servers check tickets **offline** with the master's
+public key (configured, or fetched once and pinned), and accept each ticket once.
+
+- **Unranked** (the default, every LAN and listen server): no accounts. With a master
+  configured, verified players show their account name and rank (`AccountBadge`).
+- **Ranked** (registered on the master, with an API key): an account is required; the
+  server sends heartbeats and, at the end of every round, the stats of its verified players
+  (`game_server::accounts`, from `stats`). The master only counts players who got a ticket
+  for that server lately, once per round id, and turns score, time and wins into XP and
+  ranks (`game_auth::ranks`).
+
+The client keeps a refresh token (never the password) in `account.ron` in the config folder
+and asks for a ticket after the server proved its identity (`game_client::account`).
 
 ### Player vs soldier
 
@@ -187,6 +252,69 @@ free look, Shift afterburner, Space wheel brakes, fire/aim buttons the seat's
 primary/secondary guns, weapon keys the gun on a trigger, G countermeasures (flares, smoke),
 V chase camera, F1..F8 seats, E enter/exit.
 
+### Game modes
+
+`MatchInfo::mode` names the mode (`game_data::modes`: `gpm_cq` conquest, `gpm_coop` co-op,
+`gpm_rush` Rush, `gpm_breakthrough` Breakthrough, `gpm_tdm` team deathmatch; `rush`, `bt`
+and the like work where modes are typed). Every mode plays in the same round
+(`game_server::modes`): the layout's control points are spawned, the mode's setup adjusts
+them and sets the tickets, its systems play the round until one ends it, and after a break
+the next round (or the rotation's next map) starts. A mode is a unit of its own:
+
+| part | where |
+|---|---|
+| id, name, layout data, layout generation | `game_data::modes` |
+| what clients see | `game_shared::conquest` (flags, tickets, round, deployment: all modes) and `game_shared::modes` (`ModeState` on the match, charges, sectors, `Locked` flags, `ObjectiveEvent`s) |
+| rules | a module in `game_server::modes` with a plugin whose systems run `in_mode(kind)`, and a `ServerMode` entry in `MODES` (round setup, bot strategy) |
+| bots | `ServerMode::objectives` values the objectives for each team's commander (`ai::strategy`); squads, the AI commander and vehicles follow its orders as in conquest |
+| HUD, maps, deploy screen, menu | `game_client::conquest_hud` (tickets, objectives, stage, progress, feed), `mode_hud` (charges in the world, HUD markers, map markers), `deploy`, `menu::levels` |
+
+- **Conquest and co-op**: BF2's `gpm_cq` (see M2 in the roadmap); co-op keeps the humans on
+  one team and balances the bots (`game_server::coop`).
+- **Rush**: attackers against defenders, in stages of two charges ("M-COM stations"). An
+  attacker arms a charge by holding the use key within 2.2 m for 4 s, a defender defuses an
+  armed one in 6 s (progress drains when they let go), and an armed charge goes off after
+  30 s (a 12 m blast of 300 damage). With both charges of a stage destroyed the front moves:
+  the attackers' tickets are refilled and both sides spawn further on (control points only
+  say where each side spawns: nothing is captured). Only the attackers have tickets, one per
+  death; they win by destroying the last pair and lose when out of tickets, unless a charge
+  is armed (overtime). In both staged modes nobody spawns at a flag with enemies within 30 m
+  (`SpawnBlocked`): the defenders spawn at the stage's own flags only while the attackers
+  aren't at them. Charges are drawn from a template (BF2's `xp1_generator` by default)
+  with a beacon that blinks once armed.
+- **Breakthrough**: sectors of conquest flags. Only the open sector's flags move (conquest's
+  capture rules; the others are `Locked`), defenders can take back what they lost, and once
+  the attackers hold all of a sector's flags it falls: they get their tickets back and the
+  next sector opens, the defenders spawning at the flags they still hold. The attackers win
+  by taking the last sector.
+- **Team deathmatch**: conquest's tickets without the bleed, a ticket per death, flags only
+  mark spawns.
+
+BF2's levels have conquest and co-op layouts only. Rush and Breakthrough layouts are made
+from the conquest ones when a level loads (`game_data::modes::generate`, on client and server
+alike, and cached in the `LoadedLevel`): the side holding fewer flags attacks (Karkand: the US
+from the gas station); the other flags are ordered by how far along the way from the
+attackers' start to the defenders' base (or the farthest flag) they are, over the relative
+neighbourhood graph of the flags; they are grouped into stages or sectors (one to three
+flags, at most five stages); a stage's two charges go on either side of a lone flag, or beside
+two of its flags about 80 m apart; and each stage lists who spawns where (attackers at their
+start and every stage taken, defenders at the stage's flags, the ones behind and their bases). Once the
+navigation grid is there the server moves generated charges onto walkable ground in their
+flag's walkable region, with room around them and at ground level. A generated layout is
+`based_on` its conquest layout, whose navigation grid and BF2 strategic areas it shares.
+Layouts written by hand in `level.ron` or `levels/<name>/modes.ron` take the place of the
+generated ones (see [MODDING.md](MODDING.md#game-mode-layouts)).
+
+**Bots** play every mode through the same orders. In Rush the charges are strategic areas of
+their own: attackers are sent to the charges to arm (both at once, spread by the commander's
+crowding rule) and to guard armed ones; defenders guard both and every armed charge comes
+first. Near a charge that needs them (attackers: one to arm; defenders: an armed one) bots
+walk up to it and hold the use key, crouched, before fighting anyone not close. In
+Breakthrough the commanders only value the open sector's flags: attackers take what they
+don't hold and hold what is being taken back, defenders hold theirs and retake what they
+lost. Orders in the staged modes are dropped once their objective is worth less than 40 % of
+the best one, so squads react to an armed charge.
+
 ### Bots
 
 Bots are `Player`s whose `InputBuffer` is filled by a `BotBrain` instead of the network.
@@ -220,7 +348,10 @@ use button, the seat keys and ordinary `InputFrame`s like players:
 - *Getting out*: at the objective, when the vehicle is badly damaged (aircrews on the ground,
   or high enough up for their parachute), on its roof, stuck for good, or when the driver left.
 
-The **vehicle grid** is built like the infantry grid from our collision, with vehicle limits
+The **vehicle grid** is built like the infantry grid, but only from what actually blocks a
+vehicle (terrain and BF2's vehicle-type collision, `GameLayer::VehicleGround`): small plants
+that only carry soldier or projectile collision are left out, so vehicles path straight
+through them instead of routing around bushes they'd just drive over. It uses vehicle limits
 (1 m cells, 3 m head room, 0.5 m steps, 40° slopes); BF2's own `AIPathFinding/Vehicle.qtr` is
 an undocumented runtime dump and Wake Island ships none. Per vehicle class (wheeled, tracked,
 amphibious, boat) cells cost more on slopes, in water deeper than the wheels, near walls (the
@@ -265,9 +396,13 @@ were vehicles keep them as objects, with shells landing on schedule.
 ### Levels
 
 `MatchInfo` (replicated) names the level. Client and server both load it from `imported/`:
-heightfield collider, static objects (trimesh colliders from the BF2 soldier collision
-meshes). The client additionally builds terrain chunks (one per BF2 color-map patch),
-water, and loads the glTF meshes of static objects.
+heightfield collider, static objects (trimesh colliders from BF2's per-actor-type collision:
+the soldier mesh where there is one, else vehicle, else projectile, for soldiers, bullets,
+the camera, footsteps and the infantry nav grid; separately, only where BF2 gives the part
+vehicle (hull) collision, a second collider on its own layer for vehicles, so small plants
+with no vehicle collision don't stop or bounce them — see `game_shared::statics` and
+`GameLayer::VehicleGround`). The client additionally builds terrain chunks (one per BF2
+color-map patch), water, and loads the glTF meshes of static objects.
 
 ### Levels of detail
 

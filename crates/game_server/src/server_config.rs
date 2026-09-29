@@ -38,10 +38,29 @@
 //!     download_url: "https://cdn.example.com/bf2-content",
 //!     // TCP port of the content endpoint (default: `port`).
 //!     content_port: 16567,
+//!     // Seconds a joining player has to get the content right (default 600).
+//!     content_sync_timeout: 600,
+//!     // The server's identity key; players see its fingerprint before downloading. Default:
+//!     // `identity.key` in the server's data folder, made on the first start.
+//!     identity_file: "identity.key",
+//!     // Optional accounts (crates/master_server): the master's web address. Unranked servers
+//!     // show verified account names; ranked ones (with the API key the master's admin gave
+//!     // out) require accounts and report stats.
+//!     master_url: "https://master.example.com",
+//!     // The master's public key (64 hex digits); default: fetched from master_url once.
+//!     master_key: "",
+//!     ranked: false,
+//!     master_api_key: "",
+//!     region: "eu",
+//!     // Modes (`game_data::modes`): gpm_cq (conquest, the default), gpm_coop, gpm_rush,
+//!     // gpm_breakthrough, gpm_tdm, or short: conquest, coop, rush, bt, tdm. Rush and
+//!     // Breakthrough work on every level with a conquest layout.
 //!     rotation: [
 //!         (level: "strike_at_karkand", size: 32),
 //!         (level: "dalian_plant", mode: "gpm_cq", size: 64, bots: 24),
 //!         (level: "strike_at_karkand", mode: "gpm_coop", size: 16, bots: 16),
+//!         (level: "strike_at_karkand", mode: "rush", size: 32),
+//!         (level: "gulf_of_oman", mode: "gpm_breakthrough", size: 64),
 //!     ],
 //! )
 //! ```
@@ -89,6 +108,19 @@ pub struct ServerConfig {
     pub download_url: Option<String>,
     /// TCP port of the content endpoint (default: `port`).
     pub content_port: Option<u16>,
+    /// Seconds a joining player has to get the content right (0: the default, 600).
+    pub content_sync_timeout: u32,
+    /// The server's identity key (default: `identity.key` in the data folder).
+    pub identity_file: Option<PathBuf>,
+    /// Master server web address for accounts (`https://...`).
+    pub master_url: Option<String>,
+    /// The master's public key (64 hex digits); default: fetched from `master_url`.
+    pub master_key: Option<String>,
+    /// Requires accounts and reports stats (needs `master_url` and `master_api_key`).
+    pub ranked: bool,
+    pub master_api_key: Option<String>,
+    /// For the master's server list and quick join.
+    pub region: String,
     pub rotation: Vec<MapEntry>,
 }
 
@@ -120,6 +152,13 @@ impl Default for ServerConfig {
             content: ContentMode::default(),
             download_url: None,
             content_port: None,
+            content_sync_timeout: 0,
+            identity_file: None,
+            master_url: None,
+            master_key: None,
+            ranked: false,
+            master_api_key: None,
+            region: String::new(),
             rotation: Vec::new(),
         }
     }
@@ -150,7 +189,7 @@ impl ServerConfig {
             .from_str(&text)
             .map_err(|err| anyhow::anyhow!("{}: {err}", path.display()))?;
         let dir = path.parent().unwrap_or(Path::new("."));
-        for file in [&mut config.stats_file, &mut config.ban_file].into_iter().flatten() {
+        for file in [&mut config.stats_file, &mut config.ban_file, &mut config.identity_file].into_iter().flatten() {
             if file.is_relative() {
                 *file = dir.join(&*file);
             }
@@ -197,6 +236,15 @@ impl ServerConfig {
                 port: self.content_port,
                 download_url: self.download_url.filter(|u| !u.trim().is_empty()),
                 cache_dir: None,
+                identity_file: self.identity_file,
+                sync_timeout: self.content_sync_timeout,
+            },
+            accounts: crate::accounts::AccountSettings {
+                master_url: self.master_url.filter(|u| !u.trim().is_empty()),
+                master_key: self.master_key.filter(|k| !k.trim().is_empty()),
+                ranked: self.ranked,
+                api_key: self.master_api_key.filter(|k| !k.trim().is_empty()),
+                region: self.region,
             },
         }
     }
@@ -230,5 +278,9 @@ mod tests {
         assert_eq!(settings.admin.motd.lines().count(), 2);
         assert_eq!(settings.content.mode, ContentMode::Mods);
         assert_eq!(settings.content.port, Some(16567));
+        assert!(settings.content.identity_file.unwrap().ends_with("identity.key"));
+        assert_eq!(settings.accounts.master_url.as_deref(), Some("https://master.example.com"));
+        assert_eq!(settings.accounts.master_key, None);
+        assert_eq!(settings.accounts.region, "eu");
     }
 }

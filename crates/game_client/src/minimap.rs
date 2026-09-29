@@ -39,6 +39,7 @@ impl Plugin for MinimapPlugin {
                     toggle_rotation,
                     set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
                     update_minimap,
+                    apply_minimap_size.run_if(resource_changed::<crate::settings::Settings>),
                 )
                     .chain(),
             );
@@ -95,9 +96,24 @@ struct MinimapIcons;
 #[derive(Component)]
 struct PlayerHeading;
 
+/// The minimap's outer frame, for `apply_minimap_size` (the `minimap_size` setting).
+#[derive(Component)]
+struct MinimapRoot;
+
+/// Scales the minimap frame by the `minimap_size` setting (1.0 = the base [`SIZE`]).
+fn apply_minimap_size(settings: Res<crate::settings::Settings>, mut root: Query<&mut Node, With<MinimapRoot>>) {
+    let Ok(mut node) = root.single_mut() else {
+        return;
+    };
+    let size = px(SIZE * settings.minimap_size.clamp(0.5, 1.75));
+    node.width = size;
+    node.height = size;
+}
+
 fn spawn_minimap(mut commands: Commands) {
     commands
         .spawn((
+            MinimapRoot,
             Node {
                 position_type: PositionType::Absolute,
                 top: px(12),

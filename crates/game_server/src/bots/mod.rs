@@ -26,8 +26,10 @@ use bevy::{
 };
 use bevy_replicon::prelude::*;
 use game_data::{FireKind, FireMode, FiringPose, FlashbangDesc, WeaponDesc};
+use game_data::modes::ModeKind;
 use game_shared::{
     conquest::{ControlPoint, Deployment, FlagState, team_index},
+    modes::{Charge, ChargeState, ModeState},
     input::{Buttons, InputFrame},
     level::LoadedLevel,
     projectile::{GRAVITY, Smoke},
@@ -147,6 +149,10 @@ const CROWD_DISTANCE: f32 = 1.2;
 const SPRINT_RESERVE: f32 = 0.35;
 /// Vehicles faster than this run soldiers over, m/s (see `roadkill`).
 const DANGEROUS_SPEED: f32 = 3.5;
+/// Rush: how far from a charge that needs arming (or defusing) bots go for it, meters, and
+/// how much they want to once close (more than shooting at anyone but a close enemy).
+const CHARGE_DISTANCE: f32 = 30.0;
+const CHARGE_UTILITY: f32 = 8.2;
 /// How far medics go to revive someone, meters, and how much they want to (BF2's revive
 /// behaviour weight is 3, fire 7.5).
 const REVIVE_DISTANCE: f32 = 35.0;
@@ -238,6 +244,9 @@ enum Activity {
     Demolish { vehicle: Entity, time: f32, placed: u8 },
     /// To a vehicle's entry point and in, for a seat of this kind (see [`vehicle`]).
     Mount { vehicle: Entity, wish: SeatWish, time: f32 },
+    /// Rush: to a charge and the use key held at it, to arm it (attackers) or defuse it
+    /// (defenders), for at most `time` more seconds.
+    Charge { charge: Entity, time: f32 },
 }
 
 /// How a bot stands while shooting.
@@ -547,6 +556,11 @@ struct Senses<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     smoke: Smoke<'w, 's>,
     control_points: Query<'w, 's, (&'static ControlPoint, &'static FlagState)>,
+    /// Rush's charges, and the mode being played.
+    charges: Query<'w, 's, (Entity, &'static Charge, &'static ChargeState)>,
+    modes: Query<'w, 's, &'static ModeState>,
+    /// Flags closed for spawning (staged modes: enemies at them).
+    blocked: Query<'w, 's, &'static game_shared::modes::SpawnBlocked>,
     soldiers: Query<
         'w,
         's,
@@ -613,6 +627,48 @@ impl Senses<'_, '_> {
     /// Whether `team` holds an area.
     fn holds(&self, area: usize, team: Team) -> bool {
         self.flag(area).is_some_and(|(_, state)| state.owner == team)
+    }
+
+    /// Whether `team` can't spawn at an area's flag right now (enemies at it).
+    fn spawn_blocked(&self, area: usize, team: Team) -> bool {
+        self.map
+            .areas
+            .get(area)
+            .and_then(|a| a.control_point)
+            .and_then(|index| self.map.control_points.get(index as usize).copied().flatten())
+            .and_then(|entity| self.blocked.get(entity).ok())
+            .is_some_and(|b| b.0 == team)
+    }
+
+    /// The state of an area's charge (Rush).
+    fn charge_state(&self, area: usize) -> Option<ChargeState> {
+        let entity = self.map.charge_of(area)?;
+        self.charges.get(entity).ok().map(|(_, _, state)| *state)
+    }
+
+    /// Whether `team` has work at a charge in this state: arming it as the attackers,
+    /// defusing it as the defenders.
+    fn charge_work(&self, team: Team, state: &ChargeState) -> bool {
+        let Some(mode) = self.modes.iter().next().filter(|m| m.kind == ModeKind::Rush) else {
+            return false;
+        };
+        match state {
+            ChargeState::Active { .. } => team == mode.attacker,
+            ChargeState::Armed { .. } => team == mode.defender(),
+            _ => false,
+        }
+    }
+
+    /// The nearest charge of the current stage within `radius` of `position` that `team` has
+    /// work at, where it is and whether it is armed (to be defused before it goes off).
+    fn charge_to_work(&self, team: Team, position: Vec3, radius: f32) -> Option<(Entity, Vec3, bool)> {
+        let stage = self.modes.iter().next()?.stage;
+        self.charges
+            .iter()
+            .filter(|(_, charge, state)| charge.stage == stage && self.charge_work(team, state))
+            .map(|(entity, charge, state)| (entity, charge.position, state.armed()))
+            .filter(|(_, at, _)| at.distance(position) < radius)
+            .min_by(|a, b| a.1.distance(position).total_cmp(&b.1.distance(position)))
     }
 
     fn is_enemy(&self, player: Entity, team: Team) -> bool {
@@ -819,6 +875,7 @@ impl BotBrain {
             Activity::Repair { target, time } => self.repair(w, me, target, time, &mut intent, dt),
             Activity::Demolish { vehicle, time, placed } => self.demolish(w, me, vehicle, time, placed, &mut intent, dt),
             Activity::Mount { vehicle, wish, time } => self.mount(w, me, vcx, vehicle, wish, time, &mut intent, dt),
+            Activity::Charge { charge, time } => self.work_charge(w, me, charge, time, &mut intent, dt),
             Activity::Objective => {
                 self.objective(w, me, &mut intent, dt);
                 intent.weapon = intent.weapon.or(self.bag);
@@ -828,6 +885,9 @@ impl BotBrain {
         team_stats.alive += dt;
         if self.activity == Activity::Engage {
             team_stats.fighting += dt;
+        }
+        if matches!(self.activity, Activity::Charge { .. }) {
+            team_stats.charge_seconds += dt;
         }
         if let Some((_, area)) = self.order
             && let Some(area) = w.map.areas.get(area)
@@ -1045,6 +1105,7 @@ impl BotBrain {
             Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
             Activity::Mount { time, .. } if time < 90.0 => best = (5.0, self.activity),
             Activity::Demolish { time, .. } if time < 40.0 => best = (7.0, self.activity),
+            Activity::Charge { time, .. } if time > 0.0 => best = (CHARGE_UTILITY, self.activity),
             _ => {}
         }
         let consider = |best: &mut (f32, Activity), utility: f32, activity: Activity| {
@@ -1057,6 +1118,15 @@ impl BotBrain {
         if let Some(d) = distance.filter(|d| *d < engage_range || self.hurt_ago < 3.0) {
             let close = if d < 12.0 { 1.3 } else { 1.0 };
             consider(&mut best, 7.5 * close * (0.6 + 0.4 * hp), Activity::Engage);
+        }
+
+        // Rush: a charge close by to arm, or an armed one to defuse (before it goes off), comes
+        // before shooting at anyone not close.
+        if !matches!(self.activity, Activity::Charge { .. })
+            && let Some((charge, at, armed)) = w.charge_to_work(me.team, position, CHARGE_DISTANCE)
+        {
+            let utility = if armed || at.distance(position) < 8.0 { CHARGE_UTILITY } else { 6.0 };
+            consider(&mut best, utility, Activity::Charge { charge, time: 40.0 });
         }
 
         // Cover when hurt, more readily the less courage.
@@ -1448,15 +1518,48 @@ impl BotBrain {
             .filter(|(_, area)| *area < w.map.areas.len())
     }
 
-    /// The flag someone at `position` is at: to take or to hold.
+    /// The flag (or charge) someone at `position` is at: to take or to hold.
     fn area_near(&self, w: &Senses, position: Vec3, team: Team) -> Option<(OrderKind, usize)> {
         w.map
             .areas
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.control_point.is_some() && !a.uncapturable)
+            .filter(|(_, a)| (a.control_point.is_some() && !a.uncapturable) || a.charge.is_some())
             .find(|(_, a)| a.position.distance(position) < a.radius + 25.0)
-            .map(|(i, _)| (if w.holds(i, team) { OrderKind::Defend } else { OrderKind::Attack }, i))
+            .map(|(i, a)| {
+                let attack = match a.charge {
+                    Some(_) => w.charge_state(i).is_some_and(|s| matches!(s, ChargeState::Active { .. }) && w.charge_work(team, &s)),
+                    None => !w.holds(i, team),
+                };
+                (if attack { OrderKind::Attack } else { OrderKind::Defend }, i)
+            })
+    }
+
+    /// Rush: walks up to a charge and holds the use key at it, crouched and looking at it,
+    /// until it is armed (or defused), someone else did it, or `time` runs out.
+    fn work_charge(&mut self, w: &Senses, me: &Me, charge: Entity, time: f32, intent: &mut Intent, dt: f32) {
+        let target = w
+            .charges
+            .get(charge)
+            .ok()
+            .filter(|(_, _, state)| w.charge_work(me.team, state))
+            .map(|(_, charge, _)| charge.position);
+        let (Some(at), true) = (target, time > 0.0) else {
+            self.activity = Activity::Objective;
+            return;
+        };
+        let distance = flat(at - me.motion.position).length();
+        if distance > Charge::REACH - 0.7 || (at.y - me.motion.position.y).abs() > 1.5 {
+            intent.goal = Some(Goal {
+                position: at,
+                tolerance: 0.8,
+                sprint: distance > 12.0,
+            });
+        } else {
+            intent.look = Look::At(at + Vec3::Y * 0.6);
+            intent.buttons |= Buttons::USE | Buttons::CROUCH;
+        }
+        self.activity = Activity::Charge { charge, time: time - dt };
     }
 
     /// Squad and objective movement: follow the leader, wait for the squad, head for the
@@ -1637,6 +1740,12 @@ impl BotBrain {
                     let spread = (jitter - 0.5) * 2.4;
                     (-(facing + spread) - std::f32::consts::FRAC_PI_2, cp.radius * 0.5 + 4.0 + 8.0 * fastrand::f32())
                 }
+                // Guarding a charge (Rush): a ring around it, mostly towards the enemy, not all
+                // crowded at the charge.
+                (OrderKind::Defend, None) if area.charge.is_some() => {
+                    let spread = (jitter - 0.5) * 3.0;
+                    (-(facing + spread) - std::f32::consts::FRAC_PI_2, 6.0 + 12.0 * fastrand::f32())
+                }
                 _ => (base + attempt as f32 * 1.3, 8.0 * jitter),
             };
             let center = if cp.is_some() { area.position } else { area.order_position };
@@ -1649,6 +1758,7 @@ impl BotBrain {
                 let inside = match (kind, cp) {
                     (OrderKind::Attack, Some(cp)) => cp.contains(spot),
                     (_, Some(cp)) => spot.distance(cp.position) < cp.radius + 16.0,
+                    (OrderKind::Defend, None) if area.charge.is_some() => spot.distance(area.position) < 22.0,
                     _ => true,
                 };
                 if inside {
@@ -2158,7 +2268,7 @@ impl BotBrain {
             .areas
             .iter()
             .enumerate()
-            .filter(|(i, a)| a.has_spawns && w.holds(*i, team))
+            .filter(|(i, a)| a.has_spawns && w.holds(*i, team) && !w.spawn_blocked(*i, team))
             .filter_map(|(i, a)| Some((i, a.control_point?, a.position)))
             .collect();
         // Not at a base walking can't get anywhere from (a carrier) while there's another.

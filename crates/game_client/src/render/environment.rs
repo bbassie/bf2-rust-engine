@@ -31,6 +31,17 @@
 //!   the moon (the dynamic sun colour) lights everything, at [`MOON`] times the ambient's
 //!   brightness, casting shadows. The colours are the faked-HDR "dark-adapted" ones BF2
 //!   showed while the player looked at dark surroundings.
+//! - Tints: BF2's light colours are strongly tinted (Strike at Karkand's sky light has a
+//!   quarter as much blue as red in linear light), which BF2's clamping and exposure washed
+//!   out but real-time light with tonemapping shows as a sepia filter. Every light, the fog
+//!   and the sky keep their hue but only part of their saturation: warm colours
+//!   ([`TINT`], [`FOG_TINT`], [`SKY_TINT`]) much less than cool ones ([`COOL_TINT`]), so blue
+//!   levels (Midnight Sun, the Gulf of Oman's sky) stay blue; night levels [`NIGHT_TINT`].
+//! - Lamps (`lamps`) are real-time lights in the level's lamp colour, as bright as BF2's
+//!   baked lamp light would be as sunlight ([`LevelLight::lamp`]).
+//! - Night versions of day levels (setting `time_of_day`, or `BF2_LIGHT=night=1`): the level
+//!   lit like the Special Forces night levels ([`night_version`]), its sky darkened and its
+//!   lamps on. Chosen when a level loads.
 //!
 //! # Direction and occlusion of the ambient light
 //!
@@ -44,7 +55,8 @@
 //! Levels without [`game_data::WorldLighting`] (made without BF2's `sky.con`) are lit from
 //! the dynamic `ambient_color` and `sun_color` alone. `BF2_LIGHT=ambient=9,sun=1.2,...`
 //! overrides the constants for tuning (keys: ambient, sun, adapt, night_adapt, contrast,
-//! class, class_sun, moon, terrain_moon, tint, sky_up, horizon, bounce).
+//! class, class_sun, moon, terrain_moon, tint, fog_tint, sky_tint, cool_tint, night_tint,
+//! sky_up, horizon, bounce, lamp, night).
 
 use bevy::{
     asset::LoadState,
@@ -72,6 +84,10 @@ impl Plugin for EnvironmentPlugin {
         app.insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.85)))
             .add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_systems(
+                PreUpdate,
+                latch_time_of_day.run_if(resource_exists_and_changed::<LoadedLevel>),
+            )
+            .add_systems(
                 Update,
                 (
                     apply_environment.run_if(resource_exists_and_changed::<LoadedLevel>),
@@ -94,7 +110,7 @@ impl Plugin for EnvironmentPlugin {
 /// crushed by tonemapping.
 const SUN_ILLUMINANCE: f32 = 4_000.0;
 /// Luminance (cd/m2) of linear light 1: a white surface shows white at the default exposure.
-const LIGHT_UNIT: f32 = 1_000.0;
+pub const LIGHT_UNIT: f32 = 1_000.0;
 /// Bevy's uniform ambient light reflects `EnvBRDFApprox(albedo, F_AB(1, n.v))`, about 0.45 x
 /// the albedo, where its environment maps reflect about 0.96 x: the environment map's
 /// intensity that lights a surface as the ambient light of the same colour did (the light
@@ -127,8 +143,23 @@ pub const MOON: f32 = 0.6;
 pub const TERRAIN_MOON: f32 = 0.35;
 /// [`ADAPTATION`] on night levels: they are meant to be darker.
 pub const NIGHT_ADAPTATION: f32 = 0.15;
-/// Strength of the levels' light tints (1: BF2's; 0: grey light).
-pub const TINT: f32 = 1.0;
+/// Strength of the levels' warm light tints (1: BF2's; 0: grey light), as a power on the
+/// chromaticity at equal luminance: 0.55 leaves Strike at Karkand's sky light with half as
+/// much blue as red instead of a quarter, and its sun with 70 % instead of half.
+pub const TINT: f32 = 0.55;
+/// The same for the fog and the clear colour (and the haze the sky fades into).
+pub const FOG_TINT: f32 = 0.55;
+/// The same for the sky texture: the pictures are more varied than the fog colours, so
+/// they keep more.
+pub const SKY_TINT: f32 = 0.75;
+/// Strength of cool tints (more blue than red) in the light, fog and sky of day levels.
+pub const COOL_TINT: f32 = 0.85;
+/// All tints on night levels, whose blue is their character.
+pub const NIGHT_TINT: f32 = 0.8;
+/// Lamps' brightness relative to BF2's baked lamp light as sunlight (see [`LevelLight::lamp`]):
+/// at full strength BF2's lamps saturated what they lit, which as real light floods squares
+/// white (and their ranges overlap on lit squares): a quarter keeps pools of light in a night.
+pub const LAMP: f32 = 0.25;
 /// Sky light on surfaces facing straight up, relative to the uniform ambient it replaces;
 /// walls and undersides get less (see [`LevelLight::sky_gradient`]).
 pub const SKY_UP: f32 = 1.1;
@@ -181,8 +212,8 @@ impl LightScale {
     }
 }
 
-/// The level's light in linear units (see the module docs).
-#[derive(Clone, Copy, Debug)]
+/// The level's light in linear units (see the module docs); a resource once a level is loaded.
+#[derive(Resource, Clone, Copy, Debug)]
 pub struct LevelLight {
     /// Ambient light, 1 = [`LIGHT_UNIT`].
     pub ambient: Vec3,
@@ -193,6 +224,15 @@ pub struct LevelLight {
     /// Trees.
     pub trees: LightScale,
     pub night: bool,
+    /// Light of a lamp at full strength (BF2's baked lamp light 1, times the level's lamp
+    /// colour) on a surface facing it, in the sun's units (1 = [`LIGHT_UNIT`] on a white
+    /// surface): BF2's lamp light as bright as sunlight of that colour would be.
+    pub lamp: Vec3,
+    /// How much of their tint the fog and the sky texture keep (see [`FOG_TINT`]).
+    pub fog_tint: Tint,
+    pub sky_tint: Tint,
+    /// A night version of a day level (see [`night_version`]).
+    pub night_version: bool,
 }
 
 /// Tuning constants, overridable with `BF2_LIGHT`.
@@ -208,9 +248,16 @@ struct Knobs {
     moon: f32,
     terrain_moon: f32,
     tint: f32,
+    fog_tint: f32,
+    sky_tint: f32,
+    cool_tint: f32,
+    night_tint: f32,
     sky_up: f32,
     horizon: f32,
     bounce: f32,
+    lamp: f32,
+    /// Night versions of day levels (1) regardless of the setting.
+    night: bool,
 }
 
 impl Knobs {
@@ -228,9 +275,15 @@ impl Knobs {
                 moon: MOON,
                 terrain_moon: TERRAIN_MOON,
                 tint: TINT,
+                fog_tint: FOG_TINT,
+                sky_tint: SKY_TINT,
+                cool_tint: COOL_TINT,
+                night_tint: NIGHT_TINT,
                 sky_up: SKY_UP,
                 horizon: HORIZON,
                 bounce: BOUNCE,
+                lamp: LAMP,
+                night: false,
             };
             for pair in std::env::var("BF2_LIGHT").unwrap_or_default().split(',') {
                 let Some((key, value)) = pair.split_once('=') else { continue };
@@ -246,6 +299,12 @@ impl Knobs {
                     "terrain_moon" => knobs.terrain_moon = value,
                     "moon" => knobs.moon = value,
                     "tint" => knobs.tint = value,
+                    "fog_tint" => knobs.fog_tint = value,
+                    "sky_tint" => knobs.sky_tint = value,
+                    "cool_tint" => knobs.cool_tint = value,
+                    "night_tint" => knobs.night_tint = value,
+                    "lamp" => knobs.lamp = value,
+                    "night" => knobs.night = value != 0.0,
                     "sky_up" => knobs.sky_up = value,
                     "horizon" => knobs.horizon = value,
                     "bounce" => knobs.bounce = value,
@@ -257,19 +316,152 @@ impl Knobs {
     }
 }
 
-/// A BF2 (gamma-space) light as linear light, its tint scaled by `tint` at equal luminance.
-fn to_linear(c: Vec3, tint: f32) -> Vec3 {
-    let linear = c.max(Vec3::ZERO).powf(2.2);
+/// The "Time of day" setting: levels as made, or night versions of the day levels.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TimeOfDay {
+    #[default]
+    Level,
+    Night,
+}
+
+impl TimeOfDay {
+    // `ALL` and `label` are for the settings page.
+    #[allow(dead_code)]
+    pub const ALL: [TimeOfDay; 2] = [TimeOfDay::Level, TimeOfDay::Night];
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeOfDay::Level => "As the level is",
+            TimeOfDay::Night => "Night",
+        }
+    }
+
+    /// `level`/`day` or `night`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "level" | "day" | "default" => Some(TimeOfDay::Level),
+            "night" => Some(TimeOfDay::Night),
+            _ => None,
+        }
+    }
+}
+
+/// Whether the level loaded last is shown as its night version (latched when it loads, so
+/// everything lit later, like undergrowth streaming in, matches).
+static NIGHT_VERSION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn latch_time_of_day(settings: Res<crate::settings::Settings>) {
+    let night = settings.time_of_day == TimeOfDay::Night || Knobs::get().night;
+    NIGHT_VERSION.store(night, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether BF2 lit the level as night (no sun on statics and terrain, or faked HDR).
+fn is_night(env: &game_data::EnvironmentDesc) -> bool {
+    env.lighting.as_ref().is_some_and(|l| {
+        let dim = |c: [f32; 3]| Vec3::from_array(c).dot(LUMA) < 0.05;
+        l.dark_adapted.is_some() || (dim(l.static_sun) && dim(l.terrain_sun))
+    })
+}
+
+/// The environment the level is shown with: its own, or its night version.
+pub fn shown_environment(env: &game_data::EnvironmentDesc) -> std::borrow::Cow<'_, game_data::EnvironmentDesc> {
+    if NIGHT_VERSION.load(std::sync::atomic::Ordering::Relaxed) && !is_night(env) {
+        std::borrow::Cow::Owned(night_version(env))
+    } else {
+        std::borrow::Cow::Borrowed(env)
+    }
+}
+
+/// A night version of a day level: its light replaced by the Special Forces night levels'
+/// (Night Flight's dark-adapted sky light and moon, a little less blue), a dark blue fog, and
+/// its lamps as bright as theirs, in the level's lamp hue (a warm white where it has none).
+pub fn night_version(env: &game_data::EnvironmentDesc) -> game_data::EnvironmentDesc {
+    let day = env.lighting.clone().unwrap_or_default();
+    let hue = Vec3::from_array(day.point);
+    let hue = if hue.dot(LUMA) > 0.05 { hue } else { Vec3::new(0.95, 0.9, 0.8) };
+    let point = (hue * (0.9 / hue.dot(LUMA))).to_array();
+    game_data::EnvironmentDesc {
+        sun_color: [0.12, 0.2, 0.34],
+        fog_color: [0.03, 0.045, 0.09],
+        sky_color: [0.03, 0.045, 0.09],
+        lighting: Some(game_data::WorldLighting {
+            // Darker than Night Flight's: day levels' colour maps are brighter.
+            static_sky: [0.16, 0.17, 0.22],
+            static_sun: [0.0; 3],
+            point,
+            terrain_sun: [0.0; 3],
+            terrain_gi: [0.19, 0.2, 0.29],
+            terrain_sun_scale: 1.0,
+            tree_ambient: [0.2, 0.2, 0.25],
+            tree_sun: [0.1; 3],
+            dark_adapted: None,
+            bright_adapted: None,
+            ..day
+        }),
+        ..env.clone()
+    }
+}
+
+/// How bright the sky texture shows (rgb) on a night version of a day level.
+const NIGHT_SKY: Vec3 = Vec3::new(0.018, 0.025, 0.05);
+
+/// How much of their tint colours keep, as a power on their chromaticity at equal luminance
+/// (1: unchanged, 0: grey): `warm` for colours with more red than blue, `cool` for the others,
+/// blended around neutral.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    pub warm: f32,
+    pub cool: f32,
+}
+
+impl Tint {
+    fn both(tint: f32) -> Self {
+        Self { warm: tint, cool: tint }
+    }
+
+    /// The power for a linear colour: its warmth is `ln(red / blue)`.
+    fn power(&self, linear: Vec3) -> f32 {
+        let warmth = (linear.x.max(1e-6) / linear.z.max(1e-6)).ln();
+        let t = (warmth / 0.4).clamp(-1.0, 1.0) * 0.5 + 0.5;
+        self.cool + (self.warm - self.cool) * t
+    }
+}
+
+/// A BF2 (gamma-space) light as linear light, its tint scaled (see [`Tint`]).
+fn to_linear(c: Vec3, tint: Tint) -> Vec3 {
+    scale_tint(c.max(Vec3::ZERO).powf(2.2), tint)
+}
+
+/// A linear colour with its tint scaled (see [`Tint`]).
+fn scale_tint(linear: Vec3, tint: Tint) -> Vec3 {
     let y = linear.dot(LUMA);
-    if y <= 1e-9 || tint == 1.0 {
+    let power = tint.power(linear);
+    if y <= 1e-9 || power == 1.0 {
         return linear;
     }
-    let chroma = (linear / y).powf(tint);
+    let chroma = (linear.max(Vec3::splat(1e-9)) / y).powf(power);
     chroma * (y / chroma.dot(LUMA).max(1e-9))
 }
 
+/// An sRGB colour (0..1) with its tint scaled like [`scale_tint`].
+fn tinted_srgb(c: [f32; 3], tint: Tint) -> Color {
+    let linear = Color::srgb(c[0], c[1], c[2]).to_linear();
+    let v = scale_tint(Vec3::new(linear.red, linear.green, linear.blue), tint);
+    Color::linear_rgb(v.x, v.y, v.z)
+}
+
 impl LevelLight {
+    /// The light of the level as shown (see [`shown_environment`]).
     pub fn new(env: &game_data::EnvironmentDesc) -> Self {
+        let shown = shown_environment(env);
+        Self {
+            night_version: matches!(shown, std::borrow::Cow::Owned(_)),
+            ..Self::of(&shown)
+        }
+    }
+
+    fn of(env: &game_data::EnvironmentDesc) -> Self {
         let Some(lighting) = &env.lighting else {
             return Self::from_dynamic(env);
         };
@@ -278,11 +470,16 @@ impl LevelLight {
         let v = Vec3::from_array;
         let dim = |c: [f32; 3]| v(c).dot(LUMA) < 0.05;
         let night = lighting.dark_adapted.is_some() || (dim(l.static_sun) && dim(l.terrain_sun));
+        let tint = if night {
+            Tint::both(k.night_tint)
+        } else {
+            Tint { warm: k.tint, cool: k.cool_tint }
+        };
 
-        let ambient_static = to_linear(OPEN_SKY_STATIC * v(l.static_sky), k.tint);
-        let ambient_terrain = to_linear(OPEN_SKY_TERRAIN * v(l.terrain_gi), k.tint);
+        let ambient_static = to_linear(OPEN_SKY_STATIC * v(l.static_sky), tint);
+        let ambient_terrain = to_linear(OPEN_SKY_TERRAIN * v(l.terrain_gi), tint);
         let (sun_static, sun_terrain) = if night {
-            let tint = to_linear(v(moon), k.tint);
+            let tint = to_linear(v(moon), tint);
             let tint = tint / tint.dot(LUMA).max(1e-9);
             let moon = tint * k.moon * ambient_static.dot(LUMA) * k.ambient / k.sun;
             // On the terrain's albedo, which lacks the statics' x 2.
@@ -292,7 +489,7 @@ impl LevelLight {
             let terrain = v(l.terrain_sun) * 2.0 * l.terrain_sun_scale.min(MAX_TERRAIN_SUN_SCALE);
             let floor = terrain.normalize_or(Vec3::ONE) * 0.03;
             let statics = if dim(l.static_sun) { v(l.static_sun).max(floor) } else { v(l.static_sun) };
-            (to_linear(statics, k.tint), to_linear(terrain, k.tint))
+            (to_linear(statics, tint), to_linear(terrain, tint))
         };
         let ratio = |a: Vec3, b: Vec3| (a + Vec3::splat(1e-7)) / (b + Vec3::splat(1e-7));
         // The terrain's albedo lacks the statics' x 2 (2^2.2 in linear light); only BF2's
@@ -314,15 +511,15 @@ impl LevelLight {
             sun: if night {
                 Vec3::ONE
             } else {
-                compress(ratio(to_linear(v(l.tree_sun), k.tint), sun_static), 1.0, k.class_sun).clamp(low, high)
+                compress(ratio(to_linear(v(l.tree_sun), tint), sun_static), 1.0, k.class_sun).clamp(low, high)
             },
-            ambient: compress(ratio(to_linear(0.5 * v(l.tree_ambient), k.tint), ambient_static), 1.0, k.class)
+            ambient: compress(ratio(to_linear(0.5 * v(l.tree_ambient), tint), ambient_static), 1.0, k.class)
                 .clamp(low, high),
         };
 
         let (reference_ambient, reference_sun) = (
-            k.ambient * to_linear(OPEN_SKY_STATIC * v(REFERENCE_SKY), 1.0).dot(LUMA),
-            k.sun * to_linear(v(REFERENCE_SUN), 1.0).dot(LUMA),
+            k.ambient * to_linear(OPEN_SKY_STATIC * v(REFERENCE_SKY), Tint::both(1.0)).dot(LUMA),
+            k.sun * to_linear(v(REFERENCE_SUN), Tint::both(1.0)).dot(LUMA),
         );
         let mut ambient = ambient_static * k.ambient;
         let mut sun = sun_static * k.sun;
@@ -343,6 +540,18 @@ impl LevelLight {
             terrain,
             trees,
             night,
+            lamp: to_linear(v(l.point), tint) * k.sun * exposure * k.lamp,
+            fog_tint: if night {
+                Tint::both(k.night_tint)
+            } else {
+                Tint { warm: k.fog_tint, cool: k.cool_tint }
+            },
+            sky_tint: if night {
+                Tint::both(k.night_tint)
+            } else {
+                Tint { warm: k.sky_tint, cool: k.cool_tint.max(k.sky_tint) }
+            },
+            night_version: false,
         }
     }
 
@@ -353,13 +562,26 @@ impl LevelLight {
     fn from_dynamic(env: &game_data::EnvironmentDesc) -> Self {
         let sun = Vec3::from_array(env.sun_color);
         let ambient = Vec3::from_array(env.ambient_color);
+        let k = Knobs::get();
         Self {
             ambient: (2.0 * ambient).clamp(Vec3::ZERO, Vec3::ONE).powf(2.2),
             sun: sun / sun.max_element().max(1.0) * SUN_ILLUMINANCE / (LIGHT_UNIT * std::f32::consts::PI),
             terrain: LightScale::ONE,
             trees: LightScale::ONE,
             night: false,
+            // A warm white lamp.
+            lamp: to_linear(Vec3::new(0.9, 0.85, 0.75), Tint { warm: k.tint, cool: k.cool_tint })
+                * SUN_EXPOSURE
+                * k.lamp,
+            fog_tint: Tint { warm: k.fog_tint, cool: k.cool_tint },
+            sky_tint: Tint { warm: k.sky_tint, cool: k.cool_tint.max(k.sky_tint) },
+            night_version: false,
         }
+    }
+
+    /// The level's fog colour, its tint scaled by [`Self::fog_tint`].
+    pub fn fog_color(&self, env: &game_data::EnvironmentDesc) -> Color {
+        tinted_srgb(env.fog_color, self.fog_tint)
     }
 
     /// The ambient light as the sky and ground around a surface (for an environment map):
@@ -372,7 +594,8 @@ impl LevelLight {
         let chroma = |c: Vec3| c / lum(c);
         let up = self.ambient * k.sky_up;
         // The fog's hue, limited: night fog colours are nearly pure blue.
-        let fog = chroma(Vec3::from_array(env.fog_color).max(Vec3::splat(1e-3)).powf(2.2));
+        let fog = scale_tint(Vec3::from_array(env.fog_color).max(Vec3::splat(1e-3)).powf(2.2), self.fog_tint);
+        let fog = chroma(fog);
         let fog = chroma(fog.clamp(Vec3::splat(0.5), Vec3::splat(1.8)));
         let mut sky = SkyGradient {
             zenith: chroma(self.ambient),
@@ -476,15 +699,18 @@ fn apply_environment(
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
     mut images: ResMut<Assets<Image>>,
     cli: Res<crate::Cli>,
+    settings: Res<crate::settings::Settings>,
 ) {
-    let env = &level.desc.environment;
-    let rgb = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
+    let shown = shown_environment(&level.desc.environment);
+    let env = shown.as_ref();
+    let night_version = matches!(shown, std::borrow::Cow::Owned(_));
 
     for entity in suns.iter().chain(&skies) {
         commands.entity(entity).despawn();
     }
     let direction = Vec3::from_array(env.sun_direction).normalize_or(Vec3::NEG_Y);
-    let light = LevelLight::new(env);
+    // From the level's own environment: `new` makes the night version itself.
+    let light = LevelLight::new(&level.desc.environment);
     info!(
         "level light: ambient {:.3?}, sun {:.3?}, terrain x{:.2?} sun x{:.2?}, trees x{:.2?} sun x{:.2?}{}",
         light.ambient,
@@ -496,6 +722,8 @@ fn apply_environment(
         if light.night { ", night" } else { "" }
     );
     let (sun_color, illuminance) = light.sun_light();
+    let fog_color = light.fog_color(env);
+    commands.insert_resource(light);
     commands.spawn((
         Sun,
         DirectionalLight {
@@ -505,7 +733,7 @@ fn apply_environment(
             ..default()
         },
         Transform::default().looking_to(direction, Vec3::Y),
-        shadow_cascades(0.0),
+        shadow_cascades(0.0, settings.shadow_quality),
     ));
 
     let gradient = light.sky_gradient(env);
@@ -519,7 +747,7 @@ fn apply_environment(
         specular: images.add(specular),
     });
 
-    clear.0 = rgb(env.sky_color);
+    clear.0 = tinted_srgb(env.sky_color, light.fog_tint);
     *ambient = GlobalAmbientLight {
         color: Color::linear_rgb(light.ambient.x, light.ambient.y, light.ambient.z),
         brightness: LIGHT_UNIT,
@@ -531,7 +759,7 @@ fn apply_environment(
     commands.insert_resource(LevelFog { end: fog_end });
     for mut fog in &mut cameras {
         *fog = DistanceFog {
-            color: rgb(env.fog_color),
+            color: fog_color,
             directional_light_color: sun_color.with_alpha(0.3),
             directional_light_exponent: 20.0,
             falloff: FogFalloff::Linear {
@@ -551,7 +779,10 @@ fn apply_environment(
                     .load(GltfAssetLabel::Mesh(0).from_asset(format!("imported://{}", sky.mesh))),
                 material: sky_materials.add(SkyMaterial {
                     texture: asset_server.load(format!("imported://{}", sky.texture)),
-                    params: SkyParams { haze: Vec4::new(SKY_HAZE, 0.0, 0.0, 0.0) },
+                    params: SkyParams {
+                        haze: Vec4::new(SKY_HAZE, light.sky_tint.warm, light.sky_tint.cool, 0.0),
+                        color: if night_version { NIGHT_SKY.extend(1.0) } else { Vec4::ONE },
+                    },
                 }),
                 spawned: false,
             },
@@ -579,6 +810,8 @@ struct SkyMaterial {
 #[derive(ShaderType, Debug, Clone, Copy)]
 struct SkyParams {
     haze: Vec4,
+    /// Multiplies the sky texture (rgb).
+    color: Vec4,
 }
 
 impl Material for SkyMaterial {
@@ -630,12 +863,14 @@ pub struct LevelFog {
 
 /// Real-time sun shadows. Near the ground they only cover 120 m, like BF2 (it baked distant
 /// shadows into lightmaps); they reach further as the camera climbs, so the ground below
-/// an aircraft still has shadows. Every cascade redraws all casters inside it.
-fn shadow_cascades(height: f32) -> CascadeShadowConfig {
+/// an aircraft still has shadows. Every cascade redraws all casters inside it. Cascade count
+/// and range follow the shadow quality setting (`settings::ShadowQuality`); its map
+/// resolution is a global resource applied from `settings::apply_graphics`.
+fn shadow_cascades(height: f32, quality: crate::settings::ShadowQuality) -> CascadeShadowConfig {
     CascadeShadowConfigBuilder {
-        num_cascades: 3,
+        num_cascades: quality.cascades(),
         first_cascade_far_bound: 15.0 + height * 0.25,
-        maximum_distance: (120.0 + height * 1.5).min(700.0),
+        maximum_distance: ((120.0 + height * 1.5).min(700.0)) * quality.distance_scale(),
         ..default()
     }
     .build()
@@ -687,10 +922,11 @@ fn update_view_distance(
             perspective.far = end + 100.0;
         }
         let new_sun = suns.iter().any(|(_, sun)| sun.is_added());
-        if new_sun || (smoothed - *shadow_height).abs() > 5.0 + *shadow_height * 0.1 {
+        let quality_changed = settings.is_changed();
+        if new_sun || quality_changed || (smoothed - *shadow_height).abs() > 5.0 + *shadow_height * 0.1 {
             *shadow_height = smoothed;
             for (mut cascades, _) in &mut suns {
-                *cascades = shadow_cascades(smoothed);
+                *cascades = shadow_cascades(smoothed, settings.shadow_quality);
             }
         }
     }

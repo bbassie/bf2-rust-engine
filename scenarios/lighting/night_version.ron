@@ -1,0 +1,32 @@
+// Night version of a day level (Sharqi Peninsula): moonlight, a dark sky and its lamps (the
+// glow sprites' light sources) lit. The time of day is chosen when the level loads, so start
+// it with the setting or the knob:
+// BF2_LIGHT=night=1 client --scenario scenarios/lighting/night_version.ron
+// Without it the same views show the day (for comparison).
+(
+    level: "sharqi_peninsula",
+    size: 64,
+    bots: 0,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        Camera((-80.0, 99.5, 140.0), 45.0, -6.0),
+        Wait(1.0),
+        Screenshot("square"),
+        Setting("dynamic_lamps", "shadows"),
+        Wait(0.6),
+        Screenshot("square_shadows"),
+        Setting("dynamic_lamps", "on"),
+        Camera((-60.0, 125.0, 190.0), 35.0, -18.0),
+        Wait(1.0),
+        Screenshot("town"),
+        Camera((-390.0, 100.5, 60.0), 40.0, -5.0),
+        Wait(1.0),
+        Screenshot("street"),
+        Camera((-60.0, 125.0, 190.0), 35.0, -18.0),
+        Wait(0.5),
+        Measure("town", 5.0),
+        Quit,
+    ],
+)

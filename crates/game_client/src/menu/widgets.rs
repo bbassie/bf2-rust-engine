@@ -276,7 +276,16 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
         MenuButton::WindowSize(w, h) => settings.window_size == (*w, *h),
         MenuButton::ViewDistance(distance) => settings.view_distance == *distance,
         MenuButton::ToneMapping(t) => settings.tone_mapping == *t,
-        MenuButton::Rebind(action) => menu.rebinding == Some(*action),
+        MenuButton::RebindSlot(action, slot) => menu.rebinding == Some((*action, *slot)),
+        MenuButton::RebindGamepad(action) => menu.rebinding_gamepad == Some(*action),
+        MenuButton::Preset(preset) => settings.graphics_preset == *preset,
+        MenuButton::ShadowQuality(q) => settings.shadow_quality == *q,
+        MenuButton::AntiAliasing(aa) => settings.anti_aliasing == *aa,
+        MenuButton::SsaoQuality(q) => settings.ssao_quality == *q,
+        MenuButton::Anisotropy(a) => settings.anisotropic_filtering == *a,
+        MenuButton::ParticleQuality(q) => settings.particle_quality == *q,
+        MenuButton::CrosshairStyle(style) => settings.crosshair_style == *style,
+        MenuButton::FrameCap(fps) => settings.frame_rate_cap == *fps,
         _ => false,
     }
 }
@@ -284,10 +293,10 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
 pub(super) fn paint_buttons(
     menu: Res<Menu>,
     settings: Res<Settings>,
-    mut buttons: Query<(&MenuButton, &Look, &Interaction, &mut BackgroundColor)>,
+    mut buttons: Query<(Entity, &MenuButton, &Look, &Interaction, &mut BackgroundColor)>,
 ) {
-    for (button, look, interaction, mut background) in &mut buttons {
-        let hovered = *interaction != Interaction::None;
+    for (entity, button, look, interaction, mut background) in &mut buttons {
+        let hovered = *interaction != Interaction::None || menu.gamepad_focus == Some(entity);
         let selected = is_selected(button, &menu, &settings);
         let color = match look {
             Look::Custom => continue,
@@ -370,8 +379,22 @@ pub(super) fn update_values(
     for (value, mut text) in &mut texts {
         let line = match value {
             Value::Slider(slider) => slider.display(&settings),
-            Value::Binding(action) if menu.rebinding == Some(*action) => "Press a key".into(),
-            Value::Binding(action) => settings.binding(*action).label(),
+            Value::Binding(action, slot) if menu.rebinding == Some((*action, *slot)) => "Press a key".into(),
+            Value::Binding(action, slot) => {
+                let set = settings.bindings(*action);
+                match slot {
+                    crate::settings::BindSlot::Primary => set.primary,
+                    crate::settings::BindSlot::Secondary => set.secondary,
+                }
+                .map(crate::settings::Binding::label)
+                .unwrap_or_else(|| "-".into())
+            }
+            Value::GamepadBinding(action) if menu.rebinding_gamepad == Some(*action) => "Press a button".into(),
+            Value::GamepadBinding(action) => settings
+                .bindings(*action)
+                .gamepad
+                .map(crate::settings::gamepad_button_label)
+                .unwrap_or_else(|| "-".into()),
         };
         if text.0 != line {
             text.0 = line;

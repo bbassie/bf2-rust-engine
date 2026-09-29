@@ -131,11 +131,11 @@ fn set_map_image(
 }
 
 fn show_big_map(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: crate::settings::Actions,
     deploy: Res<DeployScreen>,
     mut root: Single<&mut Visibility, With<BigMapRoot>>,
 ) {
-    let show = keys.pressed(KeyCode::KeyM) && !deploy.open;
+    let show = actions.pressed(crate::settings::Action::Map) && !deploy.open;
     root.set_if_neq(if show { Visibility::Inherited } else { Visibility::Hidden });
 }
 

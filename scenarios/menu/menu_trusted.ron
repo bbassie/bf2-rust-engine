@@ -1,0 +1,15 @@
+// Settings > Game: forgets every trusted server (see content_trust.ron for trusting one), so
+// the next download from them asks again. The list is further down the page.
+//   client --settings <dir>/settings.ron --scenario scenarios/menu/menu_trusted.ron
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        Click("menu:settings"),
+        Wait(0.5),
+        Click("trusted:forget-all"),
+        ExpectLog("content: forgot all", 3.0),
+        Wait(1.0),
+        Quit,
+    ],
+)
