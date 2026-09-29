@@ -150,16 +150,15 @@ impl ContentStore {
         &self.root
     }
 
-    /// A stored file. Only call with a checked hash ([`super::is_hash`]).
+    /// A stored file. Callers check hashes ([`super::is_hash`]); anything else still maps to a
+    /// name inside the store, never to a path outside it.
     pub fn file(&self, hash: &str) -> PathBuf {
-        debug_assert!(super::is_hash(hash));
-        self.root.join("content").join(hash)
+        self.root.join("content").join(safe_name(hash))
     }
 
     /// Where a download in progress goes.
     pub fn partial(&self, hash: &str) -> PathBuf {
-        debug_assert!(super::is_hash(hash));
-        self.root.join("partial").join(hash)
+        self.root.join("partial").join(safe_name(hash))
     }
 
     /// The [`super::HashIndex`] file of the cache.
@@ -444,8 +443,26 @@ impl ContentStore {
     }
 }
 
+/// A file name for a hash inside the store. Anything that isn't a well-formed hash (it may come
+/// from a server) becomes a fixed name, so it can never name a file outside the store.
+fn safe_name(hash: &str) -> &str {
+    if super::is_hash(hash) { hash } else { "invalid" }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hostile_hashes_stay_inside_the_store() {
+        let root = std::env::temp_dir().join(format!("bf2-store-test-{}", std::process::id()));
+        let store = ContentStore::open(&root).unwrap();
+        for hash in [r"C:\Windows\win.ini", "/etc/passwd", "../../settings.ron", ""] {
+            assert!(store.file(hash).starts_with(&root), "{hash}");
+            assert!(store.partial(hash).starts_with(&root), "{hash}");
+            assert!(!store.file(hash).to_string_lossy().contains(".."), "{hash}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::super::{Layer, MANIFEST_VERSION, hash_bytes};
     use super::*;
 

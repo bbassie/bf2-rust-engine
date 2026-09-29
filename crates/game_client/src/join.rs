@@ -338,6 +338,16 @@ fn on_verdict(world: &mut World, verdict: JoinVerdict) {
             start_report(world);
         }
         JoinVerdict::Fetch { files, more } => {
+            // Server data becomes file names in our cache: a hash or path that isn't well formed
+            // (an absolute path, `..`) could reach files outside it, so the whole verdict goes.
+            if let Some(bad) = files
+                .iter()
+                .find(|f| !game_shared::content::is_hash(&f.hash) || game_shared::content::validate_path(&f.path).is_err())
+            {
+                warn!("join: the server asked us to fetch an invalid file ({:?}, {:?})", bad.path, bad.hash);
+                fail(world, "The server sent an invalid content list.".into());
+                return;
+            }
             let files: Vec<game_shared::content::FileEntry> = files.into_iter().map(Into::into).collect();
             let total = files.len() as u32 + more;
             info!(
