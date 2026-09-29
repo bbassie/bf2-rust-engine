@@ -156,6 +156,19 @@ impl MapPoint {
         }
     }
 
+    /// How an icon's node goes to this point: pixel points move by the node's `UiTransform`
+    /// (a moved transform needs no new layout, while a moved `left`/`top` lays the whole map
+    /// out again; minimap markers move every frame), shares by `left`/`top`.
+    fn icon_placement(self) -> (Val, Val, Val2) {
+        match self {
+            MapPoint::Pixels(at) => (px(0), px(0), Val2::px(at.x, at.y)),
+            MapPoint::Share(_) => {
+                let (left, top) = self.vals();
+                (left, top, Val2::ZERO)
+            }
+        }
+    }
+
     fn pixels(self, map: Vec2) -> Vec2 {
         match self {
             MapPoint::Pixels(at) => at,
@@ -367,7 +380,14 @@ pub struct MarkerIcons<'w, 's> {
     icons: Query<
         'w,
         's,
-        (Entity, &'static MarkerIcon, &'static ChildOf, &'static mut Node, &'static mut Visibility),
+        (
+            Entity,
+            &'static MarkerIcon,
+            &'static ChildOf,
+            &'static mut Node,
+            &'static mut UiTransform,
+            &'static mut Visibility,
+        ),
         (Without<MarkerBody>, Without<MarkerLabel>),
     >,
     bodies: Query<
@@ -382,6 +402,18 @@ pub struct MarkerIcons<'w, 's> {
         (&'static mut MarkerLabel, &'static mut Node, &'static mut TextFont, &'static mut Visibility),
         (Without<MarkerIcon>, Without<MarkerBody>),
     >,
+}
+
+/// Moves an icon's node to `point`, touching it only if it moved.
+fn place_icon(node: &mut Mut<Node>, transform: &mut Mut<UiTransform>, point: MapPoint) {
+    let (left, top, translation) = point.icon_placement();
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
+    }
+    if transform.translation != translation {
+        transform.translation = translation;
+    }
 }
 
 /// Moves a node to `point`, touching it only if it moved.
@@ -400,7 +432,7 @@ impl MarkerIcons<'_, '_> {
         // Where the labels are, so that they stay there while it still fits.
         let mut previous: HashMap<Entity, u8> = HashMap::default();
         if style.labels {
-            for (_, icon, child_of, _, _) in &self.icons {
+            for (_, icon, child_of, ..) in &self.icons {
                 if child_of.parent() == parent
                     && let Some(label) = icon.label
                     && let Ok((state, ..)) = self.labels.get(label)
@@ -414,7 +446,7 @@ impl MarkerIcons<'_, '_> {
 
         let mut wanted: HashMap<Entity, (&MapMarker, MapPoint, bool)> =
             markers.iter().map(|&(marker, point, shown)| (marker.key, (marker, point, shown))).collect();
-        for (entity, icon, child_of, mut node, mut visibility) in &mut self.icons {
+        for (entity, icon, child_of, mut node, mut transform, mut visibility) in &mut self.icons {
             if child_of.parent() != parent {
                 continue;
             }
@@ -427,7 +459,7 @@ impl MarkerIcons<'_, '_> {
                 continue;
             };
             wanted.remove(&icon.key);
-            place(&mut node, point);
+            place_icon(&mut node, &mut transform, point);
             visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
             if let Ok((background, material)) = self.bodies.get_mut(icon.body) {
                 match material {
@@ -662,14 +694,19 @@ fn spawn(
     let shape = shape(marker, style);
     let Vec2 { x: width, y: height } = shape.size();
     let (left, top) = point.vals();
+    let (icon_left, icon_top, translation) = point.icon_placement();
     let root = commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left,
-                top,
+                left: icon_left,
+                top: icon_top,
                 width: px(0),
                 height: px(0),
+                ..default()
+            },
+            UiTransform {
+                translation,
                 ..default()
             },
             ZIndex(marker.layer),

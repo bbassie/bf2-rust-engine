@@ -247,10 +247,15 @@ pub struct Settings {
     #[serde(default)]
     pub controls_revision: u32,
     // --- end flight controls ---
+    // --- Voice chat (voice) ---
+    /// Push-to-talk voice chat: on or off, push to talk or voice activation, devices, gain and
+    /// volume (see `voice::VoiceSettings`).
+    pub voice: crate::voice::VoiceSettings,
+    // --- end voice chat ---
 }
 
 /// The latest of [`Settings::migrate`]'s updates.
-const CONTROLS_REVISION: u32 = 1;
+const CONTROLS_REVISION: u32 = 2;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -307,6 +312,9 @@ impl Default for Settings {
             invert_jet_pitch: false,
             invert_heli_pitch: false,
             controls_revision: CONTROLS_REVISION,
+            // --- Voice chat (voice) ---
+            voice: Default::default(),
+            // --- end voice chat ---
         }
     }
 }
@@ -379,7 +387,7 @@ impl Settings {
 
     /// Updates settings saved by an older version. Revision 1: the pitch keys follow the
     /// mouse (up pitches up unless `invert_*_pitch`), so the old defaults (down arrow pulls
-    /// up) swap.
+    /// up) swap. Revision 2: squad voice takes B, fire mode moves to F.
     fn migrate(&mut self) {
         if self.controls_revision < 1 {
             let (up, down) = (self.bindings(Action::PitchUp), self.bindings(Action::PitchDown));
@@ -388,6 +396,22 @@ impl Settings {
                 self.bindings.insert(Action::PitchDown, up);
             }
         }
+        // --- Voice chat (voice) ---
+        // Revision 2: B talks to the squad, as in BF2; the fire mode it had moves to F.
+        if self.controls_revision < 2 {
+            let fire_mode = self.bindings(Action::FireMode);
+            if fire_mode.primary == Some(Binding::Key(KeyCode::KeyB)) {
+                let free = !Action::ALL.iter().any(|a| {
+                    let set = self.bindings(*a);
+                    [set.primary, set.secondary].contains(&Some(Binding::Key(KeyCode::KeyF)))
+                });
+                self.bindings.insert(
+                    Action::FireMode,
+                    BindingSet { primary: free.then_some(Binding::Key(KeyCode::KeyF)), ..fire_mode },
+                );
+            }
+        }
+        // --- end voice chat ---
         self.controls_revision = CONTROLS_REVISION;
     }
 
@@ -472,6 +496,9 @@ impl Settings {
                 self.time_of_day = crate::render::environment::TimeOfDay::parse(value)
                     .ok_or_else(|| format!("setting {key}: expected level or night, got {value}"))?
             }
+            // --- Voice chat (voice) ---
+            key if key.starts_with("voice") => self.voice.set(key, value)?,
+            // --- end voice chat ---
             _ => return Err(format!("unknown setting {key}")),
         }
         Ok(())
@@ -1053,6 +1080,8 @@ pub struct LastMatch {
     pub mode: String,
     pub size: u32,
     pub bots: u32,
+    /// How hard the bots are (reaction, aim, tactics, awareness).
+    pub bot_difficulty: game_server::ai::skill::BotDifficulty,
     pub team: u8,
     pub spectate: bool,
     /// Host: let players on other machines join (otherwise only this machine can).
@@ -1069,6 +1098,7 @@ impl Default for LastMatch {
             mode: "gpm_cq".into(),
             size: 16,
             bots: 7,
+            bot_difficulty: game_server::ai::skill::BotDifficulty::Normal,
             team: 1,
             spectate: false,
             public: true,
@@ -1159,10 +1189,16 @@ pub enum Action {
     Countermeasures,
     /// In a vehicle: move to this seat (1-based), like F1..F8.
     Seat(u8),
+    // --- Voice chat (voice) ---
+    /// Push to talk to the squad (a commander without a squad: to his squad leaders).
+    VoiceSquad,
+    /// Push to talk on the command channel: squad leaders and the commander.
+    VoiceCommand,
+    // --- end voice chat ---
 }
 
 impl Action {
-    pub const ALL: [Action; 49] = [
+    pub const ALL: [Action; 51] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::MoveLeft,
@@ -1212,6 +1248,10 @@ impl Action {
         Action::Seat(6),
         Action::Seat(7),
         Action::Seat(8),
+        // --- Voice chat (voice) ---
+        Action::VoiceSquad,
+        Action::VoiceCommand,
+        // --- end voice chat ---
     ];
 
     pub fn label(self) -> String {
@@ -1250,6 +1290,10 @@ impl Action {
             Action::FreeLook => "Free look (flying)".into(),
             Action::Countermeasures => "Countermeasures (flares, smoke)".into(),
             Action::Seat(seat) => format!("Vehicle seat {seat}"),
+            // --- Voice chat (voice) ---
+            Action::VoiceSquad => "Voice: talk to squad".into(),
+            Action::VoiceCommand => "Voice: talk to commander / squad leaders".into(),
+            // --- end voice chat ---
         }
     }
 
@@ -1281,7 +1325,8 @@ impl Action {
             Action::Fire => (Some(Mouse(MouseButton::Left)), Some(RightTrigger2)),
             Action::Zoom => (Some(Mouse(MouseButton::Right)), Some(LeftTrigger2)),
             Action::Reload => (Some(Key(KeyCode::KeyR)), Some(West)),
-            Action::FireMode => (Some(Key(KeyCode::KeyB)), Some(DPadRight)),
+            // B is squad voice, as in BF2 (see `migrate`).
+            Action::FireMode => (Some(Key(KeyCode::KeyF)), Some(DPadRight)),
             Action::Use => (Some(Key(KeyCode::KeyE)), Some(RightTrigger)),
             Action::WeaponSlot(slot) => (
                 Some(Key(match slot {
@@ -1333,6 +1378,11 @@ impl Action {
                 })),
                 None,
             ),
+            // --- Voice chat (voice) ---
+            // Every gamepad button already does something; bind one on the Controls tab.
+            Action::VoiceSquad => (Some(Key(KeyCode::KeyB)), None),
+            Action::VoiceCommand => (Some(Key(KeyCode::KeyH)), None),
+            // --- end voice chat ---
         };
         BindingSet { primary, secondary: None, gamepad }
     }
@@ -1613,6 +1663,11 @@ fn apply_graphics(
         }
         entity.insert(if msaa_off { Msaa::Off } else { Msaa::default() });
         match settings.anti_aliasing {
+            // Without MSAA (it is off for SSAO) SMAA smooths the image, as the view model's own
+            // camera used to.
+            AntiAliasing::Off if msaa_off => {
+                entity.remove::<(Fxaa, TemporalAntiAliasing)>().insert(Smaa::default());
+            }
             AntiAliasing::Off => {
                 entity.remove::<(Fxaa, Smaa, TemporalAntiAliasing)>();
             }
@@ -1741,3 +1796,28 @@ mod flight_control_tests {
         assert_eq!(settings.binding(Action::PitchUp), Some(Binding::Key(KeyCode::ArrowDown)));
     }
 }
+
+// --- Voice chat (voice) ---
+#[cfg(test)]
+mod voice_binding_tests {
+    use super::*;
+
+    #[test]
+    fn squad_voice_takes_b_from_fire_mode_once() {
+        // A file from before voice chat: fire mode on B, no voice keys yet.
+        let mut settings = Settings { controls_revision: 1, ..Settings::default() };
+        settings.bindings.insert(Action::FireMode, BindingSet { primary: Some(Binding::Key(KeyCode::KeyB)), ..default() });
+        settings.bindings.remove(&Action::VoiceSquad);
+        settings.fill_missing_bindings();
+        settings.migrate();
+        assert_eq!(settings.binding(Action::VoiceSquad), Some(Binding::Key(KeyCode::KeyB)));
+        assert_eq!(settings.binding(Action::FireMode), Some(Binding::Key(KeyCode::KeyF)));
+        assert!(settings.conflicts(Action::VoiceSquad).is_empty());
+        // Defaults don't collide either.
+        let defaults = Settings::default();
+        for action in [Action::VoiceSquad, Action::VoiceCommand, Action::FireMode] {
+            assert!(defaults.conflicts(action).is_empty(), "{action:?}: {:?}", defaults.conflicts(action));
+        }
+    }
+}
+// --- end voice chat ---

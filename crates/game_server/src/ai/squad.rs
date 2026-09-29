@@ -2,6 +2,16 @@
 //! members follow in a loose wedge and wait for each other, and dead bots pick a kit the
 //! team is short of and spawn on their leader when that gets them closer to the fight.
 //! Bots in a human's squad follow the human; the commander's order is only a suggestion.
+//!
+//! Near the fight a bot-led squad works as two fire teams ([`fire_team`]; the leader's is
+//! team 0) coordinated by [`coordinate`]:
+//!
+//! - **Bounding overwatch** on the way to an objective in contact (close to it, or enemies
+//!   seen near the squad): one fire team moves while the other holds and covers, then they
+//!   swap: the leader's team moves [`BOUND_DISTANCE`] meters with him, then the other team
+//!   bounds past him to [`bound_slot`]s while his team covers.
+//! - **Pinned down** (members fighting and under fire for a while, the enemy in one place):
+//!   team 0 keeps his head down with suppressive fire while team 1 goes round him.
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_shared::{
@@ -13,7 +23,10 @@ use game_shared::{
     weapons::Armory,
 };
 
-use super::skill::Personality;
+use super::{
+    skill::Personality,
+    strategy::{StrategicMap, Strategy, TeamIntel},
+};
 use crate::{Controls, bots::BotBrain};
 
 /// A living soldier, as squads and commanders see it.
@@ -135,6 +148,207 @@ pub fn snapshot(
     }
 }
 
+/// Which fire team a squad member is in: 0 for the leader (`slot` `None`) and every other
+/// member, 1 for the rest.
+pub fn fire_team(slot: Option<usize>) -> u8 {
+    match slot {
+        None => 0,
+        Some(s) => (s % 2 == 0) as u8,
+    }
+}
+
+/// How far each fire team moves per bound, meters.
+pub const BOUND_DISTANCE: f32 = 25.0;
+/// How long a bound lasts at most, seconds.
+const BOUND_SECONDS: f32 = 12.0;
+/// Squads bound within this distance of their objective (or with enemies seen near them).
+const CONTACT_DISTANCE: f32 = 220.0;
+/// ... and run in a wedge once this close (they spread out over the objective there).
+const ARRIVED_DISTANCE: f32 = 60.0;
+
+/// What the bots of a squad reported this tick (written by [`crate::bots`], read by
+/// [`coordinate`] next tick).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SquadReport {
+    /// Members fighting (a target in sight, or one just lost).
+    pub engaged: u32,
+    /// Members under fire (suppressed).
+    pub suppressed: u32,
+    /// Sum and count of the enemy positions members are fighting.
+    pub contact_sum: Vec3,
+    pub contacts: u32,
+}
+
+/// Per squad: [`SquadReport`]s of this tick.
+#[derive(Resource, Default)]
+pub struct SquadReports(pub HashMap<(Team, u8), SquadReport>);
+
+/// What a squad's fire teams do (see the module docs).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SquadTactic {
+    /// Bounding overwatch on: `moving` is the fire team on the move.
+    pub bounding: bool,
+    pub moving: u8,
+    /// Counts bounds: members note where they hold when it changes.
+    pub phase: u32,
+    /// Seconds into this bound.
+    pub phase_time: f32,
+    /// Where the leader was when the bound began, and the way forward (XZ unit vector).
+    pub anchor: Vec3,
+    pub axis: Vec3,
+    /// Pinned down by enemies around here: team 0 suppresses, team 1 flanks on `flank_side`
+    /// (+1 or -1) for `pin_time` more seconds.
+    pub pinned: Option<Vec3>,
+    pub flank_side: f32,
+    pub pin_time: f32,
+    /// Seconds the squad has been fighting under fire (towards pinned), and until it may be
+    /// pinned again.
+    pub pressure: f32,
+    pub pin_cooldown: f32,
+    /// Seconds without contacts while pinned.
+    pub quiet: f32,
+    /// Counts pinned episodes (members roll whether they join in once per episode).
+    pub episode: u32,
+}
+
+/// Per squad (bot-led ones): what its fire teams do.
+#[derive(Resource, Default)]
+pub struct SquadTactics {
+    pub squads: HashMap<(Team, u8), SquadTactic>,
+    /// Per team, bounds begun and squads pinned down (for the statistics).
+    pub bounds: [u32; 2],
+    pub pins: [u32; 2],
+}
+
+/// Where member `slot` of fire team 1 goes on its bound: past the leader along the way
+/// forward, spread out sideways.
+pub fn bound_slot(tactic: &SquadTactic, leader: Vec3, slot: usize) -> Vec3 {
+    let side = Vec3::new(-tactic.axis.z, 0.0, tactic.axis.x);
+    let (right, forward) = match slot / 2 {
+        0 => (-6.0, 14.0),
+        1 => (6.0, 14.0),
+        _ => (0.0, 18.0),
+    };
+    leader + tactic.axis * forward + side * right
+}
+
+/// Whether bots of `team` play with the tactics from before squad coordination (testing,
+/// `--bot-legacy-team`).
+pub fn legacy(settings: &crate::ServerSettings, team: Team) -> bool {
+    match settings.bot_legacy_team {
+        0 => false,
+        3 => true,
+        n => team_index(team) == Some(n as usize - 1),
+    }
+}
+
+/// Updates every bot-led squad's fire teams from its members' reports (see the module docs).
+#[allow(clippy::too_many_arguments)]
+pub fn coordinate(
+    time: Res<Time>,
+    snapshot: Res<SquadSnapshot>,
+    strategy: Res<Strategy>,
+    map: Res<StrategicMap>,
+    intel: Res<TeamIntel>,
+    settings: Res<crate::ServerSettings>,
+    mut reports: ResMut<SquadReports>,
+    mut tactics: ResMut<SquadTactics>,
+) {
+    let dt = time.delta_secs();
+    let tactics = &mut *tactics;
+    tactics.squads.retain(|key, _| snapshot.squads.get(key).is_some_and(|s| s.leader_is_bot));
+    for (&key, squad) in &snapshot.squads {
+        let (team, _) = key;
+        if !squad.leader_is_bot || legacy(&settings, team) {
+            continue;
+        }
+        let Some(t) = team_index(team) else {
+            continue;
+        };
+        let report = reports.0.get(&key).copied().unwrap_or_default();
+        let tactic = tactics.squads.entry(key).or_default();
+        let Some(leader) = squad.leader_soldier else {
+            tactic.bounding = false;
+            tactic.pinned = None;
+            continue;
+        };
+        let members = squad.alive.len();
+
+        // Pinned down: fighting under fire in one place for a while.
+        tactic.pin_cooldown -= dt;
+        let pressed = report.engaged >= 2 || (report.engaged >= 1 && report.suppressed >= 1);
+        tactic.pressure = if pressed { tactic.pressure + dt } else { (tactic.pressure - 2.0 * dt).max(0.0) };
+        let contact = (report.contacts > 0).then(|| report.contact_sum / report.contacts as f32);
+        match (tactic.pinned, contact) {
+            (None, Some(at)) if tactic.pressure > 4.0 && tactic.pin_cooldown <= 0.0 && members >= 3 => {
+                tactic.pinned = Some(at);
+                tactic.pin_time = 25.0;
+                tactic.flank_side = if fastrand::bool() { 1.0 } else { -1.0 };
+                tactic.quiet = 0.0;
+                tactic.episode = tactic.episode.wrapping_add(1);
+                tactics.pins[t] += 1;
+            }
+            (Some(pinned), _) => {
+                tactic.pin_time -= dt;
+                match contact {
+                    // Follow the enemy slowly (the flankers aim for where he is).
+                    Some(at) => {
+                        tactic.pinned = Some(pinned.lerp(at, (dt * 0.2).min(1.0)));
+                        tactic.quiet = 0.0;
+                    }
+                    None => tactic.quiet += dt,
+                }
+                if tactic.pin_time <= 0.0 || tactic.quiet > 6.0 || members < 2 {
+                    tactic.pinned = None;
+                    tactic.pin_cooldown = 20.0;
+                    tactic.pressure = 0.0;
+                }
+            }
+            _ => {}
+        }
+
+        // Bounding overwatch on the way to an objective in contact.
+        let objective = strategy
+            .orders
+            .get(&key)
+            .and_then(|o| o.point.or_else(|| map.areas.get(o.area).map(|a| a.order_position)));
+        let enemies_near = intel.enemies_near(team, leader.position, 110.0) > 0;
+        let wanted = objective.is_some_and(|at| {
+            let d = at.distance(leader.position);
+            d > ARRIVED_DISTANCE && (d < CONTACT_DISTANCE || enemies_near)
+        }) && members >= 3
+            && tactic.pinned.is_none();
+        let Some(objective) = objective.filter(|_| wanted) else {
+            tactic.bounding = false;
+            continue;
+        };
+        let axis = (objective - leader.position).with_y(0.0).normalize_or(Vec3::NEG_Z);
+        let start = !tactic.bounding;
+        tactic.phase_time += dt;
+        let done = !start
+            && match tactic.moving {
+                0 => leader.position.distance(tactic.anchor) > BOUND_DISTANCE,
+                _ => squad
+                    .members
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot, _)| fire_team(Some(*slot)) == 1)
+                    .filter_map(|(slot, player)| squad.alive.iter().find(|s| s.player == *player).map(|s| (slot, s)))
+                    .all(|(slot, s)| s.position.distance(bound_slot(tactic, tactic.anchor, slot)) < 5.0),
+            };
+        if start || done || tactic.phase_time > BOUND_SECONDS {
+            tactic.moving = if start { 0 } else { 1 - tactic.moving };
+            tactic.bounding = true;
+            tactic.phase = tactic.phase.wrapping_add(1);
+            tactic.phase_time = 0.0;
+            tactic.anchor = leader.position;
+            tactic.axis = axis;
+            tactics.bounds[t] += 1;
+        }
+    }
+    reports.0.clear();
+}
+
 /// Where member `slot` walks: a loose wedge behind and beside the leader, `spacing` meters
 /// apart.
 pub fn formation_slot(leader: &SoldierInfo, slot: usize, spacing: f32) -> Vec3 {
@@ -243,6 +457,31 @@ mod tests {
         let left = formation_slot(&leader, 0, 4.0);
         let right = formation_slot(&leader, 1, 4.0);
         assert!(left.x < 0.0 && right.x > 0.0 && left.z > 0.0 && right.z > 0.0, "{left} {right}");
+    }
+
+    #[test]
+    fn fire_teams_leapfrog() {
+        // The leader and every other member form team 0, the rest team 1.
+        assert_eq!(fire_team(None), 0);
+        assert_eq!([0, 1, 2, 3, 4].map(|s| fire_team(Some(s))), [1, 0, 1, 0, 1]);
+        // Team 1 bounds past the leader along the way forward, spread out sideways.
+        let tactic = SquadTactic {
+            axis: Vec3::NEG_Z,
+            ..default()
+        };
+        let slots = [0, 2, 4].map(|s| bound_slot(&tactic, Vec3::ZERO, s));
+        assert!(slots.iter().all(|p| p.z < -10.0), "{slots:?}");
+        assert!(slots[0].x * slots[1].x < 0.0, "{slots:?}");
+    }
+
+    #[test]
+    fn legacy_teams() {
+        let mut settings = crate::ServerSettings::default();
+        assert!(!legacy(&settings, Team::One) && !legacy(&settings, Team::Two));
+        settings.bot_legacy_team = 1;
+        assert!(legacy(&settings, Team::One) && !legacy(&settings, Team::Two));
+        settings.bot_legacy_team = 3;
+        assert!(legacy(&settings, Team::One) && legacy(&settings, Team::Two));
     }
 
     #[test]

@@ -109,6 +109,7 @@ const UV_SUM: u32 = 16384u;
 const WRECK: u32 = 32768u;
 const DYNAMIC: u32 = 65536u;
 const LIGHTMAPPED: u32 = 131072u;
+const VIEW_MODEL: u32 = 262144u;
 // MeshTag bits (sky_occlusion.rs, static_lightmaps.rs).
 const SKY_TAG: u32 = 0x80000000u;
 const LIGHTMAP_TAG: u32 = 0x40000000u;
@@ -632,6 +633,15 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #endif
 
     var pbr_input = pbr_input_from_standard_material(in, is_front);
+#ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
+    // The view model is drawn shrunk towards the eye (viewmodel.rs): to screen-space ambient
+    // occlusion it is a tiny object right at the camera. BF2 materials have no occlusion
+    // textures, so this only drops the SSAO term.
+    if (layers.flags & VIEW_MODEL) != 0u {
+        pbr_input.diffuse_occlusion = vec3(1.0);
+        pbr_input.specular_occlusion = 1.0;
+    }
+#endif
 
     surface_in.world_normal = in.world_normal;
     surface_in.world_tangent = vec4(1.0, 0.0, 0.0, 1.0);

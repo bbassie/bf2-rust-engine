@@ -11,7 +11,7 @@ use game_shared::{
 };
 
 use super::{
-    squad::SquadSnapshot,
+    squad::{SquadSnapshot, SquadTactics},
     strategy::{OrderKind, StrategicMap, Strategy},
 };
 use crate::{
@@ -83,6 +83,23 @@ pub struct TeamStats {
     pub countermeasures: u32,
     /// Rush: bot-seconds going to a charge to arm or defuse it and holding the use key there.
     pub charge_seconds: f32,
+    /// Bot-seconds engaged (an enemy in sight or just lost, or just hurt), and of those in
+    /// cover from the threat (a ray from its eye to the middle of the body is blocked);
+    /// sampled every half second.
+    pub engaged_seconds: f32,
+    pub covered_seconds: f32,
+    /// Bot-seconds fighting from a cover spot (tactical bots).
+    pub cover_fights: f32,
+    /// Runs to cover in a firefight, suppressive fire, bags run to squad mates, times
+    /// suppressed (near misses after a quiet while), enemies spotted on the radio.
+    pub takecovers: u32,
+    pub suppressions: u32,
+    pub supplies_run: u32,
+    pub suppressed: u32,
+    pub spots: u32,
+    /// Squads' bounds begun and times pinned down.
+    pub bounds: u32,
+    pub pinned: u32,
 }
 
 impl TeamStats {
@@ -124,6 +141,16 @@ impl TeamStats {
         self.demolitions += other.demolitions;
         self.countermeasures += other.countermeasures;
         self.charge_seconds += other.charge_seconds;
+        self.engaged_seconds += other.engaged_seconds;
+        self.covered_seconds += other.covered_seconds;
+        self.cover_fights += other.cover_fights;
+        self.takecovers += other.takecovers;
+        self.suppressions += other.suppressions;
+        self.supplies_run += other.supplies_run;
+        self.suppressed += other.suppressed;
+        self.spots += other.spots;
+        self.bounds += other.bounds;
+        self.pinned += other.pinned;
     }
 }
 
@@ -184,6 +211,7 @@ pub fn log_stats(
     map: Res<StrategicMap>,
     snapshot: Res<SquadSnapshot>,
     armory: Res<Armory>,
+    mut tactics: ResMut<SquadTactics>,
     bots: Query<(), With<BotBrain>>,
 ) {
     stats.elapsed += time.delta_secs();
@@ -192,6 +220,10 @@ pub fn log_stats(
     }
     stats.elapsed = 0.0;
     stats.minutes += 1;
+    for t in 0..2 {
+        stats.teams[t].bounds = std::mem::take(&mut tactics.bounds[t]);
+        stats.teams[t].pinned = std::mem::take(&mut tactics.pins[t]);
+    }
     if bots.is_empty() {
         stats.teams = default();
         return;
@@ -233,6 +265,8 @@ pub fn log_stats(
         info!(
             "ai team {}: {} captured, {} neutralized, {} kills, {} deaths in the last minute \
              ({} / {} / {} / {} in {} min); {:.0}% of bot time at objectives, {:.0}% fighting; \
+             {:.0}% of engaged time in cover ({:.0} s engaged), {:.0} s fighting from cover spots; \
+             {} takecovers, {} suppressions, {} suppressed, {} spots, {} bounds, {} pinned, {} supply runs; \
              {} covers, {} flanks, {} grenades, {} reactions, {} revives, {} bags, {} launcher shots, \
              {} rockets, {} repairs, {} flashed, {:.0} s gassed; commander: {} orders, {} artillery, {} UAVs, \
              {} scans, {} supply drops; {} of {} spawns on the squad leader; \
@@ -250,6 +284,16 @@ pub fn log_stats(
             stats.minutes,
             100.0 * minute.at_objective / minute.alive.max(1.0),
             100.0 * minute.fighting / minute.alive.max(1.0),
+            100.0 * minute.covered_seconds / minute.engaged_seconds.max(0.5),
+            minute.engaged_seconds,
+            minute.cover_fights,
+            minute.takecovers,
+            minute.suppressions,
+            minute.suppressed,
+            minute.spots,
+            minute.bounds,
+            minute.pinned,
+            minute.supplies_run,
             minute.covers,
             minute.flanks,
             minute.grenades,

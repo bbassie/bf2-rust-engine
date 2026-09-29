@@ -60,6 +60,7 @@ pub mod destruction;
 pub mod nav;
 pub mod roadkill;
 pub mod vehicles;
+pub mod voice;
 
 /// How the server was configured to run.
 #[derive(Resource, Clone, Debug)]
@@ -86,6 +87,15 @@ pub struct ServerSettings {
     pub friendly_fire: bool,
     /// How well bots aim and how quickly they react, 0..1 (BF2's bot skill).
     pub bot_skill: f32,
+    /// How hard the bots are: scales reaction, aim, tactics and awareness (see
+    /// [`ai::skill::BotDifficulty`]); it also sets `bot_skill` where that isn't given.
+    pub bot_difficulty: ai::skill::BotDifficulty,
+    /// Testing: bots of this team (1, 2; 3 for both) play with the tactics from before
+    /// cover, suppression, memory and squad coordination (`--bot-legacy-team`), to compare.
+    pub bot_legacy_team: u8,
+    /// Testing: bots of this team (1 or 2) play at this difficulty (skill included) instead
+    /// (`--bot-team-difficulty 2:easy`).
+    pub bot_team_difficulty: Option<(u8, ai::skill::BotDifficulty)>,
     /// Shown in server browsers and greetings.
     pub name: String,
     /// Percent of the level's tickets each team starts a round with.
@@ -121,6 +131,9 @@ impl Default for ServerSettings {
             respawn_seconds: 10.0,
             friendly_fire: false,
             bot_skill: 0.5,
+            bot_difficulty: ai::skill::BotDifficulty::Normal,
+            bot_legacy_team: 0,
+            bot_team_difficulty: None,
             name: "BF2 Rust server".into(),
             ticket_ratio: 100.0,
             rotation: Vec::new(),
@@ -156,6 +169,7 @@ impl Plugin for GameServerPlugin {
                 rotation::RotationPlugin,
                 stats::StatsPlugin,
                 content::ContentPlugin,
+                voice::VoicePlugin,
             ))
             .add_plugins((join::JoinPlugin, accounts::AccountsPlugin))
             .add_observer(create_client_player)

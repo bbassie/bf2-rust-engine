@@ -269,6 +269,8 @@ impl Bf2Layers {
     pub const DYNAMIC: u32 = 1 << 16;
     /// `lightmap` holds the level's static lightmap atlases.
     pub const LIGHTMAPPED: u32 = 1 << 17;
+    /// First-person view model (`viewmodel`): no screen-space ambient occlusion.
+    pub const VIEW_MODEL: u32 = 1 << 18;
 }
 
 #[derive(ShaderType, Clone, Default)]

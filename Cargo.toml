@@ -39,6 +39,7 @@ game_shared = { path = "crates/game_shared" }
 game_data = { path = "crates/game_data" }
 game_server = { path = "crates/game_server" }
 game_auth = { path = "crates/game_auth" }
+game_voice = { path = "crates/game_voice" }
 
 # Bevy compiles slowly without optimizations and runs far too slowly in debug.
 # Optimize dependencies, keep our own code quick to build.

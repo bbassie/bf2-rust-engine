@@ -51,7 +51,7 @@ pub struct Spectator {
 
 fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>, settings: Res<Settings>) {
     let ssao = settings.ssao_on(&cli);
-    // SSAO needs MSAA off; the view model camera smooths the final image with SMAA then.
+    // SSAO needs MSAA off; SMAA smooths the image then (`settings::apply_graphics`).
     let msaa = if ssao { Msaa::Off } else { Msaa::default() };
     let mut camera = commands.spawn((
         PlayerCamera,
@@ -59,10 +59,13 @@ fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>, settings: Res<Sett
         msaa,
         Projection::from(PerspectiveProjection {
             fov: settings.field_of_view.to_radians(),
-            near: 0.05,
+            // The view model is drawn shrunk towards the eye (`render::viewmodel`).
+            near: crate::render::viewmodel::CAMERA_NEAR,
             far: 3000.0,
             ..default()
         }),
+        // The world and the view model.
+        bevy::camera::visibility::RenderLayers::from_layers(&[0, crate::render::viewmodel::VIEW_MODEL_LAYER]),
         DistanceFog::default(),
         Spectator {
             position: Vec3::new(0.0, 40.0, 60.0),
@@ -70,6 +73,14 @@ fn spawn_camera(mut commands: Commands, cli: Res<crate::Cli>, settings: Res<Sett
         Transform::from_xyz(0.0, 40.0, 60.0),
         SpatialListener::new(0.25),
     ));
+    // Direct draws instead of Bevy's GPU-built indirect ones (also for the sun's shadow
+    // cascades, which follow the camera): the indirect path's per-frame bin unpacking, indirect
+    // parameters and bind groups for every batch of every view cost more CPU than they save
+    // here. Karkand, 63 bots: render thread 8.1 -> 7.2 ms a frame. `BF2_PERF_EXP=indirect`
+    // keeps Bevy's default.
+    if !std::env::var("BF2_PERF_EXP").is_ok_and(|e| e.contains("indirect")) {
+        camera.insert(bevy::render::view::NoIndirectDrawing);
+    }
     if ssao {
         // Contact shadows in corners and under objects, which BF2 baked into lightmaps.
         camera.insert(ScreenSpaceAmbientOcclusion::default());

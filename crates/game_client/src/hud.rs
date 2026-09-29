@@ -74,8 +74,10 @@ struct AmmoPanel;
 struct KillFeedText;
 #[derive(Component)]
 struct DeathNotice;
+/// The scoreboard's full-screen root: the team columns, and under them what other modules
+/// add (voice chat's mute chips, `voice::ui`).
 #[derive(Component)]
-struct Scoreboard;
+pub(crate) struct Scoreboard;
 #[derive(Component)]
 struct ScoreboardColumn(usize);
 /// A team's name and flag over its scoreboard column.
@@ -269,6 +271,7 @@ fn spawn_hud(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 width: percent(100),
                 height: percent(100),
+                flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()

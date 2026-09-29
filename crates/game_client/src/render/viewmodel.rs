@@ -1,8 +1,17 @@
 //! First-person view model: BF2's first-person arms and weapon, animated with the weapon's
-//! first-person set, drawn by a second camera so it never clips into walls.
+//! first-person set.
+//!
+//! It is drawn by the player camera, shrunk towards the eye so it never clips into walls: a
+//! uniform scale about the eye changes nothing on screen, only the depth. The model hangs
+//! under a [`ViewModelAnchor`] on the camera whose scale is [`VIEW_MODEL_SHRINK`], and in x
+//! and y also the ratio of the camera's field of view to BF2's first-person one
+//! ([`VIEW_MODEL_FOV`]), so it looks as if a 60° camera drew it at any field of view and
+//! zoom. A second camera cost about 1.4 ms of the render thread and 0.5 ms of the main
+//! thread a frame (its own view, passes and post-processing). The model is lit like the
+//! world, sun shadows included; `bf2_material.wgsl` keeps screen-space ambient occlusion off
+//! it (materials flagged [`Bf2Layers::VIEW_MODEL`]).
 
 use bevy::{
-    anti_alias::smaa::Smaa,
     app::AnimationSystems,
     camera::visibility::RenderLayers,
     gltf::{Gltf, GltfMesh},
@@ -12,10 +21,8 @@ use bevy::{
     world_serialization::WorldInstanceReady,
 };
 use game_data::SoldierDesc;
-use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 use game_shared::{
     config::GamePaths,
-    physics::GameLayer,
     level::LoadedLevel,
     protocol::Team,
     soldier::SoldierMotion,
@@ -24,8 +31,7 @@ use game_shared::{
 
 use super::{
     blend::{BlendLayer, Clip, Play},
-    environment::Sun,
-    materials::Bf2Materials,
+    materials::{Bf2Layers, Bf2Material, Bf2Materials},
     scope::Zoom,
 };
 use crate::{
@@ -34,15 +40,67 @@ use crate::{
     net::{LocalPlayer, LocalSoldier},
 };
 
-/// Render layer of everything in the view model.
+/// Render layer of everything in the view model (the player camera draws it too; the sun's
+/// shadow maps, on layer 0, leave it out).
 pub const VIEW_MODEL_LAYER: usize = 1;
+
+/// How far towards the eye the view model is pulled (a scale about the eye): a rifle reaching
+/// 0.8 m ahead ends at 0.16 m, closer than any wall the soldier can stand at.
+pub const VIEW_MODEL_SHRINK: f32 = 0.2;
+
+/// Field of view BF2's first-person models are drawn with.
+pub const VIEW_MODEL_FOV: f32 = 60.0;
+
+/// The near plane the first-person models were made for (0.01 m), shrunk like them: the
+/// player camera's near plane.
+pub const CAMERA_NEAR: f32 = 0.01 * VIEW_MODEL_SHRINK;
+
+/// On the player camera: what the view model hangs from. Its scale (camera space) is
+/// [`ViewModelSpace::scale`].
+#[derive(Component)]
+pub struct ViewModelAnchor;
+
+/// The view model's scale in camera space (see [`ViewModelAnchor`]): first-person effects
+/// are placed with it.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ViewModelSpace {
+    pub scale: Vec3,
+}
+
+impl Default for ViewModelSpace {
+    fn default() -> Self {
+        Self {
+            scale: Vec3::splat(VIEW_MODEL_SHRINK),
+        }
+    }
+}
+
+impl ViewModelSpace {
+    /// `world`, a point of the full-size view model (as if drawn by its own camera at
+    /// `camera`), where the shrunk one draws it.
+    pub fn shrink(&self, camera: &Transform, world: Vec3) -> Vec3 {
+        let local = camera.rotation.inverse() * (world - camera.translation);
+        camera.translation + camera.rotation * (local * self.scale)
+    }
+
+    /// The inverse of [`Self::shrink`].
+    pub fn grow(&self, camera: &Transform, shrunk: Vec3) -> Vec3 {
+        let local = camera.rotation.inverse() * (shrunk - camera.translation);
+        camera.translation + camera.rotation * (local / self.scale)
+    }
+}
+
+/// A mesh of the view model (its material is flagged [`Bf2Layers::VIEW_MODEL`]).
+#[derive(Component)]
+pub struct ViewModelMesh;
 
 pub struct ViewModelPlugin;
 
 impl Plugin for ViewModelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewModelAssets>()
-            .add_observer(add_view_model_camera)
+            .init_resource::<ViewModelSpace>()
+            .add_observer(add_view_model_anchor)
             .add_systems(
                 Update,
                 (
@@ -53,11 +111,13 @@ impl Plugin for ViewModelPlugin {
                 )
                     .chain(),
             )
-            .add_systems(Update, (light_view_model, match_main_camera_msaa))
+            .add_systems(Update, flag_view_model_materials)
             .add_systems(
                 PostUpdate,
-                align_to_camera_bone
-                    .after(AnimationSystems)
+                (
+                    align_to_camera_bone.after(AnimationSystems),
+                    scale_anchor.after(crate::camera::CameraSystems),
+                )
                     .before(TransformSystems::Propagate),
             );
     }
@@ -78,10 +138,7 @@ struct ViewAnimations {
     clips: HashMap<String, Clip>,
 }
 
-#[derive(Component)]
-struct ViewModelCamera;
-
-/// The arms scene under the view model camera.
+/// The arms scene under the view model anchor.
 #[derive(Component)]
 struct ViewModelRoot {
     team: usize,
@@ -134,47 +191,51 @@ impl OneShot {
     }
 }
 
-fn add_view_model_camera(add: On<Add, PlayerCamera>, mut commands: Commands) {
+fn add_view_model_anchor(add: On<Add, PlayerCamera>, mut commands: Commands) {
     commands.spawn((
-        ViewModelCamera,
-        Camera3d::default(),
-        Camera {
-            order: 1,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        Projection::from(PerspectiveProjection {
-            fov: 60f32.to_radians(),
-            near: 0.01,
-            far: 10.0,
-            ..default()
-        }),
-        RenderLayers::layer(VIEW_MODEL_LAYER),
-        // No lamp lights this layer (lights draw on theirs): one light cluster instead of
-        // Bevy's thousands, rebuilt every frame for nothing.
-        bevy::light::cluster::ClusterConfig::Single,
+        ViewModelAnchor,
+        Transform::from_scale(Vec3::splat(VIEW_MODEL_SHRINK)),
+        Visibility::default(),
         ChildOf(add.entity),
     ));
 }
 
-/// Both cameras draw into one image, and Bevy only shares a camera's intermediate textures
-/// with cameras of the same MSAA setting (otherwise this camera would draw over a stale
-/// copy of the world). Without MSAA (for SSAO) this camera renders last, so its SMAA pass
-/// smooths the world and the weapon at once.
-fn match_main_camera_msaa(
-    mut commands: Commands,
-    main: Query<&Msaa, (With<PlayerCamera>, Changed<Msaa>)>,
-    view_camera: Query<Entity, With<ViewModelCamera>>,
+/// Scales the anchor for the camera's field of view (zooming changes it): x and y by
+/// `tan(fov / 2) / tan(60° / 2)` on top of the shrink, so the model covers the screen as it
+/// does at BF2's first-person field of view.
+fn scale_anchor(
+    camera: Query<&Projection, With<PlayerCamera>>,
+    mut anchors: Query<&mut Transform, With<ViewModelAnchor>>,
+    mut space: ResMut<ViewModelSpace>,
 ) {
-    let (Ok(msaa), Ok(view_camera)) = (main.single(), view_camera.single()) else {
+    let Ok(Projection::Perspective(perspective)) = camera.single() else {
         return;
     };
-    let mut view_camera = commands.entity(view_camera);
-    view_camera.insert(*msaa);
-    if *msaa == Msaa::Off {
-        view_camera.insert(Smaa::default());
-    } else {
-        view_camera.remove::<Smaa>();
+    let ratio = (perspective.fov * 0.5).tan() / (VIEW_MODEL_FOV.to_radians() * 0.5).tan();
+    let scale = Vec3::new(ratio, ratio, 1.0) * VIEW_MODEL_SHRINK;
+    if space.scale != scale {
+        space.scale = scale;
+    }
+    for mut transform in &mut anchors {
+        if transform.scale != scale {
+            transform.scale = scale;
+        }
+    }
+}
+
+/// Keeps screen-space ambient occlusion off the view model (its own camera had none): the
+/// shrunk model is a tiny object right at the eye to it. Also after a level change rebuilt
+/// the materials.
+fn flag_view_model_materials(
+    meshes: Query<&MeshMaterial3d<Bf2Material>, With<ViewModelMesh>>,
+    mut materials: ResMut<Assets<Bf2Material>>,
+) {
+    for material in &meshes {
+        if materials.get(&material.0).is_some_and(|m| m.extension.flags & Bf2Layers::VIEW_MODEL == 0)
+            && let Some(mut material) = materials.get_mut(&material.0)
+        {
+            material.extension.flags |= Bf2Layers::VIEW_MODEL;
+        }
     }
 }
 
@@ -198,13 +259,13 @@ fn load_arms(
     }
 }
 
-/// Spawns the local team's arms under the view model camera.
+/// Spawns the local team's arms under the view model anchor.
 #[allow(clippy::type_complexity)]
 fn attach_arms(
     mut commands: Commands,
     assets: Res<ViewModelAssets>,
     gltfs: Res<Assets<Gltf>>,
-    camera: Query<Entity, With<ViewModelCamera>>,
+    camera: Query<Entity, With<ViewModelAnchor>>,
     local: Query<&Team, With<LocalPlayer>>,
     roots: Query<(Entity, &ViewModelRoot)>,
 ) {
@@ -250,7 +311,7 @@ fn attach_arms(
                     if meshes.contains(entity) {
                         commands
                             .entity(entity)
-                            .insert((RenderLayers::layer(VIEW_MODEL_LAYER), NotShadowCaster));
+                            .insert((RenderLayers::layer(VIEW_MODEL_LAYER), NotShadowCaster, ViewModelMesh));
                     }
                     let Ok(name) = names.get(entity) else { continue };
                     if name.as_str().eq_ignore_ascii_case("camerabone") {
@@ -350,6 +411,7 @@ fn attach_weapon(
                     MeshMaterial3d(material),
                     RenderLayers::layer(VIEW_MODEL_LAYER),
                     NotShadowCaster,
+                    ViewModelMesh,
                     ChildOf(bone),
                 ))
                 .id();
@@ -574,52 +636,4 @@ fn align_to_camera_bone(
         let inverse = Transform::from_matrix(relative.to_matrix().inverse());
         *root_transform = inverse;
     }
-}
-
-/// Sunlight for the view model. The level's sun only lights the world layer (so the view
-/// model camera needs no shadow maps of its own); this one follows it without shadows and
-/// fades out while the camera is in the shade.
-#[derive(Component)]
-struct ViewModelSun {
-    visibility: f32,
-}
-
-#[allow(clippy::type_complexity)]
-fn light_view_model(
-    mut commands: Commands,
-    time: Res<Time>,
-    spatial: SpatialQuery,
-    sun: Query<(&DirectionalLight, &Transform), (With<Sun>, Without<ViewModelSun>)>,
-    camera: Query<&GlobalTransform, With<PlayerCamera>>,
-    mut lights: Query<(Entity, &mut DirectionalLight, &mut Transform, &mut ViewModelSun)>,
-) {
-    let Ok((sun_light, sun_transform)) = sun.single() else {
-        for (entity, ..) in &lights {
-            commands.entity(entity).despawn();
-        }
-        return;
-    };
-    let Ok((_, mut light, mut transform, mut state)) = lights.single_mut() else {
-        commands.spawn((
-            ViewModelSun { visibility: 1.0 },
-            DirectionalLight {
-                shadow_maps_enabled: false,
-                ..sun_light.clone()
-            },
-            *sun_transform,
-            RenderLayers::layer(VIEW_MODEL_LAYER),
-        ));
-        return;
-    };
-    let lit = camera.single().map_or(true, |camera| {
-        let filter = SpatialQueryFilter::from_mask(GameLayer::World);
-        spatial
-            .cast_ray(camera.translation(), -sun_transform.forward(), 400.0, true, &filter)
-            .is_none()
-    });
-    let target = if lit { 1.0 } else { 0.0 };
-    state.visibility += (target - state.visibility) * (1.0 - (-8.0 * time.delta_secs()).exp());
-    light.illuminance = sun_light.illuminance * state.visibility;
-    light.color = sun_light.color;
-    *transform = *sun_transform;
 }

@@ -5,8 +5,11 @@
 //!   gives every squad an order (attack or defend a flag).
 //! - [`commander`]: a bot takes the commander post nobody holds, passes the orders on and
 //!   calls in artillery, the UAV, scans and supply drops.
-//! - [`squad`]: leaders lead, members follow in formation; kits and spawns for dead bots.
-//! - [`tactics`]: cover, flanking spots, grenade arcs, safe strafing.
+//! - [`squad`]: leaders lead, members follow in formation, fire teams bound and flank;
+//!   kits and spawns for dead bots.
+//! - [`tactics`]: flanking spots, grenade arcs, safe strafing, line of sight.
+//! - [`cover`]: cover to fight from, found on the navigation grid and checked with rays.
+//! - [`awareness`]: what bots remember about enemies out of sight, and suppression.
 //! - [`gadgets`]: flashbangs and tear gas against bots, gas masks.
 //! - [`skill`]: difficulty and per-bot personality.
 //! - [`stats`]: per-minute statistics.
@@ -15,7 +18,9 @@
 //! Level data comes from the importer ([`game_data::LevelAiDesc`], BF2's strategic areas,
 //! and [`game_data::AiWeaponsDesc`], BF2's weapon templates); both are optional.
 
+pub mod awareness;
 pub mod commander;
+pub mod cover;
 pub mod gadgets;
 pub mod skill;
 pub mod squad;

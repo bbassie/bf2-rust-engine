@@ -3415,11 +3415,13 @@ dependencies = [
  "bevy_replicon",
  "bevy_replicon_renet",
  "clap",
+ "cpal",
  "fastrand",
  "game_auth",
  "game_data",
  "game_server",
  "game_shared",
+ "game_voice",
  "ron 0.10.1",
  "serde",
  "serde_json",
@@ -3477,6 +3479,13 @@ dependencies = [
  "ron 0.10.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "game_voice"
+version = "0.1.0"
+dependencies = [
+ "unsafe-libopus",
 ]
 
 [[package]]
@@ -6912,6 +6921,17 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "unsafe-libopus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c757408e7256c910343c7b215c8c8b878948630eecc774baabcca0972376eb73"
+dependencies = [
+ "arrayref",
+ "num-complex",
+ "num-traits",
 ]
 
 [[package]]

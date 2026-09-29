@@ -20,7 +20,7 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | Folder | What the scenarios check |
 |---|---|
 | `abilities/` | Man-down and revive, medic, support and engineer gadgets |
-| `ai/` | Bot strategy, navigation, bots in vehicles, carriers |
+| `ai/` | Bot strategy, navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles, carriers |
 | `animation/` | Third- and first-person animation, view model, scopes |
 | `audio/` | Sounds, checked through the log |
 | `combat/` | Grenades, launchers, explosives, hit zones, lag compensation, destruction, effects, SF gadgets |
@@ -35,6 +35,7 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | `perf/` | Frame times with many bots (Karkand, AIX 2 Archipelago): at spawn, a fixed view, in the fight |
 | `terrain/` | Terrain, undergrowth, trees, water, horizon, view distance |
 | `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures |
+| `voice/` | Voice chat, two clients and a dedicated server: squad and command channels, enemies, muting (`BF2_VOICE_TEST_INPUT`) |
 
 Files ending in `_host`/`_remote` or `_net` go in pairs or against a dedicated server; their
 headers say which command to start first.

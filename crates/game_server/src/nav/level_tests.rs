@@ -260,3 +260,129 @@ fn carriers_on_levels() {
         }
     }
 }
+
+/// Prints the infantry grid around points, to see why bots get stuck there:
+///
+/// `NAV_AROUND="gulf_of_oman:64:-685,535@21;wake_island_2007:64:35,-215" cargo test -p game_server --lib nav_around -- --ignored --nocapture`
+///
+/// Per point (optionally `@height`: the floor of interest, else every floor in the column
+/// there): a 0.5 m map, 24 m across, of the cells within a meter of that height (`.` level,
+/// `+`/`-` up to a meter higher or lower, `,` next to an edge, `#` none; letters for other
+/// regions, `L` ladder ends), and the statics nearby.
+#[test]
+#[ignore]
+fn nav_around() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../imported");
+    let paths = GamePaths::resolve(Some(root));
+    let specs = std::env::var("NAV_AROUND").unwrap_or_else(|_| "gulf_of_oman:64:-685,535".into());
+    let params = NavParams::from_tuning(&SoldierTuning::default());
+    let mut loaded: Option<(String, u32, Arc<NavGrid>, game_shared::level::LoadedLevel)> = None;
+    for spec in specs.split(';').filter(|s| !s.trim().is_empty()) {
+        let mut parts = spec.trim().splitn(3, ':');
+        let name = parts.next().unwrap().to_string();
+        let size: u32 = parts.next().unwrap_or("64").parse().unwrap();
+        let point = parts.next().unwrap_or("0,0");
+        let (xz, height) = match point.split_once('@') {
+            Some((xz, h)) => (xz, Some(h.parse::<f32>().unwrap())),
+            None => (point, None),
+        };
+        let (x, z) = xz.split_once(',').unwrap();
+        let (x, z): (f32, f32) = (x.parse().unwrap(), z.parse().unwrap());
+        if loaded.as_ref().is_none_or(|(n, s, ..)| *n != name || *s != size) {
+            let Ok(level) = load_level(&paths, &name) else {
+                println!("{name}: not imported");
+                continue;
+            };
+            let Some(layout) = level.base_layout("gpm_cq", size).cloned() else {
+                println!("{name} {size}: no such layout");
+                continue;
+            };
+            let mut world = World::new();
+            {
+                let mut commands = world.commands();
+                spawn_statics(&mut commands, &level.desc.statics, &paths);
+            }
+            world.flush();
+            let mut colliders = world
+                .query_filtered::<(&Collider, &Transform, &CollisionLayers), (With<LevelEntity>, Without<ColliderDisabled>)>();
+            let mut ladders = world.query_filtered::<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>();
+            let collected = collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(&layout));
+            let patches = detail_patches(&level, &collected.geometry, Some(&paths));
+            let grid = Arc::new(patch::build_level(&collected.geometry, &patches, params));
+            loaded = Some((name.clone(), size, grid, level));
+        }
+        let (_, _, grid, level) = loaded.as_ref().unwrap();
+        let heights: Vec<f32> = match height {
+            Some(h) => vec![h],
+            None => {
+                let mut hs: Vec<f32> = grid
+                    .cells_near(Vec2::new(x, z), 1.0)
+                    .map(|c| grid.cell(c).y)
+                    .collect();
+                hs.sort_by(f32::total_cmp);
+                hs.dedup_by(|a, b| (*a - *b).abs() < 1.5);
+                hs
+            }
+        };
+        println!("\n== {name} {size} around ({x}, {z}): floors {heights:?}");
+        for h in heights {
+            let center = grid.locate(Vec3::new(x, h + 0.5, z), 3.0, None);
+            let home = center.map(|c| grid.cell(c).region);
+            println!("  floor {h:.1}: nearest cell {:?} region {home:?}", center.map(|c| grid.position(c)));
+            let mut regions: Vec<u16> = Vec::new();
+            for row in 0..48 {
+                let wz = z - 12.0 + row as f32 * 0.5;
+                let mut line = String::new();
+                for col in 0..48 {
+                    let wx = x - 12.0 + col as f32 * 0.5;
+                    let here = row == 24 && col == 24;
+                    let probe = Vec3::new(wx, h + 1.0, wz);
+                    let cell = grid
+                        .locate(probe, 0.3, None)
+                        .filter(|c| grid.position(*c).xz().distance(probe.xz()) < 0.45 && (grid.cell(*c).y - h).abs() < 1.0);
+                    let ch = match cell {
+                        _ if here => '@',
+                        None => '#',
+                        Some(c) => {
+                            let cell = grid.cell(c);
+                            if grid.ladders_at(c.index).next().is_some() {
+                                'L'
+                            } else if Some(cell.region) != home {
+                                let i = regions.iter().position(|r| *r == cell.region).unwrap_or_else(|| {
+                                    regions.push(cell.region);
+                                    regions.len() - 1
+                                });
+                                (b'a' + (i % 26) as u8) as char
+                            } else if cell.y > h + 0.3 {
+                                '+'
+                            } else if cell.y < h - 0.3 {
+                                '-'
+                            } else if cell.dist == 0 {
+                                ','
+                            } else {
+                                '.'
+                            }
+                        }
+                    };
+                    line.push(ch);
+                }
+                println!("  {wz:7.1} {line}");
+            }
+            println!("  (x from {:.1} to {:.1}; other regions: {regions:?})", x - 12.0, x + 11.5);
+        }
+        let mut near: Vec<(f32, String)> = level
+            .desc
+            .statics
+            .iter()
+            .map(|s| {
+                let p = Vec3::from_array(s.placement.position);
+                (p.xz().distance(Vec2::new(x, z)), format!("{} at {p:.1}", s.template))
+            })
+            .filter(|(d, _)| *d < 25.0)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (d, s) in near.iter().take(10) {
+            println!("  static {d:.0} m: {s}");
+        }
+    }
+}

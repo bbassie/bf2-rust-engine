@@ -1,0 +1,39 @@
+// Voice chat over a dedicated server, the squad member's side: see voice_squad_alice.ron.
+(
+    steps: [
+        WaitReady,
+        ForbidLog("ERROR "),
+        // Alice's command channel never reaches a squad member.
+        ForbidLog("voice: hearing Alice on command"),
+        // Join Alice's squad (again, until she has made it).
+        Wait(1.0),
+        Squad(Join(1)),
+        Wait(3.0),
+        Squad(Join(1)),
+        Wait(3.0),
+        Squad(Join(1)),
+        ExpectLog("voice: squad channel reaches Alice", 60.0),
+        ExpectLog("voice: hearing Alice on squad", 60.0),
+        Wait(0.5),
+        Screenshot("hearing_alice"),
+        ExpectLog("voice: Alice stopped on squad", 10.0),
+        // A member can't talk on the command channel: the HUD says so, nothing is sent.
+        HoldKey(KeyH),
+        Wait(0.5),
+        Screenshot("command_refused"),
+        ReleaseKey(KeyH),
+        Wait(0.5),
+        HoldKey(KeyB),
+        Wait(1.5),
+        ReleaseKey(KeyB),
+        ExpectLog("voice: stopped talking on squad", 3.0),
+        // Alice talks on command meanwhile (forbidden above), then mutes us; talk again.
+        Wait(9.0),
+        HoldKey(KeyB),
+        Wait(1.5),
+        ReleaseKey(KeyB),
+        ExpectLog("voice: stopped talking on squad", 3.0),
+        Wait(3.0),
+        Quit,
+    ],
+)

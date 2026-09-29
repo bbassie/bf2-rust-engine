@@ -42,6 +42,10 @@ fastrand = "2"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 # Server identity keys, account tokens, the master server API (see `account`, `join`).
 game_auth.workspace = true
+# Voice chat (see `voice`): the codec, jitter buffer and resampler, and the audio devices
+# (the same cpal Bevy's audio already builds, through rodio).
+game_voice.workspace = true
+cpal = "0.17"
 
 # Bevy's `wayland` feature links libwayland-client at build time (needs libwayland-dev).
 # Load it at runtime instead, like winit already does for X11.

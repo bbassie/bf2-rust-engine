@@ -50,7 +50,7 @@ use game_shared::{
 use crate::{
     audio::{PlaySound, Sound},
     camera::PlayerCamera,
-    render::viewmodel::VIEW_MODEL_LAYER,
+    render::viewmodel::{VIEW_MODEL_LAYER, ViewModelAnchor, ViewModelSpace},
 };
 
 pub mod decals;
@@ -515,7 +515,8 @@ struct Instance {
     position: Vec3,
     rotation: Quat,
     first_person: bool,
-    /// First person: the placement relative to the camera, which it follows.
+    /// First person: the placement relative to the camera, which it follows (for the
+    /// full-size view model; it is drawn shrunk with it, see `render::viewmodel`).
     camera_local: Option<Transform>,
     /// Follows this entity while it has an [`EffectEmitter`].
     follow: Option<Entity>,
@@ -623,6 +624,8 @@ fn spawn_effects(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut world: ResMut<EffectWorld>,
     camera: Query<(Entity, &Transform), With<PlayerCamera>>,
+    anchor: Query<Entity, With<ViewModelAnchor>>,
+    view_model: Res<ViewModelSpace>,
     mut sounds: MessageWriter<PlaySound>,
 ) {
     let Some(mut library) = library else {
@@ -642,10 +645,16 @@ fn spawn_effects(
         };
         trace!("effect {} at {}", request.name, request.position);
         let sustain = request.duration.unwrap_or(0.0);
-        let mut instance = Instance::new(effect.clone(), request.position, request.rotation, request.first_person, sustain);
+        // First person: `request.position` is on the shrunk view model; the effect runs at
+        // full size in front of the camera and is drawn shrunk like the model.
+        let position = match (request.first_person, camera) {
+            (true, Some((_, camera))) => view_model.grow(camera, request.position),
+            _ => request.position,
+        };
+        let mut instance = Instance::new(effect.clone(), position, request.rotation, request.first_person, sustain);
         let camera_local = match (request.first_person, camera) {
             (true, Some((_, camera))) => {
-                let world = Transform::from_translation(request.position).with_rotation(request.rotation);
+                let world = Transform::from_translation(position).with_rotation(request.rotation);
                 Some(Transform::from_matrix(camera.to_matrix().inverse() * world.to_matrix()))
             }
             _ => None,
@@ -674,25 +683,26 @@ fn spawn_effects(
                 layer.clone(),
                 Flash { age: 0.0, life: flash.life.max(0.03) },
             ));
-            match (camera_local, camera) {
-                (Some(camera_local), Some((camera_entity, _))) => {
-                    entity.insert((camera_local * local, ChildOf(camera_entity)));
+            // First person under the view model's anchor, which scales it with the model.
+            match (camera_local, anchor.single()) {
+                (Some(camera_local), Ok(anchor)) => {
+                    entity.insert((camera_local * local, ChildOf(anchor)));
                 }
                 _ => {
-                    let placed = Transform::from_translation(request.position).with_rotation(request.rotation);
+                    let placed = Transform::from_translation(position).with_rotation(request.rotation);
                     entity.insert(placed * local);
                 }
             }
         }
-        let frame = Transform::from_translation(request.position).with_rotation(request.rotation);
+        let frame = Transform::from_translation(position).with_rotation(request.rotation);
         for piece in &desc.debris {
             throw_debris(&mut commands, piece, &frame);
         }
         for sound in desc.sounds.iter().filter(|s| s.views.shows(request.first_person) && !s.files.is_empty()) {
-            sounds.write(PlaySound::at(sound_desc(sound), request.position).reason("effect"));
+            sounds.write(PlaySound::at(sound_desc(sound), position).reason("effect"));
         }
         if let Some(radius) = effect.explosion_radius {
-            sounds.write(PlaySound::at(Sound::Explosion { radius }, request.position).reason("explosion effect"));
+            sounds.write(PlaySound::at(Sound::Explosion { radius }, position).reason("explosion effect"));
         }
         world.instances.push(instance);
     }
@@ -745,12 +755,12 @@ fn simulate(
     camera: Query<&Transform, With<PlayerCamera>>,
     followed: Query<EmitterPlacement, With<EffectEmitter>>,
     settings: Res<crate::settings::Settings>,
+    view_model: Res<ViewModelSpace>,
 ) {
     let started = std::time::Instant::now();
     let dt = time.delta_secs().min(0.1);
     let light = light.map_or(Vec3::ONE, |l| l.0);
     let camera = camera.single().copied().unwrap_or_default();
-    let camera_forward = camera.forward().as_vec3();
     // The particle quality graphics setting scales the shared particle budget.
     let cap = (MAX_PARTICLES as f32 * settings.particle_quality.scale()) as usize;
     let mut budget = cap.saturating_sub(world.particles);
@@ -776,7 +786,7 @@ fn simulate(
         emit(instance, &mut budget);
         emit_carried(instance, &mut budget);
         alive += instance.particles.len();
-        draw(instance, &mut batches, light, camera.translation, camera_forward);
+        draw(instance, &mut batches, light, &camera, &view_model);
     }
     world.instances.retain(|i| !i.finished());
     world.particles = alive;
@@ -969,22 +979,37 @@ fn integrate(instance: &mut Instance, dt: f32) {
 }
 
 /// Queues the instance's visible particles for drawing.
-fn draw(instance: &Instance, batches: &mut render::Batches, light: Vec3, camera: Vec3, forward: Vec3) {
+fn draw(instance: &Instance, batches: &mut render::Batches, light: Vec3, camera_transform: &Transform, view_model: &ViewModelSpace) {
     let effect = &instance.effect;
     let layer = instance.layer();
+    let camera = camera_transform.translation;
+    let forward = camera_transform.forward().as_vec3();
     let up = instance.rotation * Vec3::Y;
+    // First person: drawn shrunk towards the eye with the view model.
+    let shrink = instance.first_person.then_some(view_model);
     for p in &instance.particles {
         let desc = &effect.desc.emitters[p.emitter as usize];
         if desc.carries.is_some() {
             continue;
         }
         let t = p.age / p.life;
-        let size = p.size * desc.size_curve.at(t);
+        let mut size = p.size * desc.size_curve.at(t);
         let opacity = desc.opacity_curve.at(t).clamp(0.0, 1.0);
         if size <= 0.001 || opacity <= 0.004 {
             continue;
         }
-        let depth = (p.position - camera).dot(forward);
+        let (position, velocity) = match shrink {
+            Some(view_model) => {
+                size *= view_model.scale.x;
+                let velocity_local = camera_transform.rotation.inverse() * p.velocity;
+                (
+                    view_model.shrink(camera_transform, p.position),
+                    camera_transform.rotation * (velocity_local * view_model.scale),
+                )
+            }
+            None => (p.position, p.velocity),
+        };
+        let depth = (position - camera).dot(forward);
         if depth < -size {
             continue;
         }
@@ -1000,8 +1025,8 @@ fn draw(instance: &Instance, batches: &mut render::Batches, light: Vec3, camera:
         let (mode, axis, length) = match desc.facing {
             Facing::Camera => (0.0, Vec3::Y, 1.0),
             Facing::Velocity => {
-                let speed = p.velocity.length();
-                let axis = if speed > 1e-4 { p.velocity / speed } else { up };
+                let speed = velocity.length();
+                let axis = if speed > 1e-4 { velocity / speed } else { up };
                 (1.0, axis, 1.0 + speed * desc.stretch / half.max(1e-3) * 0.5)
             }
             Facing::Horizontal => (2.0, up, 1.0),
@@ -1013,7 +1038,7 @@ fn draw(instance: &Instance, batches: &mut render::Batches, light: Vec3, camera:
             layer,
             depth,
             render::GpuParticle {
-                position: p.position,
+                position,
                 size: half,
                 axis,
                 rotation: p.rotation,

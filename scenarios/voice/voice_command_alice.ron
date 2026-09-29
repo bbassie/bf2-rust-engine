@@ -1,0 +1,46 @@
+// Voice chat over a dedicated server, the commander's side (pairs with
+// voice_command_bob.ron): Alice is the commander (no squad), Bob leads squad 1. Alice's
+// squad key talks to her squad leaders, so Bob hears her on the command channel; Bob's
+// command key reaches Alice; Bob's squad channel (a squad of one) reaches nobody. Then Alice,
+// logged in as admin, mutes Bob with `/mute`: his client says so and stops sending.
+// target/debug/deps/server.exe --level test_range --mode gpm_coop --bots 0 --port 30101 --rcon-port 0 --admin-password voicetest
+// BF2_VOICE_TEST_INPUT=tone:440 target/debug/deps/client.exe --connect 127.0.0.1 --port 30101 --name Alice --scenario scenarios/voice/voice_command_alice.ron
+// BF2_VOICE_TEST_INPUT=tone:660 target/debug/deps/client.exe --connect 127.0.0.1 --port 30101 --name Bob --scenario scenarios/voice/voice_command_bob.ron
+(
+    steps: [
+        WaitReady,
+        ForbidLog("ERROR "),
+        ForbidLog("voice: hearing Bob on squad"),
+        Commander(Apply),
+        ExpectLog("voice: command channel reaches Bob", 60.0),
+        Wait(1.0),
+        // The squad key of a commander without a squad: his squad leaders.
+        HoldKey(KeyB),
+        Wait(0.6),
+        Screenshot("commander_talking"),
+        Wait(1.4),
+        ReleaseKey(KeyB),
+        ExpectLog("voice: stopped talking on command", 3.0),
+        ExpectLog("voice: hearing Bob on command", 30.0),
+        Wait(0.5),
+        Screenshot("hearing_leader"),
+        ExpectLog("voice: Bob stopped on command", 10.0),
+        // Bob's squad channel reaches nobody (forbidden above). Then the admin mutes him.
+        Wait(5.0),
+        Key(KeyT),
+        Frames(2),
+        Type("/login voicetest"),
+        Frames(2),
+        Key(Enter),
+        Wait(0.5),
+        Key(KeyT),
+        Frames(2),
+        Type("/mute Bob testing"),
+        Frames(2),
+        Key(Enter),
+        Wait(0.5),
+        ForbidLog("voice: hearing Bob"),
+        Wait(10.0),
+        Quit,
+    ],
+)

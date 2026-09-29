@@ -1,0 +1,27 @@
+// Voice chat over a dedicated server between enemies (pairs with voice_enemy_bob.ron):
+// conquest puts Alice and Bob on opposite teams, each leading squad 1 of his team. Both talk
+// on the squad and the command channel; neither hears the other.
+// target/debug/deps/server.exe --level test_range --mode gpm_cq --bots 0 --port 30102 --rcon-port 0
+// BF2_VOICE_TEST_INPUT=tone:440 target/debug/deps/client.exe --connect 127.0.0.1 --port 30102 --name Alice --scenario scenarios/voice/voice_enemy_alice.ron
+// BF2_VOICE_TEST_INPUT=tone:660 target/debug/deps/client.exe --connect 127.0.0.1 --port 30102 --name Bob --scenario scenarios/voice/voice_enemy_bob.ron
+(
+    steps: [
+        WaitReady,
+        ForbidLog("ERROR "),
+        ForbidLog("voice: hearing"),
+        Squad(Create),
+        ExpectLog("voice: squad channel reaches nobody", 30.0),
+        Wait(4.0),
+        HoldKey(KeyB),
+        Wait(2.0),
+        ReleaseKey(KeyB),
+        ExpectLog("voice: stopped talking on squad", 3.0),
+        Wait(1.0),
+        HoldKey(KeyH),
+        Wait(2.0),
+        ReleaseKey(KeyH),
+        ExpectLog("voice: stopped talking on command", 3.0),
+        Wait(10.0),
+        Quit,
+    ],
+)

@@ -9,6 +9,9 @@
 //!     public: false,
 //!     max_players: 32,
 //!     bots: 12,
+//!     // Easy, Normal, Hard or Expert: reaction, aim, tactics and awareness.
+//!     bot_difficulty: Normal,
+//!     // Aim and reaction 0..1; default: the difficulty's (Normal 0.5).
 //!     bot_skill: 0.5,
 //!     friendly_fire: false,
 //!     respawn_time: 10.0,
@@ -89,7 +92,10 @@ pub struct ServerConfig {
     pub public: bool,
     pub max_players: usize,
     pub bots: u32,
-    pub bot_skill: f32,
+    /// Aim and reaction 0..1 (default: the difficulty's, 0.5 at `Normal`).
+    pub bot_skill: Option<f32>,
+    /// `Easy`, `Normal`, `Hard` or `Expert`. Also sets `bot_skill` unless that is given.
+    pub bot_difficulty: Option<crate::ai::skill::BotDifficulty>,
     pub friendly_fire: bool,
     /// Seconds between death and respawn.
     pub respawn_time: f32,
@@ -145,7 +151,8 @@ impl Default for ServerConfig {
             public: false,
             max_players: settings.max_clients,
             bots: 0,
-            bot_skill: settings.bot_skill,
+            bot_skill: None,
+            bot_difficulty: None,
             friendly_fire: settings.friendly_fire,
             respawn_time: settings.respawn_seconds,
             ticket_ratio: settings.ticket_ratio,
@@ -224,7 +231,13 @@ impl ServerConfig {
             local_team: 1,
             respawn_seconds: self.respawn_time.max(0.0),
             friendly_fire: self.friendly_fire,
-            bot_skill: self.bot_skill.clamp(0.0, 1.0),
+            bot_skill: self
+                .bot_skill
+                .unwrap_or(self.bot_difficulty.unwrap_or_default().params().skill)
+                .clamp(0.0, 1.0),
+            bot_difficulty: self.bot_difficulty.unwrap_or_default(),
+            bot_legacy_team: 0,
+            bot_team_difficulty: None,
             name: self.name,
             ticket_ratio: self.ticket_ratio.max(1.0),
             rotation: self.rotation,
@@ -281,6 +294,7 @@ mod tests {
         let config = ServerConfig::load(&path).unwrap();
         assert_eq!(config.rotation.len(), 5);
         assert_eq!(config.coop_bot_skill, Some(0.4));
+        assert_eq!(config.bot_difficulty, Some(crate::ai::skill::BotDifficulty::Normal));
         assert_eq!(config.rotation[0].mode, "gpm_cq");
         assert_eq!(config.rotation[1].bots, Some(24));
         assert!(config.stats_file.unwrap().ends_with("stats.ron"));

@@ -4,7 +4,7 @@
 //!
 //! - [`RateLimiter`]: a token bucket per sender (a player, a client connection or an address)
 //!   for command-like messages: chat lines, admin commands, commander requests, content
-//!   reports, discovery queries. Honest players never notice the limits.
+//!   reports, discovery queries, and voice frames. Honest players never notice the limits.
 //! - [`LoginBackoff`]: failed password attempts per sender; after a few, the sender is locked
 //!   out for a while, doubling with each further failure.
 //! - [`constant_time_eq`] for comparing secrets.
@@ -36,6 +36,9 @@ impl Rate {
     pub const DISCOVERY_PER_ADDRESS: Rate = Rate { burst: 16.0, per_second: 4.0 };
     /// Server browser queries from everyone together (spoofed senders come from anywhere).
     pub const DISCOVERY_TOTAL: Rate = Rate { burst: 128.0, per_second: 64.0 };
+    /// Voice frames from a talker (`voice`): 50 a second while talking, plus room for
+    /// frames that arrive bunched up after a network hiccup.
+    pub const VOICE: Rate = Rate { burst: 25.0, per_second: 55.0 };
     /// Remote console connections from one address.
     pub const RCON_CONNECTIONS: Rate = Rate { burst: 8.0, per_second: 0.5 };
 }

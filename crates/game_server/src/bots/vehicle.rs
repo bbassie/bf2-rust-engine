@@ -434,7 +434,7 @@ impl BotBrain {
         let objective = order.map(|(_, a)| w.map.areas[a].position);
         let far = objective.map_or(0.0, |o| o.xz().distance(position.xz()));
         let attacking = order.is_some_and(|(k, _)| k == OrderKind::Attack);
-        let skill = self.personality.skill(w.settings.bot_skill).0;
+        let skill = self.personality.skill(&w.settings, me.team).0;
         // Cut off: walking can't get to the objective from here (a carrier, an island).
         let here = w.nav().and_then(|nav| nav.locate(position, 2.0, None)).map(|c| w.nav().unwrap().cell(c).region);
         let cut_off = self.stranded > 0.0
@@ -445,7 +445,8 @@ impl BotBrain {
         // Whether it can walk up to a vehicle's door (a boat below a carrier's deck isn't).
         let walkable = |data: &game_shared::vehicle::VehicleData, motion: &VehicleMotion| {
             let (Some(nav), Some(region)) = (w.nav(), here) else {
-                return true;
+                // Off the grid itself: only what's close by.
+                return w.nav().is_none();
             };
             let transform = motion.transform();
             let entries = &data.0.desc.entry_points;
@@ -599,7 +600,23 @@ impl BotBrain {
         let crew = vcx.crews.get(&vehicle).map_or(&[][..], |c| &c[..]);
         let hostile = crew.iter().any(|c| c.team != me.team);
         let far = seen.as_ref().map_or(0.0, |v| v.motion.position.distance(me.motion.position));
-        let (Some(seen), false, true) = (seen, hostile, time < 30.0 + far / 3.0) else {
+        // It leaves without us, walking can't get there, or we keep getting stuck at the
+        // door (parked against a wall): give up on it for a while.
+        let leaving = seen.as_ref().is_some_and(|v| v.motion.velocity.length() > 5.0 && far > 20.0);
+        let blocked = self.stranded > 0.0 || (self.stuck_strikes > 2.5 && far < 25.0);
+        if leaving || blocked {
+            if let Some(v) = &seen {
+                debug!(
+                    "{} gives up on {} ({})",
+                    w.name(me.player),
+                    v.template,
+                    if leaving { "leaving" } else { "can't get to it" }
+                );
+            }
+            self.left_vehicle = Some((vehicle, 60.0));
+            self.stuck_strikes = 0.0;
+        }
+        let (Some(seen), false, true, false) = (seen, hostile, time < 30.0 + far.min(300.0) / 3.0, leaving || blocked) else {
             vcx.claims.release(me.player);
             self.activity = Activity::Objective;
             self.vehicle_cooldown = VEHICLE_COOLDOWN;
@@ -622,7 +639,9 @@ impl BotBrain {
             .min_by(|a, b| a.0.distance(chest).total_cmp(&b.0.distance(chest)))
             .unwrap_or((seen.motion.position, 3.0));
         let reach = chest.distance(entry) - radius;
-        if reach <= 0.4 {
+        // Held up right by the door: try the use key from here.
+        let held_up = reach < 1.2 && self.stuck_strikes > 0.5;
+        if reach <= 0.4 || held_up {
             // Pressed and let go on alternate ticks: each press is a fresh one.
             self.use_toggle = !self.use_toggle;
             if self.use_toggle {
@@ -765,7 +784,7 @@ impl BotBrain {
             }
         }
 
-        let skill = self.personality.skill(w.settings.bot_skill);
+        let skill = self.personality.skill(&w.settings, me.team);
         let eye_seat = seated.seat as usize;
         let mounted = Mounted::new(&seen.data.0, seen.motion.transform());
         let order = self.current_order(w, me);
@@ -1366,6 +1385,8 @@ impl BotBrain {
                         half: Vec2::new((max.x - min.x) * 0.5 + grow, (max.z - min.z) * 0.5 + grow),
                     }
                 })
+                // Where drivers kept getting stuck (too narrow, something in the way).
+                .chain(w.stuck.vehicle_obstacles(position, 400.0, profile.half_width))
                 .collect();
             ride.path_task = Some(AsyncComputeTaskPool::get().spawn(async move {
                 let started = Instant::now();
@@ -1496,6 +1517,12 @@ impl BotBrain {
             team_stats.vehicle_stuck += 1;
             let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
             *stats.vehicle_stuck_spots.entry(square).or_default() += 1;
+            stats
+                .vehicle_stuck_samples
+                .insert(square, (position, target, format!("{} stuck, {:.0} m left", seen.template, remaining)));
+            if profile.role != Role::Boat {
+                stats.vehicle_stuck_reports.push((position, target));
+            }
             debug!(
                 "{} stuck in {} at {position:.0} (bearing {:.0} to {target:.0}, {:.0} m left, wanted {wanted:.1} m/s)",
                 w.name(me.player),
@@ -1532,6 +1559,9 @@ impl BotBrain {
             team_stats.vehicle_stuck += 1;
             let square = ((position.x / 10.0).floor() as i32, (position.z / 10.0).floor() as i32);
             *stats.vehicle_stuck_spots.entry(square).or_default() += 1;
+            stats
+                .vehicle_stuck_samples
+                .insert(square, (position, target, format!("{} gets nowhere, {:.0} m left", seen.template, remaining)));
             return;
         }
         // Wheels: a target inside the turning circle can't be reached going forwards. Back up

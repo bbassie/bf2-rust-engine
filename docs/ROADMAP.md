@@ -35,7 +35,7 @@ in M5.)
 - [x] Third-person camera (V)
 - [x] Weapon models in hands (third person)
 - [x] First-person view: BF2's arms and weapon models with their 1P animations (deploy, fire,
-  zoom, reload, run, sprint), drawn by a second camera so they never clip into walls
+  zoom, reload, run, sprint), drawn shrunk towards the eye so they never clip into walls
 - [x] Kits (7 classes per faction) and handheld weapons from the original templates:
   rate of fire, fire modes, magazines, recoil, deviation, zoom
 - [x] Projectiles with gravity, server-side hit detection, damage falloff, headshots,

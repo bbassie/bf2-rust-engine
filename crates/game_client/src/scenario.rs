@@ -151,6 +151,13 @@ pub enum Step {
     /// `sea`, or `""` for any), looking at it, e.g. `ChaseDriven("land", 18.0, 7.0)`. Logs
     /// which.
     ChaseDriven(String, f32, f32),
+    /// Spectating in singleplayer: follows a bot for this many seconds, the camera
+    /// `distance` meters behind and `height` meters above him, looking at him: `"cover"`
+    /// picks one fighting from cover, `"squad"` a squad leader whose squad bounds (or moves
+    /// together), `"fight"` one fighting, anything else a bot whose name contains it, e.g.
+    /// `ChaseBot("cover", 8.0, 7.0, 3.0)`. Until one matches it keeps looking (the seconds
+    /// count from then, for at most a minute). Logs whom, and what he does every second.
+    ChaseBot(String, f32, f32, f32),
     /// Adds our vehicle's state (position, speed, altitude above ground, climb rate,
     /// attitude, engine) to the report every 0.25 s for this many seconds.
     VehicleTrace(String, f32),
@@ -227,6 +234,9 @@ pub enum Step {
     Commander(game_shared::commander::CommanderRequest),
     /// Clicks the commander screen's map at this world position (height ignored).
     CommanderClick((f32, f32, f32)),
+    /// A squad request, as the deploy screen would send it: `Squad(Create)`, `Squad(Join(1))`,
+    /// `Squad(Leave)`.
+    Squad(game_shared::squad::SquadRequest),
     /// The nearest vehicle loses this many hit points (keeping at least 1).
     DamageVehicle(f32),
     /// The vehicle nearest to a point loses this many hit points; at 0 it is destroyed.
@@ -491,6 +501,8 @@ struct Runner {
     released: Vec<KeyCode>,
     /// Where something was when the current step began.
     mark: Option<Vec3>,
+    /// The bot `ChaseBot` follows (a player entity).
+    chased: Option<Entity>,
     /// Text of the last `Type` step, typed the next frame.
     typed: String,
     /// Captured log lines before this index are done with for `ExpectLog`.
@@ -514,6 +526,7 @@ struct PlayerControls<'w, 's> {
     effects: MessageWriter<'w, crate::effects::SpawnEffect>,
     radio: MessageWriter<'w, game_shared::radio::RadioRequest>,
     commander: MessageWriter<'w, game_shared::commander::CommanderRequest>,
+    squad: MessageWriter<'w, game_shared::squad::SquadRequest>,
     commander_screen: ResMut<'w, crate::commander::CommanderScreen>,
     gamepad: ResMut<'w, ScenarioGamepad>,
     /// `gamepad_connection_system` (which attaches/detaches the `Gamepad` component) listens
@@ -593,6 +606,20 @@ struct Soldiers<'w, 's> {
         (With<Soldier>, Without<LocalSoldier>),
     >,
     spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+    /// Bots of an in-process server, for `ChaseBot`.
+    bots: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static game_server::bots::BotBrain,
+            &'static game_shared::protocol::Player,
+            Option<&'static game_server::Controls>,
+            Option<&'static game_shared::squad::SquadMember>,
+            &'static Team,
+        ),
+    >,
+    squad_tactics: Option<Res<'w, game_server::ai::squad::SquadTactics>>,
     /// Rush's charges and the mode, for `NearCharge`.
     charges: Query<'w, 's, &'static game_shared::modes::Charge>,
     modes: Query<'w, 's, &'static game_shared::modes::ModeState>,
@@ -640,6 +667,7 @@ fn run_scenario(
         mut effects,
         mut radio,
         mut commander,
+        mut squad,
         mut commander_screen,
         mut gamepad,
         mut gamepad_events,
@@ -652,6 +680,8 @@ fn run_scenario(
         local_team,
         drawn,
         spatial,
+        bots,
+        squad_tactics,
         charges,
         modes,
     } = soldiers;
@@ -1028,6 +1058,112 @@ fn run_scenario(
                 }
                 Progress::Done
             }
+            Step::ChaseBot(what, seconds, distance, height) => {
+                let motion_of = |player: Entity| {
+                    bots.get(player)
+                        .ok()
+                        .and_then(|(_, _, _, controls, ..)| controls)
+                        .and_then(|c| others.get(c.0).ok())
+                        .map(|(_, _, motion, _)| *motion)
+                };
+                let mut just_chosen = false;
+                if runner.frames == 0 {
+                    // Squad members near a leader.
+                    let squad_near = |leader: Entity, team: Team, squad: u8| {
+                        let Some(at) = motion_of(leader).map(|m| m.position) else { return 0 };
+                        bots.iter()
+                            .filter(|(p, _, _, _, m, t)| *p != leader && **t == team && m.is_some_and(|m| m.squad == squad))
+                            .filter(|(p, ..)| motion_of(*p).is_some_and(|m| m.position.distance(at) < 35.0))
+                            .count()
+                    };
+                    let score = |(player, brain, info, _, member, team): (
+                        Entity,
+                        &game_server::bots::BotBrain,
+                        &game_shared::protocol::Player,
+                        Option<&game_server::Controls>,
+                        Option<&game_shared::squad::SquadMember>,
+                        &Team,
+                    )|
+                     -> Option<f32> {
+                        motion_of(player)?;
+                        match what.as_str() {
+                            "cover" => brain.fighting_from_cover().map(|up| if up { 2.0 } else { 1.0 }),
+                            "fight" => brain.combat_state().0.then_some(1.0 + brain.combat_state().1),
+                            "squad" => {
+                                let member = member.filter(|m| m.leader)?;
+                                let bounding = squad_tactics
+                                    .as_ref()
+                                    .and_then(|t| t.squads.get(&(*team, member.squad)))
+                                    .is_some_and(|t| t.bounding);
+                                let near = squad_near(player, *team, member.squad);
+                                (near >= 2).then_some(near as f32 + if bounding { 10.0 } else { 0.0 })
+                            }
+                            name => info.name.contains(name).then_some(1.0),
+                        }
+                    };
+                    runner.chased = bots
+                        .iter()
+                        .filter_map(|b| score(b).map(|s| (s, b.0)))
+                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, p)| p);
+                    match runner.chased.and_then(|p| bots.get(p).ok()) {
+                        Some((_, brain, info, ..)) => {
+                            let line = format!("chase bot {} ({what}: {}) after {elapsed:.1} s", info.name, brain.doing());
+                            info!("scenario: {line}");
+                            writeln!(runner.report, "{line}").ok();
+                            runner.frames = 1;
+                            runner.samples.clear();
+                            runner.step_started = Some(now);
+                            just_chosen = true;
+                        }
+                        None if elapsed > 60.0 => {
+                            warn!("scenario: no bot matching `{what}` to chase ({} bots)", bots.iter().count());
+                            runner.frames = 1;
+                        }
+                        None => {}
+                    }
+                }
+                if let (Some(player), Ok(mut camera)) = (runner.chased, spectator.single_mut())
+                    && let Some(motion) = motion_of(player)
+                {
+                    let forward = Quat::from_rotation_y(motion.yaw) * Vec3::NEG_Z;
+                    let target = motion.position + Vec3::Y * 1.0;
+                    let wanted = motion.position - forward * *distance + Vec3::Y * *height;
+                    // Smoothly, so turning bots don't whip the camera round.
+                    camera.position = if runner.frames == 1 { wanted } else { camera.position.lerp(wanted, 0.08) };
+                    let to = target - camera.position;
+                    look.yaw = (-to.x).atan2(-to.z);
+                    look.pitch = to.y.atan2(to.with_y(0.0).length());
+                    // What he does, every second.
+                    if !just_chosen
+                        && elapsed >= runner.samples.len() as f32
+                        && let Ok((_, brain, info, ..)) = bots.get(player)
+                    {
+                        runner.samples.push(elapsed);
+                        let (target, suppression) = brain.combat_state();
+                        let line = format!(
+                            "chase {:.0}s: {} at ({:.0}, {:.0}, {:.0}) {} ({:?}{}{}, suppression {suppression:.2})",
+                            elapsed,
+                            info.name,
+                            motion.position.x,
+                            motion.position.y,
+                            motion.position.z,
+                            brain.doing(),
+                            motion.stance,
+                            if target { ", enemy in sight" } else { "" },
+                            match brain.fighting_from_cover() {
+                                Some(true) => ", up from cover",
+                                Some(false) => ", down in cover",
+                                None => "",
+                            },
+                        );
+                        info!("scenario: {line}");
+                        writeln!(runner.report, "{line}").ok();
+                    }
+                    runner.frames += 1;
+                }
+                done_if(!just_chosen && runner.frames > 0 && (runner.chased.is_none() || elapsed >= *seconds))
+            }
             Step::VehicleTrace(label, seconds) => {
                 let due = runner.frames == 0 || elapsed >= runner.frames as f32 * 0.25;
                 if due {
@@ -1326,6 +1462,10 @@ fn run_scenario(
             }
             Step::Commander(request) => {
                 commander.write(*request);
+                Progress::Done
+            }
+            Step::Squad(request) => {
+                squad.write(*request);
                 Progress::Done
             }
             Step::CommanderClick((x, y, z)) => {

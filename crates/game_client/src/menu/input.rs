@@ -202,6 +202,7 @@ pub(super) fn press_buttons(
                 settings.last_match.team = *team;
                 settings.last_match.spectate = false;
             }
+            MenuButton::BotDifficulty(d) => settings.last_match.bot_difficulty = *d,
             MenuButton::Resume => resume(
                 &mut menu,
                 window,
@@ -399,6 +400,8 @@ fn local_setup(settings: &Settings, host: bool) -> MatchSetup {
         mode: last.mode.clone(),
         size: last.size,
         bots: last.bots,
+        bot_difficulty: last.bot_difficulty,
+        bot_skill: last.bot_difficulty.params().skill,
         port: last.port,
         network: host,
         // Hosting from the menu is for other players (unless switched off).

@@ -51,9 +51,19 @@ struct Cli {
     /// Number of bots.
     #[arg(long)]
     bots: Option<u32>,
-    /// Bot skill, 0..1: aim and reaction time.
+    /// Bot skill, 0..1: aim and reaction time (default: the difficulty's).
     #[arg(long)]
     bot_skill: Option<f32>,
+    /// Bot difficulty: easy, normal, hard or expert (reaction, aim, tactics, awareness).
+    #[arg(long)]
+    bot_difficulty: Option<game_server::ai::skill::BotDifficulty>,
+    /// Testing: bots of team 1, 2 (or 3: both) play with the tactics from before cover,
+    /// suppression, memory and squad coordination, to compare the two.
+    #[arg(long, default_value_t = 0, hide = true)]
+    bot_legacy_team: u8,
+    /// Testing: bots of one team at another difficulty, `2:easy`.
+    #[arg(long, hide = true)]
+    bot_team_difficulty: Option<String>,
     /// Accept players from other machines (listen on all interfaces). Without it only
     /// clients on this machine can connect.
     #[arg(long)]
@@ -228,8 +238,26 @@ fn main() -> AppExit {
     if let Some(bots) = cli.bots {
         settings.bots = bots;
     }
+    if let Some(difficulty) = cli.bot_difficulty {
+        settings.bot_difficulty = difficulty;
+        settings.bot_skill = difficulty.params().skill;
+    }
     if let Some(skill) = cli.bot_skill {
         settings.bot_skill = skill.clamp(0.0, 1.0);
+    }
+    settings.bot_legacy_team = cli.bot_legacy_team;
+    if let Some(spec) = &cli.bot_team_difficulty {
+        let parsed = spec.split_once(':').and_then(|(team, d)| {
+            let team: u8 = team.trim().parse().ok().filter(|t| (1..=2).contains(t))?;
+            Some((team, game_server::ai::skill::BotDifficulty::parse(d)?))
+        });
+        match parsed {
+            Some(team_difficulty) => settings.bot_team_difficulty = Some(team_difficulty),
+            None => {
+                eprintln!("--bot-team-difficulty: expected <team 1|2>:<easy|normal|hard|expert>, got `{spec}`");
+                return AppExit::error();
+            }
+        }
     }
     if let Some(name) = cli.name {
         settings.name = name;

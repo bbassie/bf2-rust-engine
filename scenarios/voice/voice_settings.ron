@@ -1,0 +1,32 @@
+// Voice chat settings (Settings > Audio): the rows, voice activation, and the mic test with
+// its level meter, fed by a tone instead of a microphone (it plays back through the codec).
+// BF2_VOICE_TEST_INPUT=tone:440 target/debug/deps/client.exe --scenario scenarios/voice/voice_settings.ron
+(
+    menu: true,
+    steps: [
+        WaitReady,
+        ForbidLog("ERROR "),
+        Click("menu:settings"),
+        Wait(0.3),
+        Click("tab:audio"),
+        Wait(0.5),
+        Screenshot("audio"),
+        Click("voice:mode:activation"),
+        Frames(2),
+        Click("voice:test"),
+        ExpectLog("voice: microphone open: test input", 3.0),
+        ExpectLog("voice: playing on", 3.0),
+        Wait(1.0),
+        Screenshot("mic_test"),
+        Click("voice:test"),
+        ExpectLog("voice: microphone closed", 2.0),
+        // Voice off: the mic test doesn't start.
+        Click("voice:enabled"),
+        Frames(2),
+        ForbidLog("voice: microphone open"),
+        Click("voice:test"),
+        Wait(0.5),
+        Screenshot("voice_off"),
+        Quit,
+    ],
+)

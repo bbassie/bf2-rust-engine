@@ -36,6 +36,7 @@ pub mod statics;
 pub mod summary;
 pub mod validate;
 pub mod vehicle;
+pub mod voice;
 pub mod weapons;
 
 /// Simulation rate for gameplay and physics.

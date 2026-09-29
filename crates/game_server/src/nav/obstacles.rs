@@ -6,11 +6,18 @@
 //! second, the cells under every vehicle standing still (hull within [`CLEARANCE`] of a
 //! soldier standing on the cell, at knee, waist or head height) are marked in a bit set on a
 //! background task. Moving vehicles are left to the bots' dodging.
+//!
+//! The same set carries the cells bots **learned** to avoid ([`StuckCells`]): where they got
+//! stuck again and again walking the grid (a tree's low branches, a railing the grid doesn't
+//! see, a doorway too tight for the capsule), the cells just ahead of them in the direction
+//! they were going. Paths then go round those, as round a parked vehicle, for the rest of
+//! the level.
 
 use std::sync::Arc;
 
 use avian3d::prelude::*;
 use bevy::{
+    platform::collections::HashMap,
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, futures::check_ready},
 };
@@ -66,6 +73,102 @@ impl NavBlocked {
 #[derive(Resource, Clone, Default)]
 pub struct NavObstacles(pub Arc<NavBlocked>);
 
+/// Stuck events it takes (by any bots) before a cell is avoided.
+const STUCK_TO_LEARN: u8 = 3;
+/// How far ahead of a stuck bot cells are counted, meters.
+const STUCK_AHEAD: [f32; 2] = [0.5, 1.0];
+
+/// Cells bots got stuck at again and again (see the module docs), for the grid in
+/// [`Navigation`]; and spots where bot drivers got stuck again and again (a street too
+/// narrow, a tree the vehicle grid doesn't see), which vehicle paths go round.
+#[derive(Resource, Default)]
+pub struct StuckCells {
+    counts: HashMap<u32, u8>,
+    learned: Vec<u32>,
+    /// The grid the cell indices belong to.
+    grid: Option<Arc<NavGrid>>,
+    /// Where drivers got stuck (a little ahead of the vehicle), which way they were going,
+    /// and how often.
+    vehicle_spots: Vec<(Vec2, Vec2, u8)>,
+}
+
+/// Radius of a spot drivers got stuck at, meters (grown by the vehicle's half width).
+const VEHICLE_SPOT_RADIUS: f32 = 2.0;
+
+impl StuckCells {
+    /// A bot at `from` got stuck walking towards `toward`.
+    pub fn report(&mut self, grid: &Arc<NavGrid>, from: Vec3, toward: Vec3) {
+        if self.grid.as_ref().is_none_or(|g| !Arc::ptr_eq(g, grid)) {
+            *self = StuckCells {
+                grid: Some(grid.clone()),
+                ..default()
+            };
+        }
+        let dir = (toward - from).with_y(0.0).normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return;
+        }
+        let mut cells: Vec<u32> = Vec::new();
+        for ahead in STUCK_AHEAD {
+            let probe = from + dir * ahead;
+            if let Some(cell) = grid.locate(probe, 0.3, None)
+                && !cells.contains(&cell.index)
+                && grid.ladders_at(cell.index).next().is_none()
+            {
+                cells.push(cell.index);
+            }
+        }
+        for index in cells {
+            let count = self.counts.entry(index).or_default();
+            *count = count.saturating_add(1);
+            if *count == STUCK_TO_LEARN {
+                self.learned.push(index);
+            }
+        }
+    }
+
+    /// Cells learned so far.
+    pub fn learned(&self) -> usize {
+        self.learned.len()
+    }
+
+    /// A driver at `from` got stuck steering for `toward`.
+    pub fn report_vehicle(&mut self, from: Vec3, toward: Vec3) {
+        let dir = (toward - from).xz().normalize_or_zero();
+        if dir == Vec2::ZERO {
+            return;
+        }
+        let at = from.xz() + dir * 4.0;
+        match self.vehicle_spots.iter_mut().find(|(p, ..)| p.distance(at) < 3.0) {
+            Some((_, _, count)) => *count = count.saturating_add(1),
+            None => self.vehicle_spots.push((at, dir, 1)),
+        }
+    }
+
+    /// Spots drivers learned to avoid within `radius` of `near`, as obstacles for a vehicle
+    /// `half_width` meters wide on either side.
+    pub fn vehicle_obstacles(&self, near: Vec3, radius: f32, half_width: f32) -> impl Iterator<Item = super::vehicle::Obstacle> + '_ {
+        self.vehicle_spots
+            .iter()
+            .filter(move |(p, _, count)| *count >= STUCK_TO_LEARN && p.distance(near.xz()) < radius)
+            .map(move |(p, dir, _)| super::vehicle::Obstacle {
+                center: *p,
+                forward: *dir,
+                half: Vec2::splat(VEHICLE_SPOT_RADIUS + half_width),
+            })
+    }
+
+    /// Spots drivers learned to avoid so far.
+    pub fn vehicle_learned(&self) -> usize {
+        self.vehicle_spots.iter().filter(|(.., count)| *count >= STUCK_TO_LEARN).count()
+    }
+
+    /// A new level: forget what was learned on the last one.
+    pub fn forget(&mut self) {
+        *self = StuckCells::default();
+    }
+}
+
 /// A parked vehicle: its hull and pose.
 struct Parked {
     collider: Collider,
@@ -78,8 +181,10 @@ pub(super) struct ObstacleUpdate {
     timer: f32,
     /// The update under way, and the grid it is for.
     task: Option<(Task<NavBlocked>, Arc<NavGrid>)>,
-    /// Where the vehicles were for the last update: nothing to do while none moved.
+    /// Where the vehicles were for the last update: nothing to do while none moved (and no
+    /// cells were learned).
     last: Vec<(Entity, Vec3)>,
+    learned: usize,
 }
 
 pub(super) fn update_obstacles(
@@ -88,6 +193,7 @@ pub(super) fn update_obstacles(
     mut state: Local<ObstacleUpdate>,
     nav: Res<Navigation>,
     vehicles: Query<(Entity, &VehicleMotion, &Collider), With<Vehicle>>,
+    stuck: Option<Res<StuckCells>>,
 ) {
     if let Some((task, grid)) = &mut state.task
         && let Some(blocked) = check_ready(task)
@@ -119,13 +225,27 @@ pub(super) fn update_obstacles(
         });
     }
     now.sort_by_key(|(e, _)| *e);
-    if now == state.last {
+    let learned: Vec<u32> = stuck
+        .as_ref()
+        .filter(|s| s.grid.as_ref().is_some_and(|g| Arc::ptr_eq(g, &nav.0)))
+        .map_or(Vec::new(), |s| s.learned.clone());
+    if now == state.last && learned.len() == state.learned {
         return;
     }
     state.last = now;
+    state.learned = learned.len();
     let grid = nav.0.clone();
     let for_task = grid.clone();
-    state.task = Some((AsyncComputeTaskPool::get().spawn(async move { blocked_cells(&for_task, &parked) }), grid));
+    state.task = Some((
+        AsyncComputeTaskPool::get().spawn(async move {
+            let mut blocked = blocked_cells(&for_task, &parked);
+            for index in learned {
+                blocked.insert(index);
+            }
+            blocked
+        }),
+        grid,
+    ));
 }
 
 /// The cells the vehicles' hulls take up.

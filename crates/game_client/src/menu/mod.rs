@@ -14,6 +14,7 @@ mod levels;
 mod loading;
 mod pages;
 mod preview;
+mod voice;
 mod widgets;
 
 use std::{
@@ -73,7 +74,7 @@ impl Plugin for MenuPlugin {
             );
         }
         app.insert_resource(compiling)
-            .add_plugins((download::DownloadUiPlugin, account::AccountUiPlugin))
+            .add_plugins((download::DownloadUiPlugin, account::AccountUiPlugin, voice::VoiceUiPlugin))
             .insert_state(self.start)
             .init_resource::<Menu>()
             .init_resource::<LevelCatalog>()
@@ -245,6 +246,8 @@ enum MenuButton {
     Level(String),
     Layout(String, u32),
     Team(u8),
+    /// Play/Host page: the bots' difficulty.
+    BotDifficulty(game_server::ai::skill::BotDifficulty),
     Start,
     Connect,
     Resume,
@@ -292,6 +295,7 @@ impl MenuButton {
             MenuButton::Level(name) => format!("level:{name}"),
             MenuButton::Layout(mode, size) => format!("layout:{mode}:{size}"),
             MenuButton::Team(team) => format!("team:{team}"),
+            MenuButton::BotDifficulty(d) => format!("difficulty:{}", d.name().to_lowercase()),
             MenuButton::Start => "start".into(),
             MenuButton::Connect => "connect".into(),
             MenuButton::Resume => "pause:resume".into(),
@@ -437,6 +441,9 @@ enum Slider {
     GamepadLookSensitivity,
     GamepadMoveDeadzone,
     GamepadLookDeadzone,
+    VoiceVolume,
+    VoiceGain,
+    VoiceThreshold,
 }
 
 impl Slider {
@@ -457,6 +464,9 @@ impl Slider {
             Slider::GamepadLookSensitivity => "gamepad_look_sensitivity",
             Slider::GamepadMoveDeadzone => "gamepad_move_deadzone",
             Slider::GamepadLookDeadzone => "gamepad_look_deadzone",
+            Slider::VoiceVolume => "voice_volume",
+            Slider::VoiceGain => "voice_gain",
+            Slider::VoiceThreshold => "voice_threshold",
         }
     }
 
@@ -473,6 +483,9 @@ impl Slider {
             Slider::HudScale | Slider::MinimapSize => (0.6, 1.6, 0.05),
             Slider::GamepadLookSensitivity => (0.2, 3.0, 0.1),
             Slider::GamepadMoveDeadzone | Slider::GamepadLookDeadzone => (0.0, 0.5, 0.02),
+            Slider::VoiceVolume => (0.0, 2.0, 0.05),
+            Slider::VoiceGain => (0.0, 4.0, 0.1),
+            Slider::VoiceThreshold => (-70.0, -10.0, 1.0),
         }
     }
 
@@ -493,6 +506,9 @@ impl Slider {
             Slider::GamepadLookSensitivity => settings.gamepad.look_sensitivity,
             Slider::GamepadMoveDeadzone => settings.gamepad.move_deadzone,
             Slider::GamepadLookDeadzone => settings.gamepad.look_deadzone,
+            Slider::VoiceVolume => settings.voice.volume,
+            Slider::VoiceGain => settings.voice.input_gain,
+            Slider::VoiceThreshold => settings.voice.activation_threshold_db,
         }
     }
 
@@ -522,6 +538,9 @@ impl Slider {
             Slider::GamepadLookSensitivity => settings.gamepad.look_sensitivity = value,
             Slider::GamepadMoveDeadzone => settings.gamepad.move_deadzone = value,
             Slider::GamepadLookDeadzone => settings.gamepad.look_deadzone = value,
+            Slider::VoiceVolume => settings.voice.volume = value,
+            Slider::VoiceGain => settings.voice.input_gain = value,
+            Slider::VoiceThreshold => settings.voice.activation_threshold_db = value,
         }
         if matches!(
             self,
@@ -549,7 +568,11 @@ impl Slider {
             | Slider::GamepadMoveDeadzone
             | Slider::GamepadLookDeadzone => format!("{value:.2}"),
             Slider::FieldOfView => format!("{value:.0} deg"),
-            Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => format!("{:.0}%", value * 100.0),
+            Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume | Slider::VoiceVolume => {
+                format!("{:.0}%", value * 100.0)
+            }
+            Slider::VoiceGain => format!("x{value:.1}"),
+            Slider::VoiceThreshold => format!("{value:.0} dB"),
             Slider::Bots => format!("{value:.0}"),
         }
     }

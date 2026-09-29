@@ -1,0 +1,32 @@
+// Voice chat over a dedicated server, the squad leader's side: see voice_command_alice.ron.
+(
+    steps: [
+        WaitReady,
+        ForbidLog("ERROR "),
+        Squad(Create),
+        ExpectLog("voice: command channel reaches Alice", 60.0),
+        ExpectLog("voice: hearing Alice on command", 60.0),
+        ExpectLog("voice: Alice stopped on command", 10.0),
+        Wait(0.5),
+        HoldKey(KeyH),
+        Wait(1.5),
+        ReleaseKey(KeyH),
+        ExpectLog("voice: stopped talking on command", 3.0),
+        Wait(1.0),
+        // A squad of one: nobody hears it.
+        HoldKey(KeyB),
+        Wait(1.5),
+        ReleaseKey(KeyB),
+        ExpectLog("voice: stopped talking on squad", 3.0),
+        // Alice mutes us as admin: the key no longer sends.
+        ExpectLog("voice: an admin muted you", 40.0),
+        ForbidLog("voice: talking on"),
+        HoldKey(KeyH),
+        Wait(0.8),
+        Screenshot("admin_muted"),
+        Wait(0.7),
+        ReleaseKey(KeyH),
+        Wait(2.0),
+        Quit,
+    ],
+)

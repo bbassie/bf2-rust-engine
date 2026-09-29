@@ -85,6 +85,9 @@ mod ui_theme;
 mod vehicle_prediction;
 mod vehicle_hud;
 mod vehicles;
+// --- Voice chat ---
+mod voice;
+// --- end voice chat ---
 mod wounded;
 
 #[derive(Parser, Debug, Clone, Resource)]
@@ -347,6 +350,9 @@ fn main() -> AppExit {
             },
         ));
     }
+    // --- Voice chat ---
+    app.add_plugins(voice::VoicePlugin);
+    // --- end voice chat ---
     if let Some(setup) = start {
         app.add_systems(Startup, move |world: &mut World| net::start_match(world, setup.clone()));
     }
@@ -372,7 +378,6 @@ fn single_threaded_schedules(app: &mut App) {
         ecs::schedule::{InternedScheduleLabel, ScheduleLabel, SingleThreadedExecutor},
     };
     let mode = std::env::var("BF2_SCHEDULES").unwrap_or_default();
-    render_schedule_executors(app);
     if mode == "parallel" {
         return;
     }
@@ -392,31 +397,6 @@ fn single_threaded_schedules(app: &mut App) {
     for label in labels {
         if let Some(schedule) = schedules.get_mut(label) {
             schedule.set_executor(SingleThreadedExecutor::new());
-        }
-    }
-}
-
-/// Experiment: `BF2_RENDER_ST=Core3d,Core2d,...` runs those render-world schedules (by label
-/// name, `*` for all) on one thread; `BF2_PERF_STATS` logs every render schedule.
-fn render_schedule_executors(app: &mut App) {
-    use bevy::{
-        ecs::schedule::{Schedules, SingleThreadedExecutor},
-        render::RenderApp,
-    };
-    let wanted = std::env::var("BF2_RENDER_ST").unwrap_or_default();
-    let log = std::env::var_os("BF2_PERF_STATS").is_some();
-    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-        return;
-    };
-    let mut schedules = render_app.world_mut().resource_mut::<Schedules>();
-    for (label, schedule) in schedules.iter_mut() {
-        let name = format!("{label:?}");
-        let single = wanted.split(',').any(|w| w == "*" || w == name);
-        if single {
-            schedule.set_executor(SingleThreadedExecutor::new());
-        }
-        if log {
-            info!("render schedule {name}: {:?} executor, single-threaded: {single}", schedule.get_executor_kind());
         }
     }
 }

@@ -413,6 +413,18 @@ pub(super) fn build_level_details(
                     ..default()
                 })
                 .with_children(|row| slider(row, Slider::Bots));
+            options
+                .spawn(Node {
+                    column_gap: px(6),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|chips| {
+                    chips.spawn(text("Difficulty", 15.0, DIM));
+                    for d in game_server::ai::skill::BotDifficulty::ALL {
+                        button(chips, MenuButton::BotDifficulty(d), Look::Plain, d.name());
+                    }
+                });
             if host {
                 section(options, "Server");
                 options
@@ -687,6 +699,7 @@ fn settings_page(
                 ));
                 c.spawn(text("device switching not yet wired to an engine hook", 12.0, DIM));
             });
+            voice::settings_rows(p);
         }
         SettingsTab::Controls => {
             p.spawn(Node {

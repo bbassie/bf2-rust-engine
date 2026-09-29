@@ -8,6 +8,7 @@ use game_shared::{
     conquest::{RoundState, Tickets},
     level::LoadedLevel,
     protocol::{MatchInfo, Player, Score, Team},
+    voice::VoiceMuted,
 };
 
 use super::{
@@ -36,7 +37,10 @@ levels                           levels that can be played
 restart                          restart the map
 bots <count>                     number of bots
 tickets <count> [team]           tickets of both teams, or of team 1 or 2
-friendlyfire [on|off]            whether bullets hurt teammates";
+friendlyfire [on|off]            whether bullets hurt teammates
+mute <player> [reason]           silence a player's voice chat (until unmuted or gone)
+unmute <player>                  let a muted player talk again
+muted                            players whose voice is muted";
 
 /// Runs one admin command line and returns the answer. `admin` names who asked, for the log.
 pub fn execute(world: &mut World, line: &str, admin: &str) -> String {
@@ -65,6 +69,9 @@ pub fn execute(world: &mut World, line: &str, admin: &str) -> String {
         "bots" => bots(world, args),
         "tickets" => tickets(world, args),
         "friendlyfire" | "ff" => friendly_fire(world, args),
+        "mute" | "voicemute" => mute(world, args),
+        "unmute" | "voiceunmute" => unmute(world, args),
+        "muted" | "mutes" => Ok(list_muted(world)),
         other => Err(format!("Unknown command `{other}`. Try `help`.")),
     };
     match result {
@@ -425,3 +432,68 @@ fn friendly_fire(world: &mut World, args: &str) -> Answer {
     Ok(format!("Friendly fire {state}."))
 }
 
+// --- Voice chat (`crate::voice`) ---
+
+/// Mutes a player's voice for this session: the server drops its frames (`voice`), and its
+/// client shows it and stops sending (`VoiceMuted` replicates).
+fn mute(world: &mut World, args: &str) -> Answer {
+    let (key, reason) = first_word(args);
+    let (player, name) = find_player(world, key)?;
+    if world.get::<Player>(player).is_some_and(|p| p.is_bot) {
+        return Err(format!("{name} is a bot: bots don't talk."));
+    }
+    if world.get::<VoiceMuted>(player).is_some() {
+        return Err(format!("{name} is muted already."));
+    }
+    world.entity_mut(player).insert(VoiceMuted);
+    let why = if reason.is_empty() { String::new() } else { format!(": {reason}") };
+    info!("voice: {name} muted by an admin{why}");
+    crate::chat::tell(world, player, &format!("An admin muted your voice chat{why}."));
+    Ok(format!("Muted {name}'s voice."))
+}
+
+fn unmute(world: &mut World, args: &str) -> Answer {
+    let (key, _) = first_word(args);
+    let (player, name) = find_player(world, key)?;
+    if world.get::<VoiceMuted>(player).is_none() {
+        return Err(format!("{name} isn't muted."));
+    }
+    world.entity_mut(player).remove::<VoiceMuted>();
+    info!("voice: {name} unmuted by an admin");
+    crate::chat::tell(world, player, "An admin unmuted your voice chat.");
+    Ok(format!("Unmuted {name}'s voice."))
+}
+
+fn list_muted(world: &mut World) -> String {
+    let mut names: Vec<String> = world
+        .query_filtered::<&Player, With<VoiceMuted>>()
+        .iter(world)
+        .map(|p| p.name.clone())
+        .collect();
+    names.sort();
+    if names.is_empty() { "Nobody is muted.".into() } else { names.join("
+") }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+
+    #[test]
+    fn mute_and_unmute_a_player() {
+        let mut world = World::new();
+        world.init_resource::<Messages<ToClients<game_shared::chat::ChatLine>>>();
+        let alice = world.spawn((Player { name: "Alice".into(), is_bot: false }, PlayerId(1))).id();
+        let bot = world.spawn((Player { name: "Bot Bill".into(), is_bot: true }, PlayerId(2))).id();
+        assert_eq!(mute(&mut world, "alice spamming").unwrap(), "Muted Alice's voice.");
+        assert!(world.get::<VoiceMuted>(alice).is_some());
+        assert!(mute(&mut world, "1").is_err(), "already muted");
+        assert_eq!(list_muted(&mut world), "Alice");
+        assert!(mute(&mut world, "bill").is_err(), "bots don't talk");
+        assert!(world.get::<VoiceMuted>(bot).is_none());
+        assert_eq!(unmute(&mut world, "Alice").unwrap(), "Unmuted Alice's voice.");
+        assert!(world.get::<VoiceMuted>(alice).is_none());
+        assert!(unmute(&mut world, "alice").is_err());
+        assert_eq!(list_muted(&mut world), "Nobody is muted.");
+    }
+}

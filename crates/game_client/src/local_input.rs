@@ -103,8 +103,8 @@ pub fn cursor_locked(cursor: &CursorOptions) -> bool {
     cursor.grab_mode != CursorGrabMode::None
 }
 
-/// A click in the game takes the mouse; menus, the deploy screen and losing focus give it
-/// back (Esc opens the in-game menu, see `menu`).
+/// A click in the game takes the mouse; menus, the deploy screen, the scoreboard's mute chips
+/// and losing focus give it back (Esc opens the in-game menu, see `menu`).
 fn grab_cursor(
     mut cursor: Single<&mut CursorOptions>,
     window: Single<&Window>,
@@ -114,8 +114,11 @@ fn grab_cursor(
     screen: Res<State<Screen>>,
     menu: Res<Menu>,
     gamepads: Query<&Gamepad>,
+    // The scoreboard's mute chips want the mouse (`voice::ui`).
+    scoreboard_mouse: Res<crate::voice::ScoreboardCursor>,
 ) {
-    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open;
+    let playing =
+        *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open && !scoreboard_mouse.0;
     if !playing || !window.focused {
         if cursor_locked(&cursor) {
             cursor.visible = true;

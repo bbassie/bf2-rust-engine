@@ -1,0 +1,41 @@
+// Infantry tactics (crates/game_server/src/bots/combat.rs): 24 bots on Karkand. The camera
+// follows a squad leader whose squad bounds (one fire team moves while the other covers),
+// then bots fighting from cover (up to shoot, down to reload or under fire), and logs what
+// each does every second (`chase ...` lines, also in report.txt). Fails if no bot fought
+// from cover within the run.
+// client --scenario scenarios/ai/bots_tactics.ron --out target/scenarios/ai/bots_tactics
+(
+    level: "strike_at_karkand",
+    bots: 24,
+    size: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        // The squads leave their bases and bound towards the first flags.
+        Wait(20.0),
+        ChaseBot("squad", 6.0, 16.0, 9.0),
+        Screenshot("squad_1"),
+        ChaseBot("squad", 4.0, 22.0, 14.0),
+        Screenshot("squad_2"),
+        Wait(25.0),
+        ChaseBot("squad", 6.0, 16.0, 9.0),
+        Screenshot("squad_3"),
+        // Firefights: bots in cover, peeking to shoot.
+        Wait(20.0),
+        ChaseBot("cover", 5.0, 5.0, 2.5),
+        Screenshot("cover_1"),
+        ChaseBot("cover", 5.0, 6.0, 3.0),
+        Screenshot("cover_2"),
+        Wait(15.0),
+        ChaseBot("cover", 5.0, 5.0, 2.5),
+        Screenshot("cover_3"),
+        ChaseBot("fight", 5.0, 6.0, 3.0),
+        Screenshot("fight_1"),
+        Wait(20.0),
+        ChaseBot("cover", 6.0, 5.0, 2.5),
+        Screenshot("cover_4"),
+        ExpectLog("down in cover", 1.0),
+        Quit,
+    ],
+)

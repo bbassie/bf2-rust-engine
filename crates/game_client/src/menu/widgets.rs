@@ -266,6 +266,7 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
         MenuButton::Level(name) => last.level == *name,
         MenuButton::Layout(mode, size) => last.mode == *mode && last.size == *size,
         MenuButton::Team(team) => last.team == *team && !last.spectate,
+        MenuButton::BotDifficulty(d) => last.bot_difficulty == *d,
         MenuButton::Tab(tab) => menu.tab == *tab,
         MenuButton::Display(mode) => settings.window_mode == *mode,
         MenuButton::WindowSize(w, h) => settings.window_size == (*w, *h),

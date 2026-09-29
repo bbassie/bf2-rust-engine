@@ -1,0 +1,22 @@
+// Voice chat between enemies, the other side: see voice_enemy_alice.ron.
+(
+    steps: [
+        WaitReady,
+        ForbidLog("ERROR "),
+        ForbidLog("voice: hearing"),
+        Squad(Create),
+        ExpectLog("voice: squad channel reaches nobody", 30.0),
+        Wait(6.0),
+        HoldKey(KeyB),
+        Wait(2.0),
+        ReleaseKey(KeyB),
+        ExpectLog("voice: stopped talking on squad", 3.0),
+        Wait(1.0),
+        HoldKey(KeyH),
+        Wait(2.0),
+        ReleaseKey(KeyH),
+        ExpectLog("voice: stopped talking on command", 3.0),
+        Wait(8.0),
+        Quit,
+    ],
+)

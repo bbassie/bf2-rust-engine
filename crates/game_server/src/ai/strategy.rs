@@ -494,6 +494,17 @@ impl TeamIntel {
             .collect()
     }
 
+    /// Enemies of `team` seen by anyone on it within `radius` of `position` in the last
+    /// `max_age` seconds: who, where and how long ago.
+    pub fn sightings_near(&self, team: Team, position: Vec3, radius: f32, max_age: f32) -> impl Iterator<Item = (Entity, Vec3, f32)> + '_ {
+        let clock = self.clock;
+        team_index(team)
+            .into_iter()
+            .flat_map(move |t| self.seen[t].iter())
+            .filter(move |(_, (p, time))| clock - time < max_age && p.distance_squared(position) < radius * radius)
+            .map(move |(enemy, (p, time))| (*enemy, *p, clock - time))
+    }
+
     fn tick(&mut self, dt: f32) {
         self.clock += dt;
         let clock = self.clock;

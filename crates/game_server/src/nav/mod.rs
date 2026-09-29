@@ -46,7 +46,7 @@ use game_shared::{
     soldier::{SOLDIER_HEIGHT, SoldierTuning},
 };
 
-pub use obstacles::{NavBlocked, NavObstacles};
+pub use obstacles::{NavBlocked, NavObstacles, StuckCells};
 pub use path::{LadderStep, NavPath, Waypoint};
 
 pub struct NavPlugin;

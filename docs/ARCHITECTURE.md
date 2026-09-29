@@ -378,7 +378,47 @@ whatever its heading. The level grid leaves the patch's rectangle out and portal
 along its edge; patch cells live in the same arrays, so paths, regions and every other query
 cover both (`nav::patch`). Vehicles standing still are marked on the grid once a second and
 paths go around them; a goal at a vehicle's door snaps to the nearest free cell
-(`nav::obstacles`).
+(`nav::obstacles`). Where bots get stuck again and again (three stuck events on a cell: a
+tree's low branches, a railing or a bank the grid doesn't see) the cells just ahead of them
+join that set (`nav::StuckCells`), so later paths go round them; a swimmer against a bank it
+can't climb learns it at once and swims for the nearest shore, and spots where drivers keep
+getting stuck (a street too narrow) become obstacles for vehicle paths.
+
+**Infantry tactics** (`bots::combat`, `ai::cover`, `ai::awareness`, `ai::squad`) sit on top
+of the utility behaviours:
+
+- *Cover*: in a firefight a bot rolls (difficulty, courage) whether it fights from cover. The
+  search takes cells near an edge of the grid with nothing walkable right beside them towards
+  the threat (the grid's cheap line of sight), scores them by distance, the way it is going
+  and teammates' spots, and checks the best few with rays: hidden crouching but not standing
+  is low cover (stand up to shoot), hidden standing needs a peek spot a step to the side past
+  the corner. Rays are rationed per tick (`COVER_RAYS`). From cover it is up shooting a few
+  seconds (longer while it wins), down to reload, when hurt or when the fire gets close;
+  attackers move on from cover to cover towards their flag; with the enemy gone it watches.
+- *Suppression*: enemy fire whose aim passes within 4 m (the client's flyby crack radius)
+  raises it; it shakes the aim, slows reactions, sends the bot to cover or low (crouched,
+  prone at range) and tells it where the shooter is.
+- *Awareness*: a memory of contacts (seen, heard firing or running, spotted by the team or
+  seen by a teammate, shooting at it) that ages and is forgotten; it points holders the way
+  the enemy comes, gives grenades and suppressive fire their targets, and a known enemy
+  coming back into view is shot at sooner. Bots call out enemies they see with the commo
+  rose's spot, which marks them for the whole team.
+- *Squads* of bots work as two fire teams: near the fight they **bound** (one team moves
+  25 m while the other holds low, covering, then the other team moves past it); pinned down
+  (members fighting under fire for a while), team 0 lays down suppressive fire while team 1
+  flanks. Medics go to downed squad mates first, medics and support run their bags to squad
+  mates who need them, and defenders take cover facing the way the enemy comes, the leader
+  (whom the squad spawns on) behind the flag.
+- *Difficulty* (`ai::skill::BotDifficulty`, `--bot-difficulty`, the host menu) sets the
+  default skill and scales reaction time, aim error, tactics (how often bots take cover,
+  flank, suppress, throw grenades behind cover, spot) and awareness (sight, hearing, memory):
+  Easy 0.25 / 1.4 / 1.5 / 0.3 / 0.8, Normal 0.5 / 1 / 1 / 0.65 / 1, Hard 0.7 / 0.8 / 0.8 /
+  0.85 / 1.15, Expert 0.9 / 0.65 / 0.65 / 1 / 1.3.
+- `--bot-legacy-team 1|2|3` makes a team (3: both) play without these, to compare; the
+  per-minute `ai team` log line has the time spent in cover while engaged (a ray from the
+  threat's eye to the body, sampled for both behaviours), cover runs, suppression, spots,
+  bounds and pins, and the `bots:` lines idle bots by what they were doing and where bots
+  and drivers got stuck.
 
 **Bots in vehicles** (`game_server::bots::vehicle`, `ai::vehicles`, `nav::vehicle`) use the
 use button, the seat keys and ordinary `InputFrame`s like players:
@@ -452,6 +492,37 @@ a destroyed asset (object or artillery wreck) is in `DestroyedStatics`, which th
 commander screen, the maps and the bots' engineers read. Levels imported before the pieces
 were vehicles keep them as objects, with shells landing on schedule.
 
+### Voice chat
+
+BF2's push-to-talk voice, done in a modern way (`game_shared::voice`, `game_server::voice`,
+the client's `voice` module, and the engine-free `game_voice` crate):
+
+- **Channels.** Squad (B): the talker's squad. Command (H): the commander and the team's squad
+  leaders, who alone may talk on it; a commander outside any squad talks there with B too.
+  Bots never talk. The rules are one pure function (`voice::hears`, unit-tested), applied by
+  the **server**: the client only says which key it pressed.
+- **Codec.** Opus, 48 kHz mono, 20 ms frames, 24 kbps VBR, VoIP mode with in-band FEC. The
+  codec is libopus 1.3.1 translated to Rust (`unsafe-libopus`): the reference implementation
+  without a C toolchain or CMake, so the client builds the same on Windows MSVC and Linux.
+- **Network.** `VoicePacket` (client to server) and `VoiceRelay` (server to each listener,
+  independent of replication, talker by `PlayerNetId`) each get a dedicated unreliable renet
+  channel, registered last. The server drops empty or oversized frames (256 bytes), frames
+  beyond `Rate::VOICE` (the shared limiter), and frames from bots, spectators, players who may
+  not use the channel and players an admin muted (`mute`/`unmute`/`muted` admin commands;
+  `VoiceMuted` replicates so the client stops sending). About 30 kbit/s per listener of a
+  talker: a squad of six with one talking costs the server 150 kbit/s up.
+- **Client.** The microphone (cpal, the device's own rate and format, resampled to 48 kHz) is
+  opened only while push to talk is held (plus a 200 ms tail), voice activation is chosen, or
+  the mic test runs; voice chat off captures nothing. Playback is an output stream of its
+  own: each talker has a jitter buffer (60 ms to start, growing after late packets, FEC for a
+  single loss, concealment otherwise) and a decoder, mixed at master times voice volume. The
+  HUD lists who talks (ours first) with a channel badge; the scoreboard mutes teammates for
+  the session (right-click frees the mouse). Settings > Audio has the devices, gain, volume,
+  push to talk or voice activation (with its level) and a mic test that plays you back.
+- **Testing.** `BF2_VOICE_TEST_INPUT=tone`, `tone:<Hz>` or a WAV file replaces the
+  microphone; the log names every burst sent and heard, which `scenarios/voice/` checks with
+  two clients against a dedicated server.
+
 ### Levels
 
 `MatchInfo` (replicated) names the level. Client and server both load it from `imported/`:
@@ -499,9 +570,25 @@ What a frame with 63 bots costs, and the rules that keep it low (see `render::pe
 - The main world's schedules run single-threaded (`main::single_threaded_schedules`, like the
   dedicated server): its systems are tiny, and handing each to a worker cost more than it saved
   while the render thread keeps the workers busy. `BF2_SCHEDULES=parallel` switches back.
+- One camera draws everything, the first-person view model included (`render::viewmodel`: the
+  model is shrunk towards the eye so it never clips into walls, and scaled for BF2's 60°
+  first-person field of view): a second camera was a whole extra view, about 1.4 ms of the
+  render thread and 0.5 ms of the main thread a frame.
+- The player camera and its shadow cascades draw directly (`NoIndirectDrawing`): Bevy's
+  GPU-driven indirect draws rebuild bin unpacking bind groups and indirect parameters for
+  every batch of every view each frame, which costs more CPU here than the draw calls it
+  saves (render thread 8.1 -> 7.2 ms on Karkand with 63 bots). `BF2_PERF_EXP=indirect` for
+  comparisons. Most of the render thread's time is wgpu recording and submitting the draws
+  (the time after each camera's schedule in `BF2_PERF_STATS`).
+- Map markers that move every frame (the minimap's) move by their `UiTransform`, not
+  `left`/`top`: a changed `Node` lays out its whole UI tree again.
+- Mesh entities nobody sees (other LODs, culled by their `VisibilityRange`) cost little: 4,800
+  more on Karkand added about 0.15 ms. What costs is what each view draws.
 - Measuring: `client --scenario scenarios/perf/perf_karkand.ron --bots 63` (median and p95 per
-  view in `report.txt`); `BF2_PERF_STATS=1` logs the main world's and the render thread's time a
-  frame, mesh, bone and body counts and material changes (`=full` also what moved);
+  view in `report.txt`); `BF2_PERF_STATS=1` logs the main world's time a frame (by schedule),
+  how long it waits for the render world and extracts, the render thread's time by render
+  set and camera, mesh (by kind), draw, UI node, bone and body counts and material changes
+  (`=full` also what moved);
   `--diagnostics` adds the GPU time of each pass to the report; a build with
   `--features game_server/profile` and `BF2_PROFILE_FRAMES=1` adds every system's time.
 

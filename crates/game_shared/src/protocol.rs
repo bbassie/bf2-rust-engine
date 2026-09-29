@@ -102,7 +102,14 @@ impl Plugin for ProtocolPlugin {
             .add_server_message::<crate::join::JoinChallenge>(Channel::Ordered)
             .add_server_message::<crate::join::JoinVerdict>(Channel::Ordered)
             .make_message_independent::<crate::join::JoinChallenge>()
-            .make_message_independent::<crate::join::JoinVerdict>();
+            .make_message_independent::<crate::join::JoinVerdict>()
+            // Voice chat (`crate::voice`): each message gets a renet channel of its own, so
+            // these are dedicated unreliable channels, registered after the game's so they
+            // come last when a packet is filled. The relay holds no entities: out right away.
+            .replicate::<crate::voice::VoiceMuted>()
+            .add_client_message::<crate::voice::VoicePacket>(Channel::Unreliable)
+            .add_server_message::<crate::voice::VoiceRelay>(Channel::Unreliable)
+            .make_message_independent::<crate::voice::VoiceRelay>();
     }
 }
 
