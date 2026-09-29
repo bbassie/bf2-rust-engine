@@ -130,11 +130,18 @@ const STRIKE_LINGER: f32 = 1.5;
 /// The commander spots the enemy within this many meters of where he clicks.
 const SPOT_REACH: f32 = 15.0;
 
-#[derive(Default)]
 struct TeamState {
     /// Seconds until each asset recharges, by [`Asset::index`].
     recharge: [f32; 4],
     mutiny: HashSet<Entity>,
+}
+
+impl Default for TeamState {
+    /// A round starts with every asset recharging from empty, so no artillery, UAV, scan or
+    /// supply drop lands in its first minutes: the opening belongs to the soldiers.
+    fn default() -> Self {
+        Self { recharge: Asset::ALL.map(Asset::recharge), mutiny: HashSet::default() }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -337,8 +344,7 @@ fn reset_on_round(
         return;
     }
     for team in &mut state.teams {
-        team.recharge = [0.0; 4];
-        team.mutiny.clear();
+        *team = TeamState::default();
     }
     for entity in &strikes {
         commands.entity(entity).despawn();
@@ -1368,7 +1374,21 @@ mod request_tests {
             .init_resource::<CommanderAssets>()
             .init_resource::<CommanderState>()
             .add_systems(Update, handle_commands);
+        // Rounds start with assets recharging; these tests are about using charged ones.
+        for team in &mut app.world_mut().resource_mut::<CommanderState>().teams {
+            team.recharge = [0.0; 4];
+        }
         app
+    }
+
+    #[test]
+    fn a_round_starts_with_every_asset_recharging() {
+        let state = CommanderState::default();
+        for team in &state.teams {
+            for asset in Asset::ALL {
+                assert_eq!(team.recharge[asset.index()], asset.recharge(), "{asset:?}");
+            }
+        }
     }
 
     fn player(app: &mut App, name: &str, team: Team) -> Entity {
