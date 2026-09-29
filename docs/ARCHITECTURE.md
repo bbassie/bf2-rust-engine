@@ -380,9 +380,11 @@ cover both (`nav::patch`). Vehicles standing still are marked on the grid once a
 paths go around them; a goal at a vehicle's door snaps to the nearest free cell
 (`nav::obstacles`). Where bots get stuck again and again (three stuck events on a cell: a
 tree's low branches, a railing or a bank the grid doesn't see) the cells just ahead of them
-join that set (`nav::StuckCells`), so later paths go round them; a swimmer against a bank it
-can't climb learns it at once and swims for the nearest shore, and spots where drivers keep
-getting stuck (a street too narrow) become obstacles for vehicle paths.
+join that set (`nav::StuckCells`), so later paths go round them, and spots where drivers keep
+getting stuck (a street too narrow) become obstacles for vehicle paths. A swimmer only finds
+its feet where the bottom is within wading depth (0.4 m) of the surface, so a bot swimming
+without getting anywhere (against a hull or a quay) swims straight for the nearest shore
+shallower than that, and another one if that fails too.
 
 **Infantry tactics** (`bots::combat`, `ai::cover`, `ai::awareness`, `ai::squad`) sit on top
 of the utility behaviours:
@@ -414,7 +416,8 @@ of the utility behaviours:
   flank, suppress, throw grenades behind cover, spot) and awareness (sight, hearing, memory):
   Easy 0.25 / 1.4 / 1.5 / 0.3 / 0.8, Normal 0.5 / 1 / 1 / 0.65 / 1, Hard 0.7 / 0.8 / 0.8 /
   0.85 / 1.15, Expert 0.9 / 0.65 / 0.65 / 1 / 1.3.
-- `--bot-legacy-team 1|2|3` makes a team (3: both) play without these, to compare; the
+- `--bot-legacy-team 1|2|3` makes a team (3: both) play without these, and
+  `--bot-team-difficulty 2:easy` a team at another difficulty, to compare; the
   per-minute `ai team` log line has the time spent in cover while engaged (a ray from the
   threat's eye to the body, sampled for both behaviours), cover runs, suppression, spots,
   bounds and pins, and the `bots:` lines idle bots by what they were doing and where bots

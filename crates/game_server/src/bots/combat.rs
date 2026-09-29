@@ -501,10 +501,10 @@ impl BotBrain {
         let hide = self.suppression > 0.75 || self.hurt_ago < 0.4 || reloading;
         if self.exposed && (self.peek_timer <= 0.0 || hide) {
             self.exposed = false;
-            self.peek_timer = 0.7 + 1.0 * fastrand::f32() + 0.8 * self.suppression.min(1.0);
+            self.peek_timer = 0.4 + 0.6 * fastrand::f32() + 0.6 * self.suppression.min(1.0);
         } else if !self.exposed && self.peek_timer <= 0.0 && !hide {
             self.exposed = true;
-            self.peek_timer = 1.5 + 2.0 * fastrand::f32() * (0.5 + self.personality.aggression);
+            self.peek_timer = 2.5 + 2.0 * fastrand::f32() * (0.5 + self.personality.aggression);
         }
         let at = if self.exposed { peek } else { cover.spot };
         if flat(at - position).length() > 0.6 {
