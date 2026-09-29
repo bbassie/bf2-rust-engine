@@ -125,6 +125,10 @@ pub struct SoldierMotion {
     /// feet touch something.
     #[serde(default)]
     pub parachute: bool,
+    /// Water is over [`SoldierTuning::swim_depth`] above the feet: floating at the surface,
+    /// standing only, weapon put away (BF2 soldiers can't dive or fire while swimming).
+    #[serde(default)]
+    pub swimming: bool,
 }
 
 impl Default for SoldierMotion {
@@ -150,6 +154,7 @@ impl Default for SoldierMotion {
             on_rope: false,
             riding: false,
             parachute: false,
+            swimming: false,
         }
     }
 }
@@ -167,7 +172,9 @@ impl SoldierMotion {
     /// jumping or getting up from prone (BF2's `fire-delay-after-jump` and
     /// `fire-delay-from-prone`).
     pub fn can_fire(&self) -> bool {
-        !self.climbing && !self.riding && self.fire_lock <= 0.0
+        // Under a parachute both hands are on the risers; swimming, the weapon is slung and
+        // both arms stroke (BF2 puts every weapon away in the water).
+        !self.climbing && !self.riding && !self.parachute && !self.swimming && self.fire_lock <= 0.0
     }
 
     pub fn eye_position(&self) -> Vec3 {
@@ -282,6 +289,22 @@ pub struct SoldierTuning {
     pub prone_switch_delay: f32,
     /// Seconds after a jump before going prone (`prone-delay-after-jump`).
     pub prone_delay_after_jump: f32,
+    /// Swimming forward, and sprint-swimming (BF2's animation value holders `3p_swimForward`
+    /// ≈ 1.9 m/s, `3p_swimSprint` ≈ 2.4 m/s).
+    pub swim_speed: f32,
+    pub swim_sprint_speed: f32,
+    /// Depth of water over the feet (m) where standing gives way to wading: slower, still
+    /// grounded.
+    pub wade_depth: f32,
+    /// Depth of water over the feet (m) deep enough that footing is lost and swimming takes
+    /// over (surface only; BF2 soldiers can't dive).
+    pub swim_depth: f32,
+    /// How far the feet float below the surface while swimming, so the head and shoulders
+    /// stay above water (BF2's swimming pose).
+    pub swim_float_depth: f32,
+    /// How quickly a soldier entering or leaving water settles to the swimming float depth
+    /// or back onto the ground, 1/s.
+    pub swim_buoyancy: f32,
 }
 
 /// Sprint stamina, from BF2's soldier templates (`us_light_soldier.tweak` and friends).
@@ -355,6 +378,12 @@ impl Default for SoldierTuning {
             fire_delay_after_prone: 0.6,
             prone_switch_delay: 0.8,
             prone_delay_after_jump: 0.3,
+            swim_speed: 1.9,
+            swim_sprint_speed: 2.4,
+            wade_depth: 0.4,
+            swim_depth: 1.3,
+            swim_float_depth: 1.55,
+            swim_buoyancy: 4.0,
         }
     }
 }
@@ -481,12 +510,15 @@ pub fn step_soldier(
     tuning: &SoldierTuning,
     shapes: &SoldierShapes,
     mover: &MoveAndSlide,
+    water: Option<f32>,
 ) {
     let world = Surroundings {
         mover,
         filter: SpatialQueryFilter::from_mask(GameLayer::soldier_movement_mask()),
         min_normal_y: tuning.max_slope.cos(),
     };
+    // Depth of water over the feet; very negative on dry land or levels without water.
+    let depth = water.map_or(f32::MIN, |h| h - m.position.y);
 
     m.yaw = input.yaw;
     m.pitch = input.pitch.clamp(-1.55, 1.55);
@@ -514,6 +546,24 @@ pub fn step_soldier(
         m.sprinting = false;
         update_stamina(m, tuning, false, dt);
         ride(m, &world, tuning, shapes, fresh_jump, dt);
+        return;
+    }
+    // Too deep to stand: swim at the surface until it shallows out again (BF2 soldiers can't
+    // dive). Once swimming, stay swimming until the ground check in `swim` finds a shore.
+    // Falling or parachuting into water with no bottom in reach swims at once too, rather
+    // than plunging through the surface (water has no collision) looking for the seabed.
+    let falling_into_deep_water = !m.grounded
+        && depth > 0.0
+        && world
+            .ground(
+                shapes.movement(Stance::Standing),
+                m.position + Stance::Standing.collision_center(),
+                tuning.swim_depth,
+            )
+            .is_none();
+    if m.swimming || depth >= tuning.swim_depth || falling_into_deep_water {
+        m.parachute = false;
+        swim(m, &world, tuning, shapes, input, water.unwrap_or(m.position.y), dt);
         return;
     }
 
@@ -565,6 +615,11 @@ pub fn step_soldier(
     if m.recovery > 0.0 {
         let recovered = 1.0 - m.recovery / tuning.landing_time;
         speed *= tuning.landing_speed + (1.0 - tuning.landing_speed) * recovered;
+    }
+    // Wading: deep enough to slow down, not yet deep enough to lose footing.
+    if depth > tuning.wade_depth {
+        let wade = ((depth - tuning.wade_depth) / (tuning.swim_depth - tuning.wade_depth)).clamp(0.0, 1.0);
+        speed *= 1.0 - wade * WADE_SLOWDOWN;
     }
     let mut horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
 
@@ -929,6 +984,71 @@ fn ride(
         m.velocity.y = 0.0;
         m.riding = false;
         m.grounded = true;
+    }
+}
+
+/// Sprint-swim slowdown vs. run/sprint on land is already in [`SoldierTuning::swim_speed`];
+/// wading only loses this much of the dry-land speed at the edge of [`SoldierTuning::swim_depth`].
+const WADE_SLOWDOWN: f32 = 0.5;
+
+/// One tick of swimming: at the surface, standing only, until the water shallows enough to
+/// climb out (a shore) or a boat is boarded (handled outside `step_soldier`, by distance:
+/// see `game_server::vehicles::enter_vehicles`). BF2 soldiers can't dive, so the feet float a
+/// fixed depth below the surface rather than sinking or rising with input.
+#[allow(clippy::too_many_arguments)]
+fn swim(
+    m: &mut SoldierMotion,
+    world: &Surroundings,
+    tuning: &SoldierTuning,
+    shapes: &SoldierShapes,
+    input: &InputFrame,
+    water_height: f32,
+    dt: f32,
+) {
+    m.swimming = true;
+    m.grounded = false;
+    m.stance = Stance::Standing;
+    m.air_control = 0.0;
+    m.recovery = 0.0;
+
+    let intent = input.movement_vec();
+    let wish = Quat::from_rotation_y(m.yaw) * Vec3::new(intent.x, 0.0, -intent.y);
+    // BF2 lets a soldier sprint-swim; it costs stamina like sprinting on land.
+    let wants_sprint = input.pressed(Buttons::SPRINT) && intent.y > 0.5;
+    update_stamina(m, tuning, wants_sprint, dt);
+    let speed = if m.sprinting { tuning.swim_sprint_speed } else { tuning.swim_speed };
+    let target = wish * speed;
+    let mut horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
+    let factor = if target.length_squared() > horizontal.length_squared() + 1e-4 {
+        tuning.acceleration
+    } else {
+        tuning.deceleration
+    };
+    horizontal = approach(horizontal, target, factor, dt);
+    // BF2 soldiers can't jump while swimming: the jump key does nothing here.
+
+    let shape = shapes.movement(Stance::Standing);
+    let center = Stance::Standing.collision_center();
+    let start = m.position + center;
+    let moved = world.slide(shape, start, horizontal, dt, Contact::Walk);
+    m.position = moved.center - center;
+    horizontal = Vec3::new(moved.velocity.x, 0.0, moved.velocity.z);
+
+    // Buoyancy: settle towards floating with the head and shoulders above the surface.
+    let target_y = water_height - tuning.swim_float_depth;
+    let blend = 1.0 - (-tuning.swim_buoyancy * dt).exp();
+    m.position.y += (target_y - m.position.y) * blend;
+    m.velocity = horizontal;
+
+    // Climbing out: close enough to a standable bottom (or a beach sloping up) that a
+    // soldier stopping there wouldn't be over swimming depth.
+    if let Some(ground) = world.ground(shape, m.position + center, tuning.swim_float_depth + 0.5)
+        && water_height - ground.height < tuning.wade_depth
+    {
+        m.position.y = ground.height;
+        m.grounded = true;
+        m.swimming = false;
+        m.velocity = along_ground(horizontal, ground.normal);
     }
 }
 

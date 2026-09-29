@@ -425,8 +425,9 @@ fn animate_view_model(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    // Both hands on a ladder: the weapon is slung, as in BF2's ladder seat.
-    if motion.climbing || motion.riding {
+    // Both hands on a ladder (or a parachute's risers): the weapon is slung, as in BF2's
+    // ladder and parachute seats. Swimming, it's put away too (BF2 can't fire in the water).
+    if motion.climbing || motion.riding || motion.parachute || motion.swimming {
         visibility.set_if_neq(Visibility::Hidden);
         state.animated_weapon.clear();
         return;

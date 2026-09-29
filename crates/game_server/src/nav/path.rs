@@ -37,6 +37,14 @@ const LADDER_DOWN_COST: f32 = 1.5;
 /// Extra cost of stepping onto a cell a parked vehicle stands on, in meters of walking:
 /// paths go around unless there's no other way.
 const BLOCKED_COST: f32 = 20.0;
+/// Water deep enough over a cell that crossing it means swimming, not wading (m). Matches
+/// BF2's own soldier depth roughly (see `game_shared::soldier::SoldierTuning::swim_depth`);
+/// kept as a separate constant since the nav grid doesn't depend on `game_shared::soldier`.
+const SWIM_NAV_DEPTH: f32 = 0.5;
+/// Cost multiplier of a cell deep enough to swim across (BF2's own
+/// `setVehicleMaterialCost Infantry DeepWater 6`): paths prefer land and boats but can still
+/// swim when that's the only or the much shorter way.
+const SWIM_COST: f32 = 6.0;
 
 /// A path for a soldier to walk.
 #[derive(Clone, Debug)]
@@ -231,9 +239,15 @@ impl NavGrid {
                 }
             });
             let from = self.position(here);
+            // Cells deep enough underwater cost much more to cross: paths prefer dry land
+            // and boats but can still swim across when nothing else gets there.
+            let water_cost = |height: f32| match self.params.water_height {
+                Some(w) if w - height > SWIM_NAV_DEPTH => SWIM_COST,
+                _ => 1.0,
+            };
             let portals = self.portals_at(index).iter().map(|&to| {
                 let b = self.cell(to);
-                let mut cost = self.position(to).xz().distance(from.xz()).max(0.1);
+                let mut cost = self.position(to).xz().distance(from.xz()).max(0.1) * water_cost(b.y);
                 let dy = b.y - a.y;
                 if dy.abs() > self.walk_climb(&a, b) {
                     cost += if dy > 0.0 { JUMP_COST } else { DROP_COST };
@@ -243,7 +257,7 @@ impl NavGrid {
             let walks = moves.into_iter().filter_map(|(to, length)| {
                 let to = to?;
                 let b = self.cell(to);
-                let mut cost = length * cell * wall_penalty(b, dist_scale);
+                let mut cost = length * cell * wall_penalty(b, dist_scale) * water_cost(b.y);
                 let dy = b.y - a.y;
                 if dy.abs() > self.walk_climb(&a, b) {
                     cost += if dy > 0.0 { JUMP_COST } else { DROP_COST };

@@ -80,18 +80,25 @@ struct ProfileLayer;
 
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for ProfileLayer {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        let kind = match attrs.metadata().name() {
+        let span_name = attrs.metadata().name();
+        let kind = match span_name {
             "system" => "",
             "schedule" => "sched ",
             "system_commands" => "cmds ",
+            // Other spans (render passes, a camera's schedule, queue submits): by span name
+            // plus its `name` or `camera` field, if any.
+            _ if cfg!(feature = "profile") => "span ",
             _ => return,
         };
         let mut name = NameVisitor(None);
         attrs.record(&mut name);
-        let Some(name) = name.0 else {
-            return;
+        let name = match (kind, name.0) {
+            ("span ", Some(field)) => format!("{span_name} {field}"),
+            ("span ", None) => span_name.to_string(),
+            (_, Some(name)) => short_name(&name),
+            (_, None) => return,
         };
-        let Some(slot) = intern(format!("{kind}{}", short_name(&name))) else {
+        let Some(slot) = intern(format!("{kind}{name}")) else {
             return;
         };
         if let Some(span) = ctx.span(id) {
@@ -131,13 +138,13 @@ struct NameVisitor(Option<String>);
 
 impl Visit for NameVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "name" {
+        if field.name() == "name" || field.name() == "camera" {
             self.0 = Some(value.to_string());
         }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "name" {
+        if field.name() == "name" || field.name() == "camera" {
             self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
         }
     }

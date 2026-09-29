@@ -169,9 +169,12 @@ helicopter, sea, stationary) comes from the engine type.
 - **Server** (`game_server::vehicles`): spawners create vehicles for the team holding their
   control point and respawn them when they are gone or abandoned. The use button near an
   entry point takes the first free seat, F1..F8 change seats, use again gets out beside the
-  vehicle (out of an aircraft high up, with its speed and under a parachute that sinks at
-  5 m/s, glides where the keys steer and packs away on landing; the jump key also opens one
-  when falling fast). A seated soldier stays alive but `apply_inputs` skips it: its
+  vehicle (out of an aircraft high up, with its speed, under a parachute; the jump key also
+  opens one when falling fast). The parachute (`soldier::parachute_glide`) catches the fall
+  over a moment (30 m/s²), then glides where the soldier looks (turning at most 70°/s):
+  8 m/s forward sinking 4.5 m/s hands off, W dives (13 m/s, 7 m/s), S brakes (3 m/s,
+  3.2 m/s), A/D slip sideways; 3 m above the ground it flares (at most 2 m/s down) and he
+  lands running with half the glide. No weapons meanwhile. A seated soldier stays alive but `apply_inputs` skips it: its
   `InputFrame` goes to the vehicle's `SeatInputs`, and it is carried along at its seat every
   tick. Guns fire from
   their seat's triggers (weapon keys pick among the guns of one trigger) with BF2 overheat;
@@ -190,14 +193,28 @@ helicopter, sea, stationary) comes from the engine type.
     `setTorque` × `setDifferential` × ratio / wheel radius, top speed from BF2's AI);
     tracked vehicles hold both tracks to a commanded speed and turn rate (skid steering).
   - jets: throttle spools (hands off holds cruise, parked idles), thrust fades towards top
-    speed (the afterburner raises it), each wing lifts with its BF2 lift plus flap lift times
-    its control surface deflection and speed squared, clamped at the stall angle; plate and
-    induced drag, a load limit, an angle of attack limiter and per-axis angular damping keep
-    it flyable. Landing gear retracts above its BF2 height.
+    speed (the afterburner raises it), each wing lifts with its BF2 lift, clamped at the
+    stall angle; plate and induced drag and a load limit. Piloted, a jet flies by wire, a
+    gameplay layer for BF3/BF4-like handling (BF2's raw wing torques rolled the J-10 at
+    20°/s at take-off speed and let it wander): the stick and rudder ask for rates (pitch
+    48°/s, roll 170°/s, yaw 29°/s at the corner speed) that a controller holds, so centred it
+    keeps its attitude, trimmed to fly where it points. The share of those rates depends on
+    airspeed: best at the corner speed (70 % of the engines' BF2 top speed, 315 km/h for
+    most jets; the HUD lights the airspeed in that band), mushy below, wider above, so the
+    throttle and afterburner change the turn radius and hard turns bleed speed (induced
+    drag). Wings lift 1.8× BF2's for the angle of attack (the path follows the nose); the fin
+    weathervanes the nose into sideways airflow (coordinated banked turns and rudder yaw).
+    Below 40 % of the corner speed or past the stall angle it stalls: the stick loses most
+    authority, the nose drops towards the flight path, the HUD says STALL and the view
+    shakes; with speed back it flies again. Unpiloted jets keep BF2's raw forces. Landing
+    gear retracts above its BF2 height.
   - helicopters: the rotor spins up, the collective regulates the climb rate (holding
-    altitude hands off), the cyclic tilts the lift within BF2's regulation angles and the
-    body levels itself when let go; turn rates follow BF2's engine values. Near the ground
-    the collective sinks slower (a held-down helicopter touches down at about 2 m/s), and a
+    altitude hands off), the cyclic tilts the lift within BF2's regulation angles at BF2's
+    turn rates, fading out towards 30° of pitch and 50° of bank, and the body levels itself
+    when let go (0.8/s pitch, 1.2/s roll). In forward flight it turns into its bank (about
+    the vertical) and the tail keeps it into the airflow; backwards and sideways it's slow
+    (extra drag), and hands off at low speed the drift dies out. Near the ground the
+    collective sinks slower (a held-down helicopter touches down at about 2 m/s), and a
     landed one leans on its skids until the pilot pulls up.
   - jump jets (the F-35B): below 35 m/s, S swings them into hover (also parked on a deck):
     the lift fan (BF2's `c_ETHelicopter` engine on the jet) carries them like a gentle
@@ -223,16 +240,21 @@ helicopter, sea, stationary) comes from the engine type.
   materials of their own (with the scroll direction and hub centres in their extras), and
   each vehicle scrolls its belts and rim treads and turns its hub textures and sprockets by
   the distance each track ran; tank road wheels (`rotateUV`) don't turn their geometry, as
-  the belt around them is skinned to them.
+  the belt around them is skinned to them. Each write of a track material re-uploads its
+  whole bindless slab, so only tracks in view are written, only once they've moved 1/512 of
+  a texture repeat, and beyond 40 m every other frame.
   First person shows the interior mesh (BF2 geom 0), the seated soldier (its seat pose) and,
   for gunners, the weapon's BF2 HUD sight (reticle, periscope frame) from
   `menu/hud/hudsetup/vehicles`, laid out on BF2's 800x600 screen. The camera uses the seat's
-  camera point (gunners' views turn with their turret) or chases the vehicle (V); pilots get
-  a stiff chase camera. The vehicle HUD (`vehicle_hud`, our own design) has a panel with
+  camera point or chases the vehicle (V). Gunners look where they aim at once, the turret
+  and gun following at their BF2 speeds (a ring marks where the gun points meanwhile), and
+  the aim stops at the turret's and gun's limits; joints are drawn between ticks. Pilots'
+  chase camera trails the aircraft's rotation, pulls back with speed and looks into the
+  turn; the cockpit view turns a little into it too (`vehicles::pilot_camera`). The vehicle HUD (`vehicle_hud`, our own design) has a panel with
   the vehicle's hit points, who sits in which seat, speed and gear, where the turret points
   and the seat's guns (ammo, heat, lock) and countermeasures; pilots get flight instruments
   (banking horizon and pitch ladder, heading, airspeed, throttle and afterburner, altitude
-  and climb rate, stall and pull-up warnings). BF2's armor effects show the damage state: smoke (and sparks) while the
+  and climb rate, a flight path marker, stall and pull-up warnings). BF2's armor effects show the damage state: smoke (and sparks) while the
   hit points are under their thresholds, the explosion and wreck fires at 0; the wreck burns
   down to -100 % over its 10 s and blows apart.
   The outside models' lower LODs (BF2 geom 1 LOD 1..) are rigged like the full model and
@@ -247,7 +269,10 @@ helicopter, sea, stationary) comes from the engine type.
 
 Controls in vehicles: W/S throttle (jets: hands off holds 50 %, S idles and air brakes, and
 slows a jump jet into hover; helicopters and hovering jets: collective), A/D steering, rudder
-or tail rotor, mouse or arrow keys as the stick (pitch and roll; the down arrow pulls up), Alt
+or tail rotor, mouse, arrow keys or the gamepad's right stick as the stick (pitch and roll;
+up raises the nose, like looking up; the "invert jet/helicopter pitch" settings make all
+three flight-stick style, BF2's default; settings saved before this swap their old arrow
+keys once, `Settings::migrate`), Alt
 free look, Shift afterburner, Space wheel brakes, fire/aim buttons the seat's
 primary/secondary guns, weapon keys the gun on a trigger, G countermeasures (flares, smoke),
 V chase camera, F1..F8 seats, E enter/exit.

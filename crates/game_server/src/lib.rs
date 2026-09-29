@@ -28,7 +28,7 @@ use game_shared::{
     protocol::{ClientHello, ControlledBy, MatchInfo, Player, PlayerNetId, Team},
     revive::Downed,
     soldier::{InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, step_soldier},
-    vehicle::Seated,
+    vehicle::{Seated, water_height},
     weapons::{Armory, Inventory, Loadout, WeaponState},
 };
 
@@ -500,6 +500,7 @@ fn apply_inputs(
     tuning: Res<SoldierTuning>,
     shapes: Res<SoldierShapes>,
     mover: MoveAndSlide,
+    level: Option<Res<LoadedLevel>>,
     mut soldiers: Query<
         (
             &ControlledBy,
@@ -515,6 +516,7 @@ fn apply_inputs(
     mut buffers: Query<&mut InputBuffer>,
 ) {
     let dt = time.delta_secs();
+    let water = water_height(level.as_deref());
     // This tick's input of every soldier, from its player's buffer.
     for (controlled_by, _, _, _, mut applied, downed) in &mut soldiers {
         let Ok(mut buffer) = buffers.get_mut(controlled_by.0) else {
@@ -538,7 +540,7 @@ fn apply_inputs(
             }
             let input = applied.0;
             let mut next = *motion;
-            step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover);
+            step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover, water);
             motion.set_if_neq(next);
             ack.set_if_neq(InputAck(input.seq));
             let body = next.body_transform();

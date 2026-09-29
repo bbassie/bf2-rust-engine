@@ -2537,8 +2537,21 @@ fn random_spot(level: &LoadedLevel, from: Vec3) -> Vec3 {
     };
     let half = heightmap.world_size() * 0.4;
     let center = heightmap.center();
-    center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half
+    let water = level.desc.water.as_ref().map(|w| w.height);
+    // Don't send bots wandering out to sea for no reason: resample a few times if the spot
+    // is over deep water, and give up and stay put rather than pick one anyway.
+    for _ in 0..8 {
+        let spot = center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half;
+        let ground = heightmap.height_at(spot.x, spot.z);
+        if water.is_none_or(|w| w - ground < ROAM_WADE_DEPTH) {
+            return Vec3::new(spot.x, ground, spot.z);
+        }
+    }
+    from
 }
+
+/// Roaming avoids water deeper than this (m): wading is fine, swimming out for no reason isn't.
+const ROAM_WADE_DEPTH: f32 = 0.4;
 
 /// Whether a soldier's main weapons are down to their last magazine.
 fn low_on_ammo(inventory: &Inventory, loadout: &Loadout, armory: &Armory) -> bool {

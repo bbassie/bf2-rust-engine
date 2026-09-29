@@ -354,5 +354,41 @@ fn main() -> AppExit {
     }
     app.insert_resource(camera::ThirdPerson(cli.third_person));
     app.insert_resource(cli);
+    single_threaded_schedules(&mut app);
     app.run()
+}
+
+/// Runs the simulation's schedules (the fixed tick: the server's game rules and bots when
+/// hosting, prediction) on one thread, as the dedicated server does: nearly all of their
+/// systems are tiny, and handing each to a worker thread costs more than it runs, all the more
+/// while the render thread keeps the workers busy. Systems with real work still split it
+/// themselves (`par_iter`). `BF2_SCHEDULES=parallel` keeps Bevy's multi-threaded executor,
+/// `=all` also runs the frame's own schedules on one thread.
+fn single_threaded_schedules(app: &mut App) {
+    use bevy::{
+        app::{FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate, RunFixedMainLoop},
+        ecs::schedule::{InternedScheduleLabel, ScheduleLabel, SingleThreadedExecutor},
+    };
+    let mode = std::env::var("BF2_SCHEDULES").unwrap_or_default();
+    if mode == "parallel" {
+        return;
+    }
+    let mut labels: Vec<InternedScheduleLabel> = vec![
+        RunFixedMainLoop.intern(),
+        FixedMain.intern(),
+        FixedFirst.intern(),
+        FixedPreUpdate.intern(),
+        FixedUpdate.intern(),
+        FixedPostUpdate.intern(),
+        FixedLast.intern(),
+    ];
+    if mode == "all" {
+        labels.extend([First.intern(), PreUpdate.intern(), Update.intern(), PostUpdate.intern(), Last.intern()]);
+    }
+    let mut schedules = app.world_mut().resource_mut::<bevy::ecs::schedule::Schedules>();
+    for label in labels {
+        if let Some(schedule) = schedules.get_mut(label) {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        }
+    }
 }

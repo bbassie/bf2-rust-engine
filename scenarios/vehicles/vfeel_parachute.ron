@@ -1,6 +1,6 @@
 // Parachute, bailing out of the J-10 high over Wake Island: the canopy opens (the fall is
 // caught over a moment), BF2's canopy and parachute pose show in third person and, looking
-// up, in first person; it glides where the soldier looks (turning at most 70 deg/s), W dives,
+// up, in first person; it glides where the soldier looks (turning at most 70 deg/s towards the view), W dives,
 // S brakes, it flares near the ground, and after landing the canopy collapses. The Trace
 // lines carry the soldier's position and velocity every frame (sink rate = -vel y).
 // client --scenario scenarios/vehicles/vfeel_parachute.ron --out target/scenarios/vfeel/parachute
@@ -20,7 +20,7 @@
         Wait(0.5),
         Move(0.0, 1.0),
         Wait(1.0),
-        PlaceVehicle((300.0, 240.0, 200.0), 0.0, 70.0),
+        PlaceVehicle((407.0, 230.0, 420.0), 0.0, 60.0),
         Move(0.0, 0.0),
         Wait(0.3),
         Hold([Use]),
@@ -36,18 +36,18 @@
         Move(0.0, -1.0),
         Trace("brake", 3.0),
         Move(0.0, 0.0),
-        Look(90.0, -10.0),
+        Look(15.0, -10.0),
         Trace("turn left", 2.5),
         Screenshot("02_turning"),
-        Look(90.0, 70.0),
+        Look(15.0, 70.0),
         ThirdPerson(false),
         Wait(0.5),
         Screenshot("03_first_person_up"),
-        Look(90.0, -30.0),
+        Look(15.0, -30.0),
         Wait(0.3),
         Screenshot("04_first_person_down"),
         ThirdPerson(true),
-        Look(90.0, -20.0),
+        Look(15.0, -20.0),
         Trace("descent", 25.0),
         Screenshot("05_landed"),
         Wait(0.8),

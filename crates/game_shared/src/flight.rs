@@ -106,6 +106,9 @@ const JET_AIRBORNE: f32 = 4.0;
 /// these tilts (pitch, roll).
 pub const HELI_MAX_TILT: Vec2 = Vec2::new(30.0, 50.0);
 const HELI_TILT_BAND: f32 = 15.0;
+/// Piloted, the collective holds the altitude up to this tilt and fades out by the second
+/// (degrees; at the stick's pitch and bank limits together it's tilted 56°).
+const HELI_REGULATION: [f32; 2] = [58.0, 75.0];
 /// How quickly a helicopter levels itself with the stick let go (pitch, roll), 1/s; BF2's
 /// `leveling` is used if stronger.
 pub const HELI_LEVELING: Vec2 = Vec2::new(0.8, 1.2);
@@ -114,8 +117,8 @@ pub const HELI_LEVELING: Vec2 = Vec2::new(0.8, 1.2);
 const HELI_FORWARD_FLIGHT: f32 = 10.0;
 const HELI_WEATHERVANE: f32 = 1.5;
 /// Extra drag flying backwards and sideways, 1/s.
-const HELI_BACKWARD_DRAG: f32 = 0.35;
-const HELI_SIDEWAYS_DRAG: f32 = 0.25;
+const HELI_BACKWARD_DRAG: f32 = 0.5;
+const HELI_SIDEWAYS_DRAG: f32 = 0.5;
 /// With the stick centred and slow (below the speed, m/s), the helicopter's drift dies out
 /// (1/s at a standstill, fading out by the speed).
 pub const HELI_HOVER_ASSIST: f32 = 0.45;
@@ -410,8 +413,15 @@ pub fn flight_forces(
         let gain = if fly_by_wire { JET_LIFT_GAIN } else { 1.0 };
         let mut lift = Vec3::ZERO;
         let mut wings = Vec::with_capacity(desc.wings.len());
+        // A piloted helicopter's fins: BF2's are made for its own model; nose down in forward
+        // flight and banked, the air seems to come from the side and they yawed it out of its
+        // turns. The tail weathervaning below keeps it straight instead.
+        let assisted_helicopter = desc.category == VehicleCategory::Helicopter && controls.occupied;
         for wing in &desc.wings {
             let rest_normal = model.rest_rotation(wing.part as usize) * Vec3::Y;
+            if assisted_helicopter && rest_normal.y.abs() < 0.5 {
+                continue;
+            }
             // BF2 sets some wings a few degrees nose down (the J-10's by 2.5°), which made the
             // jet fly nose high; by wire, the lifting wings lift from the hull's attitude.
             let rest_normal = if fly_by_wire && rest_normal.y > 0.95 { Vec3::Y } else { rest_normal };
@@ -434,7 +444,8 @@ pub fn flight_forces(
                 + wing.flap_lift * deflection * along * along;
             // Landing flaps only add lift; where BF2 puts them would pitch the jet over.
             // Flying by wire, the wings only carry the jet; the controller turns it.
-            wings.push((normal * accel, if wing.landing_flap || fly_by_wire { com } else { point }));
+            let at_com = wing.landing_flap || fly_by_wire || assisted_helicopter;
+            wings.push((normal * accel, if at_com { com } else { point }));
             lift += normal * accel;
         }
         if fly_by_wire {
@@ -537,8 +548,15 @@ pub fn flight_forces(
         let clearance = around.altitude - resting;
         let airborne = clearance > HOVER_HEIGHT;
         let tilt = up.angle_between(Vec3::Y).to_degrees();
-        let span = (rotor.no_regulation_angle - rotor.regulation_angle).max(1.0);
-        let regulation = if airborne { 1.0 - ((tilt - rotor.regulation_angle) / span).clamp(0.0, 1.0) } else { 0.0 };
+        // Piloted helicopters hold their altitude as far as the stick tilts them (BF2's 35°
+        // lost height in every banked turn).
+        let (regulated_to, unregulated_from) = if desc.category == VehicleCategory::Helicopter && controls.occupied {
+            (rotor.regulation_angle.max(HELI_REGULATION[0]), rotor.no_regulation_angle.max(HELI_REGULATION[1]))
+        } else {
+            (rotor.regulation_angle, rotor.no_regulation_angle)
+        };
+        let span = (unregulated_from - regulated_to).max(1.0);
+        let regulation = if airborne { 1.0 - ((tilt - regulated_to) / span).clamp(0.0, 1.0) } else { 0.0 };
         let climb = if controls.throttle >= 0.0 {
             controls.throttle * rotor.climb_speed[0]
         } else {
@@ -564,7 +582,9 @@ pub fn flight_forces(
         let mut drag = flat_velocity * rotor.horizontal_damping;
         let right = rotation * Vec3::X;
         let flat_forward = (forward - Vec3::Y * forward.y).normalize_or_zero();
-        let flat_right = (right - Vec3::Y * right.y).normalize_or_zero();
+        // Level right of the nose (the right wing's own direction swings forward or back
+        // when the helicopter is both pitched and banked).
+        let flat_right = flat_forward.cross(Vec3::Y);
         let centred = controls.pitch.abs() < 0.05 && controls.roll.abs() < 0.05;
         if airborne {
             // Backwards and sideways it's slow; hands off and slow, the drift dies out.
@@ -600,14 +620,13 @@ pub fn flight_forces(
                 wanted.z += roll * rotor.leveling.max(HELI_LEVELING.y);
             }
             // In forward flight it turns into its bank, and the tail keeps it into the
-            // airflow.
-            let ahead = -local_velocity.z;
+            // airflow. Measured level (a helicopter flies nose down: in its own frame the air
+            // comes from below, and banked, from the side), turning about the vertical.
+            let ahead = flat_velocity.dot(flat_forward);
             let forward_flight = smoothstep(HELI_FORWARD_FLIGHT, HELI_FORWARD_FLIGHT * 2.0, ahead);
             if forward_flight > 0.0 {
-                // Turning about the vertical, whatever the attitude (pitched down and banked,
-                // turning about its own yaw axis would swing the nose the wrong way).
                 let bank_turn = g * roll.clamp(-1.2, 1.2).tan() / ahead.max(1.0);
-                let slip = local_velocity.x.atan2(ahead);
+                let slip = flat_velocity.dot(flat_right).atan2(ahead);
                 let turn = (bank_turn.clamp(-rates.y, rates.y) + slip * HELI_WEATHERVANE) * forward_flight;
                 wanted += inverse * (Vec3::NEG_Y * turn);
             }
@@ -626,5 +645,17 @@ mod tests {
         let controls = Controls::from_input(None);
         assert!(!controls.occupied);
         assert_eq!(controls.throttle, 0.0);
+    }
+
+    #[test]
+    fn jets_turn_best_at_the_corner_speed() {
+        let envelope = JetEnvelope { corner: 87.5, stall: 35.0 };
+        let corner = jet_authority(&envelope, 87.5);
+        assert!((corner - Vec3::ONE).length() < 1e-4, "{corner}");
+        for slower_or_faster in [20.0, 50.0, 70.0, 110.0, 150.0] {
+            assert!(jet_authority(&envelope, slower_or_faster).x < corner.x);
+        }
+        // No airflow, no control.
+        assert_eq!(jet_authority(&envelope, 0.0), Vec3::ZERO);
     }
 }

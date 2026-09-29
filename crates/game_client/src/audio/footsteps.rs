@@ -20,7 +20,11 @@ use game_shared::{
 };
 
 use super::{AudioSystems, Sounds, voices::{PlaySound, Sound}};
-use crate::{effects::SurfaceQuery, net::LocalSoldier, prediction::SoldierRender};
+use crate::{
+    effects::{SpawnEffect, SurfaceQuery},
+    net::LocalSoldier,
+    prediction::SoldierRender,
+};
 
 pub struct FootstepPlugin;
 
@@ -36,6 +40,8 @@ const WALK_STRIDE: f32 = 0.9;
 const RUN_STRIDE: f32 = 1.4;
 const SPRINT_STRIDE: f32 = 2.2;
 const CRAWL_STRIDE: f32 = 0.6;
+/// Meters per stroke, swimming (BF2's swim cycle is slower than a walking stride).
+const SWIM_STRIDE: f32 = 1.3;
 /// Standing soldiers faster than this run, faster than `SPRINT_SPEED` sprint (m/s).
 const RUN_SPEED: f32 = 2.8;
 const SPRINT_SPEED: f32 = 5.4;
@@ -102,6 +108,7 @@ fn footsteps(
     soldiers: Query<(Entity, &SoldierRender, Option<&SoldierMotion>), With<Soldier>>,
     mut steps: Local<HashMap<Entity, Steps>>,
     mut sounds: MessageWriter<PlaySound>,
+    mut effects: MessageWriter<SpawnEffect>,
 ) {
     let dt = time.delta_secs();
     let Some(ear) = listener.iter().next().map(|t| t.translation) else {
@@ -151,6 +158,23 @@ fn footsteps(
                     let at = render.position + Vec3::Y;
                     sounds.write(PlaySound::at(Sound::Named(ladder.clone()), at).emitter(entity).reason("ladder"));
                 }
+            }
+            continue;
+        }
+        // Swimming: a splash and a stroke sound every stroke, faster while sprint-swimming.
+        if render.swimming {
+            let speed = render.velocity.xz().length();
+            if speed < 0.3 {
+                state.travelled = 0.0;
+                continue;
+            }
+            state.travelled += speed * dt;
+            if state.travelled >= SWIM_STRIDE {
+                state.travelled = (state.travelled - SWIM_STRIDE).min(SWIM_STRIDE);
+                if let Some(sound) = step(entity, render.position, Gait::Walk) {
+                    sounds.write(sound.reason("swim"));
+                }
+                effects.write(SpawnEffect::new("e_sold_swim", render.position));
             }
             continue;
         }

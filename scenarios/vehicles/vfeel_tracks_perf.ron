@@ -1,0 +1,22 @@
+// Track texture animation cost (render::vehicles::scroll_tracks) on Karkand 64 with 63 bots:
+// frame times looking at the US main base's parked tanks, and looking away from every tank.
+// Compare report.txt before and after a change.
+// client --scenario scenarios/vehicles/vfeel_tracks_perf.ron --out target/scenarios/vfeel/tracks_perf
+(
+    level: "strike_at_karkand",
+    size: 64,
+    bots: 63,
+    spectate: true,
+    steps: [
+        WaitReady,
+        Camera((-133.0, 185.0, 245.0), 180.0, -25.0),
+        Wait(8.0),
+        Screenshot("tanks"),
+        Measure("tanks in view", 10.0),
+        Camera((250.0, 260.0, 350.0), 30.0, -20.0),
+        Wait(2.0),
+        Measure("looking away", 8.0),
+        ForbidLog("panicked"),
+        Quit,
+    ],
+)

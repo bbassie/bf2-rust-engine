@@ -226,13 +226,24 @@ mod clips {
     pub const ROPE_HOLD: &str = "grapplehook_climb2_pause";
     pub const ZIPLINE: &str = "xpak_zipline_hang";
 
+    /// Swimming at the surface (BF2's `objects/soldiers/common` swim clips): treading water,
+    /// stroking forward or backward, and sprint-swimming. There's no strafe clip; BF2 doesn't
+    /// have one either.
+    pub const SWIM_STILL: &str = "3p_swimstill";
+    pub const SWIM_FORWARD: &str = "3p_swim";
+    pub const SWIM_BACKWARD: &str = "3p_swimbackward";
+    pub const SWIM_SPRINT: &str = "3p_swimsprint";
+
     pub fn legs() -> impl Iterator<Item = &'static str> {
-        [STAND, CROUCH, PRONE, CLIMB, SLIDE, REVIVE, ROPE_CLIMB, ROPE_HOLD, ZIPLINE]
-            .into_iter()
-            .chain(cycles())
-            .chain(STAND_TURN)
-            .chain(CROUCH_TURN)
-            .chain(JUMP.into_iter().flatten())
+        [
+            STAND, CROUCH, PRONE, CLIMB, SLIDE, REVIVE, ROPE_CLIMB, ROPE_HOLD, ZIPLINE,
+            SWIM_STILL, SWIM_FORWARD, SWIM_BACKWARD, SWIM_SPRINT,
+        ]
+        .into_iter()
+        .chain(cycles())
+        .chain(STAND_TURN)
+        .chain(CROUCH_TURN)
+        .chain(JUMP.into_iter().flatten())
     }
 
     /// Upper-body clips named like the movement clip they pair with (`3p_crouchstill` with
@@ -263,6 +274,10 @@ const RUN_SPEED: f32 = 3.9;
 const SPRINT_SPEED: f32 = 6.3;
 const CROUCH_SPEED: f32 = 1.7;
 const PRONE_SPEED: f32 = 0.7;
+/// Swimming and sprint-swimming, from BF2's animation value holders (matches
+/// `SoldierTuning::swim_speed`/`swim_sprint_speed`).
+const SWIM_SPEED: f32 = 1.9;
+const SWIM_SPRINT_SPEED: f32 = 2.4;
 /// Climbing speed the ladder clip is made for (its feet move about 1.25 m/s).
 const CLIMB_SPEED: f32 = 1.25;
 /// Climbing speed the grappling rope clip is made for (about a meter per cycle).
@@ -422,6 +437,65 @@ struct SoldierAnimator {
     was_reloading: bool,
     /// Nobody sees the soldier: its graph, taken off the animation player meanwhile.
     sleeping: Option<Handle<AnimationGraph>>,
+    /// The soldier's own copy of the team graph (see [`OwnGraph`]).
+    own: Option<OwnGraph>,
+}
+
+/// A soldier's own copy of its team's animation graph, with the same nodes (so the team
+/// graph's [`Clip`]s address it) but only the clips it is playing linked to the root. Bevy
+/// evaluates every node linked to the root for every bone, playing or not, and the team graph
+/// holds the body's 129 clips plus every weapon set's (hundreds of nodes): with them all linked
+/// posing a 32-bot battle took about 5 ms a frame. Unlinked clips still advance; a clip is
+/// linked when it starts and posed from the next frame on (clips start faded out anyway).
+struct OwnGraph {
+    handle: Handle<AnimationGraph>,
+    /// Clips linked to the root, sorted.
+    linked: Vec<AnimationNodeIndex>,
+}
+
+impl OwnGraph {
+    /// A copy of `template` with nothing linked to its root.
+    fn new(mut graph: AnimationGraph, graphs: &mut Assets<AnimationGraph>) -> Self {
+        graph.graph.clear_edges();
+        Self {
+            handle: graphs.add(graph),
+            linked: Vec::new(),
+        }
+    }
+
+    /// Links exactly the clips the player is playing (with any weight), and takes over the
+    /// clips added to the team graph since (weapon sets load as they are first used).
+    fn sync(&mut self, player: &AnimationPlayer, template: Option<&Handle<AnimationGraph>>, graphs: &mut Assets<AnimationGraph>) {
+        let mut playing: Vec<AnimationNodeIndex> = player
+            .playing_animations()
+            .filter(|(_, active)| active.weight() > 0.0)
+            .map(|(node, _)| *node)
+            .collect();
+        playing.sort_unstable();
+        let own_nodes = graphs.get(&self.handle).map_or(0, |own| own.graph.node_count());
+        let added: Vec<_> = template
+            .and_then(|template| graphs.get(template))
+            .filter(|template| template.graph.node_count() > own_nodes)
+            .map(|template| template.graph.node_weights().skip(own_nodes).cloned().collect())
+            .unwrap_or_default();
+        if playing == self.linked && added.is_empty() {
+            return;
+        }
+        let Some(mut graph) = graphs.get_mut(&self.handle) else {
+            return;
+        };
+        for node in added {
+            graph.graph.add_node(node);
+        }
+        graph.graph.clear_edges();
+        let root = graph.root;
+        for &node in &playing {
+            if node != root && node.index() < graph.graph.node_count() {
+                graph.add_edge(root, node);
+            }
+        }
+        self.linked = playing;
+    }
 }
 
 /// An upper-body one-shot.
@@ -468,6 +542,10 @@ enum Legs {
     Rope,
     /// Hanging from a zipline.
     Hang,
+    /// Treading water, or stroking forward (`false`) or backward (`true`).
+    SwimStill,
+    Swim(bool),
+    SwimSprint,
     /// Critically wounded, lying where he fell.
     Down,
     /// Revived: getting up.
@@ -979,6 +1057,16 @@ fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, rende
     if render.climbing {
         return Legs::Climb(render.velocity.y < -CLIMB_SPEED * 1.5);
     }
+    if render.swimming {
+        let sprint_above = if state == Some(Legs::SwimSprint) { 2.0 } else { 2.15 };
+        return if speed < 0.3 {
+            Legs::SwimStill
+        } else if speed > sprint_above {
+            Legs::SwimSprint
+        } else {
+            Legs::Swim(velocity.y < 0.0)
+        };
+    }
     match state {
         // A blip off the ground (a step or slope edge) is no jump worth landing from.
         Some(Legs::Jump(dir) | Legs::Fall(dir)) if render.grounded => {
@@ -1015,9 +1103,10 @@ fn fade_time(from: Option<Legs>, to: Legs) -> f32 {
         return 0.0;
     };
     match (from, to) {
-        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_) | Legs::Climb(_) | Legs::Rope | Legs::Hang)
+        (_, Legs::Jump(_) | Legs::Fall(_) | Legs::Land(_) | Legs::Climb(_) | Legs::Rope | Legs::Hang
+            | Legs::SwimStill | Legs::Swim(_) | Legs::SwimSprint)
         | (_, Legs::Down | Legs::GetUp)
-        | (Legs::Climb(_) | Legs::Rope | Legs::Hang, _) => FADE_JUMP,
+        | (Legs::Climb(_) | Legs::Rope | Legs::Hang | Legs::SwimStill | Legs::Swim(_) | Legs::SwimSprint, _) => FADE_JUMP,
         _ if from.stance() != to.stance() => {
             if from.stance() == Stance::Prone || to.stance() == Stance::Prone {
                 FADE_PRONE
@@ -1183,6 +1272,15 @@ impl SoldierAnimator {
                 };
                 speed = 0.0;
             }
+            Legs::SwimStill => targets[0] = (clips::SWIM_STILL, 1.0),
+            Legs::Swim(backward) => {
+                targets[0] = (if backward { clips::SWIM_BACKWARD } else { clips::SWIM_FORWARD }, 1.0);
+                speed = (velocity.length() / SWIM_SPEED).clamp(0.3, 2.0);
+            }
+            Legs::SwimSprint => {
+                targets[0] = (clips::SWIM_SPRINT, 1.0);
+                speed = (velocity.length() / SWIM_SPRINT_SPEED).clamp(0.3, 2.0);
+            }
             Legs::Down | Legs::GetUp if animations.legs.contains_key(clips::REVIVE) => {
                 targets[0] = (clips::REVIVE, 1.0);
                 once = Some(entered);
@@ -1215,8 +1313,12 @@ impl SoldierAnimator {
         self.legs.update(player, dt);
 
         // Both hands on the rungs: no weapon, and the ladder clip moves the arms too. Down,
-        // the weapon is dropped.
-        self.stowed = matches!(state, Legs::Climb(_) | Legs::Rope | Legs::Hang | Legs::Down | Legs::GetUp);
+        // the weapon is dropped. Swimming, both arms stroke: the weapon is slung, as in BF2.
+        self.stowed = matches!(
+            state,
+            Legs::Climb(_) | Legs::Rope | Legs::Hang | Legs::Down | Legs::GetUp
+                | Legs::SwimStill | Legs::Swim(_) | Legs::SwimSprint
+        );
         if self.stowed {
             self.action = None;
             self.upper.begin();
@@ -1358,10 +1460,15 @@ fn animate(
             continue;
         };
         if animator.graph != Some(animations.graph.id()) {
-            commands.entity(rig.player).insert(AnimationGraphHandle(animations.graph.clone()));
+            let Some(template) = graphs.get(&animations.graph) else {
+                continue;
+            };
+            let own = OwnGraph::new(template.clone(), &mut graphs);
+            commands.entity(rig.player).insert(AnimationGraphHandle(own.handle.clone()));
             player.stop_all();
             *animator = SoldierAnimator {
                 graph: Some(animations.graph.id()),
+                own: Some(own),
                 ..default()
             };
         }
@@ -1393,6 +1500,9 @@ fn animate(
         // Unseen: posed again once seen (the animation picks up from where it is then).
         if animator.sleeping.is_none() {
             animator.update(&mut player, animations, &cues, time.delta_secs());
+            if let Some(own) = &mut animator.own {
+                own.sync(&player, Some(&animations.graph), &mut graphs);
+            }
         }
     }
 }

@@ -113,6 +113,10 @@ pub struct NavParams {
     pub jump: f32,
     /// Deepest ledge a soldier drops down from.
     pub drop: f32,
+    /// The level's water surface, if it has water: cells well below it cost much more to
+    /// cross (see [`path`]), so bots swim only when it's worth it. Not part of the cache
+    /// key: loading a grid always overlays the level's current water height, cached or not.
+    pub water_height: Option<f32>,
 }
 
 impl NavParams {
@@ -133,6 +137,7 @@ impl NavParams {
             step: tuning.step_height,
             jump: jump.max(tuning.step_height),
             drop: 2.5,
+            water_height: None,
         }
     }
 }
@@ -570,7 +575,10 @@ fn start_build(
     commands.remove_resource::<Navigation>();
     commands.remove_resource::<vehicle::VehicleNavigation>();
     commands.remove_resource::<NavObstacles>();
-    let params = NavParams::from_tuning(&tuning);
+    let params = NavParams {
+        water_height: level.desc.water.as_ref().map(|w| w.height),
+        ..NavParams::from_tuning(&tuning)
+    };
     // Only the layout being played: the 64 player layouts of the big maps would take a lot
     // of memory. Layouts made from another (Rush from conquest) share its grid.
     let layout = match_info

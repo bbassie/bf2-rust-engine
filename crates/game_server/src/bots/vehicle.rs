@@ -313,10 +313,15 @@ impl Senses<'_, '_> {
     }
 
     /// Height above whatever is below (terrain, vehicle-solid statics, water), up to `max`.
-    fn height_above_ground(&self, at: Vec3, max: f32) -> f32 {
+    fn height_above_ground(&self, at: Vec3, max: f32, vehicle: Entity) -> f32 {
+        // Not the vehicle itself (the movement mask has vehicles in it: from inside its own
+        // hull the ray met it at once, and helicopters thought they were on the ground and
+        // climbed for ever).
+        let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::vehicle_movement_mask())
+            .with_excluded_entities([vehicle]);
         let ground = self
             .spatial
-            .cast_ray(at, Dir3::NEG_Y, max, true, &SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::vehicle_movement_mask()))
+            .cast_ray(at, Dir3::NEG_Y, max, true, &filter)
             .map_or(max, |hit| hit.distance);
         match self.level.desc.water.as_ref() {
             Some(water) => ground.min((at.y - water.height).max(0.0)),
@@ -327,9 +332,10 @@ impl Senses<'_, '_> {
 
 /// Whether a jet has a runway in front of it: ground at its level and nothing in the way for
 /// a few hundred meters (not a carrier deck: jump jets don't hover yet).
-fn runway_ahead(w: &Senses, motion: &VehicleMotion) -> bool {
+fn runway_ahead(w: &Senses, motion: &VehicleMotion, jet: Entity) -> bool {
     let forward = flat(motion.rotation * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
-    let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::vehicle_movement_mask());
+    // Not the jet itself: the rays start inside its hull.
+    let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::vehicle_movement_mask()).with_excluded_entities([jet]);
     let start = motion.position + Vec3::Y * 2.0;
     let length = 320.0;
     if w.spatial.cast_ray(start, Dir3::new(forward).unwrap_or(Dir3::NEG_Z), length, true, &filter).is_some() {
@@ -562,11 +568,11 @@ impl BotBrain {
                 Role::Boat => ((far > MOUNT_DISTANCE && cut_off) || (far > 250.0 && distance < 40.0), 4.6),
                 Role::TransportHeli => (far > 300.0 && is_leader && squad_size >= 3 && skill > 0.35, 4.0),
                 Role::AttackHeli => (skill > 0.3 && hash01(self.seed, 12) < 0.6, 4.3),
-                Role::Jet => (skill > 0.3 && hash01(self.seed, 13) < 0.6 && runway_ahead(w, motion), 4.3),
+                Role::Jet => (skill > 0.3 && hash01(self.seed, 13) < 0.6 && runway_ahead(w, motion, entity), 4.3),
                 Role::Stationary => (false, 0.0),
             };
             // Cut off (a carrier, an island): anything that gets it off.
-            let worth = worth || (cut_off && profile.role != Role::Stationary && (profile.role != Role::Jet || runway_ahead(w, motion)));
+            let worth = worth || (cut_off && profile.role != Role::Stationary && (profile.role != Role::Jet || runway_ahead(w, motion, entity)));
             if !worth || (profile.role == Role::Boat && w.vehicle_nav().is_none_or(|n| n.water.is_none())) {
                 continue;
             }
@@ -736,7 +742,7 @@ impl BotBrain {
         let health = seen.health_fraction();
         // Aircrews get out on the ground, or high enough up for their parachute to open
         // (`vehicles::BAIL_OUT_HEIGHT`, 8 m) with a margin, not in between.
-        let height = if profile.role.flies() { w.height_above_ground(seen.motion.position, 30.0) } else { 0.0 };
+        let height = if profile.role.flies() { w.height_above_ground(seen.motion.position, 30.0, seen.entity) } else { 0.0 };
         let grounded = height < 3.0 || height > 15.0;
         if health < BAIL_OUT && profile.role != Role::Stationary && grounded {
             ride.leave("damaged");
@@ -843,7 +849,7 @@ impl BotBrain {
         }
         let speed = seen.motion.velocity.length();
         let position = seen.motion.position;
-        let height = if profile.role.flies() { w.height_above_ground(position, 50.0) } else { 0.0 };
+        let height = if profile.role.flies() { w.height_above_ground(position, 50.0, seen.entity) } else { 0.0 };
         let landed = height < 2.5;
         // Riding with the squad leader: out when he gets out.
         let squad = me.member.and_then(|m| w.snapshot.squads.get(&(me.team, m.squad)));
@@ -1608,7 +1614,7 @@ impl BotBrain {
         let Some(rotor) = seen.data.0.desc.rotor.as_ref() else {
             return;
         };
-        let height = w.height_above_ground(position, 300.0);
+        let height = w.height_above_ground(position, 300.0, seen.entity);
         let crash = (motion.velocity - ride.last_velocity).length() > 9.0 && ride.time > 1.0;
         ride.last_velocity = motion.velocity;
         if crash {
@@ -1862,7 +1868,7 @@ impl BotBrain {
     ) {
         let motion = seen.motion;
         let position = motion.position;
-        let height = w.height_above_ground(position, 400.0);
+        let height = w.height_above_ground(position, 400.0, seen.entity);
         let speed = motion.velocity.length();
         let forward = motion.rotation * Vec3::NEG_Z;
         let crash = (motion.velocity - ride.last_velocity).length() > 9.0 && ride.time > 1.0;
@@ -1927,7 +1933,9 @@ impl BotBrain {
         let path_angle = (motion.velocity.y / speed.max(1.0)).clamp(-1.0, 1.0).asin();
         let bank_pull = (1.0 / roll.cos().abs().max(0.3) - 1.0) * 0.5;
         let stick_pitch = ((climb_angle - path_angle) * 3.0 + bank_pull - omega.x * 0.4).clamp(-1.0, 1.0);
-        let throttle = if speed < profile.top_speed * 0.6 { 1.0 } else { 0.0 };
+        // Around the corner speed, where the jet turns best (see `flight::JetEnvelope`).
+        let corner = game_shared::flight::JetEnvelope::of(&seen.data.0.desc).corner;
+        let throttle = if speed < corner { 1.0 } else { 0.0 };
         frame.set_movement(Vec2::new(0.0, throttle));
         frame.set_stick(Vec2::new(stick_roll, stick_pitch));
         if every(ride.time, dt, 5.0) {

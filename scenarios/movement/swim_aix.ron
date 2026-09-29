@@ -1,0 +1,29 @@
+// Swimming on an AIX map with water: same spot as movement/swim_gulf.ron (AIX's Gulf of
+// Oman keeps the vanilla terrain and water), teleported straight into the sea since AIX's
+// vehicle templates differ from vanilla's. Swim, check the weapon can't fire, then swim to
+// shore and climb out.
+// client --mods mods --level aix2_gulf_of_oman --scenario scenarios/movement/swim_aix.ron --out target/scenarios/swim/aix
+(
+    level: "aix2_gulf_of_oman",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        ThirdPerson(true),
+        Teleport((-499.5, 22.0, 7.5), -90.0, 0.0),
+        Wait(0.3),
+        ExpectLog("started swimming", 5.0),
+        Screenshot("01_swimming"),
+        Trace("afloat", 3.0),
+        Hold([Fire]),
+        Trace("cant_fire", 1.0),
+        Release([Fire]),
+        Move(0.0, 1.0),
+        ExpectLog("stopped swimming", 180.0),
+        Screenshot("02_ashore"),
+        Move(0.0, 0.0),
+        Trace("ashore", 2.0),
+        Quit,
+    ],
+)

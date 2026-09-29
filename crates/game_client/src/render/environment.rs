@@ -100,7 +100,31 @@ impl Plugin for EnvironmentPlugin {
                 (follow_camera, update_view_distance)
                     .after(crate::camera::CameraSystems)
                     .before(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                drop_unlit_cascades
+                    .after(bevy::light::SimulationLightSystems::UpdateDirectionalLightCascades)
+                    .before(bevy::light::SimulationLightSystems::UpdateLightFrusta),
             );
+    }
+}
+
+/// Bevy builds a sun's shadow cascades for every camera, and finds the shadow casters in each
+/// of them, even for cameras the sun doesn't light (their render layers don't meet), which
+/// the renderer then leaves out anyway: the view model camera. Drops those cascades.
+fn drop_unlit_cascades(
+    cameras: Query<(Entity, Option<&bevy::camera::visibility::RenderLayers>), With<Camera>>,
+    mut lights: Query<(&mut bevy::light::Cascades, Option<&bevy::camera::visibility::RenderLayers>), With<DirectionalLight>>,
+) {
+    for (mut cascades, light_layers) in &mut lights {
+        let light_layers = light_layers.cloned().unwrap_or_default();
+        for (camera, layers) in &cameras {
+            let lit = layers.map_or_else(|| light_layers.intersects(&default()), |l| light_layers.intersects(l));
+            if !lit && cascades.cascades.contains_key(&camera) {
+                cascades.cascades.remove(&camera);
+            }
+        }
     }
 }
 

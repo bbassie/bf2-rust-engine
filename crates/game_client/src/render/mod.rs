@@ -10,6 +10,7 @@ mod flags;
 pub mod materials;
 mod hitzones;
 pub mod lamps;
+mod perf_stats;
 mod projectiles;
 mod props;
 mod ropes;
@@ -50,6 +51,7 @@ impl Plugin for RenderPlugin {
             static_lightmaps::StaticLightmapsPlugin,
             unit_lods::UnitLodPlugin,
             lamps::LampsPlugin,
+            perf_stats::PerfStatsPlugin,
         ));
     }
 }

@@ -15,7 +15,8 @@ use std::collections::VecDeque;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
-use game_shared::vehicle::Seated;
+use game_shared::level::LoadedLevel;
+use game_shared::vehicle::{Seated, water_height};
 use game_shared::soldier::{
     InputAck, Soldier, SoldierMotion, SoldierShapes, SoldierTuning, Stance, step_soldier,
 };
@@ -89,6 +90,8 @@ pub struct SoldierRender {
     pub riding: bool,
     /// Under an open parachute.
     pub parachute: bool,
+    /// Swimming at the surface (too deep to stand; see `SoldierTuning::swim_depth`).
+    pub swimming: bool,
     /// Eye height above the feet, easing toward the stance's so the view moves with the
     /// body when crouching or going prone instead of jumping.
     pub eye_height: f32,
@@ -149,6 +152,7 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             on_rope: motion.on_rope,
             riding: motion.riding,
             parachute: motion.parachute,
+            swimming: motion.swimming,
             eye_height: motion.stance.eye_height(),
             step_offset: 0.0,
         },
@@ -167,11 +171,13 @@ fn predict(
     shapes: Res<SoldierShapes>,
     mover: MoveAndSlide,
     history: Res<InputHistory>,
+    level: Option<Res<LoadedLevel>>,
     mut soldiers: Query<(Entity, &SoldierMotion, Option<&mut Predicted>, Has<Seated>), With<LocalSoldier>>,
 ) {
     let Some(input) = history.latest() else {
         return;
     };
+    let water = water_height(level.as_deref());
     for (entity, motion, predicted, seated) in &mut soldiers {
         // Riding in a vehicle: the server moves us (vehicles aren't predicted yet).
         if seated {
@@ -196,6 +202,7 @@ fn predict(
             &tuning,
             &shapes,
             &mover,
+            water,
         );
     }
 }
@@ -206,10 +213,12 @@ fn reconcile(
     shapes: Res<SoldierShapes>,
     mover: MoveAndSlide,
     history: Res<InputHistory>,
+    level: Option<Res<LoadedLevel>>,
     mut stats: ResMut<PredictionStats>,
     mut soldiers: Query<(Ref<SoldierMotion>, Ref<InputAck>, &mut Predicted), (With<LocalSoldier>, Without<Seated>)>,
 ) {
     let dt = fixed.timestep().as_secs_f32();
+    let water = water_height(level.as_deref());
     for (motion, ack, mut predicted) in &mut soldiers {
         if !motion.is_changed() && !ack.is_changed() {
             continue;
@@ -217,7 +226,7 @@ fn reconcile(
         let mut replayed = *motion;
         let mut count = 0;
         for frame in history.frames.iter().filter(|f| f.seq > ack.0) {
-            step_soldier(&mut replayed, frame, dt, &tuning, &shapes, &mover);
+            step_soldier(&mut replayed, frame, dt, &tuning, &shapes, &mover, water);
             count += 1;
         }
         let correction = replayed.position - predicted.current.position;
@@ -308,6 +317,7 @@ fn update_render_state(
             on_rope: to.on_rope,
             riding: to.riding,
             parachute: to.parachute,
+            swimming: to.swimming,
             eye_height: render.eye_height + (eye_target - render.eye_height) * eye_blend,
             step_offset: (step * (1.0 - eye_blend)).clamp(-STEP_SMOOTHING, STEP_SMOOTHING),
         };

@@ -59,6 +59,7 @@ pub fn land_params() -> NavParams {
         step: 0.5,
         jump: 0.5,
         drop: 1.2,
+        water_height: None,
     }
 }
 

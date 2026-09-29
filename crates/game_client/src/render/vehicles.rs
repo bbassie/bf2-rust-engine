@@ -277,6 +277,8 @@ struct UvAnimated {
     center: Option<Vec2>,
     spin: f32,
     flow: Vec2,
+    /// The texture transform last written to the material (see `scroll_tracks`).
+    written: Option<Affine2>,
 }
 
 impl UvAnimated {
@@ -493,6 +495,7 @@ fn spawn_rigs(
                         center,
                         spin,
                         flow,
+                        written: None,
                     };
                     (material, Some(animated))
                 }
@@ -560,14 +563,33 @@ fn run_tracks(
     }
 }
 
+/// A track texture is written again once it has moved this far (share of a texture repeat;
+/// about the same in radians for turning hubs): every write re-uploads the material's whole
+/// bindless slab, so parked tanks (their speed jitters a little) mustn't write every frame.
+const UV_WRITE_STEP: f32 = 1.0 / 512.0;
+/// Farther than this from the camera (m), track textures move every other frame.
+const UV_NEAR: f32 = 40.0;
+
 /// Moves the track textures to where their track has run, like BF2's UV matrices: belts and
 /// wheel rims scroll (wrapping where their texture repeats), hubs turn about their centres.
+/// Only tracks in view, and only once they've visibly moved (see `UV_WRITE_STEP`).
 fn scroll_tracks(
-    animated: Query<&UvAnimated>,
+    mut frame: Local<u32>,
+    camera: Query<&GlobalTransform, With<crate::camera::PlayerCamera>>,
+    mut animated: Query<(Entity, &mut UvAnimated, &ViewVisibility, &GlobalTransform)>,
     vehicles: Query<(&VehicleData, &TrackTravel)>,
     mut materials: ResMut<Assets<Bf2Material>>,
 ) {
-    for animated in &animated {
+    *frame = frame.wrapping_add(1);
+    let eye = camera.single().ok().map(GlobalTransform::translation);
+    for (entity, mut animated, visibility, placed) in &mut animated {
+        if !visibility.get() {
+            continue;
+        }
+        let far = eye.is_some_and(|eye| placed.translation().distance_squared(eye) > UV_NEAR * UV_NEAR);
+        if far && (*frame ^ entity.to_bits() as u32) & 1 == 1 {
+            continue;
+        }
         let Ok((data, travel)) = vehicles.get(animated.vehicle) else {
             continue;
         };
@@ -601,14 +623,13 @@ fn scroll_tracks(
             }
             _ => continue,
         };
-        if let Some(material) = materials.get(&animated.material)
-            && material.base.uv_transform == transform
-        {
+        if animated.written.is_some_and(|written| written.abs_diff_eq(transform, UV_WRITE_STEP)) {
             continue;
         }
         if let Some(mut material) = materials.get_mut(&animated.material) {
             material.base.uv_transform = transform;
         }
+        animated.written = Some(transform);
     }
 }
 

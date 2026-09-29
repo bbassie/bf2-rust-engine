@@ -128,6 +128,16 @@ fn input(right: f32, forward: f32, buttons: Buttons) -> InputFrame {
 
 /// Runs `inputs` from `start` and returns the state after every tick.
 fn simulate(app: &mut App, start: SoldierMotion, inputs: Vec<InputFrame>) -> Vec<SoldierMotion> {
+    simulate_water(app, start, inputs, None)
+}
+
+/// [`simulate`] with a level water height, for the swimming tests.
+fn simulate_water(
+    app: &mut App,
+    start: SoldierMotion,
+    inputs: Vec<InputFrame>,
+    water: Option<f32>,
+) -> Vec<SoldierMotion> {
     app.world_mut()
         .run_system_once(
             move |tuning: Res<SoldierTuning>, shapes: Res<SoldierShapes>, mover: MoveAndSlide| {
@@ -135,7 +145,7 @@ fn simulate(app: &mut App, start: SoldierMotion, inputs: Vec<InputFrame>) -> Vec
                 inputs
                     .iter()
                     .map(|frame| {
-                        step_soldier(&mut m, frame, DT, &tuning, &shapes, &mover);
+                        step_soldier(&mut m, frame, DT, &tuning, &shapes, &mover, water);
                         m
                     })
                     .collect::<Vec<_>>()
@@ -1135,4 +1145,47 @@ fn rides_ziplines() {
     let trace = simulate(&mut app, m, frames);
     let jumped = trace[on + 61];
     assert!(!jumped.riding && jumped.velocity.z > 1.0, "{jumped:?}");
+}
+
+#[test]
+fn swims_in_deep_water_and_climbs_out_at_shore() {
+    use game_shared::soldier::SOLDIER_HEIGHT;
+    let tuning = SoldierTuning::default();
+    let water = 3.0;
+    // Flat sea floor at y = 0 (3 m deep, well past swimming depth), a gentle 8° ramp rising
+    // out of it from z = -10 towards the shore.
+    let mut app = world(&[ramp(-10.0, 8.0, 50.0)], true);
+    let start = SoldierMotion::at(Vec3::new(0.0, 0.05, 0.0), 0.0);
+    let trace = simulate_water(&mut app, start, vec![input(0.0, 0.0, Buttons::empty()); 90], Some(water));
+    let last = *trace.last().unwrap();
+    assert!(last.swimming && !last.grounded, "didn't start swimming in deep water: {last:?}");
+    assert!(!last.can_fire(), "shouldn't be able to fire while swimming");
+    // Floats with the head above the surface, feet well below it.
+    assert!(last.position.y + SOLDIER_HEIGHT > water, "head not above the surface: {last:?}");
+    assert!(
+        (last.position.y - (water - tuning.swim_float_depth)).abs() < 0.1,
+        "not floating at the swim depth: {last:?}"
+    );
+
+    // Swim towards the ramp (yaw 0 heads -Z) and climb out where it shallows enough.
+    let frames = vec![input(0.0, 1.0, Buttons::empty()); 1500];
+    let trace = simulate_water(&mut app, last, frames, Some(water));
+    let speed = trace[60..90].iter().map(horizontal_speed).sum::<f32>() / 30.0;
+    println!("swim speed {speed:.2} m/s (tuning {})", tuning.swim_speed);
+    assert!((speed - tuning.swim_speed).abs() < 0.1, "wrong swim speed: {speed}");
+    let out = trace
+        .iter()
+        .position(|t| !t.swimming && t.grounded)
+        .expect("never climbed out at the shore");
+    let landed = trace[out];
+    println!("climbed out after {out} ticks: {landed:?}");
+    assert!(landed.can_fire(), "should be able to fire once ashore");
+    assert!(water - landed.position.y < tuning.wade_depth + 0.05, "{landed:?}");
+
+    // Sprint-swimming is faster.
+    let frames = vec![input(0.0, 1.0, Buttons::SPRINT); 90];
+    let trace = simulate_water(&mut app, SoldierMotion::at(Vec3::new(0.0, 0.05, 20.0), 0.0), frames, Some(water));
+    let sprint_speed = trace[60..90].iter().map(horizontal_speed).sum::<f32>() / 30.0;
+    println!("swim sprint speed {sprint_speed:.2} m/s (tuning {})", tuning.swim_sprint_speed);
+    assert!((sprint_speed - tuning.swim_sprint_speed).abs() < 0.15, "{sprint_speed}");
 }

@@ -1,0 +1,37 @@
+// Swimming against a dedicated server: walks (no Teleport, which only works singleplayer/
+// listen-server) to the nearest boat, gets in, then out again straight into the water beside
+// it, and swims for a while. Traces the prediction correction the whole time: it should stay
+// ~0 (`step_soldier` is deterministic, so the client's own swim prediction should match the
+// server's exactly, same as walking).
+// server --level gulf_of_oman --bots 0
+// client --connect 127.0.0.1 --scenario scenarios/movement/swim_net.ron --out target/scenarios/swim/net
+(
+    steps: [
+        WaitReady,
+        ThirdPerson(true),
+        Wait(1.0),
+        WalkToVehicle("boat_rib"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("boarded"),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(0.5),
+        ExpectLog("started swimming", 5.0),
+        Screenshot("01_in_water"),
+        Trace("afloat", 3.0),
+        Hold([Fire]),
+        Trace("cant_fire", 1.0),
+        Release([Fire]),
+        Move(0.0, 1.0),
+        Trace("swimming", 10.0),
+        Screenshot("02_swimming"),
+        Move(0.0, 0.0),
+        Trace("stopped", 2.0),
+        Quit,
+    ],
+)

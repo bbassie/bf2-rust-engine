@@ -1,0 +1,68 @@
+// Swimming in Gulf of Oman's sea (water height 24 m): get into the water off the shore, swim,
+// check the weapon can't fire, swim to shore and climb out, then swim back out and to a boat
+// to get in. Logs "started swimming"/"stopped swimming" (with depth) so `ExpectLog` can check
+// the state changes actually happen; `Trace` samples position/depth/can-fire into the report.
+// client --scenario scenarios/movement/swim_gulf.ron --out target/scenarios/swim/gulf
+(
+    level: "gulf_of_oman",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        ThirdPerson(true),
+        Wait(1.0),
+
+        // Get into a BTR-90 on land, motor it out into the sea, then get out beside it: the
+        // simplest reliable way to place a soldier in deep water without knowing the
+        // coastline's exact geometry.
+        NearVehicle("apc_btr90"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        PlaceVehicle((-500.0, 26.0, 10.0), -90.0, 0.0),
+        Wait(1.0),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("in the water"),
+
+        // Surfaced, swimming, weapon away.
+        ExpectLog("started swimming", 5.0),
+        Screenshot("01_in_water"),
+        Trace("afloat", 2.0),
+        Hold([Fire]),
+        Trace("cant_fire", 1.0),
+        Release([Fire]),
+
+        // Swim to shore and climb out (the same course the BTR-90 drives back to land on in
+        // vehicles/vehicle2_amphibious.ron).
+        Look(-90.0, 0.0),
+        Move(0.0, 1.0),
+        Trace("swim_to_shore", 20.0),
+        ExpectLog("stopped swimming", 180.0),
+        Screenshot("02_climbed_out"),
+        Move(0.0, 0.0),
+        Trace("ashore", 2.0),
+
+        // Back out to sea and to the nearest boat: BF2 lets soldiers climb aboard straight
+        // from the water.
+        Look(90.0, 0.0),
+        Move(0.0, 1.0),
+        ExpectLog("started swimming", 60.0),
+        Move(0.0, 0.0),
+        WalkToVehicle("boat_rib"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.3),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("boarded the boat"),
+        ExpectLog("boarded the boat: boat_rib", 5.0),
+        Screenshot("03_boarded_boat"),
+        Quit,
+    ],
+)

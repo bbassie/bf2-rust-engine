@@ -613,10 +613,11 @@ fn run_scenario(
     player: PlayerControls,
     mut vehicles: Vehicles,
     soldiers: Soldiers,
-    (prediction, rendered, diagnostics): (
+    (prediction, rendered, diagnostics, mut was_swimming): (
         Res<crate::prediction::PredictionStats>,
         Query<&crate::prediction::SoldierRender, With<LocalSoldier>>,
         Res<bevy::diagnostic::DiagnosticsStore>,
+        Local<bool>,
     ),
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
@@ -653,6 +654,19 @@ fn run_scenario(
     let now = time.elapsed_secs();
     if runner.finished {
         return;
+    }
+    // Logged once on entry and exit (not every tick), so `ExpectLog` can watch for it.
+    if let Ok((m, _)) = soldier.single() {
+        if m.swimming != *was_swimming {
+            let water = level.as_ref().and_then(|l| l.desc.water.as_ref()).map(|w| w.height);
+            let depth = water.map_or(0.0, |w| w - m.position.y);
+            if m.swimming {
+                info!("scenario: started swimming (depth {depth:.2} m)");
+            } else {
+                info!("scenario: stopped swimming (depth {depth:.2} m, grounded {})", m.grounded);
+            }
+            *was_swimming = m.swimming;
+        }
     }
     let forbidden = runner
         .forbidden
@@ -1439,7 +1453,7 @@ fn run_scenario(
 {gpu}").ok();
                     }
                     if game_server::profile::enabled() {
-                        let systems = game_server::profile::take_report(frames, 60).replace("ms/tick", "ms/frame").replace("calls/tick", "calls/frame");
+                        let systems = game_server::profile::take_report(frames, 300).replace("ms/tick", "ms/frame").replace("calls/tick", "calls/frame");
                         writeln!(runner.report, "{name}: systems (BF2_PROFILE_FRAMES)
 {systems}").ok();
                     }
@@ -1451,9 +1465,11 @@ fn run_scenario(
             Step::Trace(name, seconds) => {
                 if let Ok((m, _)) = soldier.single() {
                     let (p, v) = (m.position, m.velocity);
+                    let water = level.as_ref().and_then(|l| l.desc.water.as_ref()).map(|w| w.height);
+                    let depth = water.map(|w| w - p.y);
                     writeln!(
                         runner.report,
-                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} eye {:7.3} stamina {:.3}{}{} correction {:.4}",
+                        "{name} {elapsed:6.3} pos {:8.3} {:7.3} {:8.3} vel {:6.2} {:6.2} {:6.2} {} {:?} eye {:7.3} stamina {:.3}{}{}{} correction {:.4}",
                         p.x,
                         p.y,
                         p.z,
@@ -1466,6 +1482,11 @@ fn run_scenario(
                         m.stamina,
                         if m.sprinting { " sprint" } else { "" },
                         if m.can_fire() { "" } else { " nofire" },
+                        match (m.swimming, depth) {
+                            (true, Some(d)) => format!(" swimming (depth {d:.2})"),
+                            (false, Some(d)) if d > 0.0 => format!(" wading (depth {d:.2})"),
+                            _ => String::new(),
+                        },
                         prediction.last_correction,
                     )
                     .ok();

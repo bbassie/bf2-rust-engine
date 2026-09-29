@@ -504,6 +504,8 @@ const TURN_RATE_SMOOTHING: f32 = 8.0;
 const CHASE_SPEED_STRETCH: f32 = 0.2;
 /// Stall buffet: the view shakes up to this much (radians).
 const BUFFET: f32 = 0.012;
+/// Share of a helicopter's pitch and bank its chase camera follows.
+const HELI_CHASE_TILT: Vec2 = Vec2::new(0.35, 0.5);
 
 /// The pilot camera's memory from frame to frame.
 #[derive(Default)]
@@ -540,9 +542,17 @@ pub fn pilot_camera(
     camera.last = Some(rotation);
     camera.time += dt;
     let wanted = flight_view(rotation, look);
+    // Helicopters fly nose down and bank hard: their chase camera takes only part of that, so
+    // it keeps looking ahead instead of at the ground.
+    let chased = if data.0.desc.category == game_data::VehicleCategory::Helicopter {
+        let (yaw, pitch, roll) = rotation.to_euler(EulerRot::YXZ);
+        flight_view(Quat::from_euler(EulerRot::YXZ, yaw, pitch * HELI_CHASE_TILT.x, roll * HELI_CHASE_TILT.y), look)
+    } else {
+        wanted
+    };
     let smoothed = camera
         .smoothed
-        .map_or(wanted, |c| c.slerp(wanted, 1.0 - (-CHASE_STIFFNESS * dt).exp()));
+        .map_or(chased, |c| c.slerp(chased, 1.0 - (-CHASE_STIFFNESS * dt).exp()));
     camera.smoothed = Some(smoothed);
     let lead = Vec2::new(camera.turn_rate.y, camera.turn_rate.x) * LEAD_TIME;
     let lead = lead.clamp_length_max(LEAD_MAX);
