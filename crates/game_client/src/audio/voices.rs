@@ -513,7 +513,8 @@ fn update_voices(
         if let Some(left) = &mut voice.fade {
             *left -= dt;
             if *left <= 0.0 {
-                commands.entity(entity).despawn();
+                // A one-shot may have finished (and been despawned by Bevy) meanwhile.
+                commands.entity(entity).try_despawn();
                 continue;
             }
             fade = *left / FADE;

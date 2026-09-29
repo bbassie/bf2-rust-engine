@@ -521,7 +521,9 @@ impl BotBrain {
         let winning = self.exposed && self.target.is_some() && self.suppression < 0.4 && self.hurt_ago > 2.0;
         self.peek_timer -= if winning { dt * 0.4 } else { dt };
         let reloading = me.inventory.is_some_and(|i| i.reloading);
-        let hide = self.suppression > 0.75 || self.hurt_ago < 0.4 || reloading;
+        let hide = self.suppression > crate::ai::tune::knob("hide_supp", 0.75)
+            || (self.hurt_ago < 0.4 && crate::ai::tune::knob("hide_hurt", 1.0) > 0.5)
+            || reloading;
         if self.exposed && (self.peek_timer <= 0.0 || hide) {
             self.exposed = false;
             self.peek_timer = crate::ai::tune::knob("peek_hide", 0.4) * (1.0 + 1.5 * fastrand::f32()) + 0.6 * self.suppression.min(1.0);

@@ -1141,8 +1141,10 @@ struct Flash {
 fn update_flashes(mut commands: Commands, time: Res<Time>, mut flashes: Query<(Entity, &mut Flash)>) {
     for (entity, mut flash) in &mut flashes {
         flash.age += time.delta_secs();
+        // First-person flashes hang under the view model's anchor, which may have gone (and
+        // taken them along) since.
         if flash.age >= flash.life {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
         }
     }
 }

@@ -10,6 +10,8 @@
     bots: 1,
     team: 1,
     steps: [
+        // Name tags off: they'd cover the target in the screenshots.
+        Setting("name_tags", "off"),
         Dummy("stand"),
         WaitReady,
         Teleport((-184.0, 157.0, -85.0), 90.0, 0.0),
@@ -54,6 +56,11 @@
         Screenshot("crouchstrafe"),
         HitGeometry("crouchstrafe", 4.0),
         ShootAt("crouchstrafe", "all", 22),
+
+        Dummy("crouchspam"),
+        Wait(1.0),
+        HitGeometry("crouchspam", 5.0),
+        ShootAt("crouchspam", "all", 22),
 
         Dummy("walk"),
         Wait(1.5),

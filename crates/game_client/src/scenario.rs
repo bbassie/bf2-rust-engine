@@ -175,10 +175,12 @@ pub enum Step {
     SteerResponseTime(String),
     /// Flying: holds an input (steer right, throttle up, stick roll right, stick pitch up;
     /// each -1..1) for `seconds`, then lets go for as long, and reports how the drawn vehicle
-    /// and the camera turn: when each first visibly turned (3°/s), reached half and 90 % of
-    /// the rate at the end of the hold, that rate, the rate curve, and how long after letting
-    /// go it was down to 10 %. The axis follows the input: the stick's roll, else its pitch,
-    /// else the heading. E.g. `RateResponse("yaw", (1.0, 0.0, 0.0, 0.0), 1.5)`.
+    /// and the camera turn: when each first moved 0.5°, reached half and 90 % of the rate at
+    /// the end of the hold, that rate, the rate curve, and how long after letting go it was
+    /// down to 10 % (rates over 100 ms windows; times in game time, so a slow frame rate
+    /// doesn't stretch them, and the frame rate). The axis follows the input: the stick's
+    /// roll, else its pitch, else the heading. E.g.
+    /// `RateResponse("yaw", (1.0, 0.0, 0.0, 0.0), 1.5)`.
     RateResponse(String, (f32, f32, f32, f32), f32),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
@@ -584,6 +586,8 @@ struct Runner {
     /// `RateResponse`: per frame the time since the input and the vehicle's and the
     /// camera's angle about the measured axis (degrees).
     rates: Vec<(f32, f32, f32)>,
+    /// `RateResponse`: the game time it began at.
+    rate_started: f64,
 }
 
 /// What a player can do, for [`run_scenario`].
@@ -633,19 +637,23 @@ struct Vehicles<'w, 's> {
     camera: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
     /// The pilot's stick and free look, for `VehicleLook`.
     flight: ResMut<'w, crate::vehicles::FlightStick>,
+    /// Game time, for `RateResponse`.
+    game_time: Res<'w, Time<Virtual>>,
+    /// Our inputs and the vehicles' acknowledged ones: how many ticks behind the simulation is.
+    history: Res<'w, crate::local_input::InputHistory>,
+    motions: Query<'w, 's, &'static game_shared::vehicle::VehicleMotion>,
 }
 
 impl Vehicles<'_, '_> {
     /// `label t: at (x, y, z) 320 km/h, 85 m up (climb 3.2 m/s), heading 12, pitch 4, roll -30, engine 0.8`
     fn flight_line(&self, label: &str, elapsed: f32) -> String {
-        let Some((view, state)) = self
-            .seated
-            .single()
-            .ok()
-            .and_then(|s| Some((self.vehicles.get(s.vehicle).ok()?.1, self.states.get(s.vehicle).ok()?)))
-        else {
+        let Some((view, state, ack)) = self.seated.single().ok().and_then(|s| {
+            let ack = self.motions.get(s.vehicle).map_or(0, |m| m.ack);
+            Some((self.vehicles.get(s.vehicle).ok()?.1, self.states.get(s.vehicle).ok()?, ack))
+        }) else {
             return format!("{label} {elapsed:5.2}: not in a vehicle");
         };
+        let lag = self.history.latest().map_or(0, |f| f.seq.wrapping_sub(ack) as i64);
         let t = view.transform;
         let filter = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
         let altitude = self
@@ -655,7 +663,7 @@ impl Vehicles<'_, '_> {
         let forward = t.rotation * Vec3::NEG_Z;
         let right = t.rotation * Vec3::X;
         format!(
-            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2} gear {}, replayed {} corrected {:.3}",
+            "{label} {elapsed:5.2}: at ({:.1}, {:.1}, {:.1}) {:.0} km/h, {altitude:.1} m up (climb {:.1} m/s), heading {:.0}, pitch {:.0}, roll {:.0}, engine {:.2} gear {}, replayed {} corrected {:.3}, input {lag} ticks ahead of the simulation",
             t.translation.x,
             t.translation.y,
             t.translation.z,
@@ -1385,6 +1393,7 @@ fn run_scenario(
                 };
                 if runner.frames == 0 {
                     runner.rates.clear();
+                    runner.rate_started = vehicles.game_time.elapsed_secs_f64();
                     input.movement = Some(Vec2::new(*steer, *throttle)).filter(|m| *m != Vec2::ZERO);
                     input.stick = Some(Vec2::new(*roll, *pitch)).filter(|s| *s != Vec2::ZERO);
                 }
@@ -1394,18 +1403,21 @@ fn run_scenario(
                     Some(&(_, v, c)) => (unwrap(angle(rotation), v), unwrap(angle(camera_rotation), c)),
                     None => (angle(rotation), angle(camera_rotation)),
                 };
-                if runner.rates.last().is_none_or(|s| elapsed > s.0) {
-                    runner.rates.push((elapsed, vehicle_angle, camera_angle));
+                // Game time: a slow frame rate (a busy machine) doesn't stretch the timings.
+                let game = (vehicles.game_time.elapsed_secs_f64() - runner.rate_started) as f32;
+                if runner.rates.last().is_none_or(|s| game > s.0) {
+                    runner.rates.push((game, vehicle_angle, camera_angle));
                 }
                 runner.frames += 1;
-                if elapsed >= *seconds && (input.movement.is_some() || input.stick.is_some()) {
+                if game >= *seconds && (input.movement.is_some() || input.stick.is_some()) {
                     input.movement = None;
                     input.stick = None;
                 }
-                if elapsed < *seconds * 2.0 {
+                if game < *seconds * 2.0 {
                     Progress::Waiting
                 } else {
-                    let line = rate_report(label, &runner.rates, *seconds);
+                    let fps = runner.frames as f32 / elapsed.max(0.001);
+                    let line = format!("{} ({fps:.0} fps)", rate_report(label, &runner.rates, *seconds));
                     for line in line.lines() {
                         info!("scenario: {line}");
                     }

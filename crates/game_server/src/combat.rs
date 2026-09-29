@@ -182,8 +182,9 @@ struct Detonation {
 const HEADSHOT_MULTIPLIER: f32 = 2.5;
 /// Hits are judged at most this many ticks in the past (250 ms).
 pub const MAX_REWIND: u32 = 15;
-/// Ticks of pose history kept per soldier.
-const POSE_HISTORY: usize = MAX_REWIND as usize + 4;
+/// Ticks of pose history kept per soldier: as far as hits are rewound, plus the longest
+/// crossfade of the animations before that (see `game_shared::skeleton::Blend`).
+const POSE_HISTORY: usize = MAX_REWIND as usize + 4 + (skeleton::fade::LONGEST * game_shared::TICK_HZ as f32) as usize + 1;
 /// Soldiers' `armor.defaultMaterial` (Human_body): the damage table column for hits and
 /// explosions alike (also used by `abilities` for the medic bag and repairs).
 pub(crate) const SOLDIER_MATERIAL: u32 = 24;
@@ -252,6 +253,22 @@ impl PoseHistory {
             .find(|(t, _)| *t <= tick)
             .or(self.0.front())
             .map(|(_, pose)| *pose)
+    }
+
+    /// The animation states up to `tick`, oldest first, each with the seconds since the one
+    /// before, back as far as a crossfade reaches (and the soldier was on his feet).
+    fn recent(&self, tick: u32) -> Vec<(AnimState, f32)> {
+        let mut states: Vec<(AnimState, f32)> = self
+            .0
+            .iter()
+            .rev()
+            .skip_while(|(t, _)| *t > tick)
+            .map_while(|(_, pose)| pose.anim)
+            .map(|anim| (anim, 1.0 / game_shared::TICK_HZ as f32))
+            .take((skeleton::fade::LONGEST * game_shared::TICK_HZ as f32) as usize + 1)
+            .collect();
+        states.reverse();
+        states
     }
 }
 
@@ -628,7 +645,12 @@ impl Target<'_> {
     /// The nearest of its zones, posed as `rewind` ticks ago, a ray meets.
     fn ray(&self, rigs: &HitRigs, armory: &Armory, now: u32, rewind: u32, origin: Vec3, direction: Vec3, max: f32) -> Option<ZoneHit> {
         let pose = self.pose(now, rewind);
-        let bones = || pose.anim.and_then(|anim| rigs.pose(&self.loadout.kit, self.loadout, armory, &anim));
+        // Posed like clients draw it at that tick, crossfades included.
+        let bones = || {
+            pose.anim?;
+            let recent = self.history?.recent(now.wrapping_sub(rewind));
+            rigs.pose_recent(&self.loadout.kit, self.loadout, armory, &recent)
+        };
         pose.ray_posed(self.zones, bones, origin, direction, max)
     }
 }
@@ -1362,6 +1384,7 @@ mod tests {
                         position: Vec3::new(tick as f32 * 0.1, 0.0, -20.0),
                         yaw: 0.0,
                         stance: Stance::Standing,
+                        anim: None,
                     };
                     (tick, pose)
                 })
@@ -1395,11 +1418,13 @@ mod tests {
     #[test]
     fn shots_are_judged_where_the_target_was_when_the_shooter_saw_it() {
         let history = runner();
+        let loadout = Loadout::default();
         let target = Target {
             entity: Entity::PLACEHOLDER,
             pose: history.at(100).unwrap(),
             history: Some(&history),
             zones: hitzones::fallback(),
+            loadout: &loadout,
         };
         // The shooter saw tick 90 (10 ticks back): the target a meter behind where it is now.
         let seen = target.pose(100, 10);
@@ -1412,5 +1437,25 @@ mod tests {
         assert!(present.is_none(), "a meter ahead by now");
         // Further back than the history keeps: the oldest pose.
         assert_eq!(target.pose(100, 60).position, history.0.front().unwrap().1.position);
+    }
+
+    #[test]
+    fn recent_animation_states_end_at_the_tick_and_stop_off_foot() {
+        let anim = |stride: f32| game_shared::skeleton::AnimState {
+            stance: Stance::Standing,
+            velocity: Vec2::new(0.0, 3.9),
+            stride,
+            clock: 0.0,
+            reload: None,
+            weapon: 0,
+        };
+        let mut history = runner();
+        for (tick, pose) in &mut history.0 {
+            pose.anim = (*tick != 80).then(|| anim(*tick as f32 * 0.01));
+        }
+        let recent = history.recent(95);
+        assert_eq!(recent.len(), 15, "ticks 81..=95: tick 80 was off foot");
+        assert_eq!(recent.last().unwrap().0.stride, 0.95);
+        assert!(history.recent(80).is_empty());
     }
 }

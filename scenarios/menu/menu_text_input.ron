@@ -5,6 +5,12 @@
 // cursor position), so this uses `Focus` to jump straight to what the click would have done,
 // then drives everything else (typing, arrows, Tab, Ctrl+A/Backspace, paste) the same way a
 // player would: real key events, checked with `LogField`/`ExpectLog`.
+//
+// Every key in a modifier combo (Ctrl+A, Shift+Left, ...) needs its own frame apart from the
+// others (`Frames(1)`): a key's logical modifier state (`Res<ButtonInput<Key>>`, which
+// `on_focused_keyboard_input` reads) reflects the *end* of whatever a single frame's batch of
+// key events adds up to, not the order within it, so pressing and releasing Ctrl in the same
+// frame as the key it's meant to modify leaves that key seeing no modifier at all.
 // client --scenario scenarios/menu/menu_text_input.ron --out target/scenarios/menu/text_input
 (
     menu: true,
@@ -17,6 +23,15 @@
         Wait(0.2),
         Screenshot("address_focused"),
 
+        // The address field starts pre-filled (the last-used address); clear it first.
+        HoldKey(ControlLeft),
+        Frames(1),
+        Key(KeyA),
+        Frames(1),
+        ReleaseKey(ControlLeft),
+        Frames(1),
+        Key(Backspace),
+        Wait(0.2),
         Type("127.0.0.1"),
         Wait(0.2),
         LogField("field:address"),
@@ -32,6 +47,7 @@
         Key(ArrowLeft),
         Frames(1),
         HoldKey(ShiftLeft),
+        Frames(1),
         Key(ArrowLeft),
         Frames(1),
         Key(ArrowLeft),
@@ -44,12 +60,17 @@
         Key(Backspace),
         Wait(0.2),
         LogField("field:address"),
-        ExpectLog("field field:address: \"127.1\"", 3.0),
+        // "127.0.0.1": 3 lefts put the cursor before the second "0" (after "127.0."); 3 more
+        // with Shift select ".0." (back to after "127"), which Backspace then removes.
+        ExpectLog("field field:address: \"1270.1\"", 3.0),
 
         // Ctrl+A selects all; Backspace clears it.
         HoldKey(ControlLeft),
+        Frames(1),
         Key(KeyA),
+        Frames(1),
         ReleaseKey(ControlLeft),
+        Frames(1),
         Key(Backspace),
         Wait(0.2),
         LogField("field:address"),
@@ -64,9 +85,13 @@
         Wait(0.2),
         Screenshot("port_focused"),
         HoldKey(ControlLeft),
+        Frames(1),
         Key(KeyA),
+        Frames(1),
         ReleaseKey(ControlLeft),
+        Frames(1),
         Key(Backspace),
+        Wait(0.2),
         Type("a"),
         Type("7"),
         Type("7"),
@@ -77,7 +102,9 @@
 
         // Shift+Tab goes back to the address field.
         HoldKey(ShiftLeft),
+        Wait(0.2),
         Key(Tab),
+        Wait(0.2),
         ReleaseKey(ShiftLeft),
         Wait(0.2),
         Screenshot("shift_tab_back_to_address"),
@@ -86,11 +113,17 @@
         // from): a second line doesn't make it in, even for a field with no character filter.
         SetClipboard("192.168.1.1\nsecond line"),
         HoldKey(ControlLeft),
+        Frames(1),
         Key(KeyA),
+        Frames(1),
         ReleaseKey(ControlLeft),
+        Frames(1),
         Key(Backspace),
+        Wait(0.2),
         HoldKey(ControlLeft),
+        Frames(1),
         Key(KeyV),
+        Frames(1),
         ReleaseKey(ControlLeft),
         Wait(0.3),
         LogField("field:address"),
@@ -99,19 +132,29 @@
 
         // The port field's digit filter strips the letters out of a mixed paste instead of
         // rejecting the whole paste (Bevy's own `EditableTextFilter` would reject it outright).
+        // Kept to 5 characters (the field's own `max_characters`, a real port number's widest).
         Key(Tab),
         Wait(0.2),
+        Screenshot("port_focused_2"),
         HoldKey(ControlLeft),
+        Frames(1),
         Key(KeyA),
+        Frames(1),
         ReleaseKey(ControlLeft),
+        Frames(1),
         Key(Backspace),
-        SetClipboard("12a3b4"),
+        Wait(0.2),
+        LogField("field:port"),
+        ExpectLog("field field:port: \"\"", 3.0),
+        SetClipboard("1a2b3"),
         HoldKey(ControlLeft),
+        Frames(1),
         Key(KeyV),
+        Frames(1),
         ReleaseKey(ControlLeft),
         Wait(0.3),
         LogField("field:port"),
-        ExpectLog("field field:port: \"1234\"", 3.0),
+        ExpectLog("field field:port: \"123\"", 3.0),
         Screenshot("port_pasted"),
 
         Quit,

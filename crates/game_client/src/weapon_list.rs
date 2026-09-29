@@ -147,7 +147,7 @@ fn rebuild_rows(
                     align_items: AlignItems::Center,
                     column_gap: px(10),
                     padding: UiRect::new(px(0), px(12), px(3), px(3)),
-                    width: px(270),
+                    width: px(300),
                     height: px(34),
                     border_radius: BorderRadius::all(px(6)),
                     overflow: Overflow::clip(),
@@ -185,6 +185,7 @@ fn rebuild_rows(
                     font(14.0),
                     TextColor(DIM),
                     shadow(),
+                    TextLayout::no_wrap(),
                     Node {
                         flex_grow: 1.0,
                         ..default()

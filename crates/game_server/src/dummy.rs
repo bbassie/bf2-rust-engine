@@ -6,7 +6,7 @@
 //! on a listen server sets [`DummyControl::pose`] (the `Dummy` step). A dummy is placed
 //! [`DummyControl::distance`] meters in front of the nearest human and placed again when he
 //! moves away. Poses: `stand`, `crouch`, `prone`, `strafe`, `crouchstrafe`, `pronestrafe`,
-//! `walk`, `aim`, `fire`, `reload`, `turn`; `@<degrees>` turns it that far to its left from
+//! `walk`, `aim`, `fire`, `reload`, `turn`, `crouchspam` (up and down); `@<degrees>` turns it that far to its left from
 //! facing the human (`stand@90` shows its right side).
 
 use bevy::prelude::*;
@@ -185,6 +185,9 @@ fn puppet(
             frame.weapon = primary as u8;
         }
         let stance = match name {
+            // Up and down every 0.8 s.
+            "crouchspam" if (dummy.time / 0.8) as u32 % 2 == 1 => Buttons::CROUCH,
+            "crouchspam" => Buttons::empty(),
             n if n.starts_with("crouch") => Buttons::CROUCH,
             n if n.starts_with("prone") => Buttons::PRONE,
             _ => Buttons::empty(),

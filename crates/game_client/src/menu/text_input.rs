@@ -10,10 +10,11 @@
 //! - Tab / Shift+Tab order among a page's fields (bevy's [`TabNavigationPlugin`], plus a
 //!   [`TabGroup`] on each page's root in `menu::pages`);
 //! - a password mask ([`PasswordMask`]; Bevy's widget doesn't have one yet);
-//! - paste sanitizing ([`sanitize_pasted_text`]): typing already filters one character at a
-//!   time (each keystroke is its own edit), but Bevy's [`EditableTextFilter`] rejects a *paste*
-//!   outright if it contains even one disallowed character, and doesn't stop it from including
-//!   newlines in a single-line field. We instead keep the first line and drop the rest.
+//! - a character filter and single-line enforcement applied *after* every edit
+//!   ([`sanitize_pasted_text`]) instead of Bevy's own [`EditableTextFilter`], which rejects an
+//!   edit outright if even one character in it fails: fine for typing (always one character at
+//!   a time) but it means a multi-character paste with a single bad character, or any newline
+//!   in a paste, would otherwise be dropped whole instead of cleaned up.
 
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use bevy::{
         InputFocus,
         tab_navigation::{TabIndex, TabNavigationPlugin},
     },
-    text::{EditableText, EditableTextFilter, TextCursorStyle, TextEdit, TextEditChange},
+    text::{EditableText, TextCursorStyle, TextEdit, TextEditChange},
     ui_widgets::ScrollIntoView,
 };
 
@@ -77,9 +78,9 @@ pub struct TextInputBox(pub Entity);
 #[derive(Component)]
 pub struct PasswordMask(pub Entity);
 
-/// A character filter re-applied after any edit (typing already filters one character at a
-/// time; this catches a paste). `None` still enforces single-line, just without filtering
-/// individual characters.
+/// A field's character filter, applied after every edit rather than by Bevy's own
+/// `EditableTextFilter` (see the module doc): `None` still enforces single-line, just without
+/// filtering individual characters.
 #[derive(Component, Clone, Default)]
 struct PasteGuard(Option<Arc<dyn Fn(char) -> bool + Send + Sync>>);
 
@@ -112,7 +113,7 @@ pub fn text_input(
         BorderColor::all(Color::NONE),
     ))
     .with_children(|b| {
-        let mut entity = b.spawn((
+        let entity = b.spawn((
             Name::new(format!("field:{name}")),
             marker,
             editable,
@@ -125,12 +126,14 @@ pub fn text_input(
                 selected_text_color: None,
             },
             TabIndex(options.tab_index),
+            // Not `EditableTextFilter`: Bevy's own filter rejects an edit outright if *any*
+            // character in it fails (typing is always one character at a time, so that's fine
+            // there, but it means a paste with even one disallowed character is dropped
+            // whole instead of just losing that character - see `sanitize_pasted_text`, which
+            // this drives instead and which strips rather than rejects).
             PasteGuard(options.filter.clone()),
             Node { width: percent(100), ..default() },
         ));
-        if let Some(filter) = options.filter {
-            entity.insert(EditableTextFilter::new(move |c| filter(c)));
-        }
         text_entity = entity.id();
         if options.password {
             b.spawn((
@@ -180,10 +183,10 @@ fn mask_passwords(mut masks: Query<(&PasswordMask, &mut Text)>, fields: Query<&E
     }
 }
 
-/// After any edit, keeps only the first line and the characters [`PasteGuard`] allows: typing
-/// can't violate either (a keystroke is always one character, already filtered on the way in
-/// by `EditableTextFilter`, and Enter without `allow_newlines` never reaches the buffer), so in
-/// practice this only ever has to clean up after a paste.
+/// After any edit, keeps only the first line and the characters [`PasteGuard`] allows. Typing a
+/// disallowed character technically inserts it for one edit before this reverts it (rather than
+/// Bevy's own `EditableTextFilter`, which would refuse the keystroke instead), which is not
+/// visible to the player since both happen within the same frame, before it's ever drawn.
 fn sanitize_pasted_text(change: On<TextEditChange>, mut fields: Query<(&mut EditableText, &PasteGuard)>) {
     let Ok((mut editable, guard)) = fields.get_mut(change.event_target()) else {
         return;

@@ -289,6 +289,20 @@ impl InputBuffer {
         }
     }
 
+    /// Drops all but the newest `count` queued frames; their buttons carry over to the next
+    /// frame, so a short press isn't lost.
+    pub fn keep_newest(&mut self, count: usize) {
+        let mut buttons = game_shared::input::Buttons::empty();
+        while self.queue.len() > count.max(1) {
+            if let Some(frame) = self.queue.pop_front() {
+                buttons |= frame.buttons;
+            }
+        }
+        if let Some(next) = self.queue.front_mut() {
+            next.buttons |= buttons;
+        }
+    }
+
     /// The input to apply this tick. Repeats the previous input if nothing new arrived.
     pub fn next(&mut self) -> InputFrame {
         if let Some(frame) = self.queue.pop_front() {
@@ -597,6 +611,12 @@ fn receive_inputs(
         / fixed_time.timestep().as_secs_f64()) as usize;
     for mut buffer in &mut buffers {
         buffer.trim(ticks);
+    }
+    // The host's own inputs come every frame, without loss or jitter: queued beyond the
+    // ticks about to run they would only wait. (A queue filled up by a slow frame never
+    // drained and kept the host's input 6 ticks, 100 ms, behind: flying, driving, walking.)
+    if let Some(mut buffer) = host.as_deref().and_then(|h| buffers.get_mut(h.0).ok()) {
+        buffer.keep_newest(ticks.max(1));
     }
 }
 

@@ -105,8 +105,10 @@ pub enum PickSlot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PoolWeapon {
     pub weapon: String,
-    /// Kit name prefixes (factions) whose kits carry it: `us`, `mec`, `sas`, `seal`, ...
+    /// Kit name prefixes (factions) whose kits carry or unlock it: `us`, `mec`, `sas`, ...
     pub factions: Vec<String>,
+    /// Those whose kits carry it as their own (not as an unlock).
+    pub native: Vec<String>,
     /// 0: some kit carries it as its own; otherwise the lowest unlock level that gives it.
     pub unlock: u32,
 }
@@ -192,8 +194,8 @@ impl Arsenal {
         kits: impl IntoIterator<Item = &'a KitDesc>,
         weapon: impl Fn(&str) -> Option<Arc<WeaponDesc>>,
     ) -> Self {
-        // (slot, class) -> weapon -> (factions, lowest unlock level)
-        let mut found: BTreeMap<(Option<String>, String), (BTreeSet<String>, u32)> = BTreeMap::new();
+        // (slot, class) -> weapon -> (factions, native factions, lowest unlock level)
+        let mut found: BTreeMap<(Option<String>, String), (BTreeSet<String>, BTreeSet<String>, u32)> = BTreeMap::new();
         let mut frags = BTreeSet::new();
         let mut launchers = BTreeMap::new();
         for kit in kits {
@@ -224,9 +226,12 @@ impl Arsenal {
                     Some(PickSlot::Sidearm) => (None, name.clone()),
                     None => continue,
                 };
-                let entry = found.entry(key).or_insert_with(|| (BTreeSet::new(), level));
+                let entry = found.entry(key).or_insert_with(|| (BTreeSet::new(), BTreeSet::new(), level));
                 entry.0.insert(faction.clone());
-                entry.1 = entry.1.min(level);
+                if level == 0 {
+                    entry.1.insert(faction.clone());
+                }
+                entry.2 = entry.2.min(level);
             }
         }
         let mut arsenal = Arsenal {
@@ -234,10 +239,11 @@ impl Arsenal {
             launchers,
             ..default()
         };
-        for ((class, name), (factions, unlock)) in found {
+        for ((class, name), (factions, native, unlock)) in found {
             let entry = PoolWeapon {
                 weapon: name,
                 factions: factions.into_iter().collect(),
+                native: native.into_iter().collect(),
                 unlock,
             };
             match class {

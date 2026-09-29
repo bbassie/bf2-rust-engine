@@ -100,6 +100,11 @@ pub fn class_title(kind: &str) -> String {
     }
 }
 
+/// Silenced pistols share their plain twin's name.
+fn silenced(weapon: &str) -> &'static str {
+    if weapon.contains("silenc") || weapon.contains("silens") { " SD" } else { "" }
+}
+
 /// Faction names for kit prefixes.
 fn faction_title(faction: &str) -> String {
     match faction {
@@ -297,17 +302,18 @@ fn fill_panel(
                         .map(|l| format!(" + {}", weapon_display_name(&l.display_name)))
                         .unwrap_or_default();
                     let refusal = arsenal.check(&rules, &class, slot, &entry.weapon, &factions, rank).err();
-                    let mut tag = entry.factions.iter().map(|f| faction_title(f)).collect::<Vec<_>>().join(", ");
-                    match entry.unlock {
-                        0 => {}
-                        1 => tag.push_str("  |  unlock"),
-                        _ => tag.push_str("  |  SF / booster unlock"),
-                    }
+                    // Who carries it; unlocks say so.
+                    let tag = match entry.unlock {
+                        0 if entry.native.len() > 3 => format!("{} factions", entry.native.len()),
+                        0 => entry.native.iter().map(|f| faction_title(f)).collect::<Vec<_>>().join(", "),
+                        1 => "Unlock (BF2 1.5)".to_string(),
+                        _ => "Unlock (Special Forces, booster packs)".to_string(),
+                    };
                     row(
                         list,
                         &assets,
                         LoadoutButton::Weapon(entry.weapon.clone()),
-                        format!("{}{launcher}", weapon_display_name(&weapon.display_name)),
+                        format!("{}{}{launcher}", weapon_display_name(&weapon.display_name), silenced(&weapon.name)),
                         tag,
                         Some(weapon),
                         refusal,
@@ -336,6 +342,7 @@ fn fill_panel(
                                 Text::new(label),
                                 font(11.0),
                                 TextColor(DIM),
+                                TextLayout::no_wrap(),
                                 Node {
                                     width: px(72),
                                     ..default()

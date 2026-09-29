@@ -106,7 +106,16 @@ pub(super) fn menu_keys(
     {
         menu.submit = true;
     }
-    if *screen.get() != Screen::InGame || menu.paused {
+    // Keeps a menu keypress from also being read as a gameplay one: `build_input` still runs
+    // (and reads `ButtonInput<KeyCode>`) every `FixedUpdate` tick whenever a match is active,
+    // paused or not. Not needed at the main menu itself (no match exists yet, so nothing reads
+    // it) or while loading (same reason) — and skipping it there matters now: resetting it
+    // every frame would otherwise wipe a modifier's `pressed` state before Bevy's own
+    // Tab-navigation observer (Shift+Tab between `menu::text_input` fields) or text editing
+    // (Shift+arrow selection, Ctrl+A/C/V/X) get to see it, since both hang off the same
+    // `ButtonInput<KeyCode>`/`ButtonInput<Key>` this resets and there's no ordering between a
+    // deferred observer trigger and a later system that would guarantee otherwise.
+    if (*screen.get() != Screen::InGame && *screen.get() != Screen::Menu) || menu.paused {
         keys.reset_all();
         scroll.delta = Vec2::ZERO;
     }

@@ -189,6 +189,19 @@ pub struct AnimState {
 }
 
 impl AnimState {
+    /// The reload clip and its time, while it plays (the client plays it once, then the
+    /// loops again for the rest of a long reload).
+    fn reload_clip(&self, upper: &impl Fn(&str) -> Option<f32>) -> Option<(&'static str, f32)> {
+        let name = clips::RELOAD[usize::from(self.stance == Stance::Prone)];
+        let reload = self.reload?;
+        let duration = upper(name)?;
+        (reload < duration).then_some((name, reload))
+    }
+
+    /// What the client's animator crossfades between: the legs' state.
+    fn legs_state(&self) -> (Stance, Gait) {
+        (self.stance, gait(self.stance, self.velocity))
+    }
     /// The state of a soldier on his feet with a weapon in hand; `None` when the client draws
     /// him some other way (climbing, swimming, under a parachute, hanging from a zipline,
     /// airborne), where hit zones keep their stance's pose.
@@ -225,11 +238,8 @@ impl AnimState {
                 out.push((false, name, weight, time(duration)));
             }
         }
-        let prone = usize::from(self.stance == Stance::Prone);
-        if let Some(reload) = self.reload
-            && let Some(duration) = upper(clips::RELOAD[prone])
-        {
-            out.push((true, clips::RELOAD[prone], 1.0, reload.clamp(0.0, duration)));
+        if let Some((name, time)) = self.reload_clip(&upper) {
+            out.push((true, name, 1.0, time));
             return out;
         }
         for (&name, weight) in names.iter().zip(weights).filter(|(_, w)| *w > 0.02) {
@@ -241,6 +251,117 @@ impl AnimState {
             out.push((true, name, weight, time(duration)));
         }
         out
+    }
+}
+
+/// The client animator's crossfade times (seconds), roughly BF2's bundle fade times.
+pub mod fade {
+    pub const FADE: f32 = 0.2;
+    pub const START_MOVING: f32 = 0.15;
+    pub const STANCE: f32 = 0.3;
+    pub const PRONE: f32 = 0.4;
+    pub const RELOAD_IN: f32 = 0.15;
+    pub const ACTION_OUT: f32 = 0.2;
+    /// The longest of them.
+    pub const LONGEST: f32 = PRONE;
+}
+
+/// How long the client crossfades from one legs state to another (the on-foot part of its
+/// animator's rules).
+pub fn fade_time(from: (Stance, Gait), to: (Stance, Gait)) -> f32 {
+    match (from, to) {
+        ((a, _), (b, _)) if a != b => {
+            if a == Stance::Prone || b == Stance::Prone {
+                fade::PRONE
+            } else {
+                fade::STANCE
+            }
+        }
+        ((_, Gait::Still), _) => fade::START_MOVING,
+        _ => fade::FADE,
+    }
+}
+
+/// A clip crossfading in a [`Blend`].
+#[derive(Clone, Copy, Debug)]
+struct Fading {
+    upper: bool,
+    name: &'static str,
+    weight: f32,
+    target: f32,
+    /// Its time when it was last played (clips fading out stand still).
+    time: f32,
+}
+
+/// The client's crossfades (`game_client::render::blend`), replayed from a soldier's recent
+/// states, so a pose in the middle of a crossfade (strafing from one side to the other,
+/// crouching) blends the same clips by the same weights.
+#[derive(Clone, Debug, Default)]
+pub struct Blend {
+    tracks: Vec<Fading>,
+    last: Option<((Stance, Gait), bool)>,
+    legs_fade: f32,
+    upper_fade: f32,
+}
+
+impl Blend {
+    /// The next state, `dt` seconds after the last.
+    pub fn step(&mut self, state: &AnimState, dt: f32, legs: impl Fn(&str) -> Option<f32>, upper: impl Fn(&str) -> Option<f32>) {
+        let key = state.legs_state();
+        let action = state.reload_clip(&upper).is_some();
+        let settled = self.last.is_none();
+        if let Some((last, last_action)) = self.last {
+            if last != key {
+                self.legs_fade = fade_time(last, key);
+                if !action && !last_action {
+                    self.upper_fade = self.legs_fade;
+                }
+            }
+            if action && !last_action {
+                self.upper_fade = fade::RELOAD_IN;
+            } else if !action && last_action {
+                self.upper_fade = fade::ACTION_OUT;
+            }
+        }
+        self.last = Some((key, action));
+        for track in &mut self.tracks {
+            track.target = 0.0;
+        }
+        for (is_upper, name, weight, time) in state.clips(&legs, &upper) {
+            match self.tracks.iter_mut().find(|t| t.upper == is_upper && t.name == name) {
+                Some(track) => {
+                    track.target += weight;
+                    track.time = time;
+                }
+                None => self.tracks.push(Fading {
+                    upper: is_upper,
+                    name,
+                    weight: 0.0,
+                    target: weight,
+                    time,
+                }),
+            }
+        }
+        // Each layer moves its weights toward their targets over its fade time; with nothing
+        // showing yet (or at the first state) there is nothing to fade from.
+        for upper_layer in [false, true] {
+            let fade = if upper_layer { self.upper_fade } else { self.legs_fade };
+            let silent = self.tracks.iter().filter(|t| t.upper == upper_layer).all(|t| t.weight <= 0.0);
+            let step = if fade > 0.0 && !silent && !settled { dt / fade } else { f32::INFINITY };
+            for track in self.tracks.iter_mut().filter(|t| t.upper == upper_layer) {
+                track.weight += (track.target - track.weight).clamp(-step, step);
+            }
+        }
+        self.tracks.retain(|t| t.weight > 0.0 || t.target > 0.0);
+    }
+
+    /// The clips to blend now: (upper body, name, weight, time).
+    pub fn clips(&self) -> Vec<(bool, &'static str, f32, f32)> {
+        self.tracks
+            .iter()
+            .filter(|t| t.weight > 0.0)
+            .map(|t| (t.upper, t.name, t.weight, t.time))
+            .collect()
     }
 }
 
@@ -401,6 +522,16 @@ impl Rig {
         self.pose_clips(&clips, upper)
     }
 
+    /// The bones at the last of a soldier's recent states (oldest first, each with the
+    /// seconds since the one before), crossfaded like the client does.
+    pub fn pose_recent(&self, states: &[(AnimState, f32)], upper: &ClipSet) -> Pose {
+        let mut blend = Blend::default();
+        for (state, dt) in states {
+            blend.step(state, *dt, |n| self.legs.duration(n), |n| upper.duration(n));
+        }
+        self.pose_clips(&blend.clips(), upper)
+    }
+
     /// The bones posed by clips (upper body or not, name, weight, time), blended like Bevy:
     /// every clip animating a bone counts by its weight, normalized.
     pub fn pose_clips(&self, clips: &[(bool, &str, f32, f32)], upper: &ClipSet) -> Pose {
@@ -503,6 +634,22 @@ impl HitRigs {
         let weapon = loadout.weapons.get(state.weapon as usize).and_then(|w| armory.weapon(w));
         let set = self.set(weapon.map(|w| &**w))?;
         Some(rig.pose(state, set))
+    }
+
+    /// The bones of a soldier wearing `kit` at the last of his recent states (oldest first,
+    /// with the seconds since the one before; see [`Rig::pose_recent`]).
+    pub fn pose_recent(
+        &self,
+        kit: &str,
+        loadout: &crate::weapons::Loadout,
+        armory: &crate::weapons::Armory,
+        states: &[(AnimState, f32)],
+    ) -> Option<Pose> {
+        let rig = self.rig(kit)?;
+        let (last, _) = states.last()?;
+        let weapon = loadout.weapons.get(last.weapon as usize).and_then(|w| armory.weapon(w));
+        let set = self.set(weapon.map(|w| &**w))?;
+        Some(rig.pose_recent(states, set))
     }
 
     /// Loads the upper-body set of a weapon, if it isn't yet.

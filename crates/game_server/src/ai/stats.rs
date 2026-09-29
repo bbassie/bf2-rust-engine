@@ -166,6 +166,9 @@ pub struct CombatStats {
     /// Bot-seconds on foot by the distance to the area of its order: inside its radius, up to
     /// 30 m beyond, 100 m, 200 m, further; attacking (0..5) and defending (5..10).
     pub obj_dist: [f32; 10],
+    /// Medics going to revive someone, and how that ended: back up, dead (bled out or
+    /// finished off), out of time, something else came first.
+    pub revive: [u32; 5],
 }
 
 /// What killed a soldier (the last hit before going down): bullets, a vehicle's guns or
@@ -224,6 +227,9 @@ impl CombatStats {
         for i in 0..10 {
             self.obj_dist[i] += o.obj_dist[i];
         }
+        for i in 0..5 {
+            self.revive[i] += o.revive[i];
+        }
         for i in 0..4 {
             self.death_dist[i] += o.death_dist[i];
             self.rounds_dist[i] += o.rounds_dist[i];
@@ -237,7 +243,7 @@ impl CombatStats {
             names.iter().zip(values).map(|(n, v)| format!("{n} {v}")).collect::<Vec<_>>().join(", ")
         };
         format!(
-            "deaths by cause: {}; bullet deaths by distance: {}; rounds by distance: {}; hits by distance: {}; time by state: {}; objective distance: {}",
+            "deaths by cause: {}; bullet deaths by distance: {}; rounds by distance: {}; hits by distance: {}; time by state: {}; objective distance: {}; revives {}",
             list(&DEATH_CAUSES, &self.death_cause),
             list(&DISTANCES, &self.death_dist),
             list(&DISTANCES, &self.rounds_dist),
@@ -249,6 +255,7 @@ impl CombatStats {
                 .collect::<Vec<_>>()
                 .join(", "),
             self.obj_dist.iter().map(|v| format!("{v:.0}")).collect::<Vec<_>>().join(" "),
+            self.revive.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" "),
         )
     }
 

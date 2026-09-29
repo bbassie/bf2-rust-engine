@@ -40,6 +40,7 @@ impl Plugin for ClientCombatPlugin {
             .init_resource::<ViewTick>()
             .add_systems(Startup, simulated_input_delay)
             .add_systems(PreUpdate, track_view_tick.after(ClientSystems::Receive))
+            .add_systems(PostUpdate, record_drawn_anim.after(crate::prediction::RenderStateSystems))
             .add_systems(PostUpdate, delay_inputs.before(ClientSystems::Send))
             .add_message::<LocalShot>()
             .add_message::<LocalLaunch>()
@@ -722,13 +723,51 @@ pub(crate) fn drawn_body_pose(render: &SoldierRender, inventory: Option<&Invento
     }
 }
 
+/// A soldier's animation states as drawn over the last frames (oldest first, each with the
+/// seconds since the one before), to pose his hit zones mid-crossfade as the server does
+/// (`game_shared::skeleton::Blend`).
+#[derive(Component, Default)]
+pub(crate) struct DrawnAnim(VecDeque<(AnimState, f32)>);
+
+fn record_drawn_anim(
+    mut commands: Commands,
+    time: Res<Time>,
+    view: Res<ViewTick>,
+    mut soldiers: Query<(Entity, &SoldierRender, Option<&Inventory>, Has<Seated>, Option<&mut DrawnAnim>), With<Soldier>>,
+) {
+    let dt = time.delta_secs();
+    for (entity, render, inventory, seated, history) in &mut soldiers {
+        let Some(mut history) = history else {
+            commands.entity(entity).insert(DrawnAnim::default());
+            continue;
+        };
+        match drawn_body_pose(render, inventory, seated, &view).anim {
+            Some(anim) => {
+                history.0.push_back((anim, dt));
+                // As far back as the longest crossfade reaches.
+                while history.0.iter().skip(1).map(|(_, dt)| dt).sum::<f32>() > skeleton::fade::LONGEST + 0.05 {
+                    history.0.pop_front();
+                }
+            }
+            None => history.0.clear(),
+        }
+    }
+}
+
 /// Soldiers bullets can hit, as drawn: for the tracers, the hit zone overlay and checks.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct DrawnTargets<'w, 's> {
     soldiers: Query<
         'w,
         's,
-        (Entity, &'static SoldierRender, &'static Loadout, Option<&'static Inventory>, Option<&'static Seated>),
+        (
+            Entity,
+            &'static SoldierRender,
+            &'static Loadout,
+            Option<&'static Inventory>,
+            Option<&'static Seated>,
+            Option<&'static DrawnAnim>,
+        ),
         (With<Soldier>, Without<Downed>),
     >,
     vehicles: Query<'w, 's, &'static VehicleData>,
@@ -744,6 +783,7 @@ pub(crate) struct DrawnTarget<'a> {
     pub pose: BodyPose,
     pub zones: &'a [game_data::HitZone],
     loadout: &'a Loadout,
+    recent: Option<&'a DrawnAnim>,
     bones: std::cell::OnceCell<Option<skeleton::Pose>>,
 }
 
@@ -753,18 +793,19 @@ impl DrawnTargets<'_, '_> {
     pub(crate) fn collect(&self) -> Vec<DrawnTarget<'_>> {
         self.soldiers
             .iter()
-            .filter(|(.., seated)| {
+            .filter(|(.., seated, _)| {
                 seated.is_none_or(|s| {
                     self.vehicles
                         .get(s.vehicle)
                         .is_ok_and(|v| v.0.desc.seats.get(s.seat as usize).is_some_and(|seat| seat.open))
                 })
             })
-            .map(|(entity, render, loadout, inventory, seated)| DrawnTarget {
+            .map(|(entity, render, loadout, inventory, seated, recent)| DrawnTarget {
                 entity,
                 pose: drawn_body_pose(render, inventory, seated.is_some(), &self.view),
                 zones: self.armory.hit_zones(&loadout.kit),
                 loadout,
+                recent,
                 bones: std::cell::OnceCell::new(),
             })
             .collect()
@@ -776,7 +817,10 @@ impl DrawnTargets<'_, '_> {
             .bones
             .get_or_init(|| {
                 let anim = target.pose.anim?;
-                self.rigs.pose(&target.loadout.kit, target.loadout, &self.armory, &anim)
+                match target.recent.map(|r| r.0.iter().copied().collect::<Vec<_>>()).filter(|r| !r.is_empty()) {
+                    Some(recent) => self.rigs.pose_recent(&target.loadout.kit, target.loadout, &self.armory, &recent),
+                    None => self.rigs.pose(&target.loadout.kit, target.loadout, &self.armory, &anim),
+                }
             })
             .as_ref()
     }

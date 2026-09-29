@@ -89,7 +89,18 @@ impl Plugin for MenuPlugin {
             .add_observer(level_changed)
             .add_systems(Startup, scan_levels)
             .add_systems(First, leave_when_asked)
-            .add_systems(PreUpdate, menu_keys.in_set(MenuKeys).after(InputSystems))
+            .add_systems(
+                PreUpdate,
+                menu_keys
+                    .in_set(MenuKeys)
+                    .after(InputSystems)
+                    // `menu_keys` resets `ButtonInput<KeyCode>` while not (actively) in-game so
+                    // gameplay never sees a menu keypress; ordered after Bevy's own input
+                    // dispatch (which is what its Tab/Shift+Tab navigation observer, reading
+                    // that same resource for the Shift modifier, hangs off of) so it doesn't
+                    // wipe Shift's state out from under it first.
+                    .after(bevy::input_focus::InputFocusSystems::Dispatch),
+            )
             .add_systems(OnEnter(Screen::Menu), spawn_main_menu)
             .add_systems(OnEnter(Screen::Loading), spawn_loading_screen)
             .add_systems(OnExit(Screen::InGame), |mut menu: ResMut<Menu>| {

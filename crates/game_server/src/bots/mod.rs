@@ -1034,7 +1034,7 @@ impl BotBrain {
                 self.activity = Activity::Search { at, time: time - dt };
             }
             Activity::Throw { at, time, weapon } => self.throw(w, me, at, time, weapon, &mut intent, dt),
-            Activity::Revive { soldier, time } => self.revive(w, me, soldier, time, &mut intent, dt),
+            Activity::Revive { soldier, time } => self.revive(w, me, soldier, time, &mut intent, team_stats, dt),
             Activity::Launch { target, time, weapon, shots, fired } => {
                 self.launch(w, me, skill, target, time, weapon, shots, fired, &mut intent, dt)
             }
@@ -1402,7 +1402,17 @@ impl BotBrain {
             Activity::Cover { time, .. } if time > 0.0 => best = (6.0, self.activity),
             Activity::Flank { time, .. } if time > 0.0 => best = (3.0, self.activity),
             Activity::Search { time, .. } if time > 0.0 => best = (2.5, self.activity),
-            Activity::Revive { time, .. } if time > 0.0 => best = (REVIVE_UTILITY, self.activity),
+            Activity::Revive { time, soldier } if time > 0.0 => {
+                // Tactical medics see a revive through once close, unless it gets too hot.
+                let close = w.soldiers.get(soldier).is_ok_and(|s| flat(s.1.position - position).length() < 20.0);
+                let committed = self.tactical
+                    && crate::ai::tune::knob("revive_commit", 0.0) > 0.5
+                    && close
+                    && self.suppression < 0.8
+                    && hp > 0.4
+                    && distance.is_none_or(|d| d > 12.0);
+                best = (if committed { 8.6 } else { REVIVE_UTILITY }, self.activity);
+            }
             Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
             Activity::Mount { time, .. } if time < 90.0 => best = (5.0, self.activity),
             Activity::Demolish { time, .. } if time < 40.0 => best = (7.0, self.activity),
@@ -1476,7 +1486,18 @@ impl BotBrain {
             if let Some((soldier, mate, _)) = pick {
                 // Not into the fire: the squad mate first only while nobody shoots at us.
                 let fight = distance.is_some_and(|d| d < 40.0) || self.suppression > 0.3;
-                let utility = if mate && !fight { REVIVE_UTILITY + 2.0 } else { REVIVE_UTILITY };
+                let mut utility = if mate && !fight { REVIVE_UTILITY + 2.0 } else { REVIVE_UTILITY };
+                // Tactical medics go for a teammate down close by even in a firefight, unless
+                // the enemy is right there: a revive saves a life (and a ticket).
+                let near = downed.iter().find(|d| d.0 == soldier).is_some_and(|d| flat(d.1 - position).length() < 25.0);
+                if self.tactical
+                    && crate::ai::tune::knob("revive_commit", 0.0) > 0.5
+                    && (near || mate)
+                    && self.suppression < 0.6
+                    && distance.is_none_or(|d| d > 15.0)
+                {
+                    utility = utility.max(7.8);
+                }
                 consider(&mut best, utility, Activity::Revive { soldier, time: 25.0 });
             }
         }
@@ -1529,8 +1550,13 @@ impl BotBrain {
                         .all(|s| s.player == me.player || s.position.distance(at) > GRENADE_SAFETY)
                 });
                 let depth = if self.tactical { 0.6 + 0.8 * skill.tactics() } else { 1.0 };
+                // Winding up a grenade in the open, in a firefight, is time not shooting back:
+                // tactical bots throw at an enemy in sight from cover.
+                let exposed = self.tactical
+                    && crate::ai::tune::knob("vis_throw", 1.0) < 0.5
+                    && self.cover.is_none_or(|c| flat(c.spot - position).length() > 2.0);
                 let utility = match visible {
-                    true if self.engaged > 2.5 && fastrand::f32() < 0.1 + 0.25 * aggression => 8.0,
+                    true if self.engaged > 2.5 && !exposed && fastrand::f32() < 0.1 + 0.25 * aggression => 8.0,
                     true => 0.0,
                     false => 5.0 * (0.5 + aggression) * depth,
                 };
@@ -1587,6 +1613,13 @@ impl BotBrain {
         }
 
         let (_, next) = best;
+        if let Activity::Revive { soldier, .. } = self.activity
+            && std::mem::discriminant(&next) != std::mem::discriminant(&self.activity)
+        {
+            // Off to something else before the revive was done.
+            let still_down = w.soldiers.get(soldier).is_ok_and(|s| s.8);
+            team_stats.combat.revive[if still_down { 4 } else { 1 }] += 1;
+        }
         if std::mem::discriminant(&next) != std::mem::discriminant(&self.activity) {
             match next {
                 Activity::Cover { .. } => team_stats.covers += 1,
@@ -1606,7 +1639,10 @@ impl BotBrain {
                     self.last_repair = Some(target);
                     team_stats.repairs += 1;
                 }
-                Activity::Revive { .. } => team_stats.revives += 1,
+                Activity::Revive { .. } => {
+                    team_stats.revives += 1;
+                    team_stats.combat.revive[0] += 1;
+                }
                 Activity::TakeCover { .. } => team_stats.takecovers += 1,
                 Activity::Suppress { .. } => team_stats.suppressions += 1,
                 Activity::Supply { .. } => team_stats.supplies_run += 1,
@@ -1836,9 +1872,17 @@ impl BotBrain {
 
     /// Walks to a downed teammate with the paddles out and shocks him until he is back up
     /// (or gone).
-    fn revive(&mut self, w: &Senses, me: &Me, soldier: Entity, time: f32, intent: &mut Intent, dt: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn revive(&mut self, w: &Senses, me: &Me, soldier: Entity, time: f32, intent: &mut Intent, team_stats: &mut TeamStats, dt: f32) {
         let body = w.soldiers.get(soldier).ok().filter(|s| s.8).map(|s| s.1.position);
         let (Some(body), Some(paddles), true) = (body, self.paddles, time > 0.0) else {
+            // How it ended: up again, dead, or out of time.
+            let outcome = match w.soldiers.get(soldier) {
+                Ok(s) if !s.8 => 1,
+                Ok(_) => 3,
+                Err(_) => 2,
+            };
+            team_stats.combat.revive[outcome] += 1;
             self.activity = Activity::Objective;
             return;
         };
