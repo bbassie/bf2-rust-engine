@@ -354,7 +354,7 @@ fn pinned_mismatch(pinned: &str, fetched: &str) -> bool {
 /// clear, and a server the client won't retry probing could go stale for good).
 pub fn clean_url(url: Option<&str>) -> Option<String> {
     let url = url?.trim().trim_end_matches('/');
-    (!url.is_empty() && !url.contains(char::is_whitespace) && game_auth::https_or_loopback(url)).then(|| url.to_string())
+    (!url.is_empty() && !url.contains(char::is_whitespace) && game_auth::master_url_allowed(url)).then(|| url.to_string())
 }
 
 /// The master URL changed in the settings: log out of the old one.
@@ -390,7 +390,9 @@ mod tests {
         assert_eq!(clean_url(Some("https://master.example.com/")), Some("https://master.example.com".into()));
         assert_eq!(clean_url(Some("http://127.0.0.1:16581")), Some("http://127.0.0.1:16581".into()));
         assert_eq!(clean_url(Some("http://localhost:16581")), Some("http://localhost:16581".into()));
-        assert_eq!(clean_url(Some("http://master.example.com")), None, "plain http to a real host");
+        // Plain http to a real host: refused in release builds, allowed in development builds.
+        let expected = cfg!(debug_assertions).then(|| "http://master.example.com".to_string());
+        assert_eq!(clean_url(Some("http://master.example.com")), expected, "plain http to a real host");
         assert_eq!(clean_url(Some("ftp://x")), None);
         assert_eq!(clean_url(Some("  ")), None);
         assert_eq!(clean_url(None), None);

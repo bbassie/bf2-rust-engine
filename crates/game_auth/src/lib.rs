@@ -107,6 +107,13 @@ pub fn https_or_loopback(url: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1") || host.starts_with("127.")
 }
 
+/// Whether a master server URL may be used: [`https_or_loopback`], plus plain `http://` to any
+/// host in development builds (debug assertions on), for masters on a test machine without a
+/// TLS proxy. Release builds never send passwords or keys over plain HTTP to another machine.
+pub fn master_url_allowed(url: &str) -> bool {
+    https_or_loopback(url) || (cfg!(debug_assertions) && url.trim().strip_prefix("http://").is_some_and(|rest| !rest.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -197,8 +197,8 @@ pub fn start(world: &mut World) {
     let url = url.unwrap_or_default();
     // S20: the master's key (and, if ranked, this server's API key) travel over `master_url`,
     // so it must be https unless it's plainly local testing (no reverse proxy in front yet).
-    if !url.is_empty() && !game_auth::https_or_loopback(&url) {
-        warn!("accounts: master_url must be https:// (http:// only to localhost, for local testing); ignoring accounts");
+    if !url.is_empty() && !game_auth::master_url_allowed(&url) {
+        warn!("accounts: master_url must be https:// (http:// only to localhost, or anywhere in development builds); ignoring accounts");
         return;
     }
     let ranked = config.ranked && config.api_key.as_ref().is_some_and(|k| !k.trim().is_empty()) && !url.is_empty();
@@ -402,7 +402,9 @@ mod tests {
             ..default()
         });
         start(app.world_mut());
-        assert!(app.world().get_resource::<Accounts>().is_none(), "plain http to a real host is refused, not silently used");
+        // Development builds (which run the tests) allow plain http to test machines.
+        let refused = app.world().get_resource::<Accounts>().is_none();
+        assert_eq!(refused, !cfg!(debug_assertions), "plain http to a real host is refused in release builds");
     }
 
     #[test]
