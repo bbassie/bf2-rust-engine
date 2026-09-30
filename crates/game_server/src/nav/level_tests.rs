@@ -113,7 +113,7 @@ fn carriers_on_levels() {
         let mut colliders =
             world.query_filtered::<(&Collider, &Transform, &CollisionLayers), (With<LevelEntity>, Without<ColliderDisabled>)>();
         let mut ladders = world.query_filtered::<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>();
-        let collected = collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(layout));
+        let collected = collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(layout), &[]);
         let geometry = collected.geometry;
         let patches = detail_patches(&level, &geometry, Some(&paths));
 
@@ -306,7 +306,7 @@ fn nav_around() {
             let mut colliders = world
                 .query_filtered::<(&Collider, &Transform, &CollisionLayers), (With<LevelEntity>, Without<ColliderDisabled>)>();
             let mut ladders = world.query_filtered::<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>();
-            let collected = collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(&layout));
+            let collected = collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(&layout), &[]);
             let patches = detail_patches(&level, &collected.geometry, Some(&paths));
             let grid = Arc::new(patch::build_level(&collected.geometry, &patches, params));
             loaded = Some((name.clone(), size, grid, level));
@@ -383,6 +383,136 @@ fn nav_around() {
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (d, s) in near.iter().take(10) {
             println!("  static {d:.0} m: {s}");
+        }
+    }
+}
+
+/// Builds the grids of levels with and without their combat areas (see [`super::area`]),
+/// like the server does at level load, and prints build times, cells, memory and cache file
+/// sizes, the spawn check and path query times of both:
+///
+/// `NAV_LEVELS=strike_at_karkand:64,gulf_of_oman:64 cargo test -p game_server --lib combat_areas_on_levels -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn combat_areas_on_levels() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let paths = GamePaths::resolve_with_mods(Some(root.join("imported")), Some(root.join("mods")));
+    let levels = std::env::var("NAV_LEVELS")
+        .unwrap_or_else(|_| "strike_at_karkand:64,gulf_of_oman:64,dalian_plant:64,aix2_aix_archipelago:64".into());
+    let params = NavParams::from_tuning(&SoldierTuning::default());
+    let file_size = |grid: &NavGrid| {
+        let path = std::env::temp_dir().join(format!("navgrid_area_{}.bin", std::process::id()));
+        super::cache::save(&path, 1, grid).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        std::fs::remove_file(&path).unwrap();
+        size as f32 / 1e6
+    };
+    // The fastest of two builds.
+    fn timed<T>(mut f: impl FnMut() -> T) -> (T, f32) {
+        let started = Instant::now();
+        let _ = f();
+        let first = started.elapsed().as_secs_f32();
+        let started = Instant::now();
+        let out = f();
+        (out, first.min(started.elapsed().as_secs_f32()))
+    }
+    for spec in levels.split(',') {
+        let (name, size) = spec.split_once(':').unwrap_or((spec, "64"));
+        let size: u32 = size.parse().unwrap();
+        let Ok(level) = load_level(&paths, name) else {
+            println!("{name}: not imported");
+            continue;
+        };
+        let Some(layout) = level.base_layout("gpm_cq", size).cloned() else {
+            println!("{name} {size}: no such layout");
+            continue;
+        };
+        if layout.combat_areas.is_empty() {
+            println!("{name} {size}: no combat areas (imported before they were)");
+            continue;
+        }
+        let plain_layout = game_data::GameModeDesc {
+            combat_areas: Vec::new(),
+            ..layout.clone()
+        };
+        let mut world = World::new();
+        {
+            let mut commands = world.commands();
+            spawn_statics(&mut commands, &level.desc.statics, &paths);
+        }
+        world.flush();
+        let mut colliders =
+            world.query_filtered::<(&Collider, &Transform, &CollisionLayers), (With<LevelEntity>, Without<ColliderDisabled>)>();
+        let mut ladders = world.query_filtered::<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>();
+        let strategic = super::strategic_points(&level, Some(&layout));
+        println!("\n== {name} {size}");
+        let mut grids = Vec::new();
+        for (label, l) in [("before", &plain_layout), ("after", &layout)] {
+            let collected =
+                collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(l), &strategic);
+            let geometry = collected.geometry;
+            let patches = detail_patches(&level, &geometry, Some(&paths));
+            let (grid, build_s) = timed(|| patch::build_level(&geometry, &patches, params));
+            let (lo, hi) = geometry.bounds.unwrap_or_default();
+            println!(
+                "  infantry {label}: {:.0}x{:.0} m, {}x{} columns of {} m, {} cells ({} in {} patches), {:.1} MB, file {:.1} MB, built in {build_s:.2} s",
+                hi.x - lo.x,
+                hi.y - lo.y,
+                grid.width,
+                grid.depth,
+                grid.params.cell,
+                grid.cell_count(),
+                grid.patch_cell_count(),
+                grid.patches().len(),
+                grid.memory_bytes() as f32 / 1e6,
+                file_size(&grid),
+            );
+            let (vehicle_geometry, areas) = super::vehicle_geometry(&geometry, collected.vehicle_meshes, Some(l));
+            let input = super::vehicle::VehicleGeometry {
+                geometry: vehicle_geometry,
+                roads: Vec::new(),
+                water: level.desc.water.as_ref().map(|w| w.height),
+                areas,
+            };
+            let (vehicles, vehicle_s) = timed(|| super::vehicle::build_all(&input, None));
+            println!(
+                "  vehicles {label}: land {}x{} ({} cells, {:.1} MB, file {:.1} MB), water {}, built in {vehicle_s:.2} s",
+                vehicles.land.width,
+                vehicles.land.depth,
+                vehicles.land.cell_count(),
+                vehicles.land.memory_bytes() as f32 / 1e6,
+                file_size(&vehicles.land),
+                vehicles.water.as_ref().map_or("none".into(), |w| format!("{}x{}", w.width, w.depth)),
+            );
+            grids.push(grid);
+        }
+        let check = SpawnCheck {
+            spawns: layout
+                .spawn_points
+                .iter()
+                .map(|sp| (sp.control_point.clone(), Vec3::from_array(sp.placement.position)))
+                .collect(),
+            control_points: layout.control_points.iter().map(|cp| (cp.id.clone(), Vec3::from_array(cp.position))).collect(),
+        };
+        for (label, g) in ["before", "after"].iter().zip(&grids) {
+            let cut = check.cut_off(g);
+            let (mut n, mut ms, mut max_ms, mut complete) = (0, 0.0f32, 0.0f32, 0);
+            for (_, from) in check.spawns.iter().step_by(2) {
+                for (_, to) in &check.control_points {
+                    let started = Instant::now();
+                    let path = g.find_path(*from, *to);
+                    let took = started.elapsed().as_secs_f32() * 1000.0;
+                    n += 1;
+                    ms += took;
+                    max_ms = max_ms.max(took);
+                    complete += usize::from(path.is_some_and(|p| p.complete));
+                }
+            }
+            println!(
+                "  {label}: {} spawns cut off from their flag; spawns -> flags: {n} paths ({complete} complete), {:.2} ms avg, {max_ms:.1} ms max",
+                cut.len(),
+                ms / n.max(1) as f32
+            );
         }
     }
 }

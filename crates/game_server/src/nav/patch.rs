@@ -185,6 +185,7 @@ pub fn build_level(geometry: &LevelGeometry, patches: &[Rect], params: NavParams
         bounds: geometry.bounds,
         holes: holes.clone(),
         frame: None,
+        area: geometry.area.clone(),
     };
     let mut grid = build::build_cells(&base, params);
     for (i, rect) in patches.iter().enumerate() {
@@ -195,6 +196,7 @@ pub fn build_level(geometry: &LevelGeometry, patches: &[Rect], params: NavParams
             bounds: Some((rect.min, rect.max)),
             holes: Vec::new(),
             frame: Some(rect.frame),
+            area: None,
         };
         let patch = build::build_cells(&local, NavParams { cell: patch_cell(), ..params });
         append(&mut grid, patch, rect.frame);

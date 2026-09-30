@@ -249,6 +249,9 @@ pub fn merge_layouts(layouts: &mut Vec<GameModeDesc>, extra: Vec<GameModeDesc>) 
             if layout.statics.is_empty() {
                 layout.statics = base.statics;
             }
+            if layout.combat_areas.is_empty() {
+                layout.combat_areas = base.combat_areas;
+            }
         }
         match layouts.iter_mut().find(|l| l.mode == layout.mode && l.size == layout.size) {
             Some(existing) => *existing = layout,
@@ -368,6 +371,7 @@ pub fn generate(source: &GameModeDesc, kind: ModeKind) -> Option<GameModeDesc> {
         spawn_points: source.spawn_points.clone(),
         vehicle_spawners: source.vehicle_spawners.clone(),
         statics: source.statics.clone(),
+        combat_areas: source.combat_areas.clone(),
         staged: Some(StagedDesc {
             attacker: front.attacker,
             tickets: default_tickets(kind, source.size),

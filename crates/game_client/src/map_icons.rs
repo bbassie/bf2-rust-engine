@@ -8,6 +8,10 @@
 //! in our colour (green when a squad mate is in), empty ones grey (only those our side or
 //! both sides spawn), enemy ones in red while spotted; tanks, APCs and anti-air with a line
 //! for the turret.
+//!
+//! In the tactical map style (`Settings::map_style`) flags are lettered shapes instead (see
+//! `map_shapes::objective_look`), pinned to the minimap's edge while out of range, and
+//! vehicles take the tactical palette's colours.
 
 use bevy::{platform::collections::HashMap, prelude::*};
 use game_data::VehicleClass;
@@ -23,7 +27,9 @@ use game_shared::{
 use crate::{
     conquest_hud::{FRIENDLY, NEUTRAL, SQUAD, team_color},
     map_markers::{CONTROL_POINT_LABEL, FLAG_LAYER, MapMarker, MapMarkers, MarkerSystems, OWN_LAYER, VEHICLE_LAYER},
+    map_shapes::{ObjectiveLetters, objective_look, palette},
     net::{LocalPlayer, LocalSoldier},
+    settings::{MapStyle, Settings},
     vehicles::VehicleView,
 };
 
@@ -124,6 +130,11 @@ impl UiIcons {
             Team::Two => &self.sides[2],
         }
     }
+
+    /// A vehicle template's class, if the level knows it.
+    pub fn vehicle_class(&self, template: &str) -> Option<VehicleClass> {
+        self.vehicles.get(&template.to_ascii_lowercase()).map(|v| v.class)
+    }
 }
 
 fn load_icons(
@@ -175,6 +186,8 @@ fn local_side(local: &Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>) -
 
 fn flag_markers(
     icons: Res<UiIcons>,
+    settings: Res<Settings>,
+    letters: Res<ObjectiveLetters>,
     local: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
     control_points: Query<(Entity, &ControlPoint, &FlagState)>,
     mut markers: ResMut<MapMarkers>,
@@ -183,6 +196,17 @@ fn flag_markers(
     for (entity, cp, state) in &control_points {
         // Rush's points nobody spawns at right now: nothing to show.
         if cp.uncapturable && state.owner == Team::Spectator {
+            continue;
+        }
+        if settings.map_style == MapStyle::Tactical {
+            let look = objective_look(state, cp.uncapturable, team, letters.get(entity));
+            markers.0.push(MapMarker {
+                layer: FLAG_LAYER,
+                pin: !cp.uncapturable,
+                ..MapMarker::shape(entity, cp.position, look, TACTICAL_FLAG_SIZE)
+                    .label(cp.name.clone())
+                    .priority(CONTROL_POINT_LABEL)
+            });
             continue;
         }
         let image = icons.side(state.owner).map_flag(cp.uncapturable);
@@ -199,6 +223,9 @@ fn flag_markers(
         });
     }
 }
+
+/// Minimap size of an objective's shape in the tactical style, logical pixels.
+pub const TACTICAL_FLAG_SIZE: f32 = 19.0;
 
 /// Where the cloth of BF2's map flag icons is (33x33 icons, the pole's foot in the middle),
 /// with a pixel around it.
@@ -284,6 +311,7 @@ fn heading(direction: Vec3) -> f32 {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn vehicle_markers(
     icons: Res<UiIcons>,
+    settings: Res<Settings>,
     local: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
     vehicles: Query<(Entity, &Vehicle, &VehicleView, Option<&VehicleHealth>, Option<&VehicleData>, Option<&Spotted>)>,
     riders: Query<(&Seated, &ControlledBy)>,
@@ -294,6 +322,10 @@ fn vehicle_markers(
 ) {
     let (team, squad) = local_side(&local);
     let ours = seat.single().ok().map(|s| s.vehicle);
+    let tactical = settings.map_style == MapStyle::Tactical;
+    let (friendly, squad_color, neutral) =
+        if tactical { (palette::FRIENDLY, palette::SQUAD, palette::NEUTRAL) } else { (FRIENDLY, SQUAD, NEUTRAL) };
+    let team_color = |side: Team, local: Team| crate::map_shapes::team_color(settings.map_style, side, local);
     // Who is in each vehicle.
     let mut crews: HashMap<Entity, (Team, bool)> = HashMap::default();
     for (seated, controlled_by) in &riders {
@@ -312,10 +344,10 @@ fn vehicle_markers(
         let color = match crews.get(&entity) {
             _ if ours == Some(entity) => OURS,
             Some((side, squad_mate)) if team == Team::Spectator => {
-                if *squad_mate { SQUAD } else { team_color(*side, team) }
+                if *squad_mate { squad_color } else { team_color(*side, team) }
             }
-            Some((side, true)) if *side == team => SQUAD,
-            Some((side, false)) if *side == team => FRIENDLY,
+            Some((side, true)) if *side == team => squad_color,
+            Some((side, false)) if *side == team => friendly,
             Some((side, _)) if spotted.is_some_and(|s| s.by == team) => team_color(*side, team),
             Some(_) => continue,
             None => {
@@ -323,7 +355,7 @@ fn vehicle_markers(
                 if team != Team::Spectator && owner.is_some_and(|o| o != team) && !spotted.is_some_and(|s| s.by == team) {
                     continue;
                 }
-                NEUTRAL
+                neutral
             }
         };
         let icon = icons.vehicles.get(&template);

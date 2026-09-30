@@ -5,6 +5,10 @@
 //! Every mode spawns at the flags a team holds; Rush's flags move with the front (points
 //! nobody spawns at are hidden) and its charges show on the map, and attackers out of
 //! tickets wait for the round to end.
+//!
+//! The map is a `map_background::MapSurface`; in the tactical style flags are the objective
+//! shapes of `map_shapes` (with their capture progress), with a grid, the main bases' zones and
+//! our squad's order lines.
 
 use bevy::{
     input::{
@@ -32,6 +36,11 @@ use crate::{
     map_markers::{LabelRequest, MapView, Obstacle, apply_map_view, drive_map_view, place_labels},
     net::{LocalPlayer, LocalSoldier},
     ui_theme::font,
+    // --- Map style ---
+    map_background::{GRID, MapSurface, legend, spawn_grid_labels},
+    map_shapes::{ObjectiveLetters, OrderLines, ShapeMaterial, ShapeText, objective_look, spawn_shape, map_lines, team_zones, update_shape, ShapeParams},
+    settings::{MapStyle, Settings},
+    // --- end map style ---
 };
 
 pub struct DeployPlugin;
@@ -45,7 +54,7 @@ impl Plugin for DeployPlugin {
                 (
                     clear_stale_choice,
                     open_and_close,
-                    set_map_image.run_if(resource_exists_and_changed::<LoadedLevel>),
+                    update_deploy_surface,
                     drive_deploy_view,
                     apply_deploy_view,
                     rebuild_markers,
@@ -148,6 +157,9 @@ struct PointFlag(Entity);
 /// A Rush charge on the map.
 #[derive(Component)]
 struct ChargeMarker(Entity);
+/// A control point's objective shape (tactical style).
+#[derive(Component)]
+struct PointShape(Entity);
 
 fn spawn_deploy_screen(mut commands: Commands) {
     commands
@@ -190,8 +202,10 @@ fn spawn_deploy_screen(mut commands: Commands) {
                         BackgroundColor(Color::srgb(0.16, 0.17, 0.18)),
                     ))
                     .with_children(|frame| {
+                        frame.spawn(legend("Wheel zoom  |  Right-drag pan  |  Double-click reset"));
                         frame.spawn((
                             MapImage,
+                            MapSurface::default(),
                             RelativeCursorPosition::default(),
                             Node {
                                 position_type: PositionType::Absolute,
@@ -317,22 +331,31 @@ fn open_and_close(
     root.set_if_neq(if screen.open { Visibility::Inherited } else { Visibility::Hidden });
 }
 
-fn set_map_image(
-    mut commands: Commands,
-    level: Res<LoadedLevel>,
-    asset_server: Res<AssetServer>,
-    map: Single<Entity, With<MapImage>>,
+/// The map (see `map_background`): the grid, the main bases' zones and our squad's order lines
+/// in the tactical style, while the screen shows.
+fn update_deploy_surface(
+    screen: Res<DeployScreen>,
+    settings: Res<Settings>,
+    level: Option<Res<LoadedLevel>>,
+    order_lines: Res<OrderLines>,
+    players: Query<(&Team, &Deployment), With<LocalPlayer>>,
+    points: Query<(&ControlPoint, &FlagState)>,
+    mut surface: Single<&mut MapSurface, With<MapImage>>,
 ) {
-    match &level.desc.minimap {
-        Some(path) => {
-            commands
-                .entity(*map)
-                .insert(ImageNode::new(asset_server.load(format!("imported://{path}"))));
-        }
-        None => {
-            commands.entity(*map).remove::<ImageNode>();
-        }
-    }
+    let Some(level) = level.filter(|_| screen.open) else {
+        return;
+    };
+    let tactical = settings.map_style == MapStyle::Tactical;
+    MapSurface::set(
+        &mut surface,
+        MapSurface {
+            pixels_per_uv: MAP_SIZE * screen.view.zoom,
+            grid: GRID as f32,
+            lines: if tactical { map_lines(&level, &order_lines.ours) } else { Vec::new() },
+            zones: if tactical { team_zones(&level, &points, local_team(&players)) } else { Vec::new() },
+            ..MapSurface::default()
+        },
+    );
 }
 
 /// Reads the mouse wheel, a right/middle drag, `+`/`-`/the triggers, the arrows/the stick and
@@ -399,6 +422,7 @@ fn rebuild_markers(
     added_charges: Query<(), Added<Charge>>,
     charges: Query<(Entity, &Charge)>,
     map: Single<(Entity, Option<&Children>), With<MapImage>>,
+    mut shapes: ResMut<Assets<ShapeMaterial>>,
 ) {
     let level_changed = level.as_ref().is_some_and(|l| l.is_changed());
     if added.is_empty() && added_charges.is_empty() && removed.read().next().is_none() && !level_changed {
@@ -411,6 +435,7 @@ fn rebuild_markers(
     for child in children.into_iter().flatten() {
         commands.entity(*child).despawn();
     }
+    spawn_grid_labels(&mut commands, map);
     // Names where they don't cover each other or the flags (see `map_markers::place_labels`).
     let points: Vec<(Entity, &ControlPoint, Vec2)> = control_points
         .iter()
@@ -469,8 +494,9 @@ fn rebuild_markers(
         ));
     }
     for (&(entity, cp, uv), spot) in points.iter().zip(spots) {
+        let mut marker_entity = Entity::PLACEHOLDER;
         commands.entity(map).with_children(|map| {
-            map.spawn((
+            marker_entity = map.spawn((
                 PointMarker {
                     entity,
                     index: cp.index,
@@ -534,10 +560,30 @@ fn rebuild_markers(
                         ..default()
                     },
                 ));
-            });
+            })
+            .id();
         });
+        // The tactical style's objective shape, in the middle of the marker (hidden in the
+        // classic style by `update_markers`).
+        let center = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: percent(50),
+                    top: percent(50),
+                    ..default()
+                },
+                bevy::ui::FocusPolicy::Pass,
+                ChildOf(marker_entity),
+            ))
+            .id();
+        let look = objective_look(&FlagState::default(), cp.uncapturable, Team::Spectator, "?");
+        spawn_shape(&mut commands, &mut shapes, center, &look, SHAPE, 0.0, (PointShape(entity), Visibility::Hidden));
     }
 }
+
+/// Size of an objective's shape on the deploy map (tactical style).
+const SHAPE: f32 = 22.0;
 
 fn local_team(players: &Query<(&Team, &Deployment), With<LocalPlayer>>) -> Team {
     players.single().map(|(t, _)| *t).unwrap_or_default()
@@ -835,12 +881,51 @@ fn update_markers(
     players: Query<(&Team, &Deployment), With<LocalPlayer>>,
     flags: Query<(&ControlPoint, &FlagState, Option<&SpawnBlocked>)>,
     mut markers: Query<(&PointMarker, &Interaction, &mut BackgroundColor, &mut BorderColor, &mut Visibility), Without<PointFlag>>,
-    mut point_flags: Query<(&PointFlag, &mut ImageNode, &mut Visibility)>,
+    mut point_flags: Query<(&PointFlag, &mut ImageNode, &mut Visibility), Without<PointMarker>>,
     icons: Res<crate::map_icons::UiIcons>,
+    // --- Map style ---
+    (screen, settings, letters, mut shapes, mut point_shapes, mut shape_texts): (
+        Res<DeployScreen>,
+        Res<Settings>,
+        Res<ObjectiveLetters>,
+        ResMut<Assets<ShapeMaterial>>,
+        Query<
+            (&PointShape, &MaterialNode<ShapeMaterial>, &Children, &mut Visibility),
+            (Without<PointMarker>, Without<PointFlag>),
+        >,
+        Query<(&mut TextColor, &mut Text), With<ShapeText>>,
+    ),
+    // --- end map style ---
 ) {
     let team = local_team(&players);
+    let tactical = settings.map_style == MapStyle::Tactical;
+    for (shape, material, children, mut visibility) in &mut point_shapes {
+        visibility.set_if_neq(if tactical { Visibility::Inherited } else { Visibility::Hidden });
+        if !tactical || !screen.open {
+            continue;
+        }
+        let Ok((cp, state, _)) = flags.get(shape.0) else { continue };
+        let look = objective_look(state, cp.uncapturable, team, letters.get(shape.0));
+        update_shape(&mut shapes, material, ShapeParams::new(&look, SHAPE, 0.0));
+        for child in children {
+            if let Ok((mut color, mut text)) = shape_texts.get_mut(*child) {
+                if color.0 != look.text_color {
+                    color.0 = look.text_color;
+                }
+                if let Some(letter) = &look.text
+                    && text.0 != *letter
+                {
+                    text.0 = letter.clone();
+                }
+            }
+        }
+    }
     for (flag, mut image, mut visibility) in &mut point_flags {
         let Ok((_, state, _)) = flags.get(flag.0) else { continue };
+        if tactical {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        }
         match icons.side(state.owner).flag.clone() {
             Some(handle) => {
                 if image.image != handle {
@@ -871,8 +956,16 @@ fn update_markers(
         if ours && *interaction == Interaction::Hovered {
             color = color.lighter(0.12);
         }
-        background.0 = color;
         let selected = ours && chosen == Some(marker.index);
+        // --- Map style: the shape shows the point; the button only rings the pick ---
+        if tactical {
+            let hovered = ours && *interaction == Interaction::Hovered;
+            background.0 = Color::srgba(1.0, 1.0, 1.0, if hovered { 0.18 } else { 0.0 });
+            *border = BorderColor::all(if selected { TEXT } else { Color::NONE });
+            continue;
+        }
+        // --- end map style ---
+        background.0 = color;
         *border = BorderColor::all(if selected { TEXT } else { Color::srgba(0.0, 0.0, 0.0, 0.6) });
     }
 }

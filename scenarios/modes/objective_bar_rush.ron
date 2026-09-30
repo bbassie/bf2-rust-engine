@@ -1,0 +1,37 @@
+// The top bar in Rush (Karkand 32, attacking US), classic and tactical style: tickets (ours
+// only: the defenders have none), the stage's charges as objective shapes, arming charge B
+// (the pie fills in our colour, then the charge pulses armed), and the stage line; the charges
+// on the tactical minimap.
+// client --scenario scenarios/modes/objective_bar_rush.ron --out target/scenarios/objective_bar_rush
+(
+    level: "strike_at_karkand",
+    mode: "gpm_rush",
+    size: 32,
+    bots: 0,
+    team: 2,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ExpectLog("charges placed on walkable ground", 30.0),
+        Wait(1.0),
+        Setting("map_style", "classic"),
+        Wait(0.3),
+        Screenshot("classic"),
+        Setting("map_style", "tactical"),
+        Wait(0.3),
+        Screenshot("tactical"),
+        NearCharge("B"),
+        Wait(1.0),
+        Hold([Use]),
+        Wait(2.0),
+        Screenshot("tactical_arming"),
+        ExpectLog("charge B of Stage 1 armed", 6.0),
+        Release([Use]),
+        Wait(0.5),
+        Screenshot("tactical_armed"),
+        Setting("map_style", "classic"),
+        Wait(0.3),
+        Screenshot("classic_armed"),
+        Quit,
+    ],
+)

@@ -8,7 +8,11 @@
 //! on background tasks and shortened by walking straight lines over the grid (see
 //! [`NavGrid::find_path`]). The grid covers the played layout's control points and spawns.
 //! Grids are cached next to the level (`navgrid_<mode>_<size>.bin`), keyed by a hash of
-//! the collision geometry and the movement limits.
+//! the collision geometry, the movement limits and the play area.
+//!
+//! Levels with combat areas (BF2 `CombatArea`) confine their grids to the area that bounds
+//! each kind of traveller, plus a margin ([`area`]): columns outside get no cells and the
+//! grid is cropped to the area's bounds, so bots never pick goals out of bounds.
 //!
 //! Big, intricate statics (the aircraft carriers: a hangar, ramps, narrow doors and
 //! catwalks, turned at any angle) get a **detail patch** ([`patch`]): a finer grid in the
@@ -18,6 +22,7 @@
 //! [`NavGrid::locate`], [`NavGrid::cells_near`], regions) covers both without callers
 //! knowing. Vehicles parked on the grid are [`obstacles`] paths go around.
 
+pub mod area;
 mod build;
 mod cache;
 pub mod obstacles;
@@ -38,6 +43,7 @@ use bevy::{
 };
 use bytemuck::{Pod, Zeroable};
 use game_data::GameModeDesc;
+use area::{COMBAT_AREA_MARGIN, KEEP_RADIUS, LADDER_REACH, PlayArea, Traveller};
 use game_shared::{
     ladder::{Ladder, LadderPart},
     level::{LevelEntity, LoadedLevel, Terrain},
@@ -503,6 +509,7 @@ fn collect_geometry<'a>(
     colliders: impl Iterator<Item = (&'a Collider, &'a Transform, &'a CollisionLayers)>,
     ladder_parts: impl Iterator<Item = (&'a Collider, &'a Transform)>,
     layout: Option<&GameModeDesc>,
+    strategic: &[Vec3],
 ) -> Collected {
     let (mut meshes, mut vehicle_meshes) = (Vec::new(), Vec::new());
     for (collider, transform, layers) in colliders {
@@ -528,17 +535,128 @@ fn collect_geometry<'a>(
             let half = aabb.size() * 0.5 * transform.scale.abs();
             Ladder::from_box(transform.transform_point(aabb.center()), transform.rotation, half)
         })
-        .collect();
+        .collect::<Vec<Ladder>>();
+    let area = layout.and_then(|l| infantry_area(l, &ladders, strategic));
+    let mut bounds = layout.and_then(gameplay_bounds);
+    if let Some(area) = &area {
+        let cropped = area.crop(bounds);
+        info!(
+            "nav: infantry grid kept to the combat area ({} polygons, {:.2} km2, margin {:.0} m{}): {:.0}x{:.0} m instead of {}",
+            area.polygons.len(),
+            area.polygon_area() / 1e6,
+            area.margin,
+            match area.keep.len() {
+                0 => String::new(),
+                n => format!(", {n} places outside kept"),
+            },
+            cropped.1.x - cropped.0.x,
+            cropped.1.y - cropped.0.y,
+            bounds.map_or("the whole level".into(), |(lo, hi)| format!("{:.0}x{:.0} m", hi.x - lo.x, hi.y - lo.y)),
+        );
+        bounds = Some(cropped);
+    }
     Collected {
         geometry: build::LevelGeometry {
             terrain,
             meshes,
             ladders,
-            bounds: layout.and_then(gameplay_bounds),
+            bounds,
+            area,
             ..default()
         },
         vehicle_meshes,
     }
+}
+
+/// The places of a layout gameplay needs to reach, by what they are: its control points,
+/// spawn points and vehicle spawners.
+fn gameplay_points(layout: &GameModeDesc) -> impl Iterator<Item = (String, Vec3)> + '_ {
+    let at = |p: [f32; 3]| Vec3::from_array(p);
+    layout
+        .control_points
+        .iter()
+        .map(move |cp| (format!("control point {}", cp.id), at(cp.position)))
+        .chain(layout.spawn_points.iter().map(move |sp| (format!("spawn of {}", sp.control_point), at(sp.placement.position))))
+        .chain(layout.vehicle_spawners.iter().map(move |v| {
+            let name = v.templates.iter().flatten().next().map_or("?", |t| t.as_str());
+            (format!("{name} spawner"), at(v.placement.position))
+        }))
+}
+
+/// Keeps `points` outside `area` (a circle and a corridor back each), logging them.
+fn keep_points(area: &mut PlayArea, grid: &str, points: impl Iterator<Item = (String, Vec3)>) {
+    let mut outside = Vec::new();
+    for (what, p) in points {
+        let distance = area.nearest_edge_point(p.xz()).1;
+        if area.keep_point(p.xz(), KEEP_RADIUS) {
+            outside.push(format!("{what} {distance:.0} m out at {:.0}, {:.0}", p.x, p.z));
+        }
+    }
+    if !outside.is_empty() {
+        info!(
+            "nav: {} places the {grid} needs lie outside the combat area, kept with corridors: {}",
+            outside.len(),
+            outside.join("; ")
+        );
+    }
+}
+
+/// The soldiers' play area of a layout: its combat area (see [`area`]), with the control
+/// points, spawns, vehicle spawners, strategic areas and routes (`strategic`) outside it
+/// kept, and ladders just outside.
+fn infantry_area(layout: &GameModeDesc, ladders: &[Ladder], strategic: &[Vec3]) -> Option<PlayArea> {
+    let mut area = PlayArea::for_layout(layout, Traveller::Soldier, COMBAT_AREA_MARGIN)?;
+    let strategic = strategic.iter().map(|p| ("strategic area point".to_string(), *p));
+    keep_points(&mut area, "infantry grid", gameplay_points(layout).chain(strategic));
+    for ladder in ladders {
+        let p = ladder.center.xz();
+        if !area.inside_polygons(p) && area.nearest_edge_point(p).1 <= area.margin + LADDER_REACH {
+            area.keep_point(p, 6.0);
+        }
+    }
+    Some(area)
+}
+
+/// The land vehicles' play area of a layout: its combat area, with the control points and
+/// vehicle spawners outside it kept.
+fn land_area(layout: &GameModeDesc) -> Option<PlayArea> {
+    let mut area = PlayArea::for_layout(layout, Traveller::Land, COMBAT_AREA_MARGIN)?;
+    let points = gameplay_points(layout).filter(|(what, _)| !what.starts_with("spawn of"));
+    keep_points(&mut area, "vehicle grid", points);
+    Some(area)
+}
+
+/// The boats' play area of a layout, with the vehicle spawners outside it kept.
+fn boat_area(layout: &GameModeDesc) -> Option<PlayArea> {
+    let mut area = PlayArea::for_layout(layout, Traveller::Boat, COMBAT_AREA_MARGIN)?;
+    for v in &layout.vehicle_spawners {
+        area.keep_point(Vec3::from_array(v.placement.position).xz(), KEEP_RADIUS);
+    }
+    Some(area)
+}
+
+/// The strategic areas' positions and route waypoints of the layout (BF2's AI hints in the
+/// level's `ai.ron`).
+fn strategic_points(level: &LoadedLevel, layout: Option<&GameModeDesc>) -> Vec<Vec3> {
+    let (Some(dir), Some(layout)) = (&level.dir, layout) else {
+        return Vec::new();
+    };
+    let path = dir.join("ai.ron");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(ai) = game_data::read_ron::<game_data::LevelAiDesc>(&path) else {
+        return Vec::new();
+    };
+    let Some(desc) = ai.layout(&layout.mode, layout.size) else {
+        return Vec::new();
+    };
+    desc.areas
+        .iter()
+        .flat_map(|a| std::iter::once(a.position).chain(a.infantry_position))
+        .chain(desc.routes.iter().flat_map(|r| r.waypoints.iter().copied()))
+        .map(Vec3::from_array)
+        .collect()
 }
 
 /// The detail patches of a level (see [`patch`]) that are within the grid's bounds.
@@ -585,11 +703,13 @@ fn start_build(
         .iter()
         .next()
         .and_then(|info| level.base_layout(&info.mode, info.size));
+    let strategic = strategic_points(&level, layout);
     let Collected { geometry, vehicle_meshes } = collect_geometry(
         terrain.iter().next().map(|t| t.0.clone()),
         colliders.iter(),
         ladder_parts.iter(),
         layout,
+        &strategic,
     );
     let patches = detail_patches(&level, &geometry, paths.as_deref());
     start_vehicle_build(&mut commands, &level, layout, &geometry, vehicle_meshes, paths.as_deref());
@@ -727,12 +847,7 @@ fn start_vehicle_build(
     vehicle_meshes: Vec<build::MeshInstance>,
     paths: Option<&game_shared::config::GamePaths>,
 ) {
-    let geometry = build::LevelGeometry {
-        terrain: infantry.terrain.clone(),
-        meshes: vehicle_meshes,
-        bounds: layout.and_then(vehicle_bounds),
-        ..default()
-    };
+    let (geometry, areas) = vehicle_geometry(infantry, vehicle_meshes, layout);
     let water = level.desc.water.as_ref().map(|w| w.height);
     let roads_desc = level.desc.roads.clone();
     let paths = paths.cloned();
@@ -745,7 +860,12 @@ fn start_vehicle_build(
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let started = Instant::now();
         let roads = paths.as_ref().map_or_else(Vec::new, |p| vehicle::road_triangles(p, &roads_desc));
-        let input = vehicle::VehicleGeometry { geometry, roads, water };
+        let input = vehicle::VehicleGeometry {
+            geometry,
+            roads,
+            water,
+            areas,
+        };
         let params = vehicle::land_params();
         let key = build::geometry_key(&input.geometry, &params);
         let cached = cache_path.as_ref().and_then(|path| cache::load(path, key, params));
@@ -772,6 +892,34 @@ fn start_vehicle_build(
         grid
     });
     commands.insert_resource(VehicleNavBuild(task));
+}
+
+/// What the vehicle grids are built from besides the roads and the water: the land grid's
+/// collision and bounds, and the play areas of land vehicles, boats and aircraft.
+fn vehicle_geometry(
+    infantry: &build::LevelGeometry,
+    vehicle_meshes: Vec<build::MeshInstance>,
+    layout: Option<&GameModeDesc>,
+) -> (build::LevelGeometry, vehicle::VehicleAreas) {
+    let area = layout.and_then(land_area);
+    let mut bounds = layout.and_then(vehicle_bounds);
+    if let Some(area) = &area {
+        bounds = Some(area.crop(bounds));
+    }
+    let geometry = build::LevelGeometry {
+        terrain: infantry.terrain.clone(),
+        meshes: vehicle_meshes,
+        bounds,
+        area,
+        ..default()
+    };
+    let air = |traveller| layout.and_then(|l| PlayArea::for_layout(l, traveller, COMBAT_AREA_MARGIN));
+    let areas = vehicle::VehicleAreas {
+        boats: layout.and_then(boat_area),
+        helicopters: air(Traveller::Helicopter),
+        jets: air(Traveller::Jet),
+    };
+    (geometry, areas)
 }
 
 fn finish_vehicle_build(mut commands: Commands, mut build: ResMut<VehicleNavBuild>) {
@@ -990,6 +1138,66 @@ mod tests {
             "{path:?}"
         );
         assert!((path.waypoints.last().unwrap().position.y - height).abs() < 0.1);
+    }
+
+    #[test]
+    fn keeps_to_the_combat_area() {
+        let terrain = Arc::new(Heightmap {
+            resolution: 33,
+            spacing: 2.0,
+            origin: Vec3::new(-32.0, 0.0, -32.0),
+            heights: vec![0.0; 33 * 33],
+        });
+        let params = NavParams::from_tuning(&SoldierTuning::default());
+        // A 20 m square left of the middle with a 4 m margin, and a flag at (24, 0) kept
+        // with a corridor.
+        let mut area = super::PlayArea {
+            polygons: vec![vec![Vec2::new(-20.0, -10.0), Vec2::new(0.0, -10.0), Vec2::new(0.0, 10.0), Vec2::new(-20.0, 10.0)]],
+            margin: 4.0,
+            keep: Vec::new(),
+        };
+        let plain = LevelGeometry {
+            terrain: Some(terrain.clone()),
+            ..default()
+        };
+        let confined = |area: &super::PlayArea| LevelGeometry {
+            terrain: Some(terrain.clone()),
+            bounds: Some(area.crop(None)),
+            area: Some(area.clone()),
+            ..default()
+        };
+        let full = build::build(&plain, params);
+        let grid = build::build(&confined(&area), params);
+        // Cropped to the area's bounds (28 m square), no cell outside the area.
+        assert_eq!((grid.width, grid.depth), (56, 56));
+        assert!(grid.cell_count() < full.cell_count() / 4, "{} of {}", grid.cell_count(), full.cell_count());
+        let mut cells = 0;
+        grid.for_each_cell(|c| {
+            cells += 1;
+            assert!(area.contains(grid.position(c).xz()), "cell at {}", grid.position(c));
+        });
+        // The square and its margin with rounded corners: 28 m square less (4 - pi) * 16 m2.
+        let expected = (28.0f32 * 28.0 - (4.0 - std::f32::consts::PI) * 16.0) / 0.25;
+        assert!((cells as f32 - expected).abs() < 0.03 * expected, "{cells} cells, expected about {expected}");
+        // Outside: no column, no cell, and paths there end at the edge.
+        let (inside, outside) = (Vec3::new(-10.0, 0.0, 0.0), Vec3::new(20.0, 0.0, 0.0));
+        assert!(grid.column_at(outside.x, outside.z).is_none());
+        assert!(grid.locate(outside, 3.0, None).is_none());
+        assert!(grid.locate(Vec3::new(-10.0, 0.0, 13.0), 0.3, None).is_some(), "the margin is walkable");
+        assert!(grid.locate(Vec3::new(-10.0, 0.0, 15.0), 0.3, None).is_none());
+        let path = grid.find_path(inside, outside).unwrap();
+        assert!(!path.complete && path.waypoints.last().unwrap().position.x < 4.5, "{path:?}");
+        // Another area, another cache key; levels without one keep theirs.
+        assert_ne!(build::geometry_key(&confined(&area), &params), build::geometry_key(&plain, &params));
+
+        // A flag outside: kept, and reachable along the corridor.
+        let flag = Vec3::new(24.0, 0.0, 0.0);
+        assert!(area.keep_point(flag.xz(), 5.0));
+        let grid = build::build(&confined(&area), params);
+        assert!(grid.width > 56);
+        let path = grid.find_path(inside, flag).unwrap();
+        assert!(path.complete, "{path:?}");
+        assert!(grid.locate(Vec3::new(10.0, 0.0, 9.0), 0.3, None).is_none(), "only a corridor");
     }
 
     #[test]

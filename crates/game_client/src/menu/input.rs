@@ -271,6 +271,7 @@ pub(super) fn press_buttons(
                 settings.graphics_preset = crate::settings::GraphicsPreset::Custom;
             }
             MenuButton::CrosshairStyle(style) => settings.crosshair_style = *style,
+            MenuButton::MapStyle(style) => settings.map_style = *style,
             MenuButton::FrameCap(fps) => settings.frame_rate_cap = *fps,
             MenuButton::Refresh => browser.refresh(&settings, time.elapsed_secs(), scripted.is_none()),
             MenuButton::Server(address, port) => {

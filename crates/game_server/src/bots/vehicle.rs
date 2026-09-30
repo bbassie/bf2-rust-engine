@@ -1706,6 +1706,14 @@ impl BotBrain {
             }
             _ => None,
         };
+        // Not out of bounds (circling an objective near the edge of the level's area).
+        let destination = destination.map(|d| match nav.and_then(|n| n.air_area(false)) {
+            Some(area) => {
+                let p = area.clamp(d.xz(), 40.0);
+                Vec3::new(p.x, d.y, p.y)
+            }
+            None => d,
+        });
         let pending = vcx.claims.pending(seen.entity);
         let spun_up = seen.state.engine > 0.95;
         let riders = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());
@@ -1960,6 +1968,13 @@ impl BotBrain {
         let to_center = flat(center - position);
         let tangent = Vec3::new(-to_center.z, 0.0, to_center.x).normalize_or(Vec3::X);
         let mut goal_dir = (to_center.normalize_or_zero() * ((to_center.length() - radius) / radius).clamp(-1.0, 1.0) + tangent).normalize_or(Vec3::NEG_Z);
+        // Out of the jets' area (the circle round an objective near its edge): turn back in.
+        if let Some(area) = nav.and_then(|n| n.air_area(true))
+            && !area.contains(position.xz())
+        {
+            let back = area.clamp(position.xz(), 150.0);
+            goal_dir = Vec3::new(back.x - position.x, 0.0, back.y - position.z).normalize_or(goal_dir);
+        }
         let floor = nav.and_then(|n| n.flight_floor(position + motion.velocity * 5.0, 120.0)).unwrap_or(position.y - height);
         let mut wanted_altitude = floor.max(position.y - height) + JET_HEIGHT;
         let mut firing = None;

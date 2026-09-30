@@ -5,6 +5,10 @@
 //! target (a satellite scan needs none). Right-click or Esc drops what was picked; with
 //! nothing picked, right-click spots the enemy there for the team (what the satellite scan
 //! shows).
+//!
+//! The map is a `map_background::MapSurface`: in the tactical style with a grid, the main
+//! bases' zones and every ordered squad's lines to its order, squad members as numbered
+//! circles (`map_shapes`).
 
 use bevy::{
     input::{
@@ -17,6 +21,7 @@ use bevy::{
 };
 use game_shared::{
     commander::{Asset, AssetEffect, CommanderAssets, CommanderRequest, OrderKind, SquadOrder, TeamAssets},
+    conquest::{ControlPoint, FlagState},
     level::LoadedLevel,
     protocol::{ControlledBy, Player, Team},
     soldier::Soldier,
@@ -33,6 +38,11 @@ use crate::{
     },
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
+    // --- Map style ---
+    map_background::{GRID, MapFrameLook, MapSurface, legend, spawn_grid_labels},
+    map_shapes::{OrderLines, ShapeLook, SquadSlots, is_order, map_lines, order_rings, soldier_look, tactical, team_zones},
+    settings::Settings,
+    // --- end map style ---
 };
 
 pub struct ScreenPlugin;
@@ -40,7 +50,7 @@ pub struct ScreenPlugin;
 impl Plugin for ScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScreenView>()
-            .add_systems(Startup, spawn_screen)
+            .add_systems(Startup, (spawn_screen, spawn_screen_extras).chain())
             .add_systems(
                 Update,
                 (
@@ -138,6 +148,7 @@ fn spawn_screen(mut commands: Commands) {
         .with_children(|root| {
             root.spawn((
                 ScreenFrame,
+                MapFrameLook,
                 Node {
                     width: vh(90),
                     height: vh(90),
@@ -153,6 +164,7 @@ fn spawn_screen(mut commands: Commands) {
                 frame
                     .spawn((
                         ScreenMap,
+                        MapSurface::default(),
                         Name::new("commander:map"),
                         Node {
                             position_type: PositionType::Absolute,
@@ -224,24 +236,18 @@ fn spawn_screen(mut commands: Commands) {
         });
 }
 
-fn set_map_image(
-    mut commands: Commands,
-    level: Res<LoadedLevel>,
-    asset_server: Res<AssetServer>,
-    map: Single<Entity, With<ScreenMap>>,
-    mut view: ResMut<ScreenView>,
-) {
-    match &level.desc.minimap {
-        Some(path) => {
-            commands
-                .entity(*map)
-                .insert(ImageNode::new(asset_server.load(format!("imported://{path}"))));
-        }
-        None => {
-            commands.entity(*map).remove::<ImageNode>();
-        }
-    }
+/// A new level: the view starts over (the image is `map_background`'s).
+fn set_map_image(mut view: ResMut<ScreenView>) {
     view.0.reset();
+}
+
+/// The map's grid labels and the controls legend (tactical style: see `map_background`).
+fn spawn_screen_extras(mut commands: Commands, map: Single<Entity, With<ScreenMap>>, frame: Single<Entity, With<ScreenFrame>>) {
+    spawn_grid_labels(&mut commands, *map);
+    commands.spawn((
+        legend("Wheel zoom  |  Right-drag pan  |  Double-click reset  |  Right-click spot"),
+        ChildOf(*frame),
+    ));
 }
 
 /// Reads the mouse wheel, a right/middle drag, `+`/`-`/the triggers, the arrows/the stick and
@@ -750,11 +756,36 @@ fn update_map(
     frame: Single<&ComputedNode, With<ScreenFrame>>,
     mut areas: Query<(Entity, &MapIcon, &mut Node), NotMarker>,
     mut icons: MarkerIcons,
+    // --- Map style ---
+    (settings, view, slots, order_lines, points, mut surface, orders): (
+        Res<Settings>,
+        Res<ScreenView>,
+        Res<SquadSlots>,
+        Res<OrderLines>,
+        Query<(&ControlPoint, &FlagState)>,
+        Single<&mut MapSurface, With<ScreenMap>>,
+        Query<(), With<SquadOrder>>,
+    ),
+    // --- end map style ---
 ) {
     let Some(level) = level.filter(|_| screen.open) else {
         return;
     };
     let team = local.single().copied().unwrap_or_default();
+    // --- Map style ---
+    let tactical = tactical(&settings);
+    let content = frame.size * frame.inverse_scale_factor * view.0.zoom;
+    MapSurface::set(
+        &mut surface,
+        MapSurface {
+            pixels_per_uv: content.x.max(1.0),
+            grid: GRID as f32,
+            lines: if tactical { map_lines(&level, &order_lines.all) } else { Vec::new() },
+            zones: if tactical { team_zones(&level, &points, team) } else { Vec::new() },
+            ..MapSurface::default()
+        },
+    );
+    // --- end map style ---
     // Our soldiers on foot by squad; flags, vehicles and the rest are markers.
     let mut ours = Vec::new();
     for (entity, render, controlled_by, local_soldier) in &soldiers {
@@ -766,6 +797,22 @@ fn update_map(
         }
         let marker = match member {
             _ if local_soldier => MapMarker::dot(entity, render.position, Color::WHITE, 8.0),
+            // --- Map style: squad members numbered, the picked squad in green ---
+            Some(member) if tactical => {
+                let slot = slots.0.get(&controlled_by.0).copied().unwrap_or(0);
+                let mut look = soldier_look(Some(slot), -render.yaw);
+                if screen.squad != Some(member.squad) {
+                    look = ShapeLook {
+                        fill: crate::map_shapes::palette::FRIENDLY_FILL.with_alpha(0.95),
+                        outline: crate::map_shapes::palette::FRIENDLY,
+                        text_color: Color::WHITE,
+                        ..look
+                    };
+                }
+                let marker = MapMarker::shape(entity, render.position, look, 9.0);
+                if member.leader { marker.label(squad_name(member.squad)).priority(SQUAD_LABEL) } else { marker }
+            }
+            // --- end map style ---
             Some(member) => {
                 let color = if screen.squad == Some(member.squad) { SQUAD } else { FRIENDLY };
                 let marker = MapMarker::dot(entity, render.position, color, if member.leader { 8.5 } else { 6.0 });
@@ -775,9 +822,11 @@ fn update_map(
         };
         ours.push(marker.layer(SOLDIER_LAYER));
     }
+    let rings = if tactical { order_rings(&markers.0, &orders) } else { Vec::new() };
     let placed = ours
         .iter()
-        .chain(&markers.0)
+        .chain(markers.0.iter().filter(|m| !tactical || !is_order(m, &orders)))
+        .chain(&rings)
         .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
     let map = *map;
     // Sized for the 648 px map of a 720p window, a little larger on larger ones; the frame

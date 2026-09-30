@@ -258,6 +258,7 @@ fn is_selected(button: &MenuButton, menu: &Menu, settings: &Settings) -> bool {
         MenuButton::Anisotropy(a) => settings.anisotropic_filtering == *a,
         MenuButton::ParticleQuality(q) => settings.particle_quality == *q,
         MenuButton::CrosshairStyle(style) => settings.crosshair_style == *style,
+        MenuButton::MapStyle(style) => settings.map_style == *style,
         MenuButton::FrameCap(fps) => settings.frame_rate_cap == *fps,
         _ => false,
     }

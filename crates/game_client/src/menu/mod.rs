@@ -54,7 +54,7 @@ use crate::{
     scenario::{ScenarioInput, ScenarioSystems},
     settings::{
         Action, Anisotropy, AntiAliasing, BindSlot, Binding, CrosshairStyle, DisplayMode, GraphicsPreset,
-        Quality, Settings, ShadowQuality, SsaoQuality, StanceMode, ToneMapping, ViewDistance,
+        MapStyle, Quality, Settings, ShadowQuality, SsaoQuality, StanceMode, ToneMapping, ViewDistance,
     },
 };
 
@@ -286,6 +286,9 @@ enum MenuButton {
     Anisotropy(Anisotropy),
     ParticleQuality(Quality),
     CrosshairStyle(CrosshairStyle),
+    // --- Map style ---
+    MapStyle(MapStyle),
+    // --- end map style ---
     FrameCap(u32),
     /// Join page: ask for servers again.
     Refresh,
@@ -335,6 +338,7 @@ impl MenuButton {
             MenuButton::Anisotropy(a) => format!("anisotropy:{}", a.label().to_lowercase()),
             MenuButton::ParticleQuality(q) => format!("particlequality:{}", q.label().to_lowercase()),
             MenuButton::CrosshairStyle(style) => format!("crosshairstyle:{}", style.label().to_lowercase()),
+            MenuButton::MapStyle(style) => format!("mapstyle:{}", style.label().to_lowercase()),
             MenuButton::FrameCap(fps) => format!("framecap:{fps}"),
             MenuButton::Refresh => "browser:refresh".into(),
             MenuButton::Server(address, port) => format!("server:{address}:{port}"),
@@ -411,6 +415,7 @@ enum Toggle {
     InvertJetPitch,
     InvertHeliPitch,
     HeliPedalsRoll,
+    MinimapSpeedZoom,
 }
 
 impl Toggle {
@@ -431,6 +436,7 @@ impl Toggle {
             Toggle::InvertJetPitch => "invert_jet_pitch",
             Toggle::InvertHeliPitch => "invert_heli_pitch",
             Toggle::HeliPedalsRoll => "heli_pedals_roll",
+            Toggle::MinimapSpeedZoom => "minimap_speed_zoom",
         }
     }
 
@@ -451,6 +457,7 @@ impl Toggle {
             Toggle::InvertJetPitch => settings.invert_jet_pitch,
             Toggle::InvertHeliPitch => settings.invert_heli_pitch,
             Toggle::HeliPedalsRoll => settings.heli_pedals_roll,
+            Toggle::MinimapSpeedZoom => settings.minimap_speed_zoom,
         }
     }
 
@@ -471,6 +478,7 @@ impl Toggle {
             Toggle::InvertJetPitch => settings.invert_jet_pitch ^= true,
             Toggle::InvertHeliPitch => settings.invert_heli_pitch ^= true,
             Toggle::HeliPedalsRoll => settings.heli_pedals_roll ^= true,
+            Toggle::MinimapSpeedZoom => settings.minimap_speed_zoom ^= true,
         }
     }
 }
@@ -489,6 +497,9 @@ enum Slider {
     VegetationDensity,
     HudScale,
     MinimapSize,
+    MinimapRange,
+    MinimapVehicleRange,
+    MinimapAirRange,
     GamepadLookSensitivity,
     GamepadMoveDeadzone,
     GamepadLookDeadzone,
@@ -512,6 +523,9 @@ impl Slider {
             Slider::VegetationDensity => "vegetation_density",
             Slider::HudScale => "hud_scale",
             Slider::MinimapSize => "minimap_size",
+            Slider::MinimapRange => "minimap_range",
+            Slider::MinimapVehicleRange => "minimap_vehicle_range",
+            Slider::MinimapAirRange => "minimap_air_range",
             Slider::GamepadLookSensitivity => "gamepad_look_sensitivity",
             Slider::GamepadMoveDeadzone => "gamepad_move_deadzone",
             Slider::GamepadLookDeadzone => "gamepad_look_deadzone",
@@ -532,6 +546,9 @@ impl Slider {
             Slider::RenderScale => (0.5, 1.5, 0.05),
             Slider::LodDetailScale | Slider::VegetationDensity => (0.2, 1.5, 0.05),
             Slider::HudScale | Slider::MinimapSize => (0.6, 1.6, 0.05),
+            Slider::MinimapRange => (100.0, 600.0, 10.0),
+            Slider::MinimapVehicleRange => (150.0, 1200.0, 10.0),
+            Slider::MinimapAirRange => (200.0, 2500.0, 50.0),
             Slider::GamepadLookSensitivity => (0.2, 3.0, 0.1),
             Slider::GamepadMoveDeadzone | Slider::GamepadLookDeadzone => (0.0, 0.5, 0.02),
             Slider::VoiceVolume => (0.0, 2.0, 0.05),
@@ -554,6 +571,9 @@ impl Slider {
             Slider::VegetationDensity => settings.vegetation_density,
             Slider::HudScale => settings.hud_scale,
             Slider::MinimapSize => settings.minimap_size,
+            Slider::MinimapRange => settings.minimap_range,
+            Slider::MinimapVehicleRange => settings.minimap_vehicle_range,
+            Slider::MinimapAirRange => settings.minimap_air_range,
             Slider::GamepadLookSensitivity => settings.gamepad.look_sensitivity,
             Slider::GamepadMoveDeadzone => settings.gamepad.move_deadzone,
             Slider::GamepadLookDeadzone => settings.gamepad.look_deadzone,
@@ -586,6 +606,9 @@ impl Slider {
             Slider::VegetationDensity => settings.vegetation_density = value,
             Slider::HudScale => settings.hud_scale = value,
             Slider::MinimapSize => settings.minimap_size = value,
+            Slider::MinimapRange => settings.minimap_range = value,
+            Slider::MinimapVehicleRange => settings.minimap_vehicle_range = value,
+            Slider::MinimapAirRange => settings.minimap_air_range = value,
             Slider::GamepadLookSensitivity => settings.gamepad.look_sensitivity = value,
             Slider::GamepadMoveDeadzone => settings.gamepad.move_deadzone = value,
             Slider::GamepadLookDeadzone => settings.gamepad.look_deadzone = value,
@@ -619,6 +642,7 @@ impl Slider {
             | Slider::GamepadMoveDeadzone
             | Slider::GamepadLookDeadzone => format!("{value:.2}"),
             Slider::FieldOfView => format!("{value:.0} deg"),
+            Slider::MinimapRange | Slider::MinimapVehicleRange | Slider::MinimapAirRange => format!("{value:.0} m"),
             Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume | Slider::VoiceVolume => {
                 format!("{:.0}%", value * 100.0)
             }

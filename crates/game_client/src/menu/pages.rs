@@ -635,6 +635,20 @@ fn settings_tab_content(
             row(p, "Field of view", |c| slider(c, Slider::FieldOfView));
             row(p, "HUD scale", |c| slider(c, Slider::HudScale));
             row(p, "Minimap size", |c| slider(c, Slider::MinimapSize));
+            // --- Map style and minimap zoom ---
+            row(p, "Map style", |c| {
+                for style in MapStyle::ALL {
+                    button(c, MenuButton::MapStyle(style), Look::Plain, style.label());
+                }
+            });
+            row(p, "Minimap range on foot", |c| slider(c, Slider::MinimapRange));
+            row(p, "Minimap range in vehicles", |c| slider(c, Slider::MinimapVehicleRange));
+            row(p, "Minimap range in the air", |c| slider(c, Slider::MinimapAirRange));
+            row(p, "Minimap zooms out with speed", |c| {
+                switch(c, Toggle::MinimapSpeedZoom);
+                c.spawn(text("eased, never a jump", 12.0, DIM));
+            });
+            // --- end map style ---
             row(p, "Crosshair style", |c| {
                 for style in CrosshairStyle::ALL {
                     button(c, MenuButton::CrosshairStyle(style), Look::Plain, style.label());

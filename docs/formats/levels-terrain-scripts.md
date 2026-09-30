@@ -660,6 +660,8 @@ CombatArea.layer n ; (CombatArea.usedByPathfinding)
 
 **[I]** `vehicles` is a vehicle-class filter; its exact meaning is unverified. Karkand 64 has an empty-polygon area with `vehicles 4` next to the real area with `vehicles 0`.
 
+**[I]** From how the retail, Special Forces and AIX 2 layouts use it (a survey of every `GamePlayObjects.con`), `vehicles` looks like BF2's vehicle category: 0 land vehicles, 1 boats, 2 jets (the biggest area of a level), 3 helicopters, 4 soldiers and whatever has no area of its own (the usual main area, often `usedByPathfinding 1`), 5 everything (AIX's big squares). `team` is 0 everywhere. `bf2-import` writes the areas with at least 3 points to `level.ron` as `game_modes[].combat_areas` (`team: None` for 0, `vehicles` as is, `used_by_pathfinding`, `points` in engine X/Z, i.e. BF2 Z mirrored); `GameModeDesc::ground_combat_area` picks the one the maps show (soldiers', else land vehicles', else the smallest). Levels imported earlier have none until they are imported again.
+
 **Modes and sizes:**
 - Only the modes listed in `Info/<L>.desc` are real. Dragon_Valley and Highway_Tampa also contain `gpm_cq/128`, `gpm_sl/*` and `sp2`/`sp3` stubs of 432 bytes with empty host blocks.
 - `sp1/16` is a copy of `gpm_coop/16` (single-player).

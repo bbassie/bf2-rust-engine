@@ -454,6 +454,83 @@ pub struct GameModeDesc {
     /// Made by the game ([`crate::modes::generate`]) rather than written by hand.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
+    /// The playable area's boundaries (BF2 `CombatArea`): soldiers and vehicles outside the
+    /// one that applies to them are out of bounds. Empty for levels imported before these
+    /// were, and for layouts that take them from the one they're [`based_on`](Self::based_on).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub combat_areas: Vec<CombatAreaDesc>,
+}
+
+impl GameModeDesc {
+    /// The combat area the map shows as the playable area for `team` (1 or 2): the one for
+    /// soldiers (see [`CombatAreaDesc::vehicles`]), else the land vehicles' one, else the
+    /// smallest. `None` without combat areas.
+    pub fn ground_combat_area(&self, team: u8) -> Option<&CombatAreaDesc> {
+        let candidates = || {
+            self.combat_areas
+                .iter()
+                .filter(move |a| a.points.len() >= 3 && a.team.is_none_or(|t| t == team))
+        };
+        let smallest = |filter: &dyn Fn(&CombatAreaDesc) -> bool| {
+            candidates()
+                .filter(|a| filter(a))
+                .min_by(|a, b| a.area().total_cmp(&b.area()))
+        };
+        smallest(&|a| a.vehicles == CombatAreaDesc::SOLDIERS)
+            .or_else(|| smallest(&|a| a.vehicles == CombatAreaDesc::LAND))
+            .or_else(|| smallest(&|_| true))
+    }
+}
+
+/// A combat area: a polygon on the ground (any height) that bounds where one team, or both,
+/// may go with some kind of vehicle.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct CombatAreaDesc {
+    /// The team it bounds; `None` both (BF2 team 0, what every retail level uses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<u8>,
+    /// What it bounds, BF2's `CombatArea.vehicles` as is. From how the levels use it (not
+    /// verified in the game): 0 land vehicles, 1 boats, 2 jets, 3 helicopters, 4 soldiers and
+    /// whatever has no area of its own (the usual main area), 5 everything (AIX's big squares).
+    #[serde(default)]
+    pub vehicles: u8,
+    /// The bots' navigation keeps inside it (BF2 `usedByPathfinding`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub used_by_pathfinding: bool,
+    /// The polygon in world X, Z (meters), in order; closed implicitly.
+    pub points: Vec<[f32; 2]>,
+}
+
+impl CombatAreaDesc {
+    pub const LAND: u8 = 0;
+    pub const SOLDIERS: u8 = 4;
+
+    /// Square meters inside.
+    pub fn area(&self) -> f32 {
+        let n = self.points.len();
+        let twice: f32 = (0..n)
+            .map(|i| {
+                let ([x1, z1], [x2, z2]) = (self.points[i], self.points[(i + 1) % n]);
+                x1 * z2 - x2 * z1
+            })
+            .sum();
+        twice.abs() * 0.5
+    }
+
+    /// Whether the point (world X, Z) lies inside (even-odd rule).
+    pub fn contains(&self, x: f32, z: f32) -> bool {
+        let n = self.points.len();
+        let mut inside = false;
+        let mut j = n.wrapping_sub(1);
+        for i in 0..n {
+            let ([xi, zi], [xj, zj]) = (self.points[i], self.points[j]);
+            if (zi > z) != (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi {
+                inside = !inside;
+            }
+            j = i;
+        }
+        inside
+    }
 }
 
 /// The flag pole every control point has, and the flags that go up and down on it.

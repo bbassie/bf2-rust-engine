@@ -69,8 +69,13 @@ mod hud;
 mod join;
 mod loadout;
 mod local_input;
+// --- Map style (tactical minimap and maps) ---
+mod map_background;
 mod map_icons;
 mod map_markers;
+mod map_shapes;
+mod objective_bar;
+// --- end map style ---
 mod menu;
 mod minimap;
 mod mod_assets;
@@ -85,6 +90,8 @@ mod render;
 mod scenario;
 mod settings;
 mod summary;
+// --- Tactical map (generated minimap texture, see tactical_map.rs) ---
+mod tactical_map;
 mod ui_theme;
 mod vehicle_prediction;
 mod vehicle_hud;
@@ -328,7 +335,11 @@ fn main() -> AppExit {
         commander::ClientCommanderPlugin,
         vehicle_prediction::VehiclePredictionPlugin,
         mode_hud::ModeHudPlugin,
+        tactical_map::TacticalMapPlugin, // --- Tactical map ---
     ))
+    // --- Map style ---
+    .add_plugins((map_shapes::MapShapesPlugin, map_background::MapBackgroundPlugin, objective_bar::ObjectiveBarPlugin))
+    // --- end map style ---
     // Weapons: the weapon list, the melee and grenade keys, loadouts on the deploy screen.
     .add_plugins((weapon_list::WeaponListPlugin, quick_actions::QuickActionsPlugin, loadout::LoadoutPlugin))
     .add_plugins((

@@ -454,7 +454,13 @@ code. The roadmap has the BF2-style layers (strategic areas, squads, behaviours)
 
 **Walking** (`game_server::nav`) follows paths on a layered walkability grid rasterized from
 the level's collision (0.5 m cells, 0.75 m on the big layouts), with ladders as links and A*
-on background tasks. Big, intricate statics (the aircraft carriers) get a **detail patch**: a
+on background tasks. The grid covers the layout's flags and spawns; on levels with combat
+areas it only has cells inside the soldiers' area plus 20 m (`nav::area`; BF2's
+`usedByPathfinding` area first, else the soldiers', else the land vehicles'), and is cropped
+to it. The land vehicle grid keeps to the land vehicles' area and the water grid to the boats'
+(each falling back to the main area), helicopters and jets turn back into theirs, and a
+flag, spawn, vehicle spawner, strategic area or ladder outside keeps a circle and a corridor
+back (logged). Big, intricate statics (the aircraft carriers) get a **detail patch**: a
 0.33 m grid in the object's own frame, so its ramps, doors and catwalks run along the cells
 whatever its heading. The level grid leaves the patch's rectangle out and portals join the two
 along its edge; patch cells live in the same arrays, so paths, regions and every other query

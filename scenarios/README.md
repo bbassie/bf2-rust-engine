@@ -25,16 +25,17 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | `audio/` | Sounds, checked through the log |
 | `combat/` | Grenades, launchers, explosives, hit zones and hit registration against target dummies (`hitreg`, `hitreg_net`), a despawn stress (`despawn_stress`: bots killed at close range over and over, which must not panic the client), lag compensation, destruction, effects, SF gadgets, the weapon list and the melee and grenade keys (`quick_weapons`) |
 | `commander/` | Commander screen and assets, commo rose and spotting, squads |
-| `conquest/` | Flags, capture, HUD, deploy screen (loadouts: `loadout_deploy`), minimap and big map, co-op |
+| `conquest/` | Flags, capture, HUD, deploy screen (loadouts: `loadout_deploy`), minimap and big map, the map styles (`map_style`: classic/tactical at three minimap sizes, pinned objectives, order lines, eased vehicle zoom; `map_capture`: capture pie), co-op |
 | `infra/` | Chat, admin, stats, server browser, content download and the server's content check (trust, repair, refusal, map change), accounts on ranked servers, soak client, the sample mod |
 | `lighting/` | Per-map lighting checks and A/B runs, tonemapping, materials, lamps (`lamps_*`), night versions of day levels |
 | `lod/` | Static, vehicle and soldier levels of detail |
 | `menu/` | Main menu, hosting and joining, settings |
-| `modes/` | Rush (arming a charge, HUD, maps, deploy screen), Breakthrough (sectors, locked flags), the level page's modes |
+| `modes/` | Rush (arming a charge, HUD, maps, deploy screen), Breakthrough (sectors, locked flags), the level page's modes, the tactical top bar in both (`objective_bar_rush`, `objective_bar_breakthrough`) |
 | `movement/` | Soldier movement, ladders, ropes, stamina, roadkill, carrier ladders |
 | `perf/` | Frame times with many bots (Karkand, AIX 2 Archipelago): at spawn, a fixed view, in the fight |
+| `tactical_map/` | The generated tactical map (`tactical_map.rs`) of Karkand, Gulf of Oman, Dalian Plant and AIX 2 Archipelago, written to `target/scenarios/tactical_map/<level>.png`; a second run shows the cache hit in the log |
 | `terrain/` | Terrain, undergrowth, trees, water, horizon, view distance |
-| `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures |
+| `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures, the minimap's air zoom (`minimap_air`) |
 | `voice/` | Voice chat, two clients and a dedicated server: squad and command channels, enemies, muting (`BF2_VOICE_TEST_INPUT`) |
 
 Files ending in `_host`/`_remote` or `_net` go in pairs or against a dedicated server; their

@@ -11,10 +11,10 @@ use bf2_formats::{
     Bf2Install, LevelInfo, Side, Vfs,
     localization::Localization,
     mesh::{MeshKind, Usage, VisMesh},
-    con::{Instance, Interpreter, Template, World, parse_vec3},
+    con::{Command, Instance, Interpreter, Template, World, parse_vec3},
 };
 use game_data::{
-    ControlPointDesc, EnvironmentDesc, FlagModels, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
+    CombatAreaDesc, ControlPointDesc, EnvironmentDesc, FlagModels, GameModeDesc, KitSlot, LevelDesc, ObjectDesc, ObjectPart,
     Placement, SkyDesc, SpawnPointDesc, StaticInstance, TeamDesc, TeamVoice, TerrainDesc, VehicleSpawnerDesc,
 };
 use glam::{Affine3A, Vec3};
@@ -66,14 +66,18 @@ pub fn import_level(
         display_name = format!("{title}: {display_name}");
     }
     let mut layouts = Vec::new();
+    // Per layout, the script commands its file ran (combat areas are commands, not objects).
+    let mut layout_commands = Vec::new();
     for (mode, size) in parse_modes(&desc_text) {
         let path = format!("{base}/gamemodes/{mode}/{size}/gameplayobjects.con");
         if !vfs.exists(&path) {
             continue;
         }
         let start = interp.world.instances.len();
+        let commands_start = interp.world.commands.len();
         interp.run(&path, &["host".to_string()]);
         let range = start..interp.world.instances.len();
+        layout_commands.push(commands_start..interp.world.commands.len());
         // Layouts reuse template names with other ids and teams (the game only ever loads
         // one), and a later layout's `ObjectTemplate.create` replaces the template: keep
         // this layout's own (Operation Blue Pearl 16 got the 64 player Market and Yard).
@@ -183,8 +187,10 @@ pub fn import_level(
 
     let game_modes: Vec<GameModeDesc> = layouts
         .iter()
-        .map(|(mode, size, range, templates)| {
-            build_game_mode(world, templates, localization, mode, *size, &world.instances[range.clone()])
+        .zip(&layout_commands)
+        .map(|((mode, size, range, templates), commands)| GameModeDesc {
+            combat_areas: combat_areas(&world.commands[commands.clone()]),
+            ..build_game_mode(world, templates, localization, mode, *size, &world.instances[range.clone()])
         })
         .collect();
     // The top-down map BF2 shows in game, copied as-is (north up, not flipped).
@@ -676,6 +682,39 @@ fn build_game_mode(
     layout
 }
 
+/// The combat areas a layout's script defines: `CombatArea.create <name>`, then for the
+/// latest one `team`, `vehicles`, `usedByPathfinding` and `addAreaPoint x/z` (BF2 X/Z).
+fn combat_areas(commands: &[Command]) -> Vec<CombatAreaDesc> {
+    let mut areas: Vec<CombatAreaDesc> = Vec::new();
+    for command in commands {
+        let Some(method) = command.name.strip_prefix("combatarea.") else {
+            continue;
+        };
+        if method == "create" {
+            areas.push(CombatAreaDesc::default());
+            continue;
+        }
+        let (Some(area), Some(arg)) = (areas.last_mut(), command.args.first()) else {
+            continue;
+        };
+        let number = || arg.parse::<f32>().ok();
+        match method {
+            "addareapoint" => {
+                if let Some([x, z, ..]) = bf2_formats::con::parse_vec(arg).as_deref() {
+                    let [x, _, z] = coords::position([*x, 0.0, *z]);
+                    area.points.push([x, z]);
+                }
+            }
+            "team" => area.team = number().map(|t| t as u8).filter(|&t| t != 0),
+            "vehicles" => area.vehicles = number().unwrap_or(0.0) as u8,
+            "usedbypathfinding" => area.used_by_pathfinding = number().is_some_and(|v| v != 0.0),
+            _ => {}
+        }
+    }
+    areas.retain(|a| a.points.len() >= 3);
+    areas
+}
+
 fn environment(world: &World, converter: &MeshConverter, terrain: &TerrainDesc, level_dir: &Path) -> EnvironmentDesc {
     let defaults = EnvironmentDesc::default();
     let color = |name: &str| world.setting(name).and_then(parse_vec3).map(terrain::normalize_color);
@@ -956,5 +995,48 @@ mod tests {
             parse_modes(desc),
             vec![("gpm_cq".into(), 16), ("gpm_cq".into(), 64), ("gpm_coop".into(), 16)]
         );
+    }
+
+    #[test]
+    fn reads_combat_areas() {
+        let dir = std::env::temp_dir().join(format!("bf2_combat_areas_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("test.con"),
+            "CombatAreaManager.use 1
+             CombatArea.create CombatArea_1
+             CombatArea.min 0.000000/0.000000
+             CombatArea.team 0
+             CombatArea.vehicles 4
+             CombatArea.create CombatArea_2
+             CombatArea.addAreaPoint -10/20
+             CombatArea.addAreaPoint 10/20
+             CombatArea.addAreaPoint 0/-5.5
+             CombatArea.team 2
+             CombatArea.vehicles 4
+             CombatArea.usedByPathfinding 1
+",
+        )
+        .unwrap();
+        let mut vfs = bf2_formats::vfs::Vfs::default();
+        vfs.mount_dir(&dir, "").unwrap();
+        let mut interp = Interpreter::new(&vfs);
+        interp.run("test.con", &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+        // The empty one is dropped; Z is mirrored.
+        let areas = combat_areas(&interp.world.commands);
+        assert_eq!(
+            areas,
+            vec![CombatAreaDesc {
+                team: Some(2),
+                vehicles: 4,
+                used_by_pathfinding: true,
+                points: vec![[-10.0, -20.0], [10.0, -20.0], [0.0, 5.5]],
+            }]
+        );
+        let layout = GameModeDesc { combat_areas: areas, ..Default::default() };
+        assert!(layout.ground_combat_area(2).unwrap().contains(0.0, -10.0));
+        assert!(!layout.ground_combat_area(2).unwrap().contains(0.0, 10.0));
+        assert!(layout.ground_combat_area(1).is_none());
     }
 }

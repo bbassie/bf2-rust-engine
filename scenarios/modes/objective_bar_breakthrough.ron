@@ -1,0 +1,29 @@
+// The top bar in Breakthrough (Karkand 32, attacking US), classic and tactical style: our
+// tickets, the open sector's flags as objective shapes (locked ones left out), lowering the
+// Hotel's flag (pie and pulse), and the sector line.
+// client --scenario scenarios/modes/objective_bar_breakthrough.ron --out target/scenarios/objective_bar_breakthrough
+(
+    level: "strike_at_karkand",
+    mode: "gpm_breakthrough",
+    size: 32,
+    bots: 8,
+    team: 2,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        Wait(1.0),
+        Setting("map_style", "classic"),
+        Wait(0.3),
+        Screenshot("classic"),
+        Setting("map_style", "tactical"),
+        Wait(0.3),
+        Screenshot("tactical"),
+        Teleport((-194.0, 156.0, -13.0), 60.0, 5.0),
+        Wait(6.0),
+        Screenshot("tactical_capturing"),
+        Setting("map_style", "classic"),
+        Wait(0.3),
+        Screenshot("classic_capturing"),
+        Quit,
+    ],
+)

@@ -10,6 +10,9 @@
 //!   one), `STAGE 2/4 | DEFEND`; at a charge, what to do there and how far along it is.
 //!
 //! The charges themselves, their markers and the map icons are in [`crate::mode_hud`].
+//!
+//! In the tactical map style (`Settings::map_style`) the top bar is `objective_bar`'s instead
+//! (tickets in team-coloured boxes, the objectives as the maps' shapes).
 
 use std::collections::VecDeque;
 
@@ -130,6 +133,12 @@ struct FlagPill(Entity);
 struct FlagPillIcon(Entity);
 #[derive(Component)]
 struct FlagPillBar(Entity);
+/// The classic top bar (tickets, flag pills, stage), hidden in the tactical style.
+#[derive(Component)]
+pub(crate) struct ClassicBar;
+/// The capture notifications' root, moved under the tactical bar in that style.
+#[derive(Component)]
+pub(crate) struct FlagFeedRoot;
 /// Rush: the stage's charges.
 #[derive(Component)]
 struct ChargeRow;
@@ -159,13 +168,16 @@ struct RoundBannerText;
 fn spawn_conquest_hud(mut commands: Commands) {
     // Top center: our tickets, the objectives, their tickets; the stage under them.
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            top: px(10),
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
+        .spawn((
+            ClassicBar,
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                top: px(10),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
         .with_children(|bar| {
             bar.spawn((
                 Node {
@@ -271,13 +283,16 @@ fn spawn_conquest_hud(mut commands: Commands) {
 
     // Capture notifications, under the flag bar.
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            width: percent(100),
-            top: px(72),
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
+        .spawn((
+            FlagFeedRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                top: px(72),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
         .with_child((
             FlagFeedText,
             Text::new(""),

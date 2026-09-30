@@ -71,7 +71,7 @@ struct VitalsPanel;
 #[derive(Component)]
 struct AmmoPanel;
 #[derive(Component)]
-struct KillFeedText;
+pub(crate) struct KillFeedText;
 #[derive(Component)]
 struct DeathNotice;
 /// The scoreboard's full-screen root: the team columns, and under them what other modules

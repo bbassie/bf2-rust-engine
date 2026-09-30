@@ -22,7 +22,9 @@ use crate::{
     camera::PlayerCamera,
     conquest_hud::{DESTROYED, charge_color, team_color},
     map_markers::{CONTROL_POINT_LABEL, FLAG_LAYER, MapMarker, MapMarkers, MarkerSystems},
+    map_shapes::charge_look,
     net::LocalPlayer,
+    settings::{MapStyle, Settings},
 };
 
 pub struct ModeHudPlugin;
@@ -266,11 +268,32 @@ fn charge_map_markers(
     modes: Query<&ModeState>,
     charges: Query<(Entity, &Charge, &ChargeState)>,
     mut markers: ResMut<MapMarkers>,
+    settings: Res<Settings>,
 ) {
     let (Ok(mode), team) = (modes.single(), local.single().copied().unwrap_or_default()) else {
         return;
     };
     for (entity, charge, state) in &charges {
+        // Tactical style: the objective shapes (see `map_shapes::charge_look`), pinned to the
+        // minimap's edge.
+        if settings.map_style == MapStyle::Tactical {
+            if !matches!(state, ChargeState::Destroyed) && charge.stage != mode.stage {
+                continue;
+            }
+            let Some(look) = charge_look(state, mode, team, &charge.name) else { continue };
+            let current = charge.stage == mode.stage;
+            let size = if current { crate::map_icons::TACTICAL_FLAG_SIZE } else { 13.0 };
+            let marker = MapMarker::shape(entity, charge.position, look, size).layer(FLAG_LAYER);
+            markers.0.push(if current {
+                MapMarker {
+                    pin: true,
+                    ..marker.label(format!("Charge {}", charge.name)).priority(CONTROL_POINT_LABEL)
+                }
+            } else {
+                marker
+            });
+            continue;
+        }
         let marker = match state {
             ChargeState::Waiting => continue,
             ChargeState::Destroyed => MapMarker::dot(entity, charge.position, DESTROYED, 8.0),

@@ -27,6 +27,7 @@ use bevy::{platform::collections::HashMap, prelude::*};
 
 use super::{
     CellRef, NavCell, NavGrid, NavParams, SLOPE_SCALE,
+    area::PlayArea,
     build::{self, LevelGeometry},
 };
 
@@ -162,6 +163,8 @@ pub struct VehicleNavGrid {
     pub water_height: Option<f32>,
     pub water: Option<WaterGrid>,
     pub air: Option<AirMap>,
+    /// Where helicopters and jets may go (the level's combat areas, see [`super::area`]).
+    air_areas: VehicleAreas,
     /// Cell costs and connected areas per kind of vehicle (see [`Self::class_costs`]), made
     /// when first needed.
     classes: std::sync::Mutex<HashMap<(NavClass, u16, u16), Arc<ClassCosts>>>,
@@ -194,13 +197,26 @@ pub struct VehicleGeometry {
     /// Road triangles, world space.
     pub roads: Vec<[Vec3; 3]>,
     pub water: Option<f32>,
+    /// The play areas of boats and aircraft (the land grid's is in `geometry`).
+    pub areas: VehicleAreas,
+}
+
+/// Where boats and aircraft may go, for levels with combat areas (see [`super::area`]).
+#[derive(Clone, Debug, Default)]
+pub struct VehicleAreas {
+    /// The water grid leaves out the cells outside it.
+    pub boats: Option<PlayArea>,
+    pub helicopters: Option<PlayArea>,
+    pub jets: Option<PlayArea>,
 }
 
 /// Builds the land grid (or takes a cached one) and the water grid and air map.
 pub fn build_all(input: &VehicleGeometry, land: Option<NavGrid>) -> VehicleNavGrid {
     let land = land.unwrap_or_else(|| build::build(&input.geometry, land_params()));
     let roads = rasterize_roads(&land, &input.roads);
-    let water = input.water.and_then(|surface| build_water(&input.geometry, surface));
+    let water = input
+        .water
+        .and_then(|surface| build_water(&input.geometry, surface, input.areas.boats.as_ref()));
     let air = build_air(&input.geometry);
     VehicleNavGrid {
         land,
@@ -208,6 +224,10 @@ pub fn build_all(input: &VehicleGeometry, land: Option<NavGrid>) -> VehicleNavGr
         water_height: input.water,
         water,
         air,
+        air_areas: VehicleAreas {
+            boats: None,
+            ..input.areas.clone()
+        },
         classes: default(),
     }
 }
@@ -257,9 +277,14 @@ fn area(geometry: &LevelGeometry, margin: f32) -> Option<(Vec2, Vec2)> {
     .filter(|(lo, hi)| lo.x < hi.x && lo.y < hi.y)
 }
 
-fn build_water(geometry: &LevelGeometry, surface: f32) -> Option<WaterGrid> {
+/// The water grid; cells outside `boats` (the boats' combat area) are blocked, and the grid
+/// is cropped to its bounds.
+fn build_water(geometry: &LevelGeometry, surface: f32, boats: Option<&PlayArea>) -> Option<WaterGrid> {
     let terrain = geometry.terrain.as_ref()?;
-    let (lo, hi) = area(geometry, 400.0)?;
+    let (mut lo, mut hi) = area(geometry, 400.0)?;
+    if let Some(boats) = boats {
+        (lo, hi) = boats.crop(Some((lo, hi)));
+    }
     let origin = (lo / WATER_CELL).floor() * WATER_CELL;
     let width = ((hi.x - origin.x) / WATER_CELL).ceil() as u32;
     let depth = ((hi.y - origin.y) / WATER_CELL).ceil() as u32;
@@ -278,7 +303,10 @@ fn build_water(geometry: &LevelGeometry, surface: f32) -> Option<WaterGrid> {
     }
     // Anything solid from a little under the surface to above a boat's deck blocks.
     let (band_lo, band_hi) = (surface - 2.0, surface + 2.5);
-    let mut blocked = vec![false; count];
+    let mut blocked = match boats {
+        Some(boats) => boats.mask(origin, WATER_CELL, width, depth).into_iter().map(|inside| !inside).collect(),
+        None => vec![false; count],
+    };
     for mesh in &geometry.meshes {
         let (min, max) = build::world_aabb(mesh);
         if max.y < band_lo || min.y > band_hi || max.x < origin.x || max.z < origin.y {
@@ -1087,6 +1115,11 @@ impl VehicleNavGrid {
         best.map(|(_, at)| at)
     }
 
+    /// Where helicopters (or jets) may fly, for levels with combat areas.
+    pub fn air_area(&self, jet: bool) -> Option<&PlayArea> {
+        if jet { self.air_areas.jets.as_ref() } else { self.air_areas.helicopters.as_ref() }
+    }
+
     /// The highest obstacle within `radius` of `p`, for aircraft.
     pub fn flight_floor(&self, p: Vec3, radius: f32) -> Option<f32> {
         self.air.as_ref().map(|air| air.floor(p, radius))
@@ -1178,6 +1211,7 @@ mod tests {
             },
             roads,
             water,
+            areas: default(),
         };
         build_all(&geometry, None)
     }
@@ -1291,6 +1325,7 @@ mod tests {
                 water_height: desc.water.as_ref().map(|w| w.height),
                 water: None,
                 air: None,
+                air_areas: default(),
                 classes: default(),
             };
             let land_vehicle = |t: &str| {

@@ -198,6 +198,20 @@ pub struct Settings {
     pub hud_scale: f32,
     /// Multiplies the minimap's on-screen size.
     pub minimap_size: f32,
+    // --- Map style and minimap zoom (minimap, map_background, map_shapes) ---
+    /// How the minimap and the big maps look: BF2's map image and icons, or the modern
+    /// tactical map with objective shapes (see `map_shapes`).
+    pub map_style: MapStyle,
+    /// Meters shown across the minimap on foot.
+    pub minimap_range: f32,
+    /// Meters across the minimap in a fast land or sea vehicle (it eases out with speed).
+    pub minimap_vehicle_range: f32,
+    /// Meters across the minimap flying fast or high.
+    pub minimap_air_range: f32,
+    /// Zoom the minimap out with speed and altitude (always eased, never a jump); off: fixed
+    /// ranges on foot, in vehicles and in the air.
+    pub minimap_speed_zoom: bool,
+    // --- end map style ---
     pub crosshair_style: CrosshairStyle,
     pub crosshair_color: [f32; 4],
     /// Swaps the team colours for a colour-blind friendly pair. Stored; the HUD/minimap/map
@@ -318,6 +332,13 @@ impl Default for Settings {
             particle_quality: Quality::default(),
             hud_scale: 1.0,
             minimap_size: 1.0,
+            // --- Map style and minimap zoom ---
+            map_style: MapStyle::default(),
+            minimap_range: 260.0,
+            minimap_vehicle_range: 480.0,
+            minimap_air_range: 1000.0,
+            minimap_speed_zoom: true,
+            // --- end map style ---
             crosshair_style: CrosshairStyle::default(),
             crosshair_color: [1.0, 1.0, 1.0, 0.85],
             colorblind_team_colors: false,
@@ -524,6 +545,15 @@ impl Settings {
             }
             "hud_scale" => self.hud_scale = num()?.clamp(0.5, 1.75),
             "minimap_size" => self.minimap_size = num()?.clamp(0.5, 1.75),
+            // --- Map style and minimap zoom ---
+            "map_style" => {
+                self.map_style = MapStyle::parse(value).ok_or_else(|| format!("setting {key}: expected classic or tactical, got {value}"))?
+            }
+            "minimap_range" => self.minimap_range = num()?.clamp(100.0, 600.0),
+            "minimap_vehicle_range" => self.minimap_vehicle_range = num()?.clamp(150.0, 1200.0),
+            "minimap_air_range" => self.minimap_air_range = num()?.clamp(200.0, 2500.0),
+            "minimap_speed_zoom" => self.minimap_speed_zoom = on()?,
+            // --- end map style ---
             "colorblind_team_colors" => self.colorblind_team_colors = on()?,
             "prone_mode" | "prone" => {
                 self.prone_mode = StanceMode::parse(value).ok_or_else(|| format!("setting {key}: expected hold or toggle, got {value}"))?
@@ -1012,6 +1042,38 @@ impl CrosshairStyle {
         }
     }
 }
+
+// --- Map style (minimap, map_background, map_shapes) ---
+/// How the maps look (`Settings::map_style`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MapStyle {
+    /// BF2's own map image, flag and vehicle icons.
+    Classic,
+    /// A modern tactical map: the generated map (`tactical_map`), objectives as lettered
+    /// shapes with capture progress, squad numbers and order lines.
+    #[default]
+    Tactical,
+}
+
+impl MapStyle {
+    pub const ALL: [MapStyle; 2] = [MapStyle::Classic, MapStyle::Tactical];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MapStyle::Classic => "Classic",
+            MapStyle::Tactical => "Tactical",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "classic" | "bf2" => Some(MapStyle::Classic),
+            "tactical" | "modern" => Some(MapStyle::Tactical),
+            _ => None,
+        }
+    }
+}
+// --- end map style ---
 
 // --- Name tags (nametags) ---
 /// Names above soldiers' heads (`nametags`): everyone on the team, squad only, or off. The

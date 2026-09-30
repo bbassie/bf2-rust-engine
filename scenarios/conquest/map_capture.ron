@@ -1,0 +1,34 @@
+// A flag changing hands on the tactical maps: at the Square alone, the enemy's diamond fills
+// with our colour as a pie while their flag comes down (pulsing), turns into a neutral square,
+// then into our circle as ours goes up; the same in the HUD's objective row and on the big
+// map. First person, so the minimap shows it.
+// client --scenario scenarios/conquest/map_capture.ron --out target/scenarios/map_capture
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    team: 2,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        Setting("map_style", "tactical"),
+        Setting("minimap_size", "1.25"),
+        Teleport((-180.0, 157.0, -93.0), 48.0, 12.0),
+        Wait(1.0),
+        Screenshot("00_start"),
+        Wait(7.0),
+        Screenshot("08_lowering"),
+        Wait(7.0),
+        Screenshot("15_lowering"),
+        Wait(8.0),
+        Screenshot("23_neutral"),
+        Wait(8.0),
+        Screenshot("31_raising"),
+        HoldKey(KeyM),
+        Wait(0.5),
+        Screenshot("31_raising_bigmap"),
+        ReleaseKey(KeyM),
+        Wait(12.0),
+        Screenshot("44_captured"),
+        Quit,
+    ],
+)

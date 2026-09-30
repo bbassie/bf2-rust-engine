@@ -38,7 +38,12 @@ use bevy::{
     ui_render::prelude::{MaterialNode, UiMaterial, UiMaterialPlugin},
 };
 
-use crate::{camera::CameraSystems, prediction::RenderStateSystems, vehicles::VehicleViewSystems};
+use crate::{
+    camera::CameraSystems,
+    map_shapes::{ShapeKind, ShapeLook, ShapeMaterial, ShapeParams, spawn_shape, update_shape},
+    prediction::RenderStateSystems,
+    vehicles::VehicleViewSystems,
+};
 
 /// Pan and zoom for a map, in map UV space (0..1) so callers never need to know a frame's
 /// pixel size except to resize/reposition the one content node that shows it
@@ -294,6 +299,10 @@ pub struct MapMarker {
     /// A line from the middle pointing this way (a turret), clockwise from north.
     pub pointer: Option<f32>,
     pub layer: i32,
+    /// Drawn as this tactical shape instead (see `map_shapes`), `size` across.
+    pub shape: Option<ShapeLook>,
+    /// An objective the minimap keeps at its edge while it is out of range.
+    pub pin: bool,
 }
 
 impl MapMarker {
@@ -313,6 +322,16 @@ impl MapMarker {
             heading: None,
             pointer: None,
             layer: ALERT_LAYER,
+            shape: None,
+            pin: false,
+        }
+    }
+
+    /// A tactical shape (see `map_shapes`), `size` across.
+    pub fn shape(key: Entity, position: Vec3, look: ShapeLook, size: f32) -> Self {
+        Self {
+            shape: Some(look.clone()),
+            ..Self::dot(key, position, look.outline, size)
         }
     }
 
@@ -333,7 +352,7 @@ impl MapMarker {
 
     /// Drawn by an [`IconMaterial`]: silhouettes, and anything turned.
     fn turned(&self) -> bool {
-        self.tint || self.heading.is_some() || self.pointer.is_some()
+        self.shape.is_none() && (self.tint || self.heading.is_some() || self.pointer.is_some())
     }
 }
 
@@ -565,6 +584,8 @@ struct IconShape {
     label: Option<String>,
     pointer: bool,
     layer: i32,
+    /// A tactical shape's kind, text and whether it has a heading triangle.
+    look: Option<(ShapeKind, Option<String>, bool)>,
 }
 
 impl IconShape {
@@ -595,10 +616,15 @@ pub struct MarkerIcons<'w, 's> {
         ),
         (Without<MarkerBody>, Without<MarkerLabel>),
     >,
+    shape_materials: ResMut<'w, Assets<ShapeMaterial>>,
     bodies: Query<
         'w,
         's,
-        (Option<&'static mut BackgroundColor>, Option<&'static MaterialNode<IconMaterial>>),
+        (
+            Option<&'static mut BackgroundColor>,
+            Option<&'static MaterialNode<IconMaterial>>,
+            Option<&'static MaterialNode<ShapeMaterial>>,
+        ),
         (With<MarkerBody>, Without<MarkerIcon>, Without<MarkerLabel>),
     >,
     labels: Query<
@@ -666,7 +692,11 @@ impl MarkerIcons<'_, '_> {
             wanted.remove(&icon.key);
             place_icon(&mut node, &mut transform, point);
             visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
-            if let Ok((background, material)) = self.bodies.get_mut(icon.body) {
+            if let Ok((background, material, shape_material)) = self.bodies.get_mut(icon.body) {
+                if let (Some(material), Some(look)) = (shape_material, &marker.shape) {
+                    let params = ShapeParams::new(look, shape(marker, style).size().x, style.turn);
+                    update_shape(&mut self.shape_materials, material, params);
+                }
                 match material {
                     // Turned icons: heading, turret and colour live in the material.
                     Some(material) => {
@@ -677,6 +707,8 @@ impl MarkerIcons<'_, '_> {
                             asset.params = params;
                         }
                     }
+                    // (Shapes draw themselves; their node's background stays clear.)
+                    None if shape_material.is_some() => {}
                     None => {
                         if let Some(mut background) = background
                             && background.0 != marker.color
@@ -718,7 +750,18 @@ impl MarkerIcons<'_, '_> {
         }
         for (marker, point, shown) in wanted.into_values() {
             let mask = mask(&self.images, &mut self.dark, marker);
-            spawn(&mut self.commands, &mut self.materials, parent, marker, point, shown, style, mask, spots.get(&marker.key));
+            spawn(
+                &mut self.commands,
+                &mut self.materials,
+                &mut self.shape_materials,
+                parent,
+                marker,
+                point,
+                shown,
+                style,
+                mask,
+                spots.get(&marker.key),
+            );
         }
     }
 }
@@ -806,6 +849,7 @@ fn shape(marker: &MapMarker, style: IconStyle) -> IconShape {
         label: marker.label.clone().filter(|_| style.labels),
         pointer: marker.pointer.is_some(),
         layer: marker.layer,
+        look: marker.shape.as_ref().map(|l| (l.kind, l.text.clone(), l.heading.is_some())),
     }
 }
 
@@ -888,6 +932,7 @@ pub fn label_node(left: Val, top: Val, offset: Vec2, size: Vec2) -> Node {
 fn spawn(
     commands: &mut Commands,
     materials: &mut Assets<IconMaterial>,
+    shape_materials: &mut Assets<ShapeMaterial>,
     parent: Entity,
     marker: &MapMarker,
     point: MapPoint,
@@ -929,6 +974,10 @@ fn spawn(
         ..default()
     };
     let body = match &marker.image {
+        _ if marker.shape.is_some() => {
+            let look = marker.shape.as_ref().expect("checked");
+            spawn_shape(commands, shape_materials, root, look, width, style.turn, MarkerBody)
+        }
         _ if marker.turned() => {
             let side = Turned::new(width, height, marker.pointer.is_some()).side;
             let material = materials.add(IconMaterial {

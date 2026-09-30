@@ -1,0 +1,17 @@
+// Generates the tactical map (crates/game_client/src/tactical_map.rs) of gulf_of_oman and writes it to
+// target/scenarios/tactical_map/gulf_of_oman.png (and _bounds.png). Run it twice: the first run
+// generates the map (log: "generated in"), the second loads it from the cache ("loaded from
+// cache in"). client --scenario scenarios/tactical_map/gulf_of_oman.ron
+(
+    level: "gulf_of_oman",
+    mode: "gpm_cq",
+    size: 64,
+    bots: 0,
+    steps: [
+        WaitReady,
+        ExpectLog("tactical map ready", 120.0),
+        ForbidLog("tactical map: writing"),
+        Wait(0.5),
+        Quit,
+    ],
+)

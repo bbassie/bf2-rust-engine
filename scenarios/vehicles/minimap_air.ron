@@ -1,0 +1,43 @@
+// The minimap flying the Z-10 on Wake Island (tactical style): it eases out from the vehicle
+// range on the pad to the air range with height and speed, never in a jump. The report traces
+// the flight; the screenshots show the minimap over time.
+// client --scenario scenarios/vehicles/minimap_air.ron --out target/scenarios/minimap_air
+(
+    level: "wake_island_2007",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        Setting("map_style", "tactical"),
+        Wait(1.0),
+        NearVehicle("ahe_z10"),
+        Wait(0.5),
+        Screenshot("air_00_foot"),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        ExpectLog("minimap: Air range", 3.0),
+        Wait(1.5),
+        Screenshot("air_01_pad"),
+        VehicleTrace("spin up", 5.0),
+        Move(0.0, 1.0),
+        VehicleTrace("lift off", 2.0),
+        Screenshot("air_02_lift"),
+        VehicleTrace("climb", 2.0),
+        Screenshot("air_03_climb"),
+        Move(0.0, 0.0),
+        VehicleTrace("hover", 1.0),
+        Screenshot("air_04_hover"),
+        // High and fast: placed 200 m up at 60 m/s, the minimap eases out to the air range.
+        PlaceVehicle((373.0, 300.0, 300.0), 0.0, 60.0),
+        VehicleTrace("fast", 1.0),
+        Screenshot("air_05_fast_1s"),
+        VehicleTrace("fast", 1.0),
+        Screenshot("air_06_fast_2s"),
+        VehicleTrace("fast", 1.5),
+        Screenshot("air_07_fast_3s"),
+        Quit,
+    ],
+)

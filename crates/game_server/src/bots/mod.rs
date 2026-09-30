@@ -2196,13 +2196,16 @@ impl BotBrain {
         }
         let target = w.map.areas[area].position;
         let from = (me.motion.position - target).with_y(0.0).normalize_or_zero();
-        let via = target + Quat::from_rotation_y(angle.to_radians()) * from * 80.0;
         let nav = w.nav()?;
         let region = match self.region {
             Some(region) => region,
             None => nav.cell(nav.locate(me.motion.position, 2.0, None)?).region,
         };
-        nav.locate(via, 12.0, Some(region)).map(|cell| nav.position(cell))
+        // Closer in if the wide way round is off the grid (out of the level's area, water).
+        [80.0, 50.0].into_iter().find_map(|distance| {
+            let via = target + Quat::from_rotation_y(angle.to_radians()) * from * distance;
+            nav.locate(via, 12.0, Some(region)).map(|cell| nav.position(cell))
+        })
     }
 
     /// A spot in or around an area for this bot: inside the capture radius to attack, in a
@@ -2347,7 +2350,7 @@ impl BotBrain {
         let position = me.motion.position;
         let reached = self.spot.is_none_or(|(_, spot)| flat(spot - position).length() < 2.0);
         if reached || self.spot_timer <= 0.0 {
-            self.spot = Some((ROAM_SPOT, random_spot(&w.level, position)));
+            self.spot = Some((ROAM_SPOT, random_spot(&w.level, w.nav(), position)));
             self.spot_timer = 40.0 + 40.0 * fastrand::f32();
         }
         if let Some((_, spot)) = self.spot {
@@ -3274,8 +3277,10 @@ fn hotspots(spots: &bevy::platform::collections::HashMap<(i32, i32), u32>) -> St
     if list.is_empty() { "-".into() } else { list.join(", ") }
 }
 
-/// A random spot on the level, for levels without control points.
-fn random_spot(level: &LoadedLevel, from: Vec3) -> Vec3 {
+/// A random spot on the level, for levels without control points: on the grid if there is
+/// one (which leaves out what is outside the level's combat area).
+fn random_spot(level: &LoadedLevel, nav: Option<&NavGrid>, from: Vec3) -> Vec3 {
+    let confined = level.desc.game_modes.iter().any(|g| !g.combat_areas.is_empty());
     let Some(heightmap) = &level.heightmap else {
         return from;
     };
@@ -3287,8 +3292,10 @@ fn random_spot(level: &LoadedLevel, from: Vec3) -> Vec3 {
     for _ in 0..8 {
         let spot = center + Vec3::new(fastrand::f32() * 2.0 - 1.0, 0.0, fastrand::f32() * 2.0 - 1.0) * half;
         let ground = heightmap.height_at(spot.x, spot.z);
-        if water.is_none_or(|w| w - ground < ROAM_WADE_DEPTH) {
-            return Vec3::new(spot.x, ground, spot.z);
+        let spot = Vec3::new(spot.x, ground, spot.z);
+        let on_grid = !confined || nav.is_none_or(|nav| nav.locate(spot, 4.0, None).is_some());
+        if on_grid && water.is_none_or(|w| w - ground < ROAM_WADE_DEPTH) {
+            return spot;
         }
     }
     from

@@ -6,6 +6,10 @@
 //! a right/middle drag, `+`/`-`/the triggers, the arrows/the stick, a double click. [`BigMapView`]
 //! resets on a new level; there's no reset button (M is usually held with the same hand as the
 //! mouse), just the double click.
+//!
+//! The map itself is a `map_background::MapSurface`: in the tactical style with a grid, the
+//! main bases' zones and our squad's order lines, teammates as numbered circles (our squad) and
+//! dots with their heading, and us as an arrow.
 
 use bevy::{
     input::{
@@ -23,14 +27,22 @@ use game_shared::{
     vehicle::Seated,
 };
 
+use game_shared::conquest::{ControlPoint, FlagState};
+
 use crate::{
     camera::PlayerCamera,
     conquest_hud::{FRIENDLY, SQUAD},
     deploy::DeployScreen,
+    map_background::{ClassicOnly, GRID, MapFrameLook, MapSurface, TacticalOnly, legend, spawn_grid_labels},
     map_icons::map_uv,
     map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MapView, MarkerIcons, NotMarker, SOLDIER_LAYER, apply_map_view, drive_map_view},
+    map_shapes::{
+        OrderLines, ShapeKind, ShapeLook, ShapeMaterial, SquadSlots, is_order, map_lines, order_rings, soldier_look, spawn_shape, tactical,
+        team_zones,
+    },
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
+    settings::Settings,
 };
 
 pub struct BigMapPlugin;
@@ -69,8 +81,8 @@ struct BigMapImage;
 #[derive(Component)]
 struct BigMapHeading;
 
-fn spawn_big_map(mut commands: Commands) {
-    commands
+fn spawn_big_map(mut commands: Commands, mut shapes: ResMut<Assets<ShapeMaterial>>) {
+    let root = commands
         .spawn((
             BigMapRoot,
             Node {
@@ -84,91 +96,123 @@ fn spawn_big_map(mut commands: Commands) {
             GlobalZIndex(5),
             Visibility::Hidden,
         ))
-        .with_children(|root| {
-            root.spawn((
-                BigMapFrame,
+        .id();
+    let frame = commands
+        .spawn((
+            BigMapFrame,
+            MapFrameLook,
+            Node {
+                width: vh(84),
+                height: vh(84),
+                border: UiRect::all(px(2)),
+                border_radius: BorderRadius::all(px(10)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.14, 0.15, 0.16)),
+            BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            ChildOf(root),
+        ))
+        .id();
+    let image = commands
+        .spawn((
+            BigMapImage,
+            MapSurface::default(),
+            RelativeCursorPosition::default(),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            ChildOf(frame),
+        ))
+        .id();
+    commands.spawn((legend("Wheel zoom  |  Right-drag pan  |  Double-click reset"), ChildOf(frame)));
+    spawn_grid_labels(&mut commands, image);
+    let heading = commands
+        .spawn((
+            BigMapHeading,
+            UiTransform::default(),
+            Node {
+                position_type: PositionType::Absolute,
+                width: px(0),
+                height: px(0),
+                ..default()
+            },
+            GlobalZIndex(6),
+            ChildOf(image),
+        ))
+        .id();
+    commands.spawn((
+        ClassicOnly,
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(0),
+            height: px(0),
+            ..default()
+        },
+        ChildOf(heading),
+        children![
+            (
                 Node {
-                    width: vh(84),
-                    height: vh(84),
-                    border: UiRect::all(px(2)),
-                    border_radius: BorderRadius::all(px(10)),
-                    overflow: Overflow::clip(),
+                    position_type: PositionType::Absolute,
+                    left: px(-1.5),
+                    top: px(-20),
+                    width: px(3),
+                    height: px(20),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.14, 0.15, 0.16)),
-                BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-            ))
-            .with_children(|frame| {
-                frame
-                    .spawn((
-                        BigMapImage,
-                        RelativeCursorPosition::default(),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: px(0),
-                            top: px(0),
-                            width: percent(100),
-                            height: percent(100),
-                            ..default()
-                        },
-                    ))
-                    .with_child((
-                        BigMapHeading,
-                        UiTransform::default(),
-                        Node {
-                            position_type: PositionType::Absolute,
-                            width: px(0),
-                            height: px(0),
-                            ..default()
-                        },
-                        GlobalZIndex(6),
-                        children![
-                            (
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: px(-1.5),
-                                    top: px(-20),
-                                    width: px(3),
-                                    height: px(20),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
-                            ),
-                            (
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: px(-5),
-                                    top: px(-5),
-                                    width: px(10),
-                                    height: px(10),
-                                    border_radius: BorderRadius::all(px(5)),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::WHITE),
-                            ),
-                        ],
-                    ));
-            });
-        });
+                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+            ),
+            (
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(-5),
+                    top: px(-5),
+                    width: px(10),
+                    height: px(10),
+                    border_radius: BorderRadius::all(px(5)),
+                    ..default()
+                },
+                BackgroundColor(Color::WHITE),
+            ),
+        ],
+    ));
+    let arrow = commands
+        .spawn((
+            TacticalOnly,
+            Node {
+                position_type: PositionType::Absolute,
+                width: px(0),
+                height: px(0),
+                ..default()
+            },
+            Visibility::Hidden,
+            ChildOf(heading),
+        ))
+        .id();
+    spawn_shape(&mut commands, &mut shapes, arrow, &player_arrow(), 20.0, 0.0, ());
 }
 
-fn set_map_image(
-    mut commands: Commands,
-    level: Res<LoadedLevel>,
-    asset_server: Res<AssetServer>,
-    image: Single<Entity, With<BigMapImage>>,
-    mut view: ResMut<BigMapView>,
-) {
-    match &level.desc.minimap {
-        Some(path) => {
-            commands
-                .entity(*image)
-                .insert(ImageNode::new(asset_server.load(format!("imported://{path}"))));
-        }
-        None => {
-            commands.entity(*image).remove::<ImageNode>();
-        }
+/// Us on the tactical maps: a white arrow.
+pub fn player_arrow() -> ShapeLook {
+    ShapeLook {
+        kind: ShapeKind::Arrow,
+        fill: Color::WHITE,
+        outline: Color::srgb(0.1, 0.12, 0.14),
+        progress: None,
+        pulse: false,
+        text: None,
+        text_color: Color::WHITE,
+        heading: Some(0.0),
     }
+}
+
+/// A new level: the view starts over (the image is `map_background`'s).
+fn set_map_image(mut view: ResMut<BigMapView>) {
     view.0.reset();
 }
 
@@ -231,6 +275,15 @@ fn apply_big_map_view(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_big_map(
     level: Option<Res<LoadedLevel>>,
+    settings: Res<Settings>,
+    view: Res<BigMapView>,
+    (slots, order_lines, points, orders): (
+        Res<SquadSlots>,
+        Res<OrderLines>,
+        Query<(&ControlPoint, &FlagState)>,
+        Query<(), With<game_shared::commander::SquadOrder>>,
+    ),
+    mut surface: Single<&mut MapSurface, With<BigMapImage>>,
     root: Single<&Visibility, (With<BigMapRoot>, NotMarker)>,
     camera: Single<&GlobalTransform, With<PlayerCamera>>,
     players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
@@ -252,9 +305,16 @@ fn update_big_map(
     let at = |uv: Vec2| (percent(uv.x.clamp(0.0, 1.0) * 100.0), percent(uv.y.clamp(0.0, 1.0) * 100.0));
 
     let (node, transform, visibility) = &mut *heading;
-    (node.left, node.top) = at(map_uv(&level, camera.translation()));
+    let (left, top) = at(map_uv(&level, camera.translation()));
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
+    }
     let forward = camera.forward();
-    transform.rotation = Rot2::radians(forward.x.atan2(-forward.z));
+    let rotation = Rot2::radians(forward.x.atan2(-forward.z));
+    if transform.rotation != rotation {
+        transform.rotation = rotation;
+    }
     // In a vehicle its icon shows where we are.
     visibility.set_if_neq(if seated.is_empty() { Visibility::Inherited } else { Visibility::Hidden });
 
@@ -262,19 +322,41 @@ fn update_big_map(
         .single()
         .map(|(team, squad)| (*team, squad.copied()))
         .unwrap_or_default();
+    let tactical = tactical(&settings);
+    let content = frame.size * frame.inverse_scale_factor * view.0.zoom;
+    MapSurface::set(
+        &mut surface,
+        MapSurface {
+            pixels_per_uv: content.x.max(1.0),
+            grid: GRID as f32,
+            lines: if tactical { map_lines(&level, &order_lines.ours) } else { Vec::new() },
+            zones: if tactical { team_zones(&level, &points, local) } else { Vec::new() },
+            ..MapSurface::default()
+        },
+    );
     // Teammates on foot (squad mates in green); flags, vehicles and the rest are markers.
     let mut teammates = Vec::new();
     for (entity, render, controlled_by) in &soldiers {
         let (team, squad) = teams.get(controlled_by.0).map(|(t, s)| (*t, s.copied())).unwrap_or_default();
         if team == local && local != Team::Spectator {
             let squad_mate = local_squad.zip(squad).is_some_and(|(a, b)| a.squad == b.squad);
-            let color = if squad_mate { SQUAD } else { FRIENDLY };
-            teammates.push(MapMarker::dot(entity, render.position, color, 6.5).layer(SOLDIER_LAYER));
+            let marker = match (tactical, squad_mate) {
+                (true, true) => {
+                    let slot = slots.0.get(&controlled_by.0).copied().unwrap_or(0);
+                    MapMarker::shape(entity, render.position, soldier_look(Some(slot), -render.yaw), 10.0)
+                }
+                (true, false) => MapMarker::shape(entity, render.position, soldier_look(None, -render.yaw), 6.0),
+                (false, true) => MapMarker::dot(entity, render.position, SQUAD, 6.5),
+                (false, false) => MapMarker::dot(entity, render.position, FRIENDLY, 6.5),
+            };
+            teammates.push(marker.layer(SOLDIER_LAYER));
         }
     }
+    let rings = if tactical { order_rings(&markers.0, &orders) } else { Vec::new() };
     let placed = teammates
         .iter()
-        .chain(&markers.0)
+        .chain(markers.0.iter().filter(|m| !tactical || !is_order(m, &orders)))
+        .chain(&rings)
         .map(|marker| (marker, MapPoint::Share(map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE)), true));
     // Sized for the 605 px map of a 720p window, a little larger on larger ones; the frame
     // (not the zoomed image) so markers keep a constant size regardless of zoom.

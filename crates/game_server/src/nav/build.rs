@@ -28,7 +28,7 @@ use avian3d::parry::shape::{SharedShape, TypedShape};
 use bevy::{math::Affine3A, platform::collections::HashMap as Map, prelude::*};
 use game_shared::{ladder::Ladder, level::Heightmap};
 
-use super::{NavCell, NavGrid, NavLadder, NavParams, SLOPE_SCALE};
+use super::{NavCell, NavGrid, NavLadder, NavParams, SLOPE_SCALE, area::PlayArea};
 
 /// Bump when the build changes, to invalidate cached grids.
 pub const VERSION: u32 = 9;
@@ -57,6 +57,10 @@ pub struct LevelGeometry {
     /// Build in this frame (a detail patch): meshes, ladders and `bounds` are in its local
     /// space, the terrain is sampled through it, and `bounds` isn't clamped to the terrain.
     pub frame: Option<Frame>,
+    /// Columns whose middle is outside this get no cells (the level's combat area; see
+    /// [`super::area`]). Only for the level grid (no `frame`); `bounds` should be cropped to
+    /// it too ([`PlayArea::crop`]).
+    pub area: Option<PlayArea>,
 }
 
 /// A horizontal frame: local XZ turned by a yaw and moved. Heights stay world heights.
@@ -230,6 +234,11 @@ pub(super) fn build_cells(geometry: &LevelGeometry, mut params: NavParams) -> Na
     let width = ((hi.x - origin.x) / cell).ceil() as u32;
     let depth = ((hi.y - origin.y) / cell).ceil() as u32;
     let area_max = origin + Vec2::new(width as f32, depth as f32) * cell;
+    // Columns outside the play area get no cells, and tiles with none of it aren't rasterized.
+    let mask = match (&geometry.area, geometry.frame) {
+        (Some(area), None) => Some(area.mask(origin, cell, width, depth)),
+        _ => None,
+    };
 
     // Heights are quantized relative to the lowest point.
     let (mut y_lo, mut y_hi) = (f32::MAX, f32::MIN);
@@ -257,6 +266,16 @@ pub(super) fn build_cells(geometry: &LevelGeometry, mut params: NavParams) -> Na
     let tiles_z = depth.div_ceil(TILE);
     let tile_size = cell * TILE as f32;
     let mut buckets = vec![Vec::new(); (tiles_x * tiles_z) as usize];
+    let skip: Vec<bool> = (0..tiles_x * tiles_z)
+        .map(|tile| {
+            let Some(mask) = &mask else {
+                return false;
+            };
+            let (x0, z0) = (tile % tiles_x * TILE, tile / tiles_x * TILE);
+            let (x1, z1) = ((x0 + TILE).min(width), (z0 + TILE).min(depth));
+            !(z0..z1).any(|z| mask[(z * width + x0) as usize..(z * width + x1) as usize].contains(&true))
+        })
+        .collect();
     for (index, i) in instances.iter().enumerate() {
         let t0 = ((i.min.xz() - origin) / tile_size).floor();
         let t1 = ((i.max.xz() - origin) / tile_size).floor();
@@ -267,7 +286,10 @@ pub(super) fn build_cells(geometry: &LevelGeometry, mut params: NavParams) -> Na
         );
         for tz in z0..=z1 {
             for tx in x0..=x1 {
-                buckets[(tz * tiles_x as i64 + tx) as usize].push(index as u32);
+                let tile = (tz * tiles_x as i64 + tx) as usize;
+                if !skip[tile] {
+                    buckets[tile].push(index as u32);
+                }
             }
         }
     }
@@ -283,6 +305,7 @@ pub(super) fn build_cells(geometry: &LevelGeometry, mut params: NavParams) -> Na
         frame: geometry.frame,
         instances: &instances,
         buckets: &buckets,
+        skip: &skip,
         tiles_x,
     };
     let tile_count = buckets.len();
@@ -330,7 +353,8 @@ pub(super) fn build_cells(geometry: &LevelGeometry, mut params: NavParams) -> Na
                 .unwrap();
             let local = ((z % TILE) * tile.width + x % TILE) as usize;
             let (start, end) = (tile.starts[local] as usize, tile.starts[local + 1] as usize);
-            if geometry.holes.is_empty() || !in_hole(x, z) {
+            let kept = mask.as_ref().is_none_or(|m| m[(z * width + x) as usize]);
+            if kept && (geometry.holes.is_empty() || !in_hole(x, z)) {
                 raw.extend_from_slice(&tile.cells[start..end]);
             }
             columns.push(raw.len() as u32);
@@ -602,6 +626,8 @@ struct Rasterizer<'a> {
     frame: Option<Frame>,
     instances: &'a [Instance<'a>],
     buckets: &'a [Vec<u32>],
+    /// Tiles entirely outside the play area: no cells.
+    skip: &'a [bool],
     tiles_x: u32,
 }
 
@@ -618,6 +644,13 @@ impl Rasterizer<'_> {
         let (tx, tz) = (tile as u32 % self.tiles_x, tile as u32 / self.tiles_x);
         let (x0, z0) = (tx * TILE, tz * TILE);
         let (w, d) = (TILE.min(self.width - x0), TILE.min(self.depth - z0));
+        if self.skip[tile] {
+            return TileCells {
+                width: w,
+                starts: vec![0; (w * d + 1) as usize],
+                cells: Vec::new(),
+            };
+        }
         let cell = self.params.cell;
         let mut raster = TileRaster {
             pool,
@@ -990,6 +1023,11 @@ pub fn geometry_key(geometry: &LevelGeometry, params: &NavParams) -> u64 {
     }
     if let Some((lo, hi)) = geometry.bounds {
         [lo.x, lo.y, hi.x, hi.y].into_iter().for_each(|v| h.f32(v));
+    }
+    // Only with an area, so grids of levels without combat areas keep their keys.
+    if let Some(area) = &geometry.area {
+        h.bytes(b"area");
+        area.key_words().into_iter().for_each(|v| h.f32(v));
     }
     for ladder in &geometry.ladders {
         for v in [ladder.center, ladder.up, ladder.front, ladder.half] {
