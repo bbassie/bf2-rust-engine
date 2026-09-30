@@ -551,10 +551,15 @@ fn enter_vehicles(
 /// Keeps seated soldiers at their seats (for their hitbox, capturing flags, and what clients
 /// see).
 fn carry_occupants(
-    mut soldiers: Query<(&Seated, &AppliedInput, &mut SoldierMotion, &mut Transform), With<Soldier>>,
+    mut soldiers: Query<(Entity, &Seated, &AppliedInput, &mut SoldierMotion, &mut Transform), With<Soldier>>,
     vehicles: Query<(&VehicleData, &VehicleState, &Position, &Rotation, &LinearVelocity), Without<Soldier>>,
 ) {
-    for (seated, applied, mut motion, mut transform) in &mut soldiers {
+    for (soldier, seated, applied, mut motion, mut transform) in &mut soldiers {
+        // Getting into a vehicle under a parachute leaves the parachute behind (for everyone
+        // who draws him, and for his own prediction once he gets out again).
+        if motion.parachute {
+            info!("parachute of {soldier} ends: in a vehicle");
+        }
         let Ok((data, state, position, rotation, velocity)) = vehicles.get(seated.vehicle) else {
             continue;
         };
@@ -572,6 +577,7 @@ fn carry_occupants(
             pitch: applied.0.pitch,
             grounded: true,
             stance: Stance::Crouching,
+            parachute: false,
             ..*motion
         };
         motion.set_if_neq(next);

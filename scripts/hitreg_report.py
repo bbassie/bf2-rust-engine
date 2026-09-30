@@ -16,7 +16,7 @@ import re
 import sys
 from collections import defaultdict
 
-SHOT = re.compile(r"hitreg shot (\d+): (\S+) part (\S+) seen (\S+) judged-here (\S+) aim-error (\S+) view_tick (\d+) clearance (\S+)(?: target \S+)?( occluded)?")
+SHOT = re.compile(r"hitreg shot (\d+): (\S+) part (\S+) seen (\S+) judged-here (\S+) aim-error (\S+) view_tick (\d+) clearance (\S+)(?: target \S+)?(?: ahead (-?\d+))?( occluded)?")
 TRACER = re.compile(r"hitreg tracer: (?:hit \S+ \(material (\d+)\)(?: zone (\S+))?|nothing hit)")
 FIRE = re.compile(r"hitreg fire: (\S+) (\S+) tick (\d+) view (\d+) rewind (\d+)")
 VERDICT = re.compile(r"hitreg verdict: \S+ (\S+) (hit \S+ zone (\S+)|miss)")
@@ -96,7 +96,8 @@ def main():
         print(f"SHOTS ({len(shots)} fired, {len(ours)} server fire lines, {len(tracers)} tracer lines)")
         table = defaultdict(lambda: defaultdict(int))
         occluded = 0
-        for i, (index, label, part, seen, _judged, _aim, _tick, clearance, blocked) in enumerate(shots):
+        aheads = [int(s[8]) for s in shots if s[8] is not None and int(s[8]) >= 0]
+        for i, (index, label, part, seen, _judged, _aim, _tick, clearance, _ahead, blocked) in enumerate(shots):
             # The world was in the way of the point aimed at: says nothing about hit zones.
             if blocked:
                 occluded += 1
@@ -140,6 +141,8 @@ def main():
             )
         if occluded:
             print(f"({occluded} shots left out: the world was in the way)")
+        if aheads:
+            print(f"input ticks ahead of the server: mean {sum(aheads) / len(aheads):.1f}, max {max(aheads)}")
         if rewinds:
             print(f"rewind ticks: min {min(rewinds)} max {max(rewinds)} mean {sum(rewinds) / len(rewinds):.1f}")
 

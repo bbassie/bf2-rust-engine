@@ -1,5 +1,7 @@
 //! Where a soldier can be hit: capsules around its bones (`game_data::HitZone`, BF2's
-//! per-bone hit capsules) posed by stance, and the ray test bullets use. Each body part has
+//! per-bone hit capsules), and the ray test bullets use. On foot the capsules sit on the bones
+//! as clients draw them (`crate::skeleton`: the same clips, weights and times); otherwise, and
+//! for zones imported without their bone offsets, in their stance's pose. Each body part has
 //! its own damage table column (head, body, body armour, limbs).
 
 use std::sync::LazyLock;
@@ -32,14 +34,6 @@ pub struct ServerClock(pub u32);
 /// predicted impacts, prefixed `hitreg`, for checking hit registration.
 pub fn hitreg_log() -> bool {
     static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("BF2_HITREG_LOG").is_some());
-    *ON
-}
-
-/// `BF2_HITREG_BEFORE=1`: hit registration as it was before hit zones followed the
-/// animations (stance capsules, client tracers stopped by the movement capsule, the host's
-/// shots judged against the present), for comparison.
-pub fn legacy() -> bool {
-    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("BF2_HITREG_BEFORE").is_some());
     *ON
 }
 

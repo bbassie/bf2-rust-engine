@@ -167,6 +167,9 @@ const REVIVE_DISTANCE: f32 = 35.0;
 const REVIVE_UTILITY: f32 = 4.5;
 /// Seconds a goal it kept getting stuck on the way to is avoided.
 const BAD_GOAL_SECONDS: f32 = 20.0;
+/// How much being under fire shakes a tactical bot's aim and slows its reaction to a newly
+/// seen enemy (a factor on the effect; it mostly sends it to cover instead).
+const SUPPRESSED_AIM: f32 = 0.3;
 /// How close teammates must be for a held bag to reach them, meters.
 const BAG_REACH: f32 = 4.0;
 /// `BotBrain::spot` keys that aren't areas: a commander's point, and roaming.
@@ -1177,7 +1180,11 @@ impl BotBrain {
             .memory
             .contacts
             .iter()
-            .filter(|c| (0.3..4.0).contains(&c.age) && c.source >= Source::Shot)
+            .filter(|c| {
+                ((0.3..4.0).contains(&c.age) && c.source >= Source::Shot)
+                    // Spotted for the team, or seen by a teammate lately: it knew where to look.
+                    || (self.tactical && c.age < 8.0 && c.source >= Source::Team)
+            })
             .map(|c| c.enemy)
             .collect();
         let mut candidates: Vec<(Entity, f32, Vec3, bool)> = Vec::new();
@@ -1234,6 +1241,12 @@ impl BotBrain {
             if self.threat.is_some_and(|(t, _)| t == entity) {
                 score -= 25.0;
             }
+            // Tactical bots finish off the wounded first (a kill sooner is one gun less).
+            if self.tactical
+                && let Some(health) = w.soldiers.get(entity).ok().and_then(|s| s.4)
+            {
+                score -= 12.0 * (1.0 - health.current / health.max.max(1.0)).clamp(0.0, 1.0);
+            }
             if best.is_none_or(|(s, ..)| score < s) {
                 best = Some((score, entity, chest, outside));
             }
@@ -1255,7 +1268,7 @@ impl BotBrain {
             self.target = seen;
             self.engaged = 0.0;
             // Someone in sight at last: decide now whether to shoot him (peeking from cover).
-            if seen.is_some() && self.tactical && crate::ai::tune::knob("peek_fast", 0.0) > 0.5 {
+            if seen.is_some() && self.tactical {
                 self.decide_timer = 0.0;
             }
             if let Some((_, _, chest, outside)) = best {
@@ -1269,11 +1282,10 @@ impl BotBrain {
                     // Someone it knew was there (peeking at him again, or he came round the
                     // corner it watched): already aimed that way.
                     if self.target.is_some_and(|t| known.contains(&t)) {
-                        self.reaction *= crate::ai::tune::knob("known_react", 0.4);
+                        self.reaction *= 0.4;
                         self.aim_error *= 0.6;
                         // The one it just lost: still aimed about where it was.
-                        if crate::ai::tune::knob("keep_aim", 0.0) > 0.5
-                            && let Some((lost, aim)) = self.lost_aim
+                        if let Some((lost, aim)) = self.lost_aim
                             && Some(lost) == self.target
                         {
                             if (aim * 1.3).length() < self.aim_error.length() {
@@ -1282,9 +1294,8 @@ impl BotBrain {
                         }
                     }
                     // Under fire it takes a little longer to settle on someone.
-                    let supp = crate::ai::tune::knob("supp_aim", 1.0);
-                    self.reaction += 0.12 * self.suppression.min(1.0) * supp;
-                    self.aim_error *= 1.0 + 0.3 * self.suppression.min(1.0) * supp;
+                    self.reaction += 0.12 * self.suppression.min(1.0) * SUPPRESSED_AIM;
+                    self.aim_error *= 1.0 + 0.3 * self.suppression.min(1.0) * SUPPRESSED_AIM;
                     self.call_spot(w, me, skill, cx);
                 }
             }
@@ -1329,7 +1340,7 @@ impl BotBrain {
         if distance < 10.0 {
             return EngageStyle::Strafe;
         }
-        if self.tactical && crate::ai::tune::knob("style", 1.0) > 0.5 {
+        if self.tactical {
             // Low at range: prone far off (steadier), crouched at middle distances.
             return match pose {
                 FiringPose::Prone if distance > 30.0 => EngageStyle::Prone,
@@ -1409,12 +1420,11 @@ impl BotBrain {
                 // Tactical medics see a revive through once close, unless it gets too hot.
                 let close = w.soldiers.get(soldier).is_ok_and(|s| flat(s.1.position - position).length() < 20.0);
                 let committed = self.tactical
-                    && crate::ai::tune::knob("revive_commit", 0.0) > 0.5
                     && close
                     && self.suppression < 0.8
                     && hp > 0.4
                     && distance.is_none_or(|d| d > 12.0);
-                best = (if committed { crate::ai::tune::knob("revive_keep", 8.6) } else { REVIVE_UTILITY }, self.activity);
+                best = (if committed { 8.6 } else { REVIVE_UTILITY }, self.activity);
             }
             Activity::Repair { time, .. } if time > 0.0 => best = (4.0, self.activity),
             Activity::Mount { time, .. } if time < 90.0 => best = (5.0, self.activity),
@@ -1476,12 +1486,12 @@ impl BotBrain {
             let squad_mate = |soldier: Entity| self.tactical && self.is_squad_mate(w, me, soldier);
             let reach = if self.tactical { REVIVE_DISTANCE * 1.7 } else { REVIVE_DISTANCE };
             let downed = w.wounded.downed_near(me.team, position, reach);
-            let commit = self.tactical && crate::ai::tune::knob("revive_commit", 0.0) > 0.5;
             let pick = downed
                 .iter()
                 .filter(|(_, _, left)| *left > 3.0)
-                // Only those it can get to in time (running, with the paddles to get out).
-                .filter(|(_, at, left)| !commit || flat(*at - position).length() / 5.0 + 2.0 < *left)
+                // Tactical medics: only those it can get to in time (running, with the paddles
+                // to get out).
+                .filter(|(_, at, left)| !self.tactical || flat(*at - position).length() / 5.0 + 2.0 < *left)
                 .map(|&(soldier, at, _)| {
                     let mate = squad_mate(soldier);
                     let far = flat(at - position).length() > REVIVE_DISTANCE;
@@ -1497,7 +1507,6 @@ impl BotBrain {
                 // the enemy is right there: a revive saves a life (and a ticket).
                 let near = downed.iter().find(|d| d.0 == soldier).is_some_and(|d| flat(d.1 - position).length() < 25.0);
                 if self.tactical
-                    && crate::ai::tune::knob("revive_commit", 0.0) > 0.5
                     && (near || mate)
                     && self.suppression < 0.6
                     && distance.is_none_or(|d| d > 15.0)
@@ -1559,7 +1568,6 @@ impl BotBrain {
                 // Winding up a grenade in the open, in a firefight, is time not shooting back:
                 // tactical bots throw at an enemy in sight from cover.
                 let exposed = self.tactical
-                    && crate::ai::tune::knob("vis_throw", 1.0) < 0.5
                     && self.cover.is_none_or(|c| flat(c.spot - position).length() > 2.0);
                 let utility = match visible {
                     true if self.engaged > 2.5 && !exposed && fastrand::f32() < 0.1 + 0.25 * aggression => 8.0,
@@ -1706,7 +1714,7 @@ impl BotBrain {
                 sprint: false,
             });
             // Tactical bots keep shooting as they go.
-            if self.tactical && crate::ai::tune::knob("adv_fire", 0.0) > 0.5 {
+            if self.tactical {
                 self.pull_trigger(w, me, distance, on_target, intent, dt);
             }
             return;
@@ -1721,7 +1729,7 @@ impl BotBrain {
         let style = match distance {
             d if d < 8.0 => EngageStyle::Strafe,
             // Pinned down in the open: get low.
-            d if self.tactical && self.suppression > 0.6 && d > 15.0 && crate::ai::tune::knob("style", 1.0) > 0.5 => {
+            d if self.tactical && self.suppression > 0.6 && d > 15.0 => {
                 if d > 30.0 { EngageStyle::Prone } else { EngageStyle::Crouch }
             }
             _ => self.style,
@@ -1757,7 +1765,7 @@ impl BotBrain {
         let settle = skill.aim_settle();
         self.aim_error *= 1.0 - (settle * dt).min(1.0);
         // Bullets cracking past shake the aim (a little: it mostly sends it to cover).
-        let shaken = 1.0 + 0.4 * self.suppression.min(1.0) * (1.0 - 0.5 * skill.0) * crate::ai::tune::knob("supp_aim", 1.0);
+        let shaken = 1.0 + 0.4 * self.suppression.min(1.0) * (1.0 - 0.5 * skill.0) * SUPPRESSED_AIM;
         let wander = skill.aim_spread(distance) * (2.0 * settle * dt).sqrt() * self.impairment() * shaken;
         self.aim_error += Vec2::new(gaussian(), gaussian()) * wander;
         self.yaw = turn_towards(self.yaw, desired_yaw, skill.turn_rate() * dt);
@@ -1859,7 +1867,7 @@ impl BotBrain {
     /// Tactical bots: which way to run from a live hand grenade close enough to hurt, once it
     /// has lain there a moment ("grenade!").
     fn dodge_grenades(&mut self, w: &Senses, me: &Me, dt: f32) -> Option<Vec3> {
-        if !self.tactical || crate::ai::tune::knob("dodge_nade", 0.0) < 0.5 {
+        if !self.tactical {
             return None;
         }
         let position = me.motion.position;
@@ -2050,7 +2058,7 @@ impl BotBrain {
             .member
             .filter(|_| self.tactical && !human_led)
             .and_then(|m| w.tactics.squads.get(&(me.team, m.squad)))
-            .filter(|t| t.bounding && crate::ai::tune::knob("bound", 1.0) > 0.5)
+            .filter(|t| t.bounding)
             .copied();
         match (tactic, squad) {
             (Some(tactic), Some(squad)) if is_leader || leader.is_some() => {
@@ -2665,9 +2673,7 @@ impl BotBrain {
             self.stuck_strikes = 0.0;
             self.spot = None;
             self.via = None;
-            if crate::ai::tune::knob("bad_goal", 1.0) > 0.5 {
-                self.bad_goal = self.goal.map(|g| (g, BAD_GOAL_SECONDS));
-            }
+            self.bad_goal = self.goal.map(|g| (g, BAD_GOAL_SECONDS));
         }
     }
 

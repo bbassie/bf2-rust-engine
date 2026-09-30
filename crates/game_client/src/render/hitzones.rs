@@ -22,8 +22,15 @@ fn draw_on_top(mut store: ResMut<GizmoConfigStore>) {
     store.config_mut::<DefaultGizmoConfigGroup>().0.depth_bias = -1.0;
 }
 
-fn draw(drawn: DrawnTargets, mut gizmos: Gizmos) {
-    for target in drawn.collect() {
+fn draw(
+    drawn: DrawnTargets,
+    third_person: Res<crate::camera::ThirdPerson>,
+    local: Query<Entity, With<crate::net::LocalSoldier>>,
+    mut gizmos: Gizmos,
+) {
+    // Not our own around the camera in first person.
+    let hidden = local.single().ok().filter(|_| !third_person.0);
+    for target in drawn.collect().into_iter().filter(|t| Some(t.entity) != hidden) {
         for zone in target.zones {
             let (a, b) = drawn.capsule(&target, zone);
             let color = match zone.material {

@@ -661,6 +661,8 @@ fn step(
         m.grounded = false;
         m.climbing = true;
         m.on_rope = ladder.rope;
+        // Both hands on the ladder: a parachute steered onto one is let go.
+        m.parachute = false;
         return;
     }
     // Walking along under a zipline's wire, downhill, grabs it.
@@ -673,6 +675,7 @@ fn step(
         m.velocity = wire.down * tuning.zipline_min_speed;
         m.grounded = false;
         m.riding = true;
+        m.parachute = false;
         return;
     }
 

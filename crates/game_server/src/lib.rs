@@ -244,6 +244,10 @@ pub struct InputBuffer {
     current: InputFrame,
     /// Frames in a row that were too far ahead of `last_received` (see [`Self::push`]).
     ahead: u32,
+    /// The fewest frames queued beyond the ticks about to run this [`Self::DRAIN_WINDOW`], and
+    /// how far into it we are (see [`Self::drain`]).
+    lowest: Option<usize>,
+    window: f32,
 }
 
 impl InputBuffer {
@@ -257,6 +261,10 @@ impl InputBuffer {
     /// Unless frames keep coming that far ahead: then the client really moved on (a long
     /// stall), and its numbers are taken as they are.
     const RESYNC_AFTER: u32 = 60;
+    /// Frames a remote client's queue keeps beyond the ticks about to run, against jitter.
+    const SLACK: usize = 2;
+    /// Seconds a queue must have held more than that before it is drained.
+    const DRAIN_WINDOW: f32 = 1.0;
 
     /// Queues a frame received from the network: dropped if it isn't newer than the last one,
     /// or if it isn't valid ([`game_shared::validate::input_frame`]: NaN or infinite angles).
@@ -287,6 +295,32 @@ impl InputBuffer {
         while self.queue.len() > Self::MAX_QUEUED + ticks {
             self.queue.pop_front();
         }
+    }
+
+    /// A remote client's queue that holds more than it needs: filled up by one slow frame it
+    /// never drains by itself, and every input then waits that many ticks (a standing 100 ms
+    /// at [`Self::MAX_QUEUED`], which lag compensation then has to rewind on top of the
+    /// round trip, beyond its cap). Once the queue has held more than [`Self::SLACK`] frames
+    /// beyond the coming `ticks` for a whole [`Self::DRAIN_WINDOW`], the oldest of those go,
+    /// their buttons carried over. Once per frame, with the frame's `dt`.
+    pub fn drain(&mut self, ticks: usize, dt: f32) {
+        let surplus = self.queue.len().saturating_sub(ticks);
+        let lowest = self.lowest.map_or(surplus, |l| l.min(surplus));
+        self.lowest = Some(lowest);
+        self.window += dt;
+        if self.window >= Self::DRAIN_WINDOW {
+            if lowest > Self::SLACK {
+                let keep = self.queue.len() - (lowest - Self::SLACK);
+                self.keep_newest(keep);
+            }
+            self.window = 0.0;
+            self.lowest = None;
+        }
+    }
+
+    /// Frames waiting to be applied.
+    pub fn queued(&self) -> usize {
+        self.queue.len()
     }
 
     /// Drops all but the newest `count` queued frames; their buttons carry over to the next
@@ -592,13 +626,13 @@ fn receive_inputs(
     host: Option<Res<HostPlayer>>,
     virtual_time: Res<Time<Virtual>>,
     fixed_time: Res<Time<Fixed>>,
-    mut buffers: Query<&mut InputBuffer>,
+    mut buffers: Query<(Entity, &mut InputBuffer)>,
 ) {
     for packet in packets.read() {
         let Some(entity) = sender_player(packet.client_id, &clients, host.as_deref()) else {
             continue;
         };
-        if let Ok(mut buffer) = buffers.get_mut(entity) {
+        if let Ok((_, mut buffer)) = buffers.get_mut(entity) {
             // The newest frames only: clients send a few; a packet of thousands is no input.
             let frames = &packet.message.frames;
             for frame in &frames[frames.len().saturating_sub(game_shared::validate::MAX_INPUT_FRAMES)..] {
@@ -609,13 +643,17 @@ fn receive_inputs(
     // The fixed ticks this frame will run to catch up with the virtual clock.
     let ticks = ((fixed_time.overstep() + virtual_time.delta()).as_secs_f64()
         / fixed_time.timestep().as_secs_f64()) as usize;
-    for mut buffer in &mut buffers {
+    let host_player = host.as_deref().map(|h| h.0);
+    for (entity, mut buffer) in &mut buffers {
         buffer.trim(ticks);
+        if Some(entity) != host_player {
+            buffer.drain(ticks, virtual_time.delta_secs());
+        }
     }
     // The host's own inputs come every frame, without loss or jitter: queued beyond the
     // ticks about to run they would only wait. (A queue filled up by a slow frame never
     // drained and kept the host's input 6 ticks, 100 ms, behind: flying, driving, walking.)
-    if let Some(mut buffer) = host.as_deref().and_then(|h| buffers.get_mut(h.0).ok()) {
+    if let Some((_, mut buffer)) = host.as_deref().and_then(|h| buffers.get_mut(h.0).ok()) {
         buffer.keep_newest(ticks.max(1));
     }
 }
@@ -660,12 +698,17 @@ fn apply_inputs(
     let (buffers, bots) = (&buffers, &bots);
     soldiers
         .par_iter_mut()
-        .for_each(|(controlled_by, mut motion, mut ack, mut transform, applied, _)| {
+        .for_each(|(controlled_by, mut motion, mut ack, mut transform, applied, downed)| {
             if !buffers.contains(controlled_by.0) {
                 return;
             }
             let input = applied.0;
             let mut next = *motion;
+            // Critically wounded under a parachute: it's let go, and he falls (his client
+            // predicts the same, see `game_client::prediction::predict`).
+            if downed.is_some() {
+                next.parachute = false;
+            }
             step_soldier(&mut next, &input, dt, &tuning, &shapes, &mover, water);
             motion.set_if_neq(next);
             // Only players predict their soldier from the ack; a bot's input number goes up every
@@ -950,5 +993,39 @@ mod tests {
         assert_eq!(buffer.last_received, Some(far + InputBuffer::RESYNC_AFTER - 1));
         buffer.push(frame(far + InputBuffer::RESYNC_AFTER));
         assert_eq!(buffer.last_received, Some(far + InputBuffer::RESYNC_AFTER));
+    }
+
+    #[test]
+    fn a_remote_queue_that_stays_full_drains_to_the_slack() {
+        let mut buffer = InputBuffer::default();
+        // One slow frame queued up six frames; since then one comes and one goes per tick.
+        let mut seq = 0;
+        for _ in 0..6 {
+            seq += 1;
+            buffer.push(frame(seq));
+        }
+        for _ in 0..61 {
+            seq += 1;
+            buffer.push(frame(seq));
+            buffer.drain(1, 1.0 / 60.0);
+            buffer.next();
+        }
+        assert_eq!(buffer.queue.len(), InputBuffer::SLACK, "the extra frames went");
+        // A jittery connection whose queue runs dry now and then keeps what it has: frames
+        // arrive four at a time every fourth tick.
+        let mut jittery = InputBuffer::default();
+        let mut seq = 0;
+        for tick in 0..240 {
+            if tick % 4 == 0 {
+                for _ in 0..4 {
+                    seq += 1;
+                    jittery.push(frame(seq));
+                }
+            }
+            let before = jittery.queue.len();
+            jittery.drain(1, 1.0 / 60.0);
+            assert_eq!(jittery.queue.len(), before, "never drained");
+            jittery.next();
+        }
     }
 }

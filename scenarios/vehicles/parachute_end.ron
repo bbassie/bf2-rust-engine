@@ -1,0 +1,52 @@
+// The parachute ends, for the soldier's state and his canopy: landing on the ground (the
+// canopy collapses behind him), landing in deep water (he swims, it collapses), and getting
+// into a vehicle from under it (the server drops the parachute and the canopy is gone at
+// once; it must not come back while he sits there).
+// client --scenario scenarios/vehicles/parachute_end.ron --out target/scenarios/parachute/end
+(
+    level: "wake_island_2007",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        ForbidLog("panicked"),
+        ThirdPerson(true),
+        // Landing on the island.
+        Teleport((407.0, 112.0, 420.0), 0.0, -15.0),
+        Parachute(0.0),
+        ExpectLog("parachute: canopy opened", 1.0),
+        Wait(1.0),
+        Screenshot("01_coming_down"),
+        ExpectLog("collapses (landed)", 15.0),
+        Screenshot("02_landed"),
+        Wait(2.0),
+        // Into the sea.
+        Teleport((407.0, 95.0, 640.0), 0.0, -15.0),
+        Parachute(0.0),
+        ExpectLog("parachute: canopy opened", 1.0),
+        ExpectLog("collapses (landed)", 15.0),
+        Wait(0.3),
+        Screenshot("03_in_the_water"),
+        Wait(2.0),
+        // Down next to a jeep and into it before touching down.
+        NearVehicle("jep_paratrooper"),
+        Parachute(1.5),
+        ExpectLog("parachute: canopy opened", 1.0),
+        Wait(0.2),
+        Screenshot("04_by_the_jeep"),
+        Hold([Use]),
+        Wait(0.1),
+        Release([Use]),
+        ExpectLog("ends: in a vehicle", 2.0),
+        ExpectLog("removed (in a vehicle)", 1.0),
+        ForbidLog("parachute: canopy opened"),
+        ForbidLog("ends: in a vehicle"),
+        Wait(0.5),
+        Screenshot("05_in_the_jeep"),
+        Wait(2.0),
+        Screenshot("06_still_no_canopy"),
+        Quit,
+    ],
+)

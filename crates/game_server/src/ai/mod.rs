@@ -27,7 +27,6 @@ pub mod squad;
 pub mod stats;
 pub mod strategy;
 pub mod tactics;
-pub mod tune;
 pub mod vehicles;
 
 use bevy::prelude::*;

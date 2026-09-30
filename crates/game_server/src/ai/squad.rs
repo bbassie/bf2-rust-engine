@@ -160,9 +160,12 @@ pub fn fire_team(slot: Option<usize>) -> u8 {
 /// How far each fire team moves per bound, meters.
 pub const BOUND_DISTANCE: f32 = 25.0;
 /// How long a bound lasts at most, seconds.
-const BOUND_SECONDS: f32 = 12.0;
-/// Squads bound within this distance of their objective (or with enemies seen near them).
-const CONTACT_DISTANCE: f32 = 220.0;
+const BOUND_SECONDS: f32 = 8.0;
+/// Squads bound within this distance of their objective, or with enemies seen within
+/// [`CONTACT_ENEMIES`] of the leader (further out they move in a wedge: bounding all the way
+/// made them slow to the flags).
+const CONTACT_DISTANCE: f32 = 120.0;
+const CONTACT_ENEMIES: f32 = 50.0;
 /// ... and run in a wedge once this close (they spread out over the objective there).
 const ARRIVED_DISTANCE: f32 = 60.0;
 
@@ -312,10 +315,10 @@ pub fn coordinate(
             .orders
             .get(&key)
             .and_then(|o| o.point.or_else(|| map.areas.get(o.area).map(|a| a.order_position)));
-        let enemies_near = intel.enemies_near(team, leader.position, super::tune::knob("bound_near", 110.0)) > 0;
+        let enemies_near = intel.enemies_near(team, leader.position, CONTACT_ENEMIES) > 0;
         let wanted = objective.is_some_and(|at| {
             let d = at.distance(leader.position);
-            d > ARRIVED_DISTANCE && (d < super::tune::knob("contact_dist", CONTACT_DISTANCE) || enemies_near)
+            d > ARRIVED_DISTANCE && (d < CONTACT_DISTANCE || enemies_near)
         }) && members >= 3
             && tactic.pinned.is_none();
         let Some(objective) = objective.filter(|_| wanted) else {
@@ -336,7 +339,7 @@ pub fn coordinate(
                     .filter_map(|(slot, player)| squad.alive.iter().find(|s| s.player == *player).map(|s| (slot, s)))
                     .all(|(slot, s)| s.position.distance(bound_slot(tactic, tactic.anchor, slot)) < 5.0),
             };
-        if start || done || tactic.phase_time > super::tune::knob("bound_secs", BOUND_SECONDS) {
+        if start || done || tactic.phase_time > BOUND_SECONDS {
             tactic.moving = if start { 0 } else { 1 - tactic.moving };
             tactic.bounding = true;
             tactic.phase = tactic.phase.wrapping_add(1);

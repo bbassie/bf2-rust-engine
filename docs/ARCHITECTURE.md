@@ -177,6 +177,26 @@ is deterministic enough that corrections are normally exactly zero.
 Rendering never touches simulated entities: soldier visuals are separate entities placed
 from `SoldierRender` each frame, so smoothing never moves hitboxes.
 
+### Hit registration
+
+Bullets hit soldiers in BF2's per-bone capsules (`game_shared::hitzones`), posed on the
+skeleton exactly as clients draw it (`game_shared::skeleton`): the server reads the same
+`.glb` clips (the body's movement clips, the held weapon's upper-body set), picks the clips,
+weights and times from each tick's state the way the client's animator does, and replays
+the client's crossfades over its pose history. What makes the two agree: the movement clips
+play at the replicated step phase (`SoldierMotion::stride`), idle loops on the server clock,
+a reload's clip from its tick (`Inventory::reload_started`). Soldiers off their feet (seated,
+climbing, swimming) keep their stance's capsules.
+
+The server judges a shot against the tick the shooter saw (`InputFrame::view_tick`; the host
+too, one or two ticks back), rewinding at most what his round trip allows. Clients predict
+impacts against the same capsules posed for the moment they draw (`combat::DrawnTargets`):
+a tracer flies the server's path (from the eye, drawn from the muzzle at first), stops in
+the body without effect, and the blood comes from the server (`SoldierImpact`), where it
+really hit. `BF2_SHOW_HITZONES=1` draws those capsules; `scenarios/combat/hitreg.ron` and
+`hitreg_net.ron` measure what is seen against what the server counts
+(`scripts/hitreg_report.py`), with target dummies (`game_server::dummy`).
+
 ### Kits, weapons and loadouts
 
 A kit (`kits/<name>.ron`, `game_data::KitDesc`) lists its weapons in BF2's order and its
@@ -235,7 +255,11 @@ helicopter, sea, stationary) comes from the engine type.
   over a moment (30 m/s²), then glides where the soldier looks (turning at most 70°/s):
   8 m/s forward sinking 4.5 m/s hands off, W dives (13 m/s, 7 m/s), S brakes (3 m/s,
   3.2 m/s), A/D slip sideways; 3 m above the ground it flares (at most 2 m/s down) and he
-  lands running with half the glide. No weapons meanwhile. A seated soldier stays alive but `apply_inputs` skips it: its
+  lands running with half the glide. No weapons meanwhile. It also ends in deep water, on a
+  ladder or zipline, when he is critically wounded and when he gets into a vehicle (the
+  server clears `SoldierMotion::parachute`; prediction steps the same rules). The canopy
+  hangs where BF2's seat puts it: the seat (2.08 m below the canopy) at the hips of the
+  `3p_parachute` pose. A seated soldier stays alive but `apply_inputs` skips it: its
   `InputFrame` goes to the vehicle's `SeatInputs`, and it is carried along at its seat every
   tick. Guns fire from
   their seat's triggers (weapon keys pick among the guns of one trigger) with BF2 overheat;

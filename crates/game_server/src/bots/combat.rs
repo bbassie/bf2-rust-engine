@@ -308,7 +308,6 @@ impl BotBrain {
         let team_no = self.fire_team(w, me);
         let target_distance = target.map(|t| t.position.distance(position));
         let covered = self.at_cover(position, threat);
-        let push = crate::ai::tune::knob("push", 0.0) > 0.5;
         // Attacking a flag: where it is, and whether the bot is on it (taking it).
         let assault = match self.order {
             Some((OrderKind::Attack, index)) => w.map.areas.get(index).map(|a| (a.position, a.radius)),
@@ -325,10 +324,10 @@ impl BotBrain {
             && !covered
             && !matches!(self.activity, Activity::TakeCover { .. })
             // Taking a flag is done standing on it.
-            && !(push && on_flag)
+            && !on_flag
             // Up close, a healthy bot fights it out.
             && flat(threat - position).length()
-                > if self.suppression > 0.5 || hp < 0.6 { crate::ai::tune::knob("cover_min_hurt", 10.0) } else { crate::ai::tune::knob("cover_min", 18.0) }
+                > if self.suppression > 0.5 || hp < 0.6 { 10.0 } else { 18.0 }
             && *cx.rays >= 12
         {
             let leader = me.member.is_some_and(|m| m.leader);
@@ -342,7 +341,7 @@ impl BotBrain {
                     threat,
                     radius: 14.0,
                     // Attackers: cover on the way to the flag.
-                    toward: assault.filter(|_| push).map(|(at, _)| at),
+                    toward: assault.map(|(at, _)| at),
                     taken: cx.taken,
                     fire: true,
                     region: self.region,
@@ -350,13 +349,7 @@ impl BotBrain {
                 // With an enemy in sight, running for cover means not shooting back: only for
                 // cover close by, unless pinned down or hurt.
                 let pressed = self.suppression > 0.5 || hp < 0.6 || self.magazine_low(w, me, 0.15);
-                let reach = match (target.is_some(), pressed) {
-                    // With the enemy in sight, a run for cover is a run without shooting back
-                    // (or walking, shooting): only to cover a few steps away.
-                    (true, _) if crate::ai::tune::knob("cover_run", 0.0) > 0.5 => 5.0,
-                    (true, false) => crate::ai::tune::knob("tc_reach", 6.0),
-                    _ => 14.0,
-                };
+                let reach = if target.is_some() && !pressed { 6.0 } else { 14.0 };
                 let query = CoverQuery { radius: reach, ..query };
                 match cover::find(nav, &w.spatial, &query, cx.rays) {
                     Some(cover) => {
@@ -383,10 +376,10 @@ impl BotBrain {
             && !holding_bound
             && hp > 0.45
             && self.suppression < 0.5
-            && self.in_cover_time > (4.0 + 5.0 * (1.0 - aggression)) * crate::ai::tune::knob("camp", 1.0)
+            && self.in_cover_time > 4.0 + 5.0 * (1.0 - aggression)
             // Not while trading shots with someone (unless it has for a while).
             && (target_distance.is_none_or(|d| d > 45.0)
-                || (push && self.in_cover_time > 2.0 * (4.0 + 5.0 * (1.0 - aggression)) * crate::ai::tune::knob("camp", 1.0)))
+                || self.in_cover_time > 2.0 * (4.0 + 5.0 * (1.0 - aggression)))
             && area.position.distance(position) > area.radius
             && *cx.rays >= 12
         {
@@ -417,7 +410,7 @@ impl BotBrain {
             consider(
                 best,
                 4.8,
-                Activity::Watch { at: contact.position, time: (3.0 + 3.0 * (1.0 - aggression)) * crate::ai::tune::knob("watch", 1.0) },
+                Activity::Watch { at: contact.position, time: 1.5 + 1.5 * (1.0 - aggression) },
             );
         }
 
@@ -527,19 +520,15 @@ impl BotBrain {
         let winning = self.exposed && self.target.is_some() && self.suppression < 0.4 && self.hurt_ago > 2.0;
         self.peek_timer -= if winning { dt * 0.4 } else { dt };
         let reloading = me.inventory.is_some_and(|i| i.reloading);
-        let hide = self.suppression > crate::ai::tune::knob("hide_supp", 0.75)
-            || (self.hurt_ago < 0.4 && crate::ai::tune::knob("hide_hurt", 1.0) > 0.5)
-            || reloading;
+        let hide = self.suppression > 0.75 || self.hurt_ago < 0.4 || reloading;
         if self.exposed && (self.peek_timer <= 0.0 || hide) {
             self.exposed = false;
-            self.peek_timer = crate::ai::tune::knob("peek_hide", 0.4) * (1.0 + 1.5 * fastrand::f32()) + 0.6 * self.suppression.min(1.0);
+            self.peek_timer = 0.4 + 0.6 * fastrand::f32() + 0.6 * self.suppression.min(1.0);
         } else if !self.exposed && self.peek_timer <= 0.0 && !hide {
             self.exposed = true;
-            if crate::ai::tune::knob("peek_fast", 0.0) > 0.5 {
-                // Look for him again as soon as it's up.
-                self.scan_timer = self.scan_timer.min(0.1);
-            }
-            self.peek_timer = crate::ai::tune::knob("peek_up", 2.5) * (1.0 + 0.8 * fastrand::f32() * (0.5 + self.personality.aggression));
+            // Look for him again as soon as it's up.
+            self.scan_timer = self.scan_timer.min(0.1);
+            self.peek_timer = 2.5 + 2.0 * fastrand::f32() * (0.5 + self.personality.aggression);
         }
         let at = if self.exposed { peek } else { cover.spot };
         if flat(at - position).length() > 0.6 {
@@ -598,8 +587,8 @@ impl BotBrain {
         }
         // With the enemy in sight it shoots back on the way (walking, not sprinting).
         let target = self.target.and_then(|t| w.soldiers.get(t).ok()).map(|s| *s.1);
-        let shooting = crate::ai::tune::knob("tc_fire", 0.0) > 0.5 && target.is_some();
-        if let Some(target) = target.filter(|_| shooting) {
+        let shooting = target.is_some();
+        if let Some(target) = target {
             let (distance, on_target) = self.aim_at(me, skill, &target, intent, dt);
             self.pull_trigger(w, me, distance, on_target, intent, dt);
         }
@@ -766,7 +755,7 @@ impl BotBrain {
             });
             let camped = attacking
                 && self.suppression < 0.3
-                && self.in_cover_time > (10.0 + 6.0 * (1.0 - self.personality.aggression)) * crate::ai::tune::knob("camp", 1.0);
+                && self.in_cover_time > 10.0 + 6.0 * (1.0 - self.personality.aggression);
             if away || camped {
                 self.cover = None;
                 if camped {
@@ -812,7 +801,7 @@ impl BotBrain {
 
     /// Whether to fight from cover this time (by difficulty and courage).
     fn roll_cover(&mut self, skill: Skill) {
-        let chance = (0.15 + skill.tactics()) * (0.8 + 0.4 * (1.0 - self.personality.courage)) * crate::ai::tune::knob("cover", 1.0);
+        let chance = (0.15 + skill.tactics()) * (0.8 + 0.4 * (1.0 - self.personality.courage));
         self.wants_cover = fastrand::f32() < chance;
     }
 

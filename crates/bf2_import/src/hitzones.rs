@@ -5,7 +5,8 @@
 //!
 //! The capsule runs from the bone (moved by `offset`) `length` meters along the bone's -Y
 //! axis: that way every one of them follows its limb (left and right bones point opposite
-//! ways, and their lengths have opposite signs).
+//! ways, and their lengths have opposite signs). Both are kept too, so the game can pose the
+//! capsule on the animated skeleton (`game_shared::skeleton`).
 
 use bf2_formats::{
     anim::{Animation, Skeleton},

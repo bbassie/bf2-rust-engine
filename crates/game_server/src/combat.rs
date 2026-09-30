@@ -303,7 +303,7 @@ fn record_poses(
     for (entity, motion, seated, inventory, history) in &mut soldiers {
         let mut pose = BodyPose::of(motion, seated);
         // On foot, the zones follow the animations clients draw (see `game_shared::skeleton`).
-        if !seated && !hitzones::legacy() {
+        if !seated {
             let reload = inventory.and_then(|i| skeleton::reload_elapsed(i.reloading, i.reload_started, seconds));
             let weapon = inventory.map_or(0, |i| i.active);
             pose.anim = AnimState::of(motion, skeleton::clock(seconds), reload, weapon);
@@ -336,18 +336,19 @@ fn rewind_for(view_tick: u32, now: u32, limit: u32) -> u32 {
 
 /// How far back a client shows other soldiers: its interpolation delay (seconds).
 const VIEW_DELAY: f64 = 0.1;
-/// Ticks of rewind allowed beyond the client's round trip and view delay, for input queued on
-/// the server and jitter.
+/// Ticks of rewind allowed beyond the client's round trip, view delay and queued input, for
+/// jitter.
 const REWIND_SLACK: u32 = 6;
 
 /// The most a client with this round-trip time (seconds, as measured by the connection) may
-/// be rewound: what it can have seen, not whatever `view_tick` it claims. Without a
-/// measurement (the host, bots), [`MAX_REWIND`].
-fn rewind_limit(rtt: Option<f64>) -> u32 {
+/// be rewound: what it can have seen, not whatever `view_tick` it claims. Its input also
+/// waits in the server's queue (`queued` frames; the round trip doesn't include that), which
+/// it has to be rewound for as well. Without a measurement (the host, bots), [`MAX_REWIND`].
+fn rewind_limit(rtt: Option<f64>, queued: usize) -> u32 {
     match rtt {
         Some(rtt) if rtt.is_finite() => {
             let ticks = ((rtt.max(0.0) + VIEW_DELAY) * game_shared::TICK_HZ).ceil() as u32;
-            (ticks + REWIND_SLACK).min(MAX_REWIND)
+            (ticks + queued as u32 + REWIND_SLACK).min(MAX_REWIND)
         }
         _ => MAX_REWIND,
     }
@@ -401,7 +402,7 @@ fn fire_weapons(
         &mut WeaponState,
         Option<&Hitbox>,
     ), Without<Seated>>,
-    placed: Query<(Entity, &Live, &ProjectileMotion)>,
+    (placed, buffers): (Query<(Entity, &Live, &ProjectileMotion)>, Query<&crate::InputBuffer>),
     tick: Res<SimTick>,
     mut shots: MessageWriter<ToClients<ShotFired>>,
     mut throws: MessageWriter<ToClients<ThrowReleased>>,
@@ -409,8 +410,12 @@ fn fire_weapons(
 ) {
     let dt = time.delta_secs();
     let now = current_tick(&tick);
-    // A client's measured round trip, which caps how far its shots are rewound.
-    let rtt = |player: Entity| clients.get(player).ok().and_then(|c| client_stats.get(c.0).ok()).map(|s| s.rtt);
+    // How far a client's shots may be rewound: its measured round trip and the input queued
+    // for it.
+    let rewind_cap = |player: Entity| {
+        let rtt = clients.get(player).ok().and_then(|c| client_stats.get(c.0).ok()).map(|s| s.rtt);
+        rewind_limit(rtt, buffers.get(player).map_or(0, |b| b.queued()))
+    };
     for (soldier, controlled_by, motion, applied, loadout, mut inventory, mut state, hitbox) in
         &mut soldiers
     {
@@ -551,7 +556,7 @@ fn fire_weapons(
                         1 => direction,
                         _ => spread_direction(direction, weapon.pellet_spread, (fastrand::f32(), fastrand::f32())),
                     };
-                    let rewind = rewind_for(input.view_tick, now, rewind_limit(rtt(player)));
+                    let rewind = rewind_for(input.view_tick, now, rewind_cap(player));
                     let mut projectile = commands.spawn((
                         Live {
                             weapon: weapon.clone(),
@@ -602,7 +607,7 @@ fn fire_weapons(
                 debug!(
                     "{name} ({player:?}) fires {} ({} ticks back, saw tick {} at {now})",
                     weapon.name,
-                    rewind_for(input.view_tick, now, rewind_limit(rtt(player))),
+                    rewind_for(input.view_tick, now, rewind_cap(player)),
                     input.view_tick
                 );
                 if desc.is_object() {
@@ -888,10 +893,30 @@ fn simulate_projectiles(
                         target.is_some_and(|t| t.pose(now, live.rewind).anim.is_some() && rigs.rig(&t.loadout.kit).is_some()),
                     );
                 }
-                None => info!(
-                    "hitreg verdict: {} {entity:?} miss (hit {:?} at {:.3} after {:.1} m)",
-                    weapon.name, hit.entity, hit.point, live.travelled
-                ),
+                None => {
+                    // The soldier the bullet passed nearest, as judged (for the log).
+                    let direction = incoming.normalize_or_zero();
+                    let nearest = targets
+                        .iter()
+                        .filter(|t| t.entity != live.shooter)
+                        .map(|t| {
+                            let at = t.pose(now, live.rewind).position + Vec3::Y * 0.9;
+                            let along = (at - hit.point).dot(direction);
+                            (t, (hit.point + direction * along).distance(at))
+                        })
+                        .min_by(|a, b| a.1.total_cmp(&b.1));
+                    info!(
+                        "hitreg verdict: {} {entity:?} miss (hit {:?} at {:.3} after {:.1} m; passed {:.2} m from {:?} at {:.3} rewind {})",
+                        weapon.name,
+                        hit.entity,
+                        hit.point,
+                        live.travelled,
+                        nearest.map_or(f32::NAN, |n| n.1),
+                        nearest.map(|n| n.0.entity),
+                        nearest.map_or(Vec3::NAN, |n| n.0.pose(now, live.rewind).position),
+                        live.rewind,
+                    );
+                }
             }
         }
         // Everyone sees the blood where the server hit (clients only stop their tracers there).
@@ -1404,15 +1429,17 @@ mod tests {
     #[test]
     fn rewinding_is_capped_by_the_round_trip() {
         // On a LAN, what the view delay and some slack allow, not the 250 ms maximum.
-        assert_eq!(rewind_limit(Some(0.0)), 12);
-        assert!(rewind_limit(Some(0.002)) < MAX_REWIND);
+        assert_eq!(rewind_limit(Some(0.0), 0), 12);
+        assert!(rewind_limit(Some(0.002), 0) < MAX_REWIND);
+        // Input waiting in the server's queue counts too.
+        assert_eq!(rewind_limit(Some(0.0), 2), 14);
         // An honest client's view: its round trip plus the view delay back.
         let honest = ((0.03 + VIEW_DELAY) * game_shared::TICK_HZ).round() as u32;
-        assert!(rewind_limit(Some(0.03)) >= honest);
+        assert!(rewind_limit(Some(0.03), 0) >= honest);
         // Slow connections get the maximum, and so do the host and bots (no measurement).
-        assert_eq!(rewind_limit(Some(0.2)), MAX_REWIND);
-        assert_eq!(rewind_limit(None), MAX_REWIND);
-        assert_eq!(rewind_limit(Some(f64::NAN)), MAX_REWIND);
+        assert_eq!(rewind_limit(Some(0.2), 0), MAX_REWIND);
+        assert_eq!(rewind_limit(None, 0), MAX_REWIND);
+        assert_eq!(rewind_limit(Some(f64::NAN), 0), MAX_REWIND);
     }
 
     #[test]

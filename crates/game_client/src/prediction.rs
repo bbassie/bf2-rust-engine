@@ -175,13 +175,16 @@ fn predict(
     mover: MoveAndSlide,
     history: Res<InputHistory>,
     level: Option<Res<LoadedLevel>>,
-    mut soldiers: Query<(Entity, &SoldierMotion, Option<&mut Predicted>, Has<Seated>), With<LocalSoldier>>,
+    mut soldiers: Query<
+        (Entity, &SoldierMotion, Option<&mut Predicted>, Has<Seated>, Has<game_shared::revive::Downed>),
+        With<LocalSoldier>,
+    >,
 ) {
     let Some(input) = history.latest() else {
         return;
     };
     let water = water_height(level.as_deref());
-    for (entity, motion, predicted, seated) in &mut soldiers {
+    for (entity, motion, predicted, seated, downed) in &mut soldiers {
         // Riding in a vehicle: the server moves us (vehicles aren't predicted yet).
         if seated {
             if predicted.is_some() {
@@ -198,6 +201,10 @@ fn predict(
             continue;
         };
         predicted.previous = predicted.current;
+        // Critically wounded: the parachute is let go, as the server does (`apply_inputs`).
+        if downed {
+            predicted.current.parachute = false;
+        }
         step_soldier(
             &mut predicted.current,
             input,

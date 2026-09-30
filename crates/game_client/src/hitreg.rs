@@ -385,8 +385,20 @@ fn run_task(
     mut local_shots: MessageReader<LocalShot>,
     local: Query<&SoldierMotion, With<LocalSoldier>>,
     view: Res<crate::combat::ViewTick>,
-    (armory, weapons, spatial): (Res<Armory>, Query<(&Loadout, &Inventory), With<LocalSoldier>>, avian3d::prelude::SpatialQuery),
+    (armory, weapons, spatial, inputs, ack): (
+        Res<Armory>,
+        Query<(&Loadout, &Inventory), With<LocalSoldier>>,
+        avian3d::prelude::SpatialQuery,
+        Res<crate::local_input::InputHistory>,
+        Query<&game_shared::soldier::InputAck, With<LocalSoldier>>,
+    ),
 ) {
+    // How many ticks our input runs ahead of the server applying it (the round trip plus
+    // the server's queue).
+    let ahead = match (inputs.latest(), ack.single()) {
+        (Some(latest), Ok(ack)) => latest.seq.wrapping_sub(ack.0) as i64,
+        _ => -1,
+    };
     // Whether the world (or a vehicle) is in the way to a point: those shots and samples say
     // nothing about the hit zones.
     let occluded = |from: Vec3, to: Vec3| {
@@ -475,7 +487,7 @@ fn run_task(
                 let along = (point - shot.origin).dot(shot.direction);
                 let miss_by = (shot.origin + shot.direction * along).distance(point);
                 info!(
-                    "hitreg shot {}: {label}/{} part {aimed} seen {} judged-here {} aim-error {:.3} view_tick {} clearance {:.3} target {:?}{}",
+                    "hitreg shot {}: {label}/{} part {aimed} seen {} judged-here {} aim-error {:.3} view_tick {} clearance {:.3} target {:?} ahead {ahead}{} (drawn at {:.3})",
                     task.shot.fired,
                     target.auto_label(),
                     zone(seen),
@@ -485,6 +497,7 @@ fn run_task(
                     target.clearance(point),
                     target.entity,
                     if occluded(shot.origin, point) { " occluded" } else { "" },
+                    target.render.position,
                 );
             }
             let state = &mut task.shot;

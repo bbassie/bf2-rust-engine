@@ -1,0 +1,72 @@
+// Parachute attachment, after BF2: the canopy (`animatedparachute`, at the parachute's origin)
+// hangs where BF2's seat puts it, the seat (`Parachute.tweak` seatInformation 2.08 m below and
+// 0.26 m ahead of the canopy) at the hips of the soldier's `3p_parachute` pose (0.81 m above
+// his feet): the risers meet the harness at his chest and the lines' junction is above his
+// head. Our own soldier from behind, the side and the front (the Look turns are shot before
+// the canopy swings round after the view), first person looking up, then a bot ahead of us
+// (side and behind: a soldier drawn from the network state, not predicted), and last: critically wounded in the air lets go
+// of the parachute (the canopy goes at once and he falls).
+// client --scenario scenarios/vehicles/parachute_attach.ron --out target/scenarios/parachute/attach
+(
+    level: "wake_island_2007",
+    size: 64,
+    team: 1,
+    bots: 4,
+    steps: [
+        WaitReady,
+        Wait(1.0),
+        ForbidLog("panicked"),
+        Teleport((407.0, 290.0, 420.0), 0.0, -10.0),
+        Wait(1.8),
+        Hold([Jump]),
+        Wait(0.1),
+        Release([Jump]),
+        ExpectLog("parachute: canopy opened", 2.0),
+        ThirdPerson(true),
+        Wait(2.5),
+        Screenshot("01_behind"),
+        Look(0.0, 15.0),
+        Wait(0.2),
+        Screenshot("02_behind_up"),
+        Look(90.0, 0.0),
+        Frames(2),
+        Screenshot("03_side_left"),
+        Look(0.0, -10.0),
+        Wait(0.3),
+        Look(-90.0, 0.0),
+        Frames(2),
+        Screenshot("04_side_right"),
+        Look(0.0, -10.0),
+        Wait(0.3),
+        Look(180.0, 5.0),
+        Frames(2),
+        Screenshot("05_front"),
+        Look(0.0, -10.0),
+        Wait(1.0),
+        ThirdPerson(false),
+        Look(0.0, 75.0),
+        Wait(0.3),
+        Screenshot("06_first_person_up"),
+        Look(0.0, 20.0),
+        Wait(0.2),
+        Screenshot("07_first_person_ahead"),
+        // A bot (drawn like any other soldier's) ahead of us: from his side, then from behind.
+        ThirdPerson(true),
+        Look(0.0, 0.0),
+        SummonParachute(0.0, 14.0, 90.0),
+        Wait(0.3),
+        Screenshot("08_bot_side"),
+        SummonParachute(0.0, 14.0, 0.0),
+        Wait(0.3),
+        Screenshot("09_bot_behind"),
+        ThirdPerson(true),
+        Look(0.0, -10.0),
+        Wait(0.5),
+        // Wounded under the canopy: it's let go.
+        Down,
+        ExpectLog("removed (parachute ended)", 2.0),
+        Wait(0.5),
+        Screenshot("10_wounded_falls"),
+        Quit,
+    ],
+)

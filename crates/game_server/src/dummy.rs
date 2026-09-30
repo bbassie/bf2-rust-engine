@@ -111,6 +111,19 @@ fn puppet(
     let Some(pose) = control.pose_at(elapsed.elapsed_secs()).map(str::to_string) else {
         return;
     };
+    // The humans shooting at dummies don't run out of ammunition.
+    for (player, controls) in &players {
+        if player.is_bot {
+            continue;
+        }
+        if let Some(Ok((_, _, mut inventory, loadout))) = controls.map(|c| soldiers.get_mut(c.0)) {
+            let active = inventory.active as usize;
+            let magazine = loadout.weapons.get(active).and_then(|w| armory.weapon(w)).map_or(0, |w| w.magazine_size);
+            if let Some(ammo) = inventory.ammo.get_mut(active).filter(|a| a[0] < 3 && magazine > 0) {
+                ammo[0] = magazine as u16;
+            }
+        }
+    }
     // Soldiers of players that aren't bots: where they stand and face.
     let humans: Vec<(Vec3, f32)> = players
         .iter()

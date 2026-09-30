@@ -6,7 +6,7 @@ use std::{collections::VecDeque, sync::Arc};
 
 use avian3d::prelude::*;
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
-use bevy_replicon::prelude::*;
+use bevy_replicon::{client::confirm_history::ConfirmHistory, prelude::*};
 use game_data::{FireKind, FireMode, WeaponDesc};
 use game_shared::{
     hitzones::{BodyPose, ServerClock, SoldierImpact, ZoneHit},
@@ -78,27 +78,32 @@ fn track_view_tick(
     real: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     state: Res<State<ClientState>>,
-    clock: Query<&ServerClock>,
+    local: Query<&ServerClock, Without<ConfirmHistory>>,
+    remote: Query<&ServerClock, With<ConfirmHistory>>,
     mut view: ResMut<ViewTick>,
 ) {
-    let Ok(clock) = clock.single() else {
+    // Connected, the clock the server replicates: the idle in-process server may have made
+    // one of its own before we connected (then every shot went out as seen in the present,
+    // with no lag compensation at all).
+    let connected = *state.get() == ClientState::Connected;
+    let clock = if connected { remote.iter().next() } else { local.iter().next() };
+    let Some(clock) = clock else {
         *view = ViewTick::default();
         return;
     };
-    let tick = match state.get() {
-        ClientState::Connected => {
-            let now = real.elapsed_secs_f64();
-            if clock.0 != view.latest {
-                view.latest = clock.0;
-                view.received = now;
-            }
-            // What is on screen is from a moment before the latest state (which the server sent a
-            // little after the tick it counted).
-            let seconds = (now - view.received).min(0.05) - INTERPOLATION_DELAY;
-            clock.0 as f64 + seconds * game_shared::TICK_HZ
+    let tick = if connected {
+        let now = real.elapsed_secs_f64();
+        if clock.0 != view.latest {
+            view.latest = clock.0;
+            view.received = now;
         }
+        // What is on screen is from a moment before the latest state (which the server sent a
+        // little after the tick it counted).
+        let seconds = (now - view.received).min(0.05) - INTERPOLATION_DELAY;
+        clock.0 as f64 + seconds * game_shared::TICK_HZ
+    } else {
         // Hosting: drawn between the last two ticks (see `prediction`).
-        _ => clock.0 as f64 - 1.0 + fixed.overstep_fraction() as f64,
+        clock.0 as f64 - 1.0 + fixed.overstep_fraction() as f64
     };
     view.tick = (tick.round() as i64).max(1) as u32;
     view.seconds = tick / game_shared::TICK_HZ;
@@ -578,13 +583,12 @@ fn spawn_local_shots(
         // itself flies from the eye, as on the server.
         let origin = camera.translation + camera.rotation * Vec3::new(0.12, -0.1, -0.4);
         let hitbox = soldier.map(|(_, _, hitbox)| hitbox.entity);
-        let logical = if game_shared::hitzones::legacy() { origin } else { shot.origin };
         // Grenades, rockets and charges are drawn as themselves (`render::projectiles`).
         if !shot.weapon.projectile.is_object()
             && let Some(tracer) = spawn_tracer_from(
                 &mut commands,
                 &assets,
-                logical,
+                shot.origin,
                 origin,
                 shot.direction,
                 &shot.weapon,
@@ -639,12 +643,11 @@ fn receive_shots(
         };
         // Drawn from the gun rather than the eye (the bullet flies from the eye).
         let gun = shot.origin - Vec3::Y * 0.15;
-        let logical = if game_shared::hitzones::legacy() { gun } else { shot.origin };
         if !weapon.projectile.is_object() {
             spawn_tracer_from(
                 &mut commands,
                 &assets,
-                logical,
+                shot.origin,
                 gun,
                 shot.direction,
                 weapon,
@@ -713,7 +716,7 @@ pub fn weapon_display_name(name: &str) -> String {
 /// against that were fired looking at this moment (see `ViewTick`).
 pub(crate) fn drawn_body_pose(render: &SoldierRender, inventory: Option<&Inventory>, seated: bool, view: &ViewTick) -> BodyPose {
     let on_foot = render.grounded && !render.climbing && !render.riding && !render.parachute && !render.swimming;
-    let anim = (on_foot && !seated && !game_shared::hitzones::legacy()).then(|| AnimState {
+    let anim = (on_foot && !seated).then(|| AnimState {
         stance: render.stance,
         velocity: skeleton::local_velocity(render.yaw, render.velocity),
         stride: render.stride,
@@ -861,15 +864,10 @@ fn update_tracers(
     drawn: DrawnTargets,
 ) {
     let dt = time.delta_secs();
-    let legacy = game_shared::hitzones::legacy();
     // Bullets meet the world and vehicles as on the server, and soldiers in their hit zones
-    // as drawn (the pose the server judges them against).
-    let layers = if legacy {
-        SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier])
-    } else {
-        SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
-    };
-    let targets = if legacy || tracers.is_empty() { Vec::new() } else { drawn.collect() };
+    // as drawn (the pose the server judges them against), not the soldiers' movement capsules.
+    let layers = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
+    let targets = if tracers.is_empty() { Vec::new() } else { drawn.collect() };
     for (entity, mut tracer, mut transform, local) in &mut tracers {
         let filter = match tracer.ignore {
             Some(hitbox) => layers.clone().with_excluded_entities([hitbox]),
@@ -985,9 +983,6 @@ fn receive_soldier_impacts(
     mut effects: MessageWriter<SpawnEffect>,
 ) {
     for impact in impacts.read() {
-        if game_shared::hitzones::legacy() {
-            continue;
-        }
         spawn_impact(
             &mut commands,
             &assets,

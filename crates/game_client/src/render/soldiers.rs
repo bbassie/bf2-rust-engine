@@ -72,7 +72,7 @@ impl Plugin for SoldierRenderPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (update_visuals, sleep_unseen.before(animate), animate, show_parachutes)
+                (update_visuals, sleep_unseen.before(animate), animate, show_parachutes.before(update_visuals))
                     .after(RenderStateSystems)
                     .after(VehicleViewSystems)
                     .before(AnimationSystems)
@@ -81,10 +81,24 @@ impl Plugin for SoldierRenderPlugin {
     }
 }
 
-/// BF2's parachute canopy, and where it hangs relative to the soldier's feet in the
-/// direction he glides (BF2's parachute seat is 2.08 m below and 0.26 m ahead of it).
+/// BF2's parachute canopy (its `animatedparachute` bundle, which sits at the parachute's
+/// origin; its idle animation keeps the bind pose, which is what we draw).
 const PARACHUTE_MESH: &str = "objects/vehicles/air/parachute/meshes/animatedparachute.glb";
-const PARACHUTE_OFFSET: Vec3 = Vec3::new(0.0, 2.08, 0.26);
+/// BF2's parachute seat relative to the canopy's origin, facing the way it glides
+/// (`Parachute.tweak`: `seatInformation Parachute 0.0563561/-2.07613/0.260896`, in our axes:
+/// 2.08 m below and 0.26 m ahead).
+const PARACHUTE_SEAT: Vec3 = Vec3::new(0.056_356_1, -2.076_13, -0.260_896);
+/// BF2 puts the root bone (the hips) of the seat's pose at the seat, not the feet: in
+/// `3p_parachute` it is 0.81 m above the soldier's origin, his feet. (The same rule places
+/// soldiers in vehicle seats, see `bf2_import::vehicles::pose_root`.)
+const PARACHUTE_POSE_HIPS: Vec3 = Vec3::new(0.0, 0.812_738, -0.003_937);
+/// Where the canopy's origin is relative to the soldier's feet, facing the way he glides:
+/// 2.89 m above them and 0.26 m behind, so its risers meet the harness at his chest.
+const PARACHUTE_OFFSET: Vec3 = Vec3::new(
+    PARACHUTE_POSE_HIPS.x - PARACHUTE_SEAT.x,
+    PARACHUTE_POSE_HIPS.y - PARACHUTE_SEAT.y,
+    PARACHUTE_POSE_HIPS.z - PARACHUTE_SEAT.z,
+);
 /// BF2's parachute poses of the soldier: hanging, and touching down.
 const PARACHUTE_POSE: &str = "3p_parachute";
 const PARACHUTE_LANDING_POSE: &str = "3p_parachute_landing";
@@ -110,17 +124,26 @@ struct Canopy {
     collapse: Option<f32>,
 }
 
-/// Opens, flies and collapses the parachutes of soldiers who have one out.
+/// Opens, flies and collapses the parachutes of soldiers who have one out. The canopy goes
+/// with the soldier's parachute state (`SoldierMotion::parachute`, which the server and
+/// prediction end on landing, in water, on a ladder or zipline, when he is wounded and when
+/// he gets into a vehicle): after touching down on the ground or in water it collapses
+/// behind him; otherwise (in a vehicle, wounded or dead in the air, on a ladder) it is gone
+/// at once.
 fn show_parachutes(
     mut commands: Commands,
     time: Res<Time>,
-    renders: Query<(Entity, &SoldierRender)>,
+    renders: Query<(Entity, &SoldierRender, Has<Seated>)>,
     mut canopies: Query<(Entity, &mut Canopy, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
-    for (soldier, render) in &renders {
-        if render.parachute && !canopies.iter().any(|(_, c, _)| c.soldier == soldier && c.collapse.is_none()) {
+    for (soldier, render, seated) in &renders {
+        if render.parachute
+            && !seated
+            && !canopies.iter().any(|(_, c, _)| c.soldier == soldier && c.collapse.is_none())
+        {
             let heading = glide_heading(render).unwrap_or(render.yaw);
+            info!("parachute: canopy opened over {soldier}");
             commands.spawn((
                 Canopy {
                     soldier,
@@ -138,7 +161,7 @@ fn show_parachutes(
         }
     }
     for (entity, mut canopy, mut transform) in &mut canopies {
-        let render = renders.get(canopy.soldier).ok().map(|(_, r)| r);
+        let render = renders.get(canopy.soldier).ok().filter(|(_, _, seated)| !seated).map(|(_, r, _)| r);
         match (canopy.collapse, render) {
             (None, Some(render)) if render.parachute => {
                 // Swing round after the glide, banking into the turn.
@@ -150,7 +173,22 @@ fn show_parachutes(
                 canopy.bank += (bank - canopy.bank) * (1.0 - (-CANOPY_TURN_SMOOTHING * dt).exp());
                 *transform = canopy_transform(render.position, canopy.heading, canopy.bank);
             }
-            (None, _) => canopy.collapse = Some(0.0),
+            // Touched down: the canopy collapses.
+            (None, Some(render)) if render.grounded || render.swimming => {
+                info!("parachute: canopy of {} collapses (landed)", canopy.soldier);
+                canopy.collapse = Some(0.0);
+            }
+            // Into a vehicle, down or dead in the air, onto a ladder or a zipline: gone.
+            (None, _) => {
+                let why = match renders.get(canopy.soldier) {
+                    Ok((_, _, true)) => "in a vehicle",
+                    Ok(_) => "parachute ended",
+                    Err(_) => "soldier gone",
+                };
+                info!("parachute: canopy of {} removed ({why})", canopy.soldier);
+                commands.entity(entity).despawn();
+                continue;
+            }
             (Some(elapsed), _) => {
                 // Landed: the canopy drifts on a little, sinks behind him and folds up.
                 let elapsed = elapsed + dt;
@@ -169,10 +207,13 @@ fn show_parachutes(
     }
 }
 
-/// Where a soldier's canopy hangs over his feet at `position`.
+/// Where a soldier's canopy hangs over his feet at `position`: its seat at his hips, banking
+/// about them (the harness stays on him while the canopy leans into a turn).
 fn canopy_transform(position: Vec3, heading: f32, bank: f32) -> Transform {
     let rotation = Quat::from_rotation_y(heading);
-    Transform::from_translation(position + rotation * PARACHUTE_OFFSET).with_rotation(rotation * Quat::from_rotation_z(bank))
+    let tilted = rotation * Quat::from_rotation_z(bank);
+    let hips = position + rotation * PARACHUTE_POSE_HIPS;
+    Transform::from_translation(hips - tilted * PARACHUTE_SEAT).with_rotation(tilted)
 }
 
 /// The direction a soldier glides (like a yaw), if he moves enough to tell.
@@ -1025,6 +1066,7 @@ fn update_visuals(
     soldiers: Query<(&SoldierRender, Has<LocalSoldier>, Option<&Seated>, Has<game_shared::revive::Downed>)>,
     vehicles: Query<(&VehicleView, &VehicleData)>,
     mut visuals: Query<(Entity, &SoldierVisual, &mut Transform, &mut Visibility, Option<&SoldierAnimator>)>,
+    canopies: Query<&Canopy>,
     tuning: Res<game_shared::soldier::SoldierTuning>,
     mut frame: Local<u32>,
 ) {
@@ -1062,7 +1104,9 @@ fn update_visuals(
                 (false, true) => ROPE_BODY_RAISE,
                 _ => 0.0,
             };
-            let yaw = if render.parachute { glide_heading(render).unwrap_or(render.yaw) } else { render.yaw };
+            // Under a parachute he hangs in its seat, facing the way the canopy flies.
+            let canopy = || canopies.iter().find(|c| c.soldier == visual.soldier && c.collapse.is_none()).map(|c| c.heading);
+            let yaw = if render.parachute { canopy().or_else(|| glide_heading(render)).unwrap_or(render.yaw) } else { render.yaw };
             Transform::from_translation(render.position + Vec3::Y * raise).with_rotation(Quat::from_rotation_y(yaw))
         }));
     }
@@ -1139,26 +1183,13 @@ fn next_legs(state: Option<Legs>, time: f32, airborne: f32, yaw_rate: f32, rende
         _ => {}
     }
     let turning = yaw_rate.abs() > if matches!(state, Some(Legs::Turn(..))) { TURN_STOP } else { TURN_START };
-    // The same gait the hit zones are posed with (see `game_shared::skeleton`).
-    if !game_shared::hitzones::legacy() && std::env::var_os("BF2_ANIM_UNSYNCED").is_none() {
-        return match skeleton::gait(render.stance, velocity) {
-            Gait::Still if turning => Legs::Turn(render.stance, yaw_rate > 0.0),
-            Gait::Still => Legs::Still(render.stance),
-            Gait::Walk => Legs::Walk,
-            Gait::Move => Legs::Move(render.stance),
-            Gait::Sprint => Legs::Sprint,
-        };
-    }
-    let standing = matches!(state, None | Some(Legs::Still(_) | Legs::Turn(..)));
-    let moving = speed > if standing { 0.5 } else { 0.3 };
-    let sprint_above = if state == Some(Legs::Sprint) { 4.8 } else { 5.2 };
-    let walk_below = if state == Some(Legs::Walk) { 2.4 } else { 2.0 };
-    match render.stance {
-        stance if !moving && turning => Legs::Turn(stance, yaw_rate > 0.0),
-        stance if !moving => Legs::Still(stance),
-        Stance::Standing if speed > sprint_above && velocity.y > 0.0 => Legs::Sprint,
-        Stance::Standing if speed < walk_below => Legs::Walk,
-        stance => Legs::Move(stance),
+    // The gait the hit zones are posed with too (see `game_shared::skeleton`).
+    match skeleton::gait(render.stance, velocity) {
+        Gait::Still if turning => Legs::Turn(render.stance, yaw_rate > 0.0),
+        Gait::Still => Legs::Still(render.stance),
+        Gait::Walk => Legs::Walk,
+        Gait::Move => Legs::Move(render.stance),
+        Gait::Sprint => Legs::Sprint,
     }
 }
 
@@ -1197,9 +1228,6 @@ struct Cues<'a> {
     reload_time: Option<f32>,
     /// The server clock idle loops run on (see `game_shared::skeleton`).
     clock: f32,
-    /// Clips timed like the server times them for hit zones: the step phase, the server
-    /// clock, the reload's tick (off with `BF2_HITREG_BEFORE`).
-    synced: bool,
     /// Critically wounded.
     downed: bool,
     /// Seated in a vehicle: the seat's pose.
@@ -1361,12 +1389,6 @@ impl SoldierAnimator {
         }
         let targets = targets.iter().filter(|(_, weight)| *weight > 0.02);
 
-        // Cycles starting now pick up the step phase of the cycle playing.
-        let cycle_phase = self
-            .legs
-            .heaviest(|node| animations.cycles.contains(&node))
-            .and_then(|clip| clip.phase(player))
-            .unwrap_or(0.0);
         self.legs.begin();
         for &(name, weight) in targets.clone() {
             let Some(&clip) = animations.legs.get(name) else {
@@ -1375,13 +1397,13 @@ impl SoldierAnimator {
             let cycle = animations.cycles.contains(&clip.node);
             let play = match once {
                 Some(restart) => Play::once(restart).speed(speed),
-                // In step with the replicated step phase, and idling on the server clock, as the
-                // hit zones are posed.
-                None if cues.synced && cycle => Play::looping(weight).at(skeleton::cycle_time(render.stride, clip.duration)),
-                None if cues.synced && matches!(state, Legs::Still(_)) => {
+                // In step with the replicated step phase (every cycle starts with the left foot
+                // forward, so switching between them keeps the step), and idling on the server
+                // clock: the same for everyone, and as the hit zones are posed.
+                None if cycle => Play::looping(weight).at(skeleton::cycle_time(render.stride, clip.duration)),
+                None if matches!(state, Legs::Still(_)) => {
                     Play::looping(weight).at(skeleton::loop_time(cues.clock, clip.duration))
                 }
-                None if cycle => Play::looping(weight).speed(speed).phase(cycle_phase),
                 None => Play::looping(weight).speed(speed),
             };
             self.legs.play(player, clip, play);
@@ -1458,10 +1480,10 @@ impl SoldierAnimator {
                 let speed = if once.is_some() { 1.0 } else { speed };
                 let cycle = animations.legs.get(name).is_some_and(|legs| animations.cycles.contains(&legs.node));
                 let play = match () {
-                    _ if cues.synced && once.is_none() && cycle => {
+                    _ if once.is_none() && cycle => {
                         Play::looping(weight).at(skeleton::cycle_time(render.stride, clip.duration))
                     }
-                    _ if cues.synced && matches!(state, Legs::Still(_)) => {
+                    _ if matches!(state, Legs::Still(_)) => {
                         Play::looping(weight).at(skeleton::loop_time(cues.clock, clip.duration))
                     }
                     _ => Play::looping(weight).speed(speed).phase(phase),
@@ -1581,15 +1603,13 @@ fn animate(
             };
             (fired, inventory.is_some_and(|i| i.reloading))
         };
-        // `BF2_ANIM_UNSYNCED=1`: clips timed by the client alone, as before (to compare).
-        let synced = !game_shared::hitzones::legacy() && std::env::var_os("BF2_ANIM_UNSYNCED").is_none();
         // Everyone else's reload runs from the tick it started (we learn of it before we draw
         // that moment); ours as predicted.
-        let reload_time = match (local, synced, inventory) {
-            (false, true, Some(i)) => skeleton::reload_elapsed(i.reloading, i.reload_started, view.seconds),
+        let reload_time = match (local, inventory) {
+            (false, Some(i)) => skeleton::reload_elapsed(i.reloading, i.reload_started, view.seconds),
             _ => None,
         };
-        let reloading = if !local && synced { reload_time.is_some() } else { reloading };
+        let reloading = if local { reloading } else { reload_time.is_some() };
         let cues = Cues {
             render,
             weapon,
@@ -1598,7 +1618,6 @@ fn animate(
             reloading,
             reload_time,
             clock: skeleton::clock(view.seconds),
-            synced,
             downed,
             seat_pose: seat_pose.as_deref(),
         };

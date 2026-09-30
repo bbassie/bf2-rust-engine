@@ -251,6 +251,15 @@ pub enum Step {
     /// us, facing us, with this much health: 0 or less wounds him critically (a body for the
     /// shock paddles).
     Summon(f32),
+    /// Our soldier is this many meters higher, under an open parachute (singleplayer and
+    /// listen server only), e.g. `NearVehicle("jep_paratrooper"), Parachute(1.5)` to come down
+    /// next to a vehicle.
+    Parachute(f32),
+    /// The nearest teammate (without one, the nearest soldier) not in a vehicle is moved
+    /// beside us, this many meters to our right and ahead, facing this many degrees left of
+    /// our way, under an open parachute (singleplayer and listen server only), e.g.
+    /// `SummonParachute(0.0, 12.0, 90.0)`: ahead of us, seen from his right side.
+    SummonParachute(f32, f32, f32),
     /// The nearest enemy is moved this many meters in front of us, facing away (a target to
     /// spot).
     SummonEnemy(f32),
@@ -1765,6 +1774,55 @@ fn run_scenario(
                         }
                     }
                     Err(_) => warn!("scenario: no soldier to summon a teammate to"),
+                }
+                Progress::Done
+            }
+            Step::Parachute(height) => {
+                match soldier.single_mut() {
+                    Ok((mut motion, _)) => {
+                        motion.position.y += *height;
+                        motion.velocity = Vec3::ZERO;
+                        motion.grounded = false;
+                        motion.climbing = false;
+                        motion.riding = false;
+                        motion.swimming = false;
+                        motion.parachute = true;
+                        info!("scenario: parachute opened at {:.1}", motion.position);
+                    }
+                    Err(_) => warn!("scenario: no soldier to open a parachute"),
+                }
+                Progress::Done
+            }
+            Step::SummonParachute(right, ahead, turn) => {
+                let team = local_team.single().ok().copied();
+                match soldier.single() {
+                    Ok((me, _)) => {
+                        let origin = me.position;
+                        let facing = Quat::from_rotation_y(look.yaw);
+                        let spot = origin + facing * Vec3::new(*right, 0.0, -*ahead);
+                        let any_teammate =
+                            others.iter().any(|(_, owner, ..)| teams.get(owner.0).ok().copied() == team);
+                        let nearest = others
+                            .iter_mut()
+                            .filter(|(_, owner, ..)| !any_teammate || teams.get(owner.0).ok().copied() == team)
+                            .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)));
+                        match nearest {
+                            Some((entity, _, mut motion, _)) => {
+                                motion.position = spot;
+                                let heading = look.yaw + turn.to_radians();
+                                motion.velocity = Quat::from_rotation_y(heading) * Vec3::new(0.0, -4.5, -8.0);
+                                motion.yaw = heading;
+                                motion.grounded = false;
+                                motion.climbing = false;
+                                motion.riding = false;
+                                motion.swimming = false;
+                                motion.parachute = true;
+                                info!("scenario: {entity} parachuting at {spot:.1}");
+                            }
+                            None => warn!("scenario: no soldier to put under a parachute"),
+                        }
+                    }
+                    Err(_) => warn!("scenario: no soldier to summon a parachutist to"),
                 }
                 Progress::Done
             }

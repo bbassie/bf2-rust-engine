@@ -159,13 +159,4 @@ impl BlendLayer {
             true
         });
     }
-
-    /// The most heavily weighted clip among those `filter` accepts.
-    pub fn heaviest(&self, filter: impl Fn(AnimationNodeIndex) -> bool) -> Option<Clip> {
-        self.tracks
-            .iter()
-            .filter(|t| t.weight > 0.0 && filter(t.clip.node))
-            .max_by(|a, b| a.weight.total_cmp(&b.weight))
-            .map(|t| t.clip)
-    }
 }
