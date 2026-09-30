@@ -45,6 +45,11 @@ BF2-style shooter in Rust + Bevy 0.19. Read `docs/ARCHITECTURE.md` first; format
 - Make scenarios checks, not just screenshots: `ExpectLog("text", seconds)` waits for a log line
   and `ForbidLog("text")` fails on one; a failed run exits with code 1 and writes
   `result.txt` (`PASS` / `FAIL: reason`).
+- Scripted runs deploy fast (0.5 s respawn): wait with `WaitSpawned`/`WaitDeployScreen`/
+  `WaitInVehicle`/`WaitBotsDeployed` (or `ExpectLog`) instead of a guessed `Wait` for anything
+  that depends on spawning or loading; a scenario that tests the real countdown sets
+  `respawn_time: Some(10.0)`. Scripted windows open unfocused and never grab the mouse, so
+  test runs don't disturb whoever is using the machine; keep it that way.
 - Review screenshots as one image: `python scripts/sheet.py <dir>` (contact sheet) and
   `python scripts/compare.py <before> <after>` (per-image change plus a before/after/diff sheet).
 - `scripts/smoke.sh` runs a quick scenario suite plus the unit tests on the Linux machine
