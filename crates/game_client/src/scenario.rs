@@ -66,7 +66,7 @@ use bevy::{
         },
         keyboard::{Key, KeyboardInput, NativeKey, NativeKeyCode},
     },
-    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
+    window::PrimaryWindow,
     pbr::ScreenSpaceAmbientOcclusion,
     platform::collections::HashSet,
     prelude::*,
@@ -592,7 +592,6 @@ impl Plugin for ScenarioPlugin {
                     note_asset_events::<AnimationClip>,
                     note_asset_events::<Shader>,
                 ),
-                lock_cursor_for_scenario,
                 run_scenario.in_set(ScenarioSystems),
             )
                 .chain(),
@@ -608,26 +607,6 @@ impl Plugin for ScenarioPlugin {
 /// Runs the scenario's steps in `Update`. UI reacting to `Key`/`Click` steps runs after it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScenarioSystems;
-
-/// Real play locks the mouse cursor on a click (`local_input::grab_cursor`); a scripted run has
-/// no mouse to click, so this does it once the match is playable, exactly as that click would.
-/// Without it, `Key`/`HoldKey` steps for gameplay actions (movement, stances, ...) would have no
-/// effect: `build_input` only reads them while the cursor is locked. Menus, the deploy screen
-/// and the commander screen still get it back the same way they always do
-/// (`local_input::grab_cursor` un-grabs it whenever one of those is open); this only ever grabs.
-fn lock_cursor_for_scenario(
-    screen: Res<State<Screen>>,
-    menu: Res<crate::menu::Menu>,
-    deploy: Res<DeployScreen>,
-    commander: Res<crate::commander::CommanderScreen>,
-    mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
-) {
-    let playing = *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open;
-    if playing && !crate::local_input::cursor_locked(&cursor) {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-    }
-}
 
 /// Pipelines still compiling, counted in the render world.
 #[derive(Resource, Clone, Default)]

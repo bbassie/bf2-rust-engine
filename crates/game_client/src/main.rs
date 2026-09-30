@@ -307,7 +307,12 @@ fn main() -> AppExit {
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(settings.window()),
+                // Scripted runs (agents' scenarios and screenshots) open in the background
+                // instead of taking focus from whoever is using the machine.
+                primary_window: Some(Window {
+                    focused: !(scenario.is_some() || cli.screenshot.is_some()),
+                    ..settings.window()
+                }),
                 ..default()
             })
             .set(ImagePlugin {

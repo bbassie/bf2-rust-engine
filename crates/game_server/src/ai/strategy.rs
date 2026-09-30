@@ -757,10 +757,11 @@ pub fn plan(
         for (squad, position, human) in open {
             let current = strategy.orders.get(&(team, squad)).copied();
             let from = position.or(fallback);
-            // A squad that just took its flag moves on (leaving a guard if need be) unless
-            // the enemy is taking it back already.
+            // Attacking, a squad that just took its flag moves on (leaving a guard if need
+            // be) unless the enemy is taking it back already. (Defenders, as in
+            // Breakthrough, hold what they took back.)
             let took = current
-                .filter(|c| c.kind == OrderKind::Attack && !c.commanded)
+                .filter(|c| posture == Posture::Attack && c.kind == OrderKind::Attack && !c.commanded)
                 .map(|c| c.area)
                 .filter(|&a| states.get(a).copied().flatten().is_some_and(|s| s.owner == team) && !under_attack(a));
             let best = objectives.iter().filter(|o| Some(o.area) != took).max_by(|a, b| {

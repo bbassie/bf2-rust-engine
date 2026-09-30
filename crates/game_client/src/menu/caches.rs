@@ -21,6 +21,10 @@ struct ClearCacheButton;
 #[derive(Component)]
 struct CacheText;
 
+/// The cache folder, under the row.
+#[derive(Component)]
+struct CacheFolder;
+
 #[derive(Resource, Default)]
 struct CacheUi {
     /// Sizing (after clearing, if it cleared: what went).
@@ -46,8 +50,16 @@ pub(super) fn settings_row(p: &mut ChildSpawnerCommands) {
             BackgroundColor(Color::NONE),
         ))
         .with_child(text("Clear caches", 15.0, TEXT));
-        c.spawn((CacheText, text("", 13.0, DIM)));
+        c.spawn((CacheText, text("", 14.0, DIM)));
     });
+    p.spawn((
+        CacheFolder,
+        text("", 13.0, DIM),
+        Node {
+            margin: UiRect::left(px(216)),
+            ..default()
+        },
+    ));
 }
 
 fn start(ui: &mut CacheUi, cache: &Cache, clear: bool) {
@@ -75,7 +87,16 @@ fn update_cache_text(
     mut ui: ResMut<CacheUi>,
     added: Query<(), Added<CacheText>>,
     mut texts: Query<&mut Text, With<CacheText>>,
+    mut folders: Query<&mut Text, (With<CacheFolder>, Without<CacheText>)>,
 ) {
+    let folder = cache.as_ref().map_or(String::new(), |c| {
+        format!("Navigation grids and tactical maps, rebuilt when needed. In {}", c.root().display())
+    });
+    for mut t in &mut folders {
+        if t.0 != folder {
+            t.0 = folder.clone();
+        }
+    }
     let Some(cache) = cache else {
         ui.text = "No cache folder: generated data isn't kept".into();
         for mut t in &mut texts {
@@ -98,8 +119,8 @@ fn update_cache_text(
         }
         let size = game_shared::content::format_bytes(usage.bytes);
         ui.text = match cleared {
-            Some(cleared) => format!("Freed {}; {size} left in {}", game_shared::content::format_bytes(cleared.bytes), cache.root().display()),
-            None => format!("{size} in {} (navigation grids, tactical maps)", cache.root().display()),
+            Some(cleared) => format!("Freed {}, {size} left", game_shared::content::format_bytes(cleared.bytes)),
+            None => format!("{size} used"),
         };
     }
     for mut t in &mut texts {

@@ -685,8 +685,8 @@ fn describe_order(map: &StrategicMap, order: Option<&super::strategy::SquadOrder
     }
 }
 
-/// Logs what squads do after their team took the flag they were at (`ai flow:` lines): the
-/// time to their next order, the time to an order for another objective, and the time until
+/// Logs what squads do after their team took the flag they were at (`ai flow:` lines; squads
+/// with at least half their living members there are followed): the time to their next order, the time to an order for another objective, and the time until
 /// most of the squad left the flag (no more than a third of its living members within the
 /// radius plus 40 m, not counting members left to guard it).
 pub fn track_flow(
@@ -740,6 +740,10 @@ pub fn track_flow(
                 None => "no order".into(),
             };
             there.push(format!("{} ({at} of {alive}, {was})", squad_name(squad)));
+            // Watched: squads mostly there (for the others there is nothing to leave).
+            if at * 2 < alive {
+                continue;
+            }
             flow.watches.push(FlowWatch {
                 team,
                 squad,

@@ -119,9 +119,16 @@ impl InputHistory {
     }
 }
 
+/// Whether gameplay input is captured: the cursor is locked, or a scripted run is in a
+/// playable screen ([`SCRIPTED_CAPTURE`]).
 pub fn cursor_locked(cursor: &CursorOptions) -> bool {
-    cursor.grab_mode != CursorGrabMode::None
+    cursor.grab_mode != CursorGrabMode::None || SCRIPTED_CAPTURE.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// A scripted run (scenario) never grabs the OS cursor, so agents' test runs don't take the
+/// mouse from whoever is using the machine; instead, while it is in a playable screen, its
+/// `Key`/`HoldKey` steps count as captured input. Set by `grab_cursor`.
+static SCRIPTED_CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A click in the game takes the mouse; menus, the deploy screen, the scoreboard's mute chips
 /// and losing focus give it back (Esc opens the in-game menu, see `menu`).
@@ -136,15 +143,20 @@ fn grab_cursor(
     gamepads: Query<&Gamepad>,
     // The scoreboard's mute chips want the mouse (`voice::ui`).
     scoreboard_mouse: Res<crate::voice::ScoreboardCursor>,
-    // A scripted run's window may never actually hold OS focus (it can run in the background),
-    // and `Key`/`HoldKey` steps for gameplay actions need the cursor locked deterministically to
-    // reach `Actions` at all (`build_input` only reads them while it is); see
-    // `scenario::lock_cursor_for_scenario`, which does the initial grab a click would.
+    // A scripted run never grabs the cursor: see `SCRIPTED_CAPTURE`.
     scenario: Option<Res<crate::scenario::ScenarioInput>>,
 ) {
     let playing =
         *screen.get() == Screen::InGame && !menu.paused && !deploy.open && !commander.open && !scoreboard_mouse.0;
-    let focused = window.focused || scenario.is_some();
+    if scenario.is_some() {
+        SCRIPTED_CAPTURE.store(playing, std::sync::atomic::Ordering::Relaxed);
+        if cursor.grab_mode != CursorGrabMode::None {
+            cursor.visible = true;
+            cursor.grab_mode = CursorGrabMode::None;
+        }
+        return;
+    }
+    let focused = window.focused;
     if !playing || !focused {
         if cursor_locked(&cursor) {
             cursor.visible = true;

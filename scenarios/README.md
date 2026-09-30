@@ -28,7 +28,7 @@ to get the real timing back. See the top of `crates/game_client/src/scenario.rs`
 | Folder | What the scenarios check |
 |---|---|
 | `abilities/` | Man-down and revive, medic, support and engineer gadgets |
-| `ai/` | Bot strategy, navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles (`heli_dropoff`: transport helicopters land and everyone gets out), carriers |
+| `ai/` | Bot strategy (`capture_flow`: squads move on once their flag is taken), navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles (`heli_dropoff`: transport helicopters land and everyone gets out), carriers |
 | `animation/` | Third- and first-person animation, view model, scopes |
 | `audio/` | Sounds, checked through the log |
 | `combat/` | Grenades, launchers, explosives, hit zones and hit registration against target dummies (`hitreg`, `hitreg_net`), a despawn stress (`despawn_stress`: bots killed at close range over and over, which must not panic the client), lag compensation, destruction, effects, SF gadgets, the weapon list and the melee and grenade keys (`quick_weapons`) |
@@ -39,7 +39,7 @@ to get the real timing back. See the top of `crates/game_client/src/scenario.rs`
 | `lod/` | Static, vehicle and soldier levels of detail |
 | `menu/` | Main menu, hosting and joining, settings |
 | `modes/` | Rush (arming a charge, HUD, maps, deploy screen), Breakthrough (sectors, locked flags), the level page's modes, the tactical top bar in both (`objective_bar_rush`, `objective_bar_breakthrough`), spawns following the front at every stage for both sides (`rush_spawns_karkand`, `rush_spawns_leviathan` with Leviathan's stage 2 charges up close, `breakthrough_spawns`) |
-| `movement/` | Soldier movement, ladders, ropes, stamina, roadkill, carrier ladders |
+| `movement/` | Soldier movement, ladders, ropes (`grapple`: the grappling hook thrown, its rope swinging, settling and climbed, a miss, a sloped roof, frame times with five ropes), jumping and mantling (`jump_mantle`), stamina, roadkill, carrier ladders |
 | `perf/` | Frame times with many bots (Karkand, AIX 2 Archipelago): at spawn, a fixed view, in the fight |
 | `tactical_map/` | The generated tactical map (`tactical_map.rs`) of Karkand, Gulf of Oman, Dalian Plant and AIX 2 Archipelago, written to `target/scenarios/tactical_map/<level>.png`; a second run shows the cache hit in the log |
 | `terrain/` | Terrain, undergrowth, trees, water, horizon, view distance |

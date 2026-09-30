@@ -3,7 +3,8 @@
 //! slid down (see [`crate::soldier::step_soldier`]).
 //!
 //! The grappling hook flies as a projectile. Where it holds (on a surface at most 60° steep,
-//! BF2's `minYNormal 0.5`) the server looks for the lip it catches on, dragging it back
+//! BF2's `minYNormal 0.5`, or over the top of a wall it hits just below the top) the server
+//! looks for the lip it catches on, dragging it back
 //! towards the thrower like BF2's rope tugs its links, and strings a rope from there; with
 //! nothing to hook over, the hook lies where it fell for a moment and is gone.
 //!
@@ -37,7 +38,7 @@ impl Plugin for RopePlugin {
             FixedPostUpdate,
             (
                 // Tests and tools may run movement without weapons.
-                string_ropes.run_if(resource_exists::<Armory>),
+                (catch_on_walls, string_ropes).chain().run_if(resource_exists::<Armory>),
                 take_down_ropes,
                 clear_missed_hooks,
             )
@@ -248,6 +249,56 @@ fn string_ropes(
         ));
     }
 }
+
+/// A flying grappling hook about to hit a wall just below its top catches over the top, as
+/// BF2's thrown rope links do: the hook lands on the lip (and [`string_ropes`] strings the
+/// rope from there). Lower down it bounces off and falls back.
+fn catch_on_walls(
+    armory: Res<Armory>,
+    spatial: SpatialQuery,
+    mut hooks: Query<(&Projectile, &mut ProjectileMotion), Without<MissedHook>>,
+) {
+    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]);
+    for (projectile, mut motion) in &mut hooks {
+        if motion.resting
+            || !armory
+                .weapon(&projectile.weapon)
+                .and_then(|w| w.projectile.rope.as_ref())
+                .is_some_and(|r| r.kind == RopeKind::Grapple)
+        {
+            continue;
+        }
+        let Ok(direction) = Dir3::new(motion.velocity) else {
+            continue;
+        };
+        let reach = motion.velocity.length() * WALL_LOOKAHEAD;
+        let Some(wall) = spatial.cast_ray(motion.position, direction, reach, true, &filter) else {
+            continue;
+        };
+        if wall.normal.y >= 0.5 {
+            // Something it holds on to by itself.
+            continue;
+        }
+        let into = -Vec3::new(wall.normal.x, 0.0, wall.normal.z).normalize_or_zero();
+        let probe = motion.position + direction * wall.distance + into * 0.15 + Vec3::Y * WALL_CATCH;
+        let Some(top) = spatial.cast_ray(probe, Dir3::NEG_Y, WALL_CATCH, true, &filter) else {
+            continue;
+        };
+        if top.distance < 1e-3 || top.normal.y < 0.5 {
+            continue;
+        }
+        motion.position = probe - Vec3::Y * (top.distance - 0.02);
+        motion.velocity = Vec3::ZERO;
+        motion.rotation = Quat::from_rotation_arc(Vec3::Y, top.normal) * motion.rotation;
+        motion.resting = true;
+        info!("{}: caught the top of a wall at {:.1}", projectile.weapon, motion.position);
+    }
+}
+
+/// How far ahead of a flying hook (seconds of flight) walls are looked for, and how far
+/// below its top a wall it hits still lets it catch over it (m).
+const WALL_LOOKAHEAD: f32 = 2.5 / 60.0;
+const WALL_CATCH: f32 = 1.0;
 
 fn take_down_ropes(
     mut commands: Commands,

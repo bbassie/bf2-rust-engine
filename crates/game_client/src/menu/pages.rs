@@ -663,8 +663,8 @@ fn settings_tab_content(
                 switch(c, Toggle::ColorblindTeamColors);
                 c.spawn(text("not yet wired to an engine hook", 12.0, DIM));
             });
-            download::settings_row(p);
             caches::settings_row(p);
+            download::settings_row(p);
         }
         SettingsTab::Graphics => {
             row(p, "Preset", |c| {
