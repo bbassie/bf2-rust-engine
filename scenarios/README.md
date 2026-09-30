@@ -23,7 +23,7 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | `ai/` | Bot strategy, navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles (`heli_dropoff`: transport helicopters land and everyone gets out), carriers |
 | `animation/` | Third- and first-person animation, view model, scopes |
 | `audio/` | Sounds, checked through the log |
-| `combat/` | Grenades, launchers, explosives, hit zones and hit registration against target dummies (`hitreg`, `hitreg_net`), lag compensation, destruction, effects, SF gadgets, the weapon list and the melee and grenade keys (`quick_weapons`) |
+| `combat/` | Grenades, launchers, explosives, hit zones and hit registration against target dummies (`hitreg`, `hitreg_net`), a despawn stress (`despawn_stress`: bots killed at close range over and over, which must not panic the client), lag compensation, destruction, effects, SF gadgets, the weapon list and the melee and grenade keys (`quick_weapons`) |
 | `commander/` | Commander screen and assets, commo rose and spotting, squads |
 | `conquest/` | Flags, capture, HUD, deploy screen (loadouts: `loadout_deploy`), minimap and big map, co-op |
 | `infra/` | Chat, admin, stats, server browser, content download and the server's content check (trust, repair, refusal, map change), accounts on ranked servers, soak client, the sample mod |

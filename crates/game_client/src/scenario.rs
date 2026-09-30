@@ -260,8 +260,8 @@ pub enum Step {
     /// our way, under an open parachute (singleplayer and listen server only), e.g.
     /// `SummonParachute(0.0, 12.0, 90.0)`: ahead of us, seen from his right side.
     SummonParachute(f32, f32, f32),
-    /// The nearest enemy is moved this many meters in front of us, facing away (a target to
-    /// spot).
+    /// The nearest living enemy (failing that, the nearest at all) is moved this many meters
+    /// in front of us, facing away (a target to spot or shoot).
     SummonEnemy(f32),
     /// Says something on the radio, as the commo rose would, e.g. `Radio(Spotted)`.
     Radio(game_shared::radio::RadioCommand),
@@ -1693,13 +1693,19 @@ fn run_scenario(
                         let origin = me.position;
                         let forward = Quat::from_rotation_y(look.yaw) * Vec3::NEG_Z;
                         let spot = origin + Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::NEG_Z) * *distance;
+                        // The nearest living enemy (a body down and bleeding out is no use
+                        // as a target); failing that, the nearest at all.
                         let nearest = others
                             .iter_mut()
                             .filter(|(_, owner, ..)| {
                                 let other = teams.get(owner.0).ok().copied();
                                 other != team && other.is_some_and(|t| t != Team::Spectator)
                             })
-                            .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)));
+                            .min_by(|a, b| {
+                                (a.3.current <= 0.0, a.2.position.distance(origin))
+                                    .partial_cmp(&(b.3.current <= 0.0, b.2.position.distance(origin)))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
                         match nearest {
                             Some((entity, _, mut motion, _)) => {
                                 motion.position = spot + Vec3::Y * 0.5;

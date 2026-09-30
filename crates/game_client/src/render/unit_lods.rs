@@ -153,7 +153,8 @@ fn apply_unit_lods(
     }
     for (entity, lod) in &added {
         if let Some(range) = lod.range(&scales) {
-            commands.entity(entity).insert(range);
+            // `try_`: the mesh may go with its soldier or vehicle in the same frame.
+            commands.entity(entity).try_insert(range);
         }
     }
 }

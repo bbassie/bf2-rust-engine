@@ -38,12 +38,6 @@ pub struct HitregPlugin;
 
 impl Plugin for HitregPlugin {
     fn build(&self, app: &mut App) {
-        // A command on a despawned entity (seen now and then under this rapid fire at a bot,
-        // from a system the release build can't name) logs a warning instead of ending the
-        // measurement.
-        if game_shared::hitzones::hitreg_log() {
-            app.set_error_handler(bevy::ecs::error::warn);
-        }
         app.init_resource::<HitregTask>()
             .init_resource::<Drawn>()
             .add_systems(PostUpdate, (measure, run_task).chain().after(TransformSystems::Propagate))

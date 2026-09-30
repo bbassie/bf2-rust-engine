@@ -773,15 +773,17 @@ fn swap_scene_materials(
     mut bf2: Bf2Materials,
 ) {
     for (entity, material, extras) in &meshes {
+        // `try_`: a scene mesh can go with its scene's owner (a projectile that went off, a
+        // soldier who died) in the same frame it is first seen here.
         if !extras.value.contains("\"bf2\"") {
-            commands.entity(entity).insert(Bf2Checked);
+            commands.entity(entity).try_insert(Bf2Checked);
             continue;
         }
         if let Some(handle) = bf2.from_standard(&material.0, Some(&extras.value)) {
             commands
                 .entity(entity)
-                .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert((MeshMaterial3d(handle), Bf2Checked));
+                .try_remove::<MeshMaterial3d<StandardMaterial>>()
+                .try_insert((MeshMaterial3d(handle), Bf2Checked));
         }
     }
 }

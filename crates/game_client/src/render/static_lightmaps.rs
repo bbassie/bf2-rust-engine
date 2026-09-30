@@ -129,6 +129,10 @@ fn geometry_name(path: &str) -> (String, bool) {
     }
 }
 
+/// `try_insert`: this sees every new mesh with a parent, including muzzle flashes and other
+/// short-lived effect meshes, which their own system may despawn in the same frame; that
+/// despawn is applied before the tag when both land in one sync point (its system comes
+/// first in the schedule), and a plain `insert` on the gone entity would panic.
 #[allow(clippy::type_complexity)]
 fn tag_static_meshes(
     mut commands: Commands,
@@ -139,11 +143,11 @@ fn tag_static_meshes(
     for (entity, mesh, child_of) in &meshes {
         let Ok((static_mesh, lods, destructible, transform)) = parents.get(child_of.parent()) else {
             // Not a static object's mesh (soldiers, vehicles, effects...).
-            commands.entity(entity).insert(LightmapChecked);
+            commands.entity(entity).try_insert(LightmapChecked);
             continue;
         };
         let mut checked = commands.entity(entity);
-        checked.insert(LightmapChecked);
+        checked.try_insert(LightmapChecked);
         if index.entries.is_empty() {
             continue;
         }
@@ -173,7 +177,7 @@ fn tag_static_meshes(
             info!("lightmap {name} lod {lod} wreck {wreck} at {position:?} ({mesh_path}): {tag:08x?}");
         }
         if let Some(tag) = tag {
-            checked.insert(MeshTag(tag));
+            checked.try_insert(MeshTag(tag));
         }
     }
 }

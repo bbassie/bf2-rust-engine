@@ -138,7 +138,7 @@ fn load_far_trees(
         commands.entity(cell).despawn();
     }
     for entity in &checked {
-        commands.entity(entity).remove::<(TreeChecked, HasStandIn)>();
+        commands.entity(entity).try_remove::<(TreeChecked, HasStandIn)>();
     }
     let (Some(dir), Some(file)) = (&level.dir, &level.desc.vegetation) else {
         return;
@@ -181,12 +181,14 @@ fn collect_trees(
     statics: Query<(Entity, &StaticMesh, &Transform), Without<TreeChecked>>,
 ) {
     for (entity, mesh, transform) in &statics {
+        // `try_`: debris and other short-lived static meshes may be despawned by their own
+        // system in the same frame.
         let mut checked = commands.entity(entity);
-        checked.insert(TreeChecked);
+        checked.try_insert(TreeChecked);
         let Some(&lod) = far.by_mesh.get(&mesh.path) else {
             continue;
         };
-        checked.insert(HasStandIn);
+        checked.try_insert(HasStandIn);
         let cell = (transform.translation.xz() / CELL_SIZE).floor().as_ivec2();
         far.cells.entry(cell).or_default().push((lod, transform.compute_affine()));
         far.dirty.insert(cell);
@@ -208,12 +210,12 @@ fn fade_detailed_trees(
     };
     for (entity, child_of) in &new_meshes {
         if trees.contains(child_of.parent()) {
-            commands.entity(entity).insert(range.clone());
+            commands.entity(entity).try_insert(range.clone());
         }
     }
     for children in &new_trees {
         for child in children.iter().filter(|c| meshes.contains(*c)) {
-            commands.entity(child).insert(range.clone());
+            commands.entity(child).try_insert(range.clone());
         }
     }
 }

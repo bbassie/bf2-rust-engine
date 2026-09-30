@@ -204,7 +204,7 @@ fn spawn_loaded_meshes(
     for (entity, mut pending) in &mut pending {
         if let LoadState::Failed(err) = asset_server.load_state(&pending.levels[0].mesh) {
             warn!("static mesh failed to load: {err}");
-            commands.entity(entity).remove::<PendingMesh>();
+            commands.entity(entity).try_remove::<PendingMesh>();
             continue;
         }
         let mut complete = true;
@@ -238,33 +238,35 @@ fn spawn_loaded_meshes(
             continue;
         }
 
-        let levels: Vec<(f32, &[(Handle<Mesh>, Handle<Bf2Material>)])> = pending
+        let levels: Vec<(f32, Vec<(Handle<Mesh>, Handle<Bf2Material>)>)> = pending
             .levels
             .iter()
-            .filter_map(|level| Some((level.start, level.ready.as_deref()?)))
+            .filter_map(|level| Some((level.start, level.ready.clone()?)))
             .collect();
         let set = StaticLodSet {
             starts: levels.iter().map(|(start, _)| *start).collect(),
             draw_distance: pending.draw_distance,
         };
         let ranges = set.ranges(scales.lod, scales.draw);
-        for (index, (_, primitives)) in levels.iter().enumerate() {
-            for (mesh, material) in primitives.iter() {
-                let mut child = commands.spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(material.clone()),
-                    ChildOf(entity),
-                ));
-                if let Some(range) = &ranges[index] {
-                    child.insert((range.clone(), StaticLodLevel(index)));
+        // One command on the owner, silently dropped if it is gone by the time commands are
+        // applied (debris whose life ran out the frame its mesh finished loading): no
+        // orphaned children, no panic.
+        commands.entity(entity).queue_silenced(move |mut owner: EntityWorldMut| {
+            owner.remove::<PendingMesh>();
+            owner.with_children(|owner| {
+                for (index, (_, primitives)) in levels.iter().enumerate() {
+                    for (mesh, material) in primitives {
+                        let mut child = owner.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+                        if let Some(range) = &ranges[index] {
+                            child.insert((range.clone(), StaticLodLevel(index)));
+                        }
+                    }
                 }
+            });
+            if ranges.iter().any(Option::is_some) {
+                owner.insert(set);
             }
-        }
-        let mut parent = commands.entity(entity);
-        parent.remove::<PendingMesh>();
-        if ranges.iter().any(Option::is_some) {
-            parent.insert(set);
-        }
+        });
     }
     let now = time.elapsed_secs();
     if config.debug && now - *debug_log > 2.0 && waiting_meshes + waiting_materials > 0 {

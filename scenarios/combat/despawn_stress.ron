@@ -1,0 +1,150 @@
+// Despawn stress: kills bots summoned right in front of us over and over (rifle fire until
+// the body is wrecked, knife, GP-30 grenades), so soldiers die, ragdoll and despawn while
+// tracers, effects, decals, name tags and voices still refer to them. Any command on a
+// despawned entity panics the client (exit 101), so the run passing is the check; run it a
+// few times in a row.
+// client --scenario scenarios/combat/despawn_stress.ron
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    team: 1,
+    steps: [
+        WaitReady,
+        // MEC assault: AK-101 with the GP-30 under it, knife in slot 3.
+        Kill,
+        Wait(1.0),
+        Click("kit:2"),
+        Wait(16.0),
+        Teleport((-184.0, 157.0, -85.0), 90.0, 0.0),
+        // Enough health that the bots can't end the run.
+        Hurt(-5000.0),
+        Wait(1.0),
+        ForbidLog("Encountered an error"),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Knife.
+        Weapon(3),
+        SummonEnemy(1.3),
+        Wait(0.3),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(1.5),
+        // GP-30 grenade at a bot 14 m away.
+        Weapon(1),
+        SummonEnemy(14.0),
+        Wait(0.5),
+        TrackEnemy(1.0, 1.2),
+        Look(90.0, 0.0),
+        Wait(4.0),
+        Hurt(-5000.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Knife.
+        Weapon(3),
+        SummonEnemy(1.3),
+        Wait(0.3),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(1.5),
+        // GP-30 grenade at a bot 14 m away.
+        Weapon(1),
+        SummonEnemy(14.0),
+        Wait(0.5),
+        TrackEnemy(1.0, 1.2),
+        Look(90.0, 0.0),
+        Wait(4.0),
+        Hurt(-5000.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Knife.
+        Weapon(3),
+        SummonEnemy(1.3),
+        Wait(0.3),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(1.5),
+        // GP-30 grenade at a bot 14 m away.
+        Weapon(1),
+        SummonEnemy(14.0),
+        Wait(0.5),
+        TrackEnemy(1.0, 1.2),
+        Look(90.0, 0.0),
+        Wait(4.0),
+        Hurt(-5000.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Rifle at a bot 4 m in front until he is down and then wrecked (`TrackEnemy` aims
+        // and fires by itself).
+        Weapon(0),
+        SummonEnemy(4.0),
+        Wait(0.2),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(2.0),
+        // Knife.
+        Weapon(3),
+        SummonEnemy(1.3),
+        Wait(0.3),
+        TrackEnemy(3.5, 1.0),
+        Look(90.0, 0.0),
+        Wait(1.5),
+        // GP-30 grenade at a bot 14 m away.
+        Weapon(1),
+        SummonEnemy(14.0),
+        Wait(0.5),
+        TrackEnemy(1.0, 1.2),
+        Look(90.0, 0.0),
+        Wait(4.0),
+        Hurt(-5000.0),
+        Screenshot("end"),
+        Quit,
+    ],
+)
