@@ -120,6 +120,8 @@ struct ErrTally {
 #[derive(Resource, Default)]
 struct Drawn {
     target: Option<Seen>,
+    /// Last frame's: what was on screen when this frame's input (and shots) were made.
+    shown: Option<Seen>,
     /// Seconds (real time) of the last shot the target fired.
     enemy_shot_at: HashMap<Entity, f32>,
 }
@@ -253,8 +255,8 @@ fn measure(
     meshes: Res<Assets<Mesh>>,
     judged: DrawnTargets,
 ) {
+    drawn.shown = drawn.target.take();
     if task.request.is_none() {
-        drawn.target = None;
         return;
     }
     let (Ok(me), my_team) = (local.single(), local_team.single().ok().copied()) else {
@@ -383,8 +385,17 @@ fn run_task(
     mut local_shots: MessageReader<LocalShot>,
     local: Query<&SoldierMotion, With<LocalSoldier>>,
     view: Res<crate::combat::ViewTick>,
-    (armory, weapons): (Res<Armory>, Query<(&Loadout, &Inventory), With<LocalSoldier>>),
+    (armory, weapons, spatial): (Res<Armory>, Query<(&Loadout, &Inventory), With<LocalSoldier>>, avian3d::prelude::SpatialQuery),
 ) {
+    // Whether the world (or a vehicle) is in the way to a point: those shots and samples say
+    // nothing about the hit zones.
+    let occluded = |from: Vec3, to: Vec3| {
+        let filter = avian3d::prelude::SpatialQueryFilter::from_mask([
+            game_shared::physics::GameLayer::World,
+            game_shared::physics::GameLayer::Vehicle,
+        ]);
+        Dir3::new(to - from).is_ok_and(|dir| spatial.cast_ray(from, dir, from.distance(to), true, &filter).is_some())
+    };
     let now = time.elapsed_secs();
     // Single shots: the fire mode button until the weapon is on single fire.
     if task.shot.mode_until <= now {
@@ -407,6 +418,9 @@ fn run_task(
                 let auto = target.auto_label();
                 let label = format!("{label}/{auto}");
                 for &(part, point) in &target.points {
+                    if occluded(eye, point) {
+                        continue;
+                    }
                     let direction = (point - eye).normalize();
                     let max = eye.distance(point) + 1.0;
                     let drawn_hit = target.drawn_ray(eye, direction, max);
@@ -446,7 +460,8 @@ fn run_task(
         Request::Shoot { label, part, shots } => {
             // Each shot we fired: what its ray meets on the skeleton drawn this frame.
             for shot in local_shots.read() {
-                let Some(target) = &drawn.target else {
+                // The shot was made looking at last frame's picture.
+                let Some(target) = drawn.shown.as_ref().or(drawn.target.as_ref()) else {
                     info!("hitreg shot: no target drawn");
                     continue;
                 };
@@ -460,7 +475,7 @@ fn run_task(
                 let along = (point - shot.origin).dot(shot.direction);
                 let miss_by = (shot.origin + shot.direction * along).distance(point);
                 info!(
-                    "hitreg shot {}: {label}/{} part {aimed} seen {} judged-here {} aim-error {:.3} view_tick {} clearance {:.3} target {:?}",
+                    "hitreg shot {}: {label}/{} part {aimed} seen {} judged-here {} aim-error {:.3} view_tick {} clearance {:.3} target {:?}{}",
                     task.shot.fired,
                     target.auto_label(),
                     zone(seen),
@@ -469,6 +484,7 @@ fn run_task(
                     view.tick,
                     target.clearance(point),
                     target.entity,
+                    if occluded(shot.origin, point) { " occluded" } else { "" },
                 );
             }
             let state = &mut task.shot;

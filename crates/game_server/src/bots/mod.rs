@@ -506,6 +506,8 @@ pub struct BotBrain {
     /// The enemy it last lost sight of and its aim error then: peeking at him again, the aim
     /// is where it was.
     lost_aim: Option<(Entity, Vec2)>,
+    /// Seconds a live grenade has been lying close by (it runs once it has seen it).
+    grenade_seen: f32,
 }
 
 impl Default for BotBrain {
@@ -633,6 +635,7 @@ impl Default for BotBrain {
             region_at: Vec3::ZERO,
             bad_goal: None,
             lost_aim: None,
+            grenade_seen: 0.0,
         }
     }
 }
@@ -1473,9 +1476,12 @@ impl BotBrain {
             let squad_mate = |soldier: Entity| self.tactical && self.is_squad_mate(w, me, soldier);
             let reach = if self.tactical { REVIVE_DISTANCE * 1.7 } else { REVIVE_DISTANCE };
             let downed = w.wounded.downed_near(me.team, position, reach);
+            let commit = self.tactical && crate::ai::tune::knob("revive_commit", 0.0) > 0.5;
             let pick = downed
                 .iter()
                 .filter(|(_, _, left)| *left > 3.0)
+                // Only those it can get to in time (running, with the paddles to get out).
+                .filter(|(_, at, left)| !commit || flat(*at - position).length() / 5.0 + 2.0 < *left)
                 .map(|&(soldier, at, _)| {
                     let mate = squad_mate(soldier);
                     let far = flat(at - position).length() > REVIVE_DISTANCE;
@@ -1848,6 +1854,39 @@ impl BotBrain {
             return;
         }
         self.activity = Activity::Throw { at, time, weapon };
+    }
+
+    /// Tactical bots: which way to run from a live hand grenade close enough to hurt, once it
+    /// has lain there a moment ("grenade!").
+    fn dodge_grenades(&mut self, w: &Senses, me: &Me, dt: f32) -> Option<Vec3> {
+        if !self.tactical || crate::ai::tune::knob("dodge_nade", 0.0) < 0.5 {
+            return None;
+        }
+        let position = me.motion.position;
+        let away = w
+            .projectiles
+            .iter()
+            .filter_map(|(projectile, motion)| {
+                let desc = &w.armory.weapon(&projectile.weapon)?.projectile;
+                if !matches!(desc.impact, game_data::Impact::Bounce) || !desc.explodes() {
+                    return None;
+                }
+                let offset = flat(position - motion.position);
+                let reach = desc.explosion_radius * 0.8 + 1.0;
+                (offset.length() < reach && (motion.position.y - position.y).abs() < 4.0 && motion.velocity.length() < 10.0)
+                    .then(|| offset.normalize_or(Vec3::X))
+            })
+            .reduce(|a, b| a + b);
+        match away {
+            Some(away) => {
+                self.grenade_seen += dt;
+                (self.grenade_seen > 0.35).then(|| away.normalize_or(Vec3::X))
+            }
+            None => {
+                self.grenade_seen = 0.0;
+                None
+            }
+        }
     }
 
     /// Which way to step out of the path of a vehicle about to run it over, if one is.
@@ -2405,9 +2444,10 @@ impl BotBrain {
         } else {
             direction = intent.step;
         }
-        // Out of the way of vehicles coming at speed, friend or foe.
+        // Out of the way of vehicles coming at speed, friend or foe, and of grenades.
+        let grenade = self.dodge_grenades(w, me, dt);
         let dodging = !me.motion.climbing
-            && match self.dodge_vehicles(w, me) {
+            && match self.dodge_vehicles(w, me).or(grenade) {
                 Some(away) => {
                     direction = away;
                     true

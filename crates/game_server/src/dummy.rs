@@ -85,6 +85,9 @@ struct Dummy {
     /// Where it was put, and where the human stood then.
     anchor: Vec3,
     human_at: Vec3,
+    human_yaw: f32,
+    /// Seconds the human has stood still (and faced one way) somewhere else.
+    settled: f32,
     pose: String,
     /// Seconds in `pose`.
     time: f32,
@@ -137,6 +140,8 @@ fn puppet(
                 commands.entity(bot).insert(Dummy {
                     anchor: Vec3::NAN,
                     human_at: Vec3::NAN,
+                    human_yaw: 0.0,
+                    settled: 0.0,
                     pose: String::new(),
                     time: 0.0,
                     right: true,
@@ -145,8 +150,13 @@ fn puppet(
                 continue;
             }
         };
-        // In front of the human, again whenever he moved on.
-        if !(dummy.human_at.distance(human) < 3.0) {
+        // In front of the human, again whenever he moved on or turned away (once he has
+        // stood still for a moment: a teleport and its new view arrive a tick apart).
+        let turned = (human_yaw - dummy.human_yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        let moved = !(dummy.human_at.distance(human) < 3.0) || turned.abs() > 0.5;
+        dummy.settled = if moved { dummy.settled + dt } else { 0.0 };
+        if moved && dummy.settled > 0.3 {
             let forward = Quat::from_rotation_y(human_yaw) * Vec3::NEG_Z;
             let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::NEG_Z);
             let spot = human + flat * control.distance + Vec3::Y * 0.3;
@@ -154,6 +164,7 @@ fn puppet(
             body.velocity = Vec3::ZERO;
             dummy.anchor = spot;
             dummy.human_at = human;
+            dummy.human_yaw = human_yaw;
             info!("dummy: {} placed at {spot:.1}, {:.1} m from {human:.1}", player.name, control.distance);
         }
         if dummy.pose != pose {

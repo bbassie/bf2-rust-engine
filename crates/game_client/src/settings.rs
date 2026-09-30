@@ -545,6 +545,7 @@ impl Settings {
                     _ => return Err(format!("setting {key}: expected yaw or roll, got {value}")),
                 }
             }
+            "heli_pedals_roll" => self.heli_pedals_roll = on()?,
             // Lighting: `off`, `on` or `shadows`; `level` or `night`.
             "dynamic_lamps" | "lamps" => {
                 self.dynamic_lamps = crate::render::lamps::DynamicLamps::parse(value)

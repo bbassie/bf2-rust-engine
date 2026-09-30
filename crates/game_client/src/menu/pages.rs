@@ -627,6 +627,7 @@ fn settings_tab_content(
                 c.spawn(text("on: mouse, stick and pitch keys forward push the nose down", 12.0, DIM));
             });
             row(p, "Invert helicopter pitch", |c| switch(c, Toggle::InvertHeliPitch));
+            row(p, "Helicopter A/D: roll instead of yaw", |c| switch(c, Toggle::HeliPedalsRoll));
             row(p, "Raw mouse input", |c| {
                 switch(c, Toggle::MouseRawInput);
                 c.spawn(text("not yet wired to an engine hook", 12.0, DIM));

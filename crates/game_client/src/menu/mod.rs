@@ -410,6 +410,7 @@ enum Toggle {
     GamepadAimAssist,
     InvertJetPitch,
     InvertHeliPitch,
+    HeliPedalsRoll,
 }
 
 impl Toggle {
@@ -429,6 +430,7 @@ impl Toggle {
             Toggle::GamepadAimAssist => "gamepad_aim_assist",
             Toggle::InvertJetPitch => "invert_jet_pitch",
             Toggle::InvertHeliPitch => "invert_heli_pitch",
+            Toggle::HeliPedalsRoll => "heli_pedals_roll",
         }
     }
 
@@ -448,6 +450,7 @@ impl Toggle {
             Toggle::GamepadAimAssist => settings.gamepad.aim_assist,
             Toggle::InvertJetPitch => settings.invert_jet_pitch,
             Toggle::InvertHeliPitch => settings.invert_heli_pitch,
+            Toggle::HeliPedalsRoll => settings.heli_pedals_roll,
         }
     }
 
@@ -467,6 +470,7 @@ impl Toggle {
             Toggle::GamepadAimAssist => settings.gamepad.aim_assist ^= true,
             Toggle::InvertJetPitch => settings.invert_jet_pitch ^= true,
             Toggle::InvertHeliPitch => settings.invert_heli_pitch ^= true,
+            Toggle::HeliPedalsRoll => settings.heli_pedals_roll ^= true,
         }
     }
 }

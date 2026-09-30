@@ -8,21 +8,30 @@ lines are in the client log too) and prints, per pose and body part:
   hit zones as drawn and as the server poses them, and the same zone;
 - `shots`: of the shots fired at it, how many the ray met on the drawn skeleton when fired
   ("seen"), how many the tracer showed on a soldier, how many the server counted, and how many
-  the server and the drawn skeleton agree on (same zone, or both a miss).
+  the server and the drawn skeleton agree on (the same damage: head, body or limbs, or both a
+  miss; zones that overlap where the ray passes may swap).
 """
 
 import re
 import sys
 from collections import defaultdict
 
-SHOT = re.compile(r"hitreg shot (\d+): (\S+) part (\S+) seen (\S+) judged-here (\S+) aim-error (\S+) view_tick (\d+) clearance (\S+)")
-TRACER = re.compile(r"hitreg tracer: (?:hit \S+ \(material (\d+)\)|nothing hit)")
+SHOT = re.compile(r"hitreg shot (\d+): (\S+) part (\S+) seen (\S+) judged-here (\S+) aim-error (\S+) view_tick (\d+) clearance (\S+)(?: target \S+)?( occluded)?")
+TRACER = re.compile(r"hitreg tracer: (?:hit \S+ \(material (\d+)\)(?: zone (\S+))?|nothing hit)")
 FIRE = re.compile(r"hitreg fire: (\S+) (\S+) tick (\d+) view (\d+) rewind (\d+)")
 VERDICT = re.compile(r"hitreg verdict: \S+ (\S+) (hit \S+ zone (\S+)|miss)")
 GEO = re.compile(r"hitreg geo (\S+) (\S+): drawn (\d+)% judged (\d+)% same-zone (\d+)% stance (\d+)% stance-same (\d+)% clear (\d+)% n=(\d+) \[(.*)\]")
 ERR = re.compile(r"hitreg err (.+) (\S+): mean (\S+) cm max (\S+) cm")
 DUMMY = re.compile(r"dummy: (\S+) ")
 HUMAN_BODY = {"24", "25", "77", "23"}
+# The damage table column of each zone (BF2's soldier templates: head, body, limbs).
+COLUMN = {"head": "head", "spine2": "body", "spine3": "body", "left_upperleg": "body", "right_upperleg": "body"}
+
+
+def column(zone):
+    if zone in (None, "miss"):
+        return "miss"
+    return COLUMN.get(zone, "limbs")
 
 
 def lines(path):
@@ -40,7 +49,7 @@ def main():
         if m := SHOT.search(line):
             shots.append(m.groups())
         elif m := TRACER.search(line):
-            tracers.append(m.group(1))
+            tracers.append((m.group(1), m.group(2)))
         elif m := GEO.search(line):
             geo.append(m.groups())
         elif m := ERR.search(line):
@@ -86,17 +95,33 @@ def main():
     if shots:
         print(f"SHOTS ({len(shots)} fired, {len(ours)} server fire lines, {len(tracers)} tracer lines)")
         table = defaultdict(lambda: defaultdict(int))
-        for i, (index, label, part, seen, _judged, _aim, _tick, clearance) in enumerate(shots):
+        occluded = 0
+        for i, (index, label, part, seen, _judged, _aim, _tick, clearance, blocked) in enumerate(shots):
+            # The world was in the way of the point aimed at: says nothing about hit zones.
+            if blocked:
+                occluded += 1
+                continue
             server_zone = None
             if i < len(ours):
                 server_zone = verdicts.get(ours[i][1])
-            tracer = tracers[i] if i < len(tracers) else None
+            tracer, tracer_zone = tracers[i] if i < len(tracers) else (None, None)
             row = table[(label, part)]
             row["n"] += 1
             row["seen"] += seen != "miss"
             row["tracer"] += tracer in HUMAN_BODY
             row["server"] += server_zone not in (None, "miss")
-            row["agree"] += (server_zone or "miss") == seen
+            row["agree"] += column(server_zone or "miss") == column(seen)
+            row["same zone"] += (server_zone or "miss") == seen
+            # The tracer's predicted impact against the server's verdict.
+            # (Before the tracers knew hit zones they only told a soldier from the world.)
+            server_column = column(server_zone or "miss")
+            if tracer not in HUMAN_BODY:
+                tracer_agrees = server_column == "miss"
+            elif tracer_zone is None:
+                tracer_agrees = server_column != "miss"
+            else:
+                tracer_agrees = server_column == column(tracer_zone)
+            row["tracer agrees"] += tracer_agrees
             row["unknown"] += server_zone is None
         print(f"{'pose':<28} {'part':<10} {'n':>3} {'seen':>5} {'tracer':>6} {'server':>6} {'agree':>6}")
         totals = defaultdict(lambda: defaultdict(int))
@@ -110,8 +135,11 @@ def main():
             print(
                 f"TOTAL {kind:<4}: {row['n']} shots, seen {100 * row['seen'] / n:.0f}%, tracer on a soldier "
                 f"{100 * row['tracer'] / n:.0f}%, server hit {100 * row['server'] / n:.0f}%, "
-                f"server agrees with the drawn skeleton {100 * row['agree'] / n:.0f}%"
+                f"server agrees with the drawn skeleton {100 * row['agree'] / n:.0f}% (same zone {100 * row['same zone'] / n:.0f}%), "
+                f"with the tracer {100 * row['tracer agrees'] / n:.0f}%"
             )
+        if occluded:
+            print(f"({occluded} shots left out: the world was in the way)")
         if rewinds:
             print(f"rewind ticks: min {min(rewinds)} max {max(rewinds)} mean {sum(rewinds) / len(rewinds):.1f}")
 
