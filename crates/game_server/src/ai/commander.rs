@@ -1,6 +1,6 @@
 //! The AI commander. While no human holds a team's commander post, one of its bots takes it
-//! (and hands it over to a human who applies). It passes the team's plan
-//! ([`super::strategy`]) on as commander orders, which the squads' humans see, and calls in
+//! (a human who applies takes it over at once, see `commander::handle_commands`). It passes
+//! the team's plan ([`super::strategy`]) on as commander orders, which the squads' humans see, and calls in
 //! the team's assets (`game_shared::commander`): artillery on enemies gathered where the
 //! team has seen them, the UAV over the fight for the flag that matters most, a satellite
 //! scan while the team is fighting, and supply drops for hurt squads. Everything goes
@@ -42,57 +42,10 @@ const SUPPLY_HEALTH: f32 = 0.6;
 pub struct AiCommander {
     /// By squad: the order sent and when.
     sent: HashMap<(Team, u8), (OrderKind, usize, Option<Vec3>, f32)>,
-    /// Handing a post over to a human: the bot resigns at once, the human's application
-    /// follows once that took effect (`due`); until `until` no bot applies for that team.
-    handover: Vec<Handover>,
+    /// Who held each team's post at the last look: a new commander (a bot again after a
+    /// player, or another bot) passes the whole plan on afresh.
+    holders: [Option<Entity>; 2],
     timer: f32,
-}
-
-struct Handover {
-    team: Team,
-    resign: Option<CommanderCommand>,
-    apply: CommanderCommand,
-    due: f32,
-    until: f32,
-}
-
-/// A human applying for a post a bot holds: the bot resigns, and the human's application is
-/// made again after it.
-pub fn yield_to_humans(
-    time: Res<Time>,
-    mut state: ResMut<AiCommander>,
-    mut requests: MessageReader<CommanderCommand>,
-    players: Query<(Entity, &Team, &Player, Has<Commander>)>,
-) {
-    for request in requests.read() {
-        if request.request != CommanderRequest::Apply {
-            continue;
-        }
-        let Ok((_, team, player, _)) = players.get(request.player) else {
-            continue;
-        };
-        if player.is_bot {
-            continue;
-        }
-        let bot = players
-            .iter()
-            .find(|(_, t, p, commander)| *t == team && p.is_bot && *commander)
-            .map(|(entity, ..)| entity);
-        if let Some(bot) = bot {
-            info!("ai commander: {} takes over from the bot", player.name);
-            let now = time.elapsed_secs();
-            state.handover.push(Handover {
-                team: *team,
-                resign: Some(CommanderCommand {
-                    player: bot,
-                    request: CommanderRequest::Resign,
-                }),
-                apply: *request,
-                due: now + 0.5,
-                until: now + 2.0,
-            });
-        }
-    }
 }
 
 /// The AI commanders' turn: fill vacant posts, pass orders on, call in assets.
@@ -112,15 +65,6 @@ pub fn command(
     mut commands: MessageWriter<CommanderCommand>,
 ) {
     let now = time.elapsed_secs();
-    for handover in &mut state.handover {
-        if let Some(resign) = handover.resign.take() {
-            commands.write(resign);
-        } else if handover.due <= now {
-            commands.write(handover.apply);
-            handover.due = f32::MAX;
-        }
-    }
-    state.handover.retain(|h| h.until > now);
     state.timer -= time.delta_secs();
     if state.timer > 0.0 || map.areas.is_empty() {
         return;
@@ -130,11 +74,15 @@ pub fn command(
     for team in [Team::One, Team::Two] {
         let t = team_index(team).unwrap();
         let commander = players.iter().find(|p| *p.1 == team && p.3);
+        let holder = commander.map(|p| p.0);
+        if state.holders[t] != holder {
+            state.holders[t] = holder;
+            state.sent.retain(|(order_team, _), _| *order_team != team);
+        }
         let Some((bot, ..)) = commander else {
-            if state.handover.iter().any(|h| h.team == team) {
-                continue;
-            }
-            // A vacant post: a bot takes it, preferably one that leads no squad.
+            // A vacant post (at the start, or a player left it): a bot takes it, preferably
+            // one that leads no squad. A player who applies takes it back at once
+            // (`commander::handle_commands`); while one commands, this stays out of it.
             let candidate = players
                 .iter()
                 .filter(|p| *p.1 == team && p.5)

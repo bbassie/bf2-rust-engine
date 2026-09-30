@@ -149,7 +149,7 @@ fn rebuild_deploy_panel(
     let (Ok((me, &team)), Ok((panel, children))) = (local.single(), panel.single()) else {
         return;
     };
-    let commander = commanders.iter().find(|(_, _, t)| **t == team).map(|(e, p, _)| (e, p.name.clone()));
+    let commander = commanders.iter().find(|(_, _, t)| **t == team).map(|(e, p, _)| (e, p.name.clone(), p.is_bot));
     if buttons
         .iter()
         .any(|(i, b)| *i == Interaction::Pressed && matches!(b, PanelButton::Request(CommanderRequest::Mutiny)))
@@ -177,12 +177,17 @@ fn rebuild_deploy_panel(
                 "Nobody commands the team.".to_string(),
                 Some((PanelButton::Request(CommanderRequest::Apply), "commander:apply", "Apply for commander")),
             ),
-            Some((entity, _)) if *entity == me => (
+            Some((entity, ..)) if *entity == me => (
                 "You command the team: orders and assets on the commander screen (Caps Lock).".to_string(),
                 Some((PanelButton::Request(CommanderRequest::Resign), "commander:resign", "Resign")),
             ),
-            Some((_, name)) if voted.is_some() => (format!("{name} commands the team. You voted to remove them."), None),
-            Some((_, name)) => (
+            // A bot holds the post until a player wants it: applying takes it over at once.
+            Some((_, name, true)) => (
+                format!("{name} commands the team until a player takes over."),
+                Some((PanelButton::Request(CommanderRequest::Apply), "commander:apply", "Apply for commander")),
+            ),
+            Some((_, name, _)) if voted.is_some() => (format!("{name} commands the team. You voted to remove them."), None),
+            Some((_, name, _)) => (
                 format!("{name} commands the team."),
                 Some((PanelButton::Request(CommanderRequest::Mutiny), "commander:mutiny", "Vote to remove")),
             ),
@@ -194,7 +199,7 @@ fn rebuild_deploy_panel(
                 ..default()
             })
             .with_children(|row| {
-                if commander.as_ref().is_some_and(|(e, _)| *e == me) {
+                if commander.as_ref().is_some_and(|(e, ..)| *e == me) {
                     panel_button(row, PanelButton::OpenScreen, "commander:screen", "Commander screen");
                 }
                 if let Some((button, name, label)) = button {

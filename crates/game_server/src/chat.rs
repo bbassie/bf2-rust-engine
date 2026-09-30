@@ -56,6 +56,35 @@ pub fn announce(world: &mut World, text: impl Into<String>) {
     });
 }
 
+/// Short private notices to one player from within a system ("You took the driver seat from
+/// Bravo (bot)."), as private chat lines; bots have nobody to tell.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Notices<'w, 's> {
+    players: Query<'w, 's, &'static Player>,
+    clients: Query<'w, 's, &'static PlayerClient>,
+    host: Option<Res<'w, HostPlayer>>,
+    lines: MessageWriter<'w, ToClients<ChatLine>>,
+}
+
+impl Notices<'_, '_> {
+    /// A player's name ("?" if it has none).
+    pub fn name(&self, player: Entity) -> String {
+        self.players.get(player).map_or_else(|_| "?".to_string(), |p| p.name.clone())
+    }
+
+    pub fn tell(&mut self, player: Entity, text: impl Into<String>) {
+        let text = text.into();
+        let Some(target) = crate::player_client(player, &self.clients, self.host.as_deref()) else {
+            return;
+        };
+        info!("notice to {}: {text}", self.name(player));
+        self.lines.write(ToClients {
+            targets: SendTargets::Single(target),
+            message: ChatLine::private(text),
+        });
+    }
+}
+
 /// A server message to one player, line by line.
 pub fn tell(world: &mut World, player: Entity, text: &str) {
     let Some(target) = client_of(world, player) else {

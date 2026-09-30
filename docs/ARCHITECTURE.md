@@ -250,8 +250,13 @@ helicopter, sea, stationary) comes from the engine type.
 - **Server** (`game_server::vehicles`): spawners create vehicles for the team holding their
   control point and respawn them when they are gone or abandoned. The use button near an
   entry point takes the first free seat, F1..F8 change seats, use again gets out beside the
-  vehicle (out of an aircraft high up, with its speed, under a parachute; the jump key also
-  opens one when falling fast). The parachute (`soldier::parachute_glide`) catches the fall
+  vehicle. Players come before bots (`vehicles::boarding`): a player takes the driver's seat
+  even from a bot, which moves to a free seat (a gunner's first) or, with none left, gets out
+  beside the vehicle (out of an aircraft only landed, or high enough for its parachute; in
+  between the player can't get in), and a seat key for a bot's seat swaps with it; nobody
+  takes a player's seat. The bot's AI takes its new seat as its own. Out of an aircraft high
+  up, one gets out with its speed, under a parachute (the jump key also opens one when
+  falling fast). The parachute (`soldier::parachute_glide`) catches the fall
   over a moment (30 m/s²), then glides where the soldier looks (turning at most 70°/s):
   8 m/s forward sinking 4.5 m/s hands off, W dives (13 m/s, 7 m/s), S brakes (3 m/s,
   3.2 m/s), A/D slip sideways; 3 m above the ground it flares (at most 2 m/s down) and he
@@ -581,8 +586,12 @@ the highest obstacle per 16 m cell (BF2's aerial height map).
 
 The commander (`game_shared::commander`, `game_server::commander`, the client's `commander`
 module) orders squads and calls in the team's assets through `CommanderRequest`s; an AI
-commander (`game_server::ai::commander`) sends the same requests with its bot player. The
-assets follow BF2:
+commander (`game_server::ai::commander`) sends the same requests with its bot player. A bot
+holds the post while no player does: a player applying (the deploy screen's "Apply for
+commander") takes it over at once, with no vote against a bot, and the bot joins a squad again;
+the team's orders and asset recharge carry over, and the AI commander stays out of it while a
+player commands. When the post falls vacant (resigning, a mutiny, leaving, switching teams) a
+bot takes it again within 2 s and passes its plan on afresh. The assets follow BF2:
 
 - **Artillery**: the layout's artillery pieces are vehicles spawned by their spawners and
   tagged `AssetVehicle` (kind, team, asset number). A strike gives each living piece of the

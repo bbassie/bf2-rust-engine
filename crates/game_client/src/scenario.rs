@@ -140,6 +140,18 @@ pub enum Step {
     InFrontOf(String, f32),
     /// In a vehicle: moves to this seat (1-based), like pressing F1..F8.
     Seat(u8),
+    /// Puts the nearest living teammate bots on foot straight into a seat (1-based; 0: every
+    /// free seat) of the nearest vehicle of this template, as getting in would, e.g.
+    /// `SeatBot("jep_vodnik", 1)` for a bot driver (singleplayer and listen server only).
+    /// Logs whom; takes a frame.
+    SeatBot(String, u8),
+    /// Lifts the nearest vehicle of this template this many meters (still, level as it
+    /// stands), e.g. a helicopter to hover out of reach of a parachute (singleplayer and
+    /// listen server only).
+    LiftVehicle(String, f32),
+    /// Logs who sits in which seat of the nearest vehicle of this template:
+    /// `seats of jep_vodnik: 1 Player, 2 Bravo (bot), 3 free` (bots' names end in "(bot)").
+    LogSeats(String),
     /// In a vehicle: look direction relative to its heading (yaw, pitch in degrees).
     VehicleLook(f32, f32),
     /// Logs our vehicle's position, speed and orientation, and adds it to the report.
@@ -307,6 +319,8 @@ pub enum Step {
     /// Fails the scenario as soon as a log line containing the text appears from this step
     /// on, e.g. `ForbidLog("ERROR ")` or `ForbidLog("prediction correction")`.
     ForbidLog(String),
+    /// Ends a `ForbidLog` of this text: from here on it may appear.
+    AllowLog(String),
     /// Hit registration (see `hitreg`): every bot becomes a target dummy that takes this pose
     /// in front of us (`game_server::dummy`: `stand`, `crouch`, `prone`, `strafe`, `reload`,
     /// ...; `""` lets them be bots again). Listen server only.
@@ -723,6 +737,10 @@ struct Soldiers<'w, 's> {
         ),
     >,
     squad_tactics: Option<Res<'w, game_server::ai::squad::SquadTactics>>,
+    /// Who sits where and soldiers' hitboxes, for `SeatBot` and `LogSeats`.
+    crews: Query<'w, 's, (&'static Seated, &'static ControlledBy)>,
+    players: Query<'w, 's, &'static game_shared::protocol::Player>,
+    hitboxes: Query<'w, 's, &'static game_shared::soldier::Hitbox>,
     /// Rush's charges and the mode, for `NearCharge`.
     charges: Query<'w, 's, &'static game_shared::modes::Charge>,
     modes: Query<'w, 's, &'static game_shared::modes::ModeState>,
@@ -827,6 +845,9 @@ fn run_scenario(
         spatial,
         bots,
         squad_tactics,
+        crews,
+        players,
+        hitboxes,
         charges,
         modes,
     } = soldiers;
@@ -1129,6 +1150,88 @@ fn run_scenario(
             }
             Step::Seat(seat) => {
                 vehicles.seat.0 = *seat;
+                Progress::Done
+            }
+            Step::SeatBot(template, seat) => {
+                // The seats taken show once the commands are applied: one frame.
+                if runner.frames > 0 {
+                    Progress::Done
+                } else {
+                    runner.frames = 1;
+                    let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                    let my_team = local_team.single().ok().copied();
+                    match nearest_vehicle(&vehicles, template, origin).and_then(|(e, view)| Some((e, view, vehicles.vehicles.get(e).ok()?.2))) {
+                        Some((vehicle, view, data)) => {
+                            let taken: Vec<u8> = crews.iter().filter(|(s, _)| s.vehicle == vehicle).map(|(s, _)| s.seat).collect();
+                            let count = data.0.desc.seats.len() as u8;
+                            let wanted: Vec<u8> = match *seat {
+                                0 => (0..count).filter(|s| !taken.contains(s)).collect(),
+                                seat if seat <= count && !taken.contains(&(seat - 1)) => vec![seat - 1],
+                                _ => Vec::new(),
+                            };
+                            let at = view.transform.translation;
+                            let mut candidates: Vec<(Entity, String, f32)> = bots
+                                .iter()
+                                .filter(|(.., team)| Some(**team) == my_team)
+                                .filter_map(|(_, _, player, controls, ..)| {
+                                    let soldier = controls?.0;
+                                    let (_, _, motion, health) = others.get(soldier).ok()?;
+                                    (health.current > 0.0).then(|| (soldier, player.name.clone(), motion.position.distance(at)))
+                                })
+                                .collect();
+                            // Nearest last, to pop.
+                            candidates.sort_by(|a, b| b.2.total_cmp(&a.2));
+                            for seat in wanted {
+                                let Some((bot, name, _)) = candidates.pop() else {
+                                    warn!("scenario: no teammate bot on foot for {template} seat {}", seat + 1);
+                                    break;
+                                };
+                                let Ok(hitbox) = hitboxes.get(bot) else { continue };
+                                let open = data.0.desc.seats[seat as usize].open;
+                                game_server::vehicles::seat_soldier(&mut commands, bot, hitbox, vehicle, seat, open);
+                                info!("scenario: seated {name} in {template} seat {}", seat + 1);
+                            }
+                        }
+                        None => warn!("scenario: no {template} to seat bots in"),
+                    }
+                    Progress::Waiting
+                }
+            }
+            Step::LiftVehicle(template, meters) => {
+                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                match nearest_vehicle(&vehicles, template, origin).and_then(|(e, _)| Some((e, vehicles.motions.get(e).ok()?))) {
+                    Some((vehicle, motion)) => {
+                        use avian3d::prelude::{AngularVelocity, LinearVelocity, Position};
+                        let position = motion.position + Vec3::Y * *meters;
+                        commands.entity(vehicle).insert((Position(position), LinearVelocity(Vec3::ZERO), AngularVelocity(Vec3::ZERO)));
+                        // Not a crash.
+                        commands.entity(vehicle).remove::<game_server::vehicles::LastVelocity>();
+                        info!("scenario: lifted {template} to {position:.1}");
+                    }
+                    None => warn!("scenario: no {template} to lift"),
+                }
+                Progress::Done
+            }
+            Step::LogSeats(template) => {
+                let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                let line = match nearest_vehicle(&vehicles, template, origin).and_then(|(e, _)| Some((e, vehicles.vehicles.get(e).ok()?.2))) {
+                    Some((vehicle, data)) => {
+                        let seats: Vec<String> = (0..data.0.desc.seats.len() as u8)
+                            .map(|seat| {
+                                let who = crews
+                                    .iter()
+                                    .find(|(s, _)| s.vehicle == vehicle && s.seat == seat)
+                                    .and_then(|(_, c)| players.get(c.0).ok())
+                                    .map_or("free".to_string(), |p| p.name.clone());
+                                format!("{} {who}", seat + 1)
+                            })
+                            .collect();
+                        format!("seats of {template}: {}", seats.join(", "))
+                    }
+                    None => format!("seats of {template}: no such vehicle"),
+                };
+                info!("scenario: {line}");
+                writeln!(runner.report, "{line}").ok();
                 Progress::Done
             }
             Step::VehicleLook(yaw, pitch) => {
@@ -2001,6 +2104,10 @@ fn run_scenario(
                 runner.forbidden.push((text.clone(), from));
                 Progress::Done
             }
+            Step::AllowLog(text) => {
+                runner.forbidden.retain(|(forbidden, _)| forbidden != text);
+                Progress::Done
+            }
             Step::Dummy(pose) => {
                 match dummies.as_mut() {
                     Some(control) => control.pose = (!pose.is_empty()).then(|| pose.clone()),
@@ -2124,6 +2231,16 @@ fn rate_report(label: &str, samples: &[(f32, f32, f32)], hold: f32) -> String {
         describe("camera", |s| s.2),
         curve.join(" ")
     )
+}
+
+/// The vehicle of this template nearest to a point.
+fn nearest_vehicle<'a>(vehicles: &'a Vehicles, template: &str, origin: Vec3) -> Option<(Entity, &'a VehicleView)> {
+    vehicles
+        .all
+        .iter()
+        .filter(|(_, v, _)| v.template == template)
+        .min_by(|a, b| a.2.transform.translation.distance(origin).total_cmp(&b.2.transform.translation.distance(origin)))
+        .map(|(entity, _, view)| (entity, view))
 }
 
 fn done_if(done: bool) -> Progress {

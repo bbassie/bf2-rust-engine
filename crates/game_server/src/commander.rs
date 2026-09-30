@@ -52,6 +52,7 @@ use crate::{
     destruction::{Materials, ObjectHealth},
     limits::{Rate, RateLimiter},
     modes::RoundReset,
+    chat::Notices,
     player_client,
     radio::Spot,
     sender_player,
@@ -489,6 +490,7 @@ fn handle_commands(
     mut state: ResMut<CommanderState>,
     mut radio: MessageWriter<ToClients<RadioMessage>>,
     mut spots: MessageWriter<Spot>,
+    mut notices: Notices,
 ) {
     // What this pass changed that the queries only see once its commands are applied: who
     // holds each team's post, and the order entity of each squad (`None`: cancelled).
@@ -512,13 +514,24 @@ fn handle_commands(
             .or_insert_with(|| players.iter().find(|p| *p.2 == team && p.4).map(|p| p.0));
         let is_commander = commander == Some(player);
         match request {
-            CommanderRequest::Apply if commander.is_none() => {
+            // A player applying takes the post from a bot at once (no vote against a bot);
+            // the bot is a soldier again (it joins a squad, see `squads`). The team's orders
+            // and asset recharge carry over: they belong to the team, not the commander.
+            CommanderRequest::Apply
+                if commander.is_none()
+                    || (!info.is_bot && commander.is_some_and(|c| players.get(c).is_ok_and(|p| p.1.is_bot))) =>
+            {
+                if let Some(bot) = commander {
+                    commands.entity(bot).remove::<Commander>();
+                    info!("{} takes {team:?}'s commander post from bot {}", info.name, notices.name(bot));
+                }
                 // Like BF2, the commander leads no squad.
                 commands.entity(player).insert(Commander).remove::<SquadMember>();
                 posts.insert(team, Some(player));
                 team_state.mutiny.clear();
                 info!("{} is now {team:?}'s commander", info.name);
                 say(&mut radio, player, position, RadioCommand::NewCommander, None);
+                notices.tell(player, "You are now the commander: orders and assets on the commander screen (Caps Lock).");
             }
             CommanderRequest::Resign if is_commander => {
                 commands.entity(player).remove::<Commander>();
@@ -1369,6 +1382,7 @@ mod request_tests {
         let mut app = App::new();
         app.add_message::<CommanderCommand>()
             .add_message::<ToClients<RadioMessage>>()
+            .add_message::<ToClients<game_shared::chat::ChatLine>>()
             .add_message::<Spot>()
             .insert_resource(game_shared::level::test_range())
             .init_resource::<CommanderAssets>()
@@ -1447,6 +1461,56 @@ mod request_tests {
         assert!(app.world().entity(a).contains::<Commander>());
         assert!(!app.world().entity(b).contains::<Commander>());
         assert!(app.world().entity(other_team).contains::<Commander>(), "one per team");
+    }
+
+    fn bot(app: &mut App, name: &str, team: Team) -> Entity {
+        let bot = player(app, name, team);
+        app.world_mut().entity_mut(bot).insert(Player {
+            name: name.into(),
+            is_bot: true,
+        });
+        bot
+    }
+
+    #[test]
+    fn a_player_takes_the_post_from_a_bot_at_once_keeping_the_recharge() {
+        let mut app = app();
+        let commander = bot(&mut app, "Bravo", Team::One);
+        app.world_mut().entity_mut(commander).insert(Commander);
+        let recharge = [12.0, 0.0, 30.0, 5.0];
+        app.world_mut().resource_mut::<CommanderState>().teams[0].recharge = recharge;
+        // Another bot applying changes nothing.
+        let other_bot = bot(&mut app, "Charlie", Team::One);
+        send(&mut app, other_bot, CommanderRequest::Apply);
+        app.update();
+        assert!(app.world().entity(commander).contains::<Commander>());
+        assert!(!app.world().entity(other_bot).contains::<Commander>());
+
+        // The bot's order for squad 2 carries over.
+        let member = bot(&mut app, "Delta", Team::One);
+        app.world_mut().entity_mut(member).insert(SquadMember { squad: 2, leader: true });
+        send(&mut app, commander, CommanderRequest::Order { squad: 2, kind: OrderKind::Attack, target: Vec3::new(10.0, 0.0, 0.0) });
+        app.update();
+        assert_eq!(count::<SquadOrder>(&mut app), 1);
+
+        let human = player(&mut app, "Human", Team::One);
+        app.world_mut().entity_mut(human).insert(SquadMember { squad: 1, leader: true });
+        send(&mut app, human, CommanderRequest::Apply);
+        app.update();
+        assert_eq!(count::<SquadOrder>(&mut app), 1, "the bot's orders stay");
+        assert!(app.world().entity(human).contains::<Commander>(), "no vote against a bot");
+        assert!(!app.world().entity(human).contains::<SquadMember>(), "the commander leads no squad");
+        assert!(!app.world().entity(commander).contains::<Commander>(), "the bot is a soldier again");
+        assert_eq!(app.world().resource::<CommanderState>().teams[0].recharge, recharge, "recharge carries over");
+
+        // Nobody takes the post from a player by applying.
+        let second = player(&mut app, "Second", Team::One);
+        send(&mut app, second, CommanderRequest::Apply);
+        send(&mut app, commander, CommanderRequest::Apply);
+        app.update();
+        assert!(app.world().entity(human).contains::<Commander>());
+        assert!(!app.world().entity(second).contains::<Commander>());
+        assert!(!app.world().entity(commander).contains::<Commander>());
     }
 
     #[test]

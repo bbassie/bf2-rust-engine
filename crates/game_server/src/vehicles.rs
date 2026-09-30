@@ -26,7 +26,7 @@ use game_shared::{
     weapons::spread_direction,
 };
 
-use crate::{AppliedInput, InputBuffer, ServerSimSystems, combat, conquest::ControlPointRules};
+use crate::{AppliedInput, InputBuffer, ServerSimSystems, chat::Notices, combat, conquest::ControlPointRules};
 
 pub struct VehiclesPlugin;
 
@@ -318,8 +318,97 @@ fn occupancy<'a>(seated: impl Iterator<Item = (Entity, &'a Seated)>) -> HashMap<
     map
 }
 
+/// Who sits in a seat, as far as taking it goes: players take seats from bots, never from
+/// other players.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Occupant {
+    Free,
+    Bot,
+    Player,
+}
+
+/// How a soldier getting in takes his seat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Boarding {
+    /// A free seat.
+    Free(u8),
+    /// A bot's seat; the bot moves on to a free one.
+    Displace { seat: u8, to: u8 },
+    /// A bot's seat; the bot gets out (there is no free seat for it).
+    Evict(u8),
+}
+
+/// The seat a soldier getting in takes. Bots take the first free seat. Players take the
+/// driver's seat even from a bot (as they would an empty vehicle's), else the first free seat,
+/// else a bot's; the bot moves on to a free seat (a gunner's first, so a driver stays useful)
+/// or, with none left, gets out.
+fn boarding(seats: &[Occupant], gunner: impl Fn(u8) -> bool, player: bool) -> Option<Boarding> {
+    let free = |seat: &u8| seats[*seat as usize] == Occupant::Free;
+    let all = 0..seats.len() as u8;
+    let first_free = all.clone().find(free);
+    if !player {
+        return first_free.map(Boarding::Free);
+    }
+    let seat = match seats.first()? {
+        Occupant::Free => return Some(Boarding::Free(0)),
+        Occupant::Bot => 0,
+        Occupant::Player => match first_free {
+            Some(seat) => return Some(Boarding::Free(seat)),
+            None => all.clone().find(|s| seats[*s as usize] == Occupant::Bot)?,
+        },
+    };
+    let to = all.filter(free).find(|s| gunner(*s)).or(first_free);
+    Some(match to {
+        Some(to) => Boarding::Displace { seat, to },
+        None => Boarding::Evict(seat),
+    })
+}
+
+/// An aircraft's origin this close above the ground (m) has landed (the bots' pilots use the
+/// same, `bots::vehicle::LANDED_HEIGHT`).
+const LANDED_HEIGHT: f32 = 3.5;
+/// Beyond [`BAIL_OUT_HEIGHT`], this much more (m) before a bot is put out of an aircraft
+/// under its parachute.
+const EJECT_MARGIN: f32 = 4.0;
+
+/// Whether a bot may be put out of a vehicle whose origin is `height` m above the ground to
+/// make room for a player: always out of land vehicles and boats; out of aircraft only landed
+/// or high enough up for his parachute to open, never in between.
+fn may_evict(flies: bool, height: f32) -> bool {
+    !flies || height < LANDED_HEIGHT || height > BAIL_OUT_HEIGHT + EJECT_MARGIN
+}
+
+/// Seats with guns of their own (not just countermeasures).
+fn gunner_seat(desc: &game_data::VehicleDesc, seat: u8) -> bool {
+    desc.weapons.iter().any(|w| w.seat == seat as u32 && w.countermeasure.is_none())
+}
+
+/// What a seat is called in notices: "the driver seat", "the gunner seat", "seat 3".
+fn seat_name(desc: &game_data::VehicleDesc, seat: u8) -> String {
+    match seat {
+        0 if desc.category.flies() => "the pilot seat".into(),
+        0 if desc.category == VehicleCategory::Stationary => "the gun".into(),
+        0 => "the driver seat".into(),
+        seat if gunner_seat(desc, seat) => "the gunner seat".into(),
+        seat => format!("seat {}", seat + 1),
+    }
+}
+
+/// A soldier getting out at `exit`, with (some of) the vehicle's speed; bailing out of an
+/// aircraft high up opens his parachute.
+fn step_out(motion: &mut SoldierMotion, exit: Vec3, vehicle: Entity, velocity: Vec3, flies: bool, spatial: &SpatialQuery) {
+    motion.position = exit;
+    // Out of an aircraft, with its speed: anything slower is run over by it.
+    motion.velocity = velocity * if flies { 1.0 } else { 0.5 };
+    motion.stance = Stance::Standing;
+    motion.grounded = false;
+    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([vehicle]);
+    let ground = spatial.cast_ray(exit + Vec3::Y * 0.5, Dir3::NEG_Y, 2000.0, true, &filter);
+    motion.parachute = flies && ground.is_none_or(|hit| hit.distance > BAIL_OUT_HEIGHT);
+}
+
 /// Seated soldiers: their input drives the vehicle; the use button gets out, the seat keys
-/// change seats.
+/// change seats. A player asking for a bot's seat swaps seats with it.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn ride_vehicles(
     mut commands: Commands,
@@ -339,14 +428,21 @@ fn ride_vehicles(
         With<Soldier>,
     >,
     mut buffers: Query<&mut InputBuffer>,
-    mut vehicles: Query<(&VehicleData, &VehicleState, &Position, &Rotation, &LinearVelocity, &mut SeatInputs)>,
+    mut vehicles: Query<(&Vehicle, &VehicleData, &VehicleState, &Position, &Rotation, &LinearVelocity, &mut SeatInputs)>,
     bots: Query<(), With<crate::bots::BotBrain>>,
+    mut notices: Notices,
 ) {
     for (.., mut inputs) in &mut vehicles {
         inputs.0.iter_mut().for_each(|seat| *seat = None);
     }
     let mut taken = occupancy(soldiers.iter().map(|(e, _, s, ..)| (e, s)));
+    // Seated bots' soldiers and their players, and bots a player swapped seats with this tick
+    // (their `Seated` changes after the loop; until then this is where they sit).
+    let bot_soldiers: HashMap<Entity, Entity> =
+        soldiers.iter().filter(|(_, c, ..)| bots.contains(c.0)).map(|(e, c, ..)| (e, c.0)).collect();
+    let mut swapped: HashMap<Entity, (Entity, u8)> = HashMap::new();
     for (soldier, controlled_by, seated, mut motion, mut ack, mut applied, latch, hitbox) in &mut soldiers {
+        let seat = swapped.get(&soldier).map_or(seated.seat, |(_, seat)| *seat);
         let Ok(mut buffer) = buffers.get_mut(controlled_by.0) else {
             continue;
         };
@@ -379,10 +475,11 @@ fn ride_vehicles(
                 false
             }
         };
-        let Ok((data, state, position, rotation, velocity, mut inputs)) = vehicles.get_mut(seated.vehicle) else {
+        let Ok((vehicle, data, state, position, rotation, velocity, mut inputs)) = vehicles.get_mut(seated.vehicle) else {
             // The vehicle is gone.
             commands.entity(soldier).remove::<Seated>();
             set_hittable(&mut commands, hitbox, true);
+            swapped.remove(&soldier);
             continue;
         };
         let model = &data.0;
@@ -390,48 +487,92 @@ fn ride_vehicles(
 
         if use_pressed {
             let transforms = model.part_transforms(&state.joints);
-            if let Some(exit) = exit_position(model, &transforms, vehicle_transform, seated.seat as usize, &spatial, &shapes) {
-                motion.position = exit;
-                // Out of an aircraft, with its speed: anything slower is run over by it.
-                motion.velocity = velocity.0 * if model.desc.category.flies() { 1.0 } else { 0.5 };
-                motion.stance = Stance::Standing;
-                motion.grounded = false;
-                // Bailing out of an aircraft high up opens a parachute.
-                let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle])
-                    .with_excluded_entities([seated.vehicle]);
-                let ground = spatial.cast_ray(exit + Vec3::Y * 0.5, Dir3::NEG_Y, 2000.0, true, &filter);
-                motion.parachute =
-                    model.desc.category.flies() && ground.is_none_or(|hit| hit.distance > BAIL_OUT_HEIGHT);
+            if let Some(exit) = exit_position(model, &transforms, vehicle_transform, seat as usize, &spatial, &shapes) {
+                step_out(&mut motion, exit, seated.vehicle, velocity.0, model.desc.category.flies(), &spatial);
                 commands.entity(soldier).remove::<Seated>();
                 set_hittable(&mut commands, hitbox, true);
+                swapped.remove(&soldier);
                 if let Some(seats) = taken.get_mut(&seated.vehicle) {
-                    seats.remove(&seated.seat);
+                    seats.remove(&seat);
                 }
                 continue;
             }
         }
 
         let wanted = input.seat.wrapping_sub(1);
-        if input.seat > 0
-            && wanted != seated.seat
-            && (wanted as usize) < model.desc.seats.len()
-            && !taken.get(&seated.vehicle).is_some_and(|s| s.contains_key(&wanted))
-        {
-            let seats = taken.entry(seated.vehicle).or_default();
-            seats.remove(&seated.seat);
-            seats.insert(wanted, soldier);
-            commands.entity(soldier).insert(Seated {
-                vehicle: seated.vehicle,
-                seat: wanted,
-            });
-            set_hittable(&mut commands, hitbox, model.desc.seats[wanted as usize].open);
-            continue;
+        if input.seat > 0 && wanted != seat && (wanted as usize) < model.desc.seats.len() {
+            let occupant = taken.get(&seated.vehicle).and_then(|s| s.get(&wanted)).copied();
+            match occupant {
+                None => {
+                    let seats = taken.entry(seated.vehicle).or_default();
+                    seats.remove(&seat);
+                    seats.insert(wanted, soldier);
+                    commands.entity(soldier).insert(Seated {
+                        vehicle: seated.vehicle,
+                        seat: wanted,
+                    });
+                    set_hittable(&mut commands, hitbox, model.desc.seats[wanted as usize].open);
+                    swapped.remove(&soldier);
+                    continue;
+                }
+                // A player asking for a bot's seat swaps with it; nobody takes a player's.
+                Some(other) if !bots.contains(controlled_by.0) && bot_soldiers.contains_key(&other) => {
+                    let seats = taken.entry(seated.vehicle).or_default();
+                    seats.insert(wanted, soldier);
+                    seats.insert(seat, other);
+                    commands.entity(soldier).insert(Seated {
+                        vehicle: seated.vehicle,
+                        seat: wanted,
+                    });
+                    set_hittable(&mut commands, hitbox, model.desc.seats[wanted as usize].open);
+                    swapped.insert(other, (seated.vehicle, seat));
+                    // Neither drives from the other's seat this tick.
+                    for slot in [wanted, seat] {
+                        if let Some(input) = inputs.0.get_mut(slot as usize) {
+                            *input = None;
+                        }
+                    }
+                    let bot = notices.name(bot_soldiers[&other]);
+                    info!(
+                        "seats: {} swapped seats with {bot} in {}: {} <-> {}",
+                        notices.name(controlled_by.0),
+                        vehicle.template,
+                        seat,
+                        wanted
+                    );
+                    notices.tell(
+                        controlled_by.0,
+                        format!("You took {} from {bot}, who moved to {}.", seat_name(&model.desc, wanted), seat_name(&model.desc, seat)),
+                    );
+                    continue;
+                }
+                // Taken by a player: stay put until it's free.
+                Some(_) => {}
+            }
         }
 
-        if let Some(slot) = inputs.0.get_mut(seated.seat as usize) {
+        if let Some(slot) = inputs.0.get_mut(seat as usize) {
             *slot = Some(input);
         }
     }
+    // Bots a player swapped seats with move to his old seat.
+    for (bot, (vehicle, seat)) in swapped {
+        commands.entity(bot).insert(Seated { vehicle, seat });
+        let open = vehicles
+            .get(vehicle)
+            .ok()
+            .and_then(|(_, data, ..)| data.0.desc.seats.get(seat as usize).map(|s| s.open))
+            .unwrap_or(true);
+        if let Ok((.., hitbox)) = soldiers.get(bot) {
+            set_hittable(&mut commands, hitbox, open);
+        }
+    }
+}
+
+/// Puts a soldier straight into a seat, as getting in there would (the scenarios' `SeatBot`).
+pub fn seat_soldier(commands: &mut Commands, soldier: Entity, hitbox: &Hitbox, vehicle: Entity, seat: u8, open: bool) {
+    commands.entity(soldier).insert(Seated { vehicle, seat });
+    set_hittable(commands, hitbox, open);
 }
 
 /// Soldiers inside a closed hull can't be shot until the hull can be (vehicle damage).
@@ -479,19 +620,35 @@ fn exit_position(
     })
 }
 
-/// Soldiers on foot: the use button near an entry point gets into the first free seat.
-#[allow(clippy::type_complexity)]
+/// Soldiers on foot: the use button near an entry point gets into the first free seat; a
+/// player takes a bot's seat (the driver's first), see [`boarding`].
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn enter_vehicles(
     mut commands: Commands,
+    spatial: SpatialQuery,
+    shapes: Res<SoldierShapes>,
     mut soldiers: Query<
         (Entity, &ControlledBy, &SoldierMotion, &AppliedInput, Option<&mut UseLatch>, &Hitbox),
         (With<Soldier>, Without<Seated>),
     >,
-    seated: Query<(Entity, &Seated, &ControlledBy)>,
-    vehicles: Query<(Entity, &VehicleData, &Position, &Rotation, &VehicleHealth)>,
+    mut seated: Query<(Entity, &Seated, &ControlledBy, &Hitbox, &mut SoldierMotion), With<Soldier>>,
+    mut vehicles: Query<(
+        Entity,
+        &Vehicle,
+        &VehicleData,
+        &VehicleState,
+        (&Position, &Rotation, &LinearVelocity),
+        &VehicleHealth,
+        &mut SeatInputs,
+    )>,
     teams: Query<&Team>,
+    bots: Query<(), With<crate::bots::BotBrain>>,
+    mut notices: Notices,
 ) {
-    let mut taken = occupancy(seated.iter().map(|(e, s, _)| (e, s)));
+    let mut taken = occupancy(seated.iter().map(|(e, s, ..)| (e, s)));
+    // Bots' soldiers in (or getting into) seats, and their players.
+    let mut bot_soldiers: HashMap<Entity, Entity> =
+        seated.iter().filter(|(_, _, c, ..)| bots.contains(c.0)).map(|(e, _, c, ..)| (e, c.0)).collect();
     for (soldier, controlled_by, motion, applied, latch, hitbox) in &mut soldiers {
         let pressed = applied.0.pressed(Buttons::USE);
         let use_pressed = match latch {
@@ -512,8 +669,8 @@ fn enter_vehicles(
         let chest = motion.position + Vec3::Y * 1.0;
         let nearest = vehicles
             .iter()
-            .filter(|(.., health)| !health.wrecked())
-            .filter_map(|(entity, data, position, rotation, _)| {
+            .filter(|(.., health, _)| !health.wrecked())
+            .filter_map(|(entity, _, data, _, (position, rotation, _), ..)| {
                 let transform = Transform::from_translation(position.0).with_rotation(rotation.0);
                 let entries = &data.0.desc.entry_points;
                 let distance = if entries.is_empty() {
@@ -527,24 +684,95 @@ fn enter_vehicles(
                 (distance <= 0.5).then_some((entity, data, distance))
             })
             .min_by(|a, b| a.2.total_cmp(&b.2));
-        let Some((vehicle, data, _)) = nearest else {
+        let Some((vehicle, ..)) = nearest else {
             continue;
         };
         // Enemies can't get into a vehicle our team is using, and vice versa.
         let enemy_inside = seated
             .iter()
-            .filter(|(_, s, _)| s.vehicle == vehicle)
-            .any(|(_, _, c)| teams.get(c.0).is_ok_and(|t| *t != team));
+            .filter(|(_, s, ..)| s.vehicle == vehicle)
+            .any(|(_, _, c, ..)| teams.get(c.0).is_ok_and(|t| *t != team));
         if enemy_inside {
             continue;
         }
-        let seats = taken.entry(vehicle).or_default();
-        let Some(seat) = (0..data.0.desc.seats.len() as u8).find(|s| !seats.contains_key(s)) else {
+        let Ok((_, kind, data, state, (position, rotation, velocity), _, mut inputs)) = vehicles.get_mut(vehicle) else {
             continue;
         };
+        let model = &data.0;
+        let player = !bots.contains(controlled_by.0);
+        let seats = taken.entry(vehicle).or_default();
+        let occupants: Vec<Occupant> = (0..model.desc.seats.len() as u8)
+            .map(|seat| match seats.get(&seat) {
+                None => Occupant::Free,
+                Some(other) if bot_soldiers.contains_key(other) => Occupant::Bot,
+                Some(_) => Occupant::Player,
+            })
+            .collect();
+        let Some(plan) = boarding(&occupants, |seat| gunner_seat(&model.desc, seat), player) else {
+            continue;
+        };
+        let seat = match plan {
+            Boarding::Free(seat) => seat,
+            Boarding::Displace { seat, to } => {
+                let bot = seats[&seat];
+                seats.insert(to, bot);
+                commands.entity(bot).insert(Seated { vehicle, seat: to });
+                if let Ok((.., bot_hitbox, _)) = seated.get(bot) {
+                    set_hittable(&mut commands, bot_hitbox, model.desc.seats[to as usize].open);
+                }
+                let name = notices.name(bot_soldiers[&bot]);
+                info!(
+                    "seats: {} took seat {seat} of {} from bot {name}, who moved to seat {to}",
+                    notices.name(controlled_by.0),
+                    kind.template
+                );
+                notices.tell(controlled_by.0, format!("You took {} from {name}.", seat_name(&model.desc, seat)));
+                seat
+            }
+            Boarding::Evict(seat) => {
+                let bot = seats[&seat];
+                let name = notices.name(bot_soldiers[&bot]);
+                let flies = model.desc.category.flies();
+                // Out of an aircraft only on the ground or under a parachute.
+                let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([vehicle]);
+                let height = spatial.cast_ray(position.0, Dir3::NEG_Y, 2000.0, true, &filter).map_or(f32::MAX, |hit| hit.distance);
+                let transform = Transform::from_translation(position.0).with_rotation(rotation.0);
+                let exit = may_evict(flies, height)
+                    .then(|| exit_position(model, &model.part_transforms(&state.joints), transform, seat as usize, &spatial, &shapes))
+                    .flatten();
+                let (Some(exit), Ok((.., bot_hitbox, mut bot_motion))) = (exit, seated.get_mut(bot)) else {
+                    info!(
+                        "seats: {} can't get into {}: bot {name} can't get out here ({height:.1} m up)",
+                        notices.name(controlled_by.0),
+                        kind.template
+                    );
+                    notices.tell(controlled_by.0, format!("No room: {name} can't get out here."));
+                    continue;
+                };
+                step_out(&mut bot_motion, exit, vehicle, velocity.0, flies, &spatial);
+                commands.entity(bot).remove::<Seated>();
+                set_hittable(&mut commands, bot_hitbox, true);
+                seats.remove(&seat);
+                info!(
+                    "seats: {} took seat {seat} of {} from bot {name}, who got out at {exit:.1}{}",
+                    notices.name(controlled_by.0),
+                    kind.template,
+                    if bot_motion.parachute { " under a parachute" } else { "" }
+                );
+                notices.tell(controlled_by.0, format!("You took {} from {name}, who got out.", seat_name(&model.desc, seat)));
+                seat
+            }
+        };
+        // What the bot put in this tick doesn't drive or fire for the new occupant.
+        if let Some(input) = inputs.0.get_mut(seat as usize) {
+            *input = None;
+        }
         seats.insert(seat, soldier);
+        if !player {
+            bot_soldiers.insert(soldier, controlled_by.0);
+        }
         commands.entity(soldier).insert(Seated { vehicle, seat });
-        set_hittable(&mut commands, hitbox, data.0.desc.seats[seat as usize].open);
+        set_hittable(&mut commands, hitbox, model.desc.seats[seat as usize].open);
     }
 }
 
@@ -902,5 +1130,51 @@ fn wreck_vehicles(
             }
         }
         inputs.0.iter_mut().for_each(|seat| *seat = None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Occupant::{Bot, Free, Player};
+
+    /// A jeep: driver, gunner (seat 1 has the gun), passenger.
+    fn jeep_gunner(seat: u8) -> bool {
+        seat == 1
+    }
+
+    #[test]
+    fn bots_take_the_first_free_seat_and_never_displace() {
+        assert_eq!(boarding(&[Bot, Free, Free], jeep_gunner, false), Some(Boarding::Free(1)));
+        assert_eq!(boarding(&[Bot, Bot, Bot], jeep_gunner, false), None);
+        assert_eq!(boarding(&[Player, Free, Free], jeep_gunner, false), Some(Boarding::Free(1)));
+    }
+
+    #[test]
+    fn a_player_takes_the_driver_seat_from_a_bot_who_moves_to_the_gun() {
+        assert_eq!(boarding(&[Free, Bot, Free], jeep_gunner, true), Some(Boarding::Free(0)));
+        assert_eq!(boarding(&[Bot, Free, Free], jeep_gunner, true), Some(Boarding::Displace { seat: 0, to: 1 }));
+        // The gun is manned: the driver moves to the passenger seat.
+        assert_eq!(boarding(&[Bot, Bot, Free], jeep_gunner, true), Some(Boarding::Displace { seat: 0, to: 2 }));
+        // Full of bots: the driver gets out.
+        assert_eq!(boarding(&[Bot, Bot, Bot], jeep_gunner, true), Some(Boarding::Evict(0)));
+    }
+
+    #[test]
+    fn players_are_never_displaced() {
+        assert_eq!(boarding(&[Player, Bot, Free], jeep_gunner, true), Some(Boarding::Free(2)));
+        // A player drives, the rest are bots: a bot's seat, and that bot gets out.
+        assert_eq!(boarding(&[Player, Bot, Bot], jeep_gunner, true), Some(Boarding::Evict(1)));
+        assert_eq!(boarding(&[Player, Player, Player], jeep_gunner, true), None);
+        assert_eq!(boarding(&[Player, Player], jeep_gunner, true), None);
+    }
+
+    #[test]
+    fn bots_leave_aircraft_only_landed_or_under_a_parachute() {
+        assert!(may_evict(false, 50.0), "land vehicles and boats: anywhere");
+        assert!(may_evict(true, 1.5), "landed");
+        assert!(!may_evict(true, 5.0), "too low for a parachute");
+        assert!(!may_evict(true, BAIL_OUT_HEIGHT + 1.0), "barely high enough");
+        assert!(may_evict(true, 80.0), "high up, under a parachute");
     }
 }

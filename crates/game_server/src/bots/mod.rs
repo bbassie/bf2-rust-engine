@@ -116,7 +116,6 @@ impl Plugin for BotPlugin {
                 strategy::update_map,
                 strategy::update_regions,
                 strategy::plan,
-                ai::commander::yield_to_humans,
                 ai::commander::command,
                 ai::gadgets::wear_gas_masks,
                 ai::vehicles::update_profiles,

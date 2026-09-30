@@ -1,0 +1,46 @@
+// A bot holds the commander post until a player wants it (game_server::commander,
+// ai::commander): a bot takes it at the start; the deploy screen offers "Apply for commander"
+// against it and a click makes us commander at once (no vote), with the bot back in the ranks;
+// while we command, the AI commander gives no orders and calls in no assets; we resign and a
+// bot takes the post again.
+// client --scenario scenarios/commander/commander_bot_handover.ron --out target/scenarios/commander/bot_handover
+(
+    level: "strike_at_karkand",
+    bots: 8,
+    team: 2,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ExpectLog("(bot) is now Two's commander", 30.0),
+        Wait(1.0),
+        Key(Enter),
+        Wait(0.5),
+        Screenshot("01_deploy_bot_commander"),
+        Log("apply"),
+        Click("commander:apply"),
+        ExpectLog("takes Two's commander post from", 3.0),
+        ExpectLog("You are now the commander", 3.0),
+        Wait(0.5),
+        Screenshot("02_deploy_we_command"),
+        Key(Enter),
+        // The AI commander is off while we command: no orders, no assets.
+        ForbidLog("ai commander: Two"),
+        ForbidLog("Two commander: squad"),
+        ForbidLog("(bot) is now Two's commander"),
+        Wait(12.0),
+        AllowLog("ai commander: Two"),
+        AllowLog("Two commander: squad"),
+        AllowLog("(bot) is now Two's commander"),
+        Log("resign"),
+        Commander(Resign),
+        ExpectLog("resigned as commander", 3.0),
+        ExpectLog("applies for Two's commander post", 5.0),
+        ExpectLog("(bot) is now Two's commander", 3.0),
+        Wait(0.5),
+        Key(Enter),
+        Wait(0.5),
+        Screenshot("03_deploy_bot_again"),
+        Key(Enter),
+        Quit,
+    ],
+)

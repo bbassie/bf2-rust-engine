@@ -747,6 +747,18 @@ impl BotBrain {
                 seat if profile.gunner_seats.contains(&seat) || profile.role == Role::Stationary => Purpose::Gun,
                 _ => Purpose::Ride,
             };
+            // (seats for players) Moved without asking: a player took our seat or swapped
+            // with us (`vehicles::boarding`). This seat is ours now; don't ask for the old one.
+            if ride.want_seat != Some(seated.seat) {
+                ride.want_seat = None;
+                info!(
+                    "{} was moved to seat {} of {} to {:?}",
+                    w.name(me.player),
+                    seated.seat,
+                    seen.template,
+                    ride.purpose
+                );
+            }
         }
         if ride.want_seat == Some(seated.seat) || ride.time > ride.want_until {
             ride.want_seat = None;
