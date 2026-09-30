@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn throws_reach_their_target() {
-        let (from, speed, g) = (Vec3::new(0.0, 1.6, 0.0), 25.0, 9.81);
+        let (from, speed, g) = (Vec3::new(0.0, 1.6, 0.0), 25.0, game_shared::physics::WORLD_GRAVITY);
         for target in [Vec3::new(20.0, 0.0, 0.0), Vec3::new(0.0, 3.0, -40.0), Vec3::new(10.0, -5.0, 10.0)] {
             let pitch = throw_pitch(from, target, speed, g).unwrap();
             // Fly the arc and see where it comes down at the target's height.

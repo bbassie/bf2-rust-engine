@@ -908,7 +908,7 @@ fn update_tracers(
         tracer.life -= dt;
         let start = tracer.velocity;
         let gravity = tracer.gravity;
-        tracer.velocity += Vec3::NEG_Y * 9.81 * gravity * dt;
+        tracer.velocity += Vec3::NEG_Y * game_shared::physics::gravity(gravity) * dt;
         let step = (start + tracer.velocity) * 0.5 * dt;
         let from = tracer.position;
         let direction = step.normalize_or_zero();

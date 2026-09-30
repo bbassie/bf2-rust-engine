@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::physics::GameLayer;
 
-pub const GRAVITY: f32 = 9.81;
-
 /// A grenade, rocket or charge in the world. Replicated; bullets are not (clients draw
 /// tracers for those).
 #[derive(Component, Serialize, Deserialize, Clone, Debug)]
@@ -131,7 +129,7 @@ pub fn step(
         }
     }
     let start_velocity = motion.velocity;
-    motion.velocity += Vec3::NEG_Y * GRAVITY * desc.gravity * dt;
+    motion.velocity += Vec3::NEG_Y * crate::physics::gravity(desc.gravity) * dt;
     let mut travel = (start_velocity + motion.velocity) * 0.5 * dt;
 
     for _ in 0..4 {

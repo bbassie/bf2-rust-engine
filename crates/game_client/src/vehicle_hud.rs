@@ -131,7 +131,7 @@ const BOMB_FALL_STEP: f32 = 1.0 / 30.0;
 /// than `exclude`, and after how many seconds.
 pub fn ballistic_impact(spatial: &SpatialQuery, origin: Vec3, velocity: Vec3, gravity: f32, exclude: Entity) -> Option<(Vec3, f32)> {
     let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Vehicle]).with_excluded_entities([exclude]);
-    let fall = Vec3::NEG_Y * game_shared::flight::GRAVITY * gravity;
+    let fall = Vec3::NEG_Y * game_shared::physics::gravity(gravity);
     let mut from = origin;
     let steps = (BOMB_FALL_TIME / BOMB_FALL_STEP) as usize;
     for step in 1..=steps {

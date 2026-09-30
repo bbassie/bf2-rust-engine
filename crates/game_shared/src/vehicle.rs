@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::GamePaths,
-    flight::{self, BodyState, Controls, FlightState, GRAVITY, Push, Surroundings},
+    flight::{self, BodyState, Controls, FlightState, Push, Surroundings},
     input::InputFrame,
     level::LoadedLevel,
     physics::GameLayer,
@@ -923,7 +923,7 @@ pub fn step_vehicle(
         let carriers = desc.wheels.iter().filter(|w| carrying(w)).count().max(1) as f32;
         let wheel_mass = desc.physics.mass / carriers;
         let max_strength = desc.wheels.iter().map(|w| w.strength).fold(0.0, f32::max).max(1.0);
-        let g = GRAVITY * desc.physics.gravity;
+        let g = crate::physics::gravity(desc.physics.gravity);
         let travel_up = bump_travel(desc.drive);
         let com_height = com_local.y;
         let [mu_long, mu_lat] = desc.engine.grip;
@@ -960,8 +960,14 @@ pub fn step_vehicle(
             sim.compression[wi] = x;
             let mut spring = k * x + c * rate;
             if center_distance < 0.0 {
-                // Bottomed out: a much stiffer bump stop.
-                spring += k * 20.0 * -center_distance;
+                // Bottomed out: a much stiffer bump stop, damped while it is pressed in (an
+                // undamped one threw a Humvee landing off a 4 m drop back up at its landing
+                // speed, bouncing until it rolled over; damped it rebounds at 70 % and settles
+                // level), at most as hard as stops the wheel's share of the mass this tick
+                // (harder would throw it back).
+                let stop = k * 20.0;
+                let damping = (2.0 * (stop * wheel_mass).sqrt()).min(wheel_mass / dt) * rate.max(0.0);
+                spring += stop * -center_distance + damping;
             }
             let load = spring.max(0.0);
             push.forces.push((up * load, top_point));
@@ -1290,7 +1296,7 @@ pub fn integrate(model: &VehicleModel, body: &mut BodyState, push: &Push, dt: f3
     let mass = desc.physics.mass;
     let com_local = Vec3::from(desc.physics.center_of_mass);
     let com = body.position + body.rotation * com_local;
-    let mut force = Vec3::NEG_Y * GRAVITY * desc.physics.gravity * mass;
+    let mut force = Vec3::NEG_Y * crate::physics::gravity(desc.physics.gravity) * mass;
     let mut torque = push.torque;
     for (f, point) in &push.forces {
         force += *f;

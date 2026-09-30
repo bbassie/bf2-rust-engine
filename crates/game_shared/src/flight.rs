@@ -52,9 +52,6 @@ use crate::{
     vehicle::VehicleModel,
 };
 
-/// Standard gravity; vehicles multiply it by their gravity modifier.
-pub const GRAVITY: f32 = 9.81;
-
 /// A stalled wing still brakes the flow through it like a plate, this much of its lift.
 const PLATE: f32 = 0.25;
 /// Drag from lift, per m/s² of lift (turning costs speed).
@@ -150,6 +147,12 @@ const HELI_SIDEWAYS_DRAG: f32 = 0.5;
 /// (1/s at a standstill, fading out by the speed).
 pub const HELI_HOVER_ASSIST: f32 = 0.45;
 const HELI_HOVER_SPEED: f32 = 20.0;
+/// Share of a tilted rotor's sideways thrust that pushes it along (and turns it in a
+/// bank). The rotor holds the altitude against BF2's world gravity (14.73 m/s²), so its
+/// sideways thrust at a tilt is 1.5× what it was when helicopters were tuned under 9.81:
+/// this share keeps their speeds and turns (an AH-1Z held 30° nose down settles at
+/// 246 km/h, 253 before, 319 with all of it; a UH-60 at 153 km/h, 151 before).
+const ROTOR_TILT_PUSH: f32 = 0.7;
 
 /// A jet's speeds that matter to its handling (m/s), from its engines' BF2 top speed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -436,7 +439,7 @@ pub fn flight_forces(
         return push;
     };
     let mass = desc.physics.mass;
-    let g = GRAVITY * desc.physics.gravity;
+    let g = crate::physics::gravity(desc.physics.gravity);
     let rotation = body.rotation;
     let inverse = rotation.inverse();
     let com = body.position + rotation * Vec3::from(desc.physics.center_of_mass);
@@ -666,7 +669,7 @@ pub fn flight_forces(
         // diving steeper than a dive begins.
         let horizontal = (up - Vec3::Y * up.y).clamp_length_max(rotor.regulation_angle.to_radians().sin());
         let steep = if helicopter { (up.y / HELI_DIVE[0].to_radians().cos()).min(1.0) } else { 1.0 };
-        let direction = Vec3::Y * up.y + horizontal * rotor.horizontal_magnifier * steep;
+        let direction = Vec3::Y * up.y + horizontal * rotor.horizontal_magnifier * steep * ROTOR_TILT_PUSH;
         let flat_velocity = body.velocity - Vec3::Y * body.velocity.y;
         let mut drag = flat_velocity * rotor.horizontal_damping;
         let flat_forward = (forward - Vec3::Y * forward.y).normalize_or_zero();
@@ -732,7 +735,7 @@ pub fn flight_forces(
             // In forward flight it turns into its bank (about the vertical), and the tail keeps
             // it into the airflow, except while the pedals turn it out of it.
             if forward_flight > 0.0 {
-                let bank_turn = g * roll.clamp(-1.2, 1.2).tan() / ahead.max(1.0);
+                let bank_turn = g * ROTOR_TILT_PUSH * roll.clamp(-1.2, 1.2).tan() / ahead.max(1.0);
                 let pedals = if helicopter { controls.steer.abs().min(1.0) } else { 0.0 };
                 let turn = (bank_turn.clamp(-rates.y, rates.y) + slip * HELI_WEATHERVANE * (1.0 - pedals)) * forward_flight;
                 wanted += inverse * (Vec3::NEG_Y * turn);

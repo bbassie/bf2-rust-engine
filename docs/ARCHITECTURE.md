@@ -172,7 +172,20 @@ sequence number):
 4. Other soldiers are shown ~100 ms in the past, interpolated between received states.
 
 `step_soldier` is a kinematic move-and-slide (avian3d) against the world collision, so it
-is deterministic enough that corrections are normally exactly zero.
+is deterministic enough that corrections are normally exactly zero. Surfaces steeper than
+55° can't be stood on, except in a crevice (between a barrier and a beam leaning on it)
+where the capsule rests on faces that are each too steep but together hold it up: it stands
+there as on flat ground and can walk or jump out (`Surroundings::crevice`), rather than
+hanging in the air, never grounded. Falling, it never gathers speed it doesn't move with.
+
+**Gravity**: everything falls with BF2's world gravity, 14.73 m/s² (the one gravity constant
+in `BF2.exe`; see docs/formats/gameplay-data.md), times its template's `gravityModifier`:
+`game_shared::physics::{WORLD_GRAVITY, gravity}`, also avian's `Gravity` resource (a
+vehicle's `GravityScale` is its modifier). Soldiers, ropes and ziplines have 1, ground
+vehicles 1.5-2, tank shells 0.4, rockets 0.05-0.1. The server, prediction, bots' aim and
+throws, the bomb marker and the commander's artillery arcs all derive from it;
+`scenarios/combat/gravity_ranges.ron` measures ranges (a hand grenade thrown 30° up first
+lands 39 m away, 57 m under 9.81; a tank shell fired level comes down after 120 m, not 146).
 
 Rendering never touches simulated entities: soldier visuals are separate entities placed
 from `SoldierRender` each frame, so smoothing never moves hitboxes.

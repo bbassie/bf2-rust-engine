@@ -107,6 +107,28 @@ fn a_grenade_bounces_rolls_and_comes_to_rest() {
 }
 
 #[test]
+fn projectiles_fall_with_bf2_world_gravity_times_their_modifier() {
+    let mut app = world(None);
+    // A shell (100 m/s, modifier 0.4 like BF2's tank shells) fired level from 5 m up comes
+    // down after sqrt(2 * 5 / (14.73 * 0.4)) = 1.30 s, 130 m away (160 m under 9.81).
+    let shell = ProjectileDesc {
+        velocity: 100.0,
+        gravity: 0.4,
+        time_to_live: 10.0,
+        explosion_damage: 100.0,
+        explosion_radius: 2.0,
+        ..Default::default()
+    };
+    let motion = ProjectileMotion::new(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Z * 100.0, 0.0);
+    let trace = fly(&mut app, &shell, motion, 3.0);
+    let (hit, _) = trace.last().unwrap();
+    let hit = hit.hit.expect("comes down");
+    let expected = 100.0 * (2.0 * 5.0 / game_shared::physics::gravity(0.4)).sqrt();
+    assert!((expected - 130.3).abs() < 0.5, "{expected}");
+    assert!((-hit.point.z - expected).abs() < 1.0, "came down {:.1} m away, not {expected:.1}", -hit.point.z);
+}
+
+#[test]
 fn a_grenade_bounces_back_off_a_wall() {
     let mut app = world(Some(8.0));
     let trace = fly(&mut app, &grenade(), throw(25.0), 6.0);
@@ -118,7 +140,7 @@ fn a_grenade_bounces_back_off_a_wall() {
 
 #[test]
 fn charges_stick_where_they_land_and_claymores_only_to_level_ground() {
-    let mut app = world(Some(3.0));
+    let mut app = world(Some(2.5));
     let c4 = ProjectileDesc {
         velocity: 5.0,
         gravity: 1.5,
@@ -138,7 +160,7 @@ fn charges_stick_where_they_land_and_claymores_only_to_level_ground() {
         .find_map(|(s, m)| s.stuck.map(|c| (c, *m)))
         .expect("sticks");
     assert!(stuck.0.normal.z > 0.9, "to the wall: {:?}", stuck.0.normal);
-    assert!((stuck.1.position.z + 3.0).abs() < 0.05);
+    assert!((stuck.1.position.z + 2.5).abs() < 0.05);
     assert!(
         stuck.1.resting && (stuck.1.rotation * Vec3::Y).z > 0.9,
         "tilted with the wall"

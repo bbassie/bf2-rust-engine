@@ -2,6 +2,27 @@
 
 use avian3d::prelude::*;
 
+/// BF2's world gravity, m/s². Everything that falls uses it, times the object's
+/// `gravityModifier` from its template (projectiles, vehicles; soldiers and ropes have 1):
+///
+/// - `BF2.exe` and `bf2_w32ded.exe` each contain one gravity constant, -14.73, stored by the
+///   physics world's constructor next to a setter and getter (the `physics.gravity` console
+///   variable); neither contains 9.81 or any other gravity-like value (9.8 appears only
+///   inside an unrelated lookup table), and no level or template sets it.
+/// - Modders measured it on projectiles: Project Reality's mortar work found g = 14.7 from
+///   45° and vertical shots, the Airsoft mod about 14.8 from its BB trajectories.
+/// - `gravityModifier` is one `ObjectTemplate` property for every kind of object, so it
+///   scales that same world gravity: BF2 has nothing else for it to scale.
+///
+/// Derive every fall from this (server, client prediction, bots' aim, HUD predictions), so
+/// they agree.
+pub const WORLD_GRAVITY: f32 = 14.73;
+
+/// Gravity on something with this `gravityModifier`, m/s² (positive: downwards).
+pub fn gravity(modifier: f32) -> f32 {
+    WORLD_GRAVITY * modifier
+}
+
 /// Collision layers. Soldiers are only hit by queries (bullets, movement of other things),
 /// they never push or get pushed by the physics solver.
 #[derive(PhysicsLayer, Clone, Copy, Debug, Default)]

@@ -285,7 +285,7 @@ fn guns(desc: &VehicleDesc, data: &AiData) -> Vec<GunInfo> {
             pick,
             kind,
             speed: p.velocity.max(1.0),
-            gravity: game_shared::projectile::GRAVITY * p.gravity,
+            gravity: game_shared::physics::gravity(p.gravity),
             range,
             rate: w.rounds_per_minute.max(1.0) / 60.0,
             single: w.magazine_size == 1,
@@ -483,6 +483,25 @@ mod tests {
         assert!((aim.y - 4.9).abs() < 0.1, "{aim}");
         let (yaw, pitch) = angles(Vec3::new(-1.0, 0.0, 0.0));
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-5 && pitch.abs() < 1e-6);
+    }
+
+    #[test]
+    fn tank_shells_aimed_with_lead_hit_at_range() {
+        // A T-90's shell: 150 m/s, gravity modifier 0.4 of BF2's world gravity, flown in
+        // 60 Hz steps like `game_shared::projectile::step`.
+        let (speed, gravity) = (150.0, game_shared::physics::gravity(0.4));
+        let dt = 1.0 / 60.0;
+        for range in [100.0, 200.0, 300.0] {
+            let target = Vec3::new(0.0, 0.0, -range);
+            let aim = lead(Vec3::ZERO, target, Vec3::ZERO, speed, gravity);
+            let (mut p, mut v) = (Vec3::ZERO, aim.normalize() * speed);
+            while p.z > -range {
+                let next = v + Vec3::NEG_Y * gravity * dt;
+                p += (v + next) * 0.5 * dt;
+                v = next;
+            }
+            assert!(p.y.abs() < 0.5, "{range} m: passes {:.2} m off", p.y);
+        }
     }
 
     #[test]

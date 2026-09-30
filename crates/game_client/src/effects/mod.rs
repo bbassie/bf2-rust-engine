@@ -1224,7 +1224,7 @@ fn update_debris(
             commands.entity(entity).despawn();
             continue;
         }
-        piece.velocity.y -= 9.81 * dt;
+        piece.velocity.y -= game_shared::physics::WORLD_GRAVITY * dt;
         let step = piece.velocity * dt;
         let hit = Dir3::new(step)
             .ok()

@@ -280,8 +280,7 @@ pub struct SoldierTuning {
     pub jump_speed: f32,
     /// Share of the ground velocity kept when jumping (`phy-soldier-jump-length-factor`).
     pub jump_momentum: f32,
-    /// Soldier gravity, m/s²: BF2's world gravity, which its physics constructor sets to
-    /// -14.73 (the only such constant in `BF2.exe`; no level or template overrides it). With
+    /// Soldier gravity, m/s²: BF2's world gravity ([`crate::physics::WORLD_GRAVITY`]). With
     /// the 6 m/s launch a jump peaks at 1.22 m after 0.41 s and lands after 0.81 s: high
     /// enough to get onto the ~1 m sandbag walls, low walls and jeep hoods BF2 soldiers
     /// jump onto.
@@ -395,7 +394,7 @@ impl Default for SoldierTuning {
             air_acceleration: 1.6,
             jump_speed: 6.0,
             jump_momentum: 0.98,
-            gravity: 14.73,
+            gravity: crate::physics::WORLD_GRAVITY,
             mantle: true,
             jump_delay_after_prone: 0.8,
             landing_impact: 4.5,
@@ -410,7 +409,7 @@ impl Default for SoldierTuning {
             rope_climb_speed: 2.3,
             zipline_hang: 2.2,
             zipline_no_entry: 3.5,
-            zipline_gravity: 10.0,
+            zipline_gravity: crate::physics::WORLD_GRAVITY,
             zipline_drag: 0.3,
             zipline_min_speed: 2.0,
             zipline_max_speed: 15.0,
@@ -822,6 +821,12 @@ fn step(
     let moved = world.slide(shape, start, m.velocity, dt, Contact::Air);
     m.position = moved.center - center;
     m.velocity = moved.velocity;
+    // Held up by something the slide kept for itself (pushed back out of a triangle mesh it
+    // got into): falling no faster than it fell, rather than gathering speed in place.
+    let fell = ((moved.center.y - start.y) / dt).min(0.0);
+    if m.velocity.y < fell {
+        m.velocity.y = fell;
+    }
     if m.velocity.y > 0.01 {
         return;
     }
@@ -1481,7 +1486,7 @@ impl Surroundings<'_, '_, '_> {
     fn ground(&self, shape: &Collider, center: Vec3, max_distance: f32) -> Option<Ground> {
         let hit = self.cast(shape, center, Dir3::NEG_Y, max_distance)?;
         if hit.normal1.y <= 0.0 {
-            return None;
+            return self.crevice(shape, center, &hit);
         }
         // Off the capsule's axis the contact may be on an edge: look at the surface just past
         // it, seen from the axis.
@@ -1500,7 +1505,7 @@ impl Surroundings<'_, '_, '_> {
                 None => (hit.normal1, hit.point1.y),
             };
         if normal.y < self.min_normal_y {
-            return None;
+            return self.crevice(shape, center, &hit);
         }
         // The cast's distance is short by up to millimeters, more on long thin triangles.
         // When it agrees with the distance to the surface's plane, the capsule rests on the
@@ -1540,6 +1545,33 @@ impl Surroundings<'_, '_, '_> {
             // Nearly flat counts as flat, so walking never creeps up or down.
             normal: if normal.y > 0.9995 { Vec3::Y } else { normal },
             height,
+        })
+    }
+
+    /// Footing where the surface below is too steep to stand on (`hit`): in a crevice, held
+    /// up by faces that are each too steep (between a barrier and a beam leaning on it), the
+    /// capsule can't slide down. It stands there as on flat ground, so it can walk or jump
+    /// out, rather than hanging in the air, never grounded. Whether it is held up: a fall
+    /// slid along every face it touches there (as move-and-slide would) keeps most of its
+    /// speed on a single steep face (a 55° slope lets 67 % through), little or nothing in a
+    /// crevice; less than half counts as held up.
+    fn crevice(&self, shape: &Collider, center: Vec3, hit: &ShapeHitData) -> Option<Ground> {
+        let gap = self
+            .mover
+            .cast_move(shape, center, Quat::IDENTITY, Vec3::NEG_Y * (hit.distance + SKIN), SKIN, &self.filter)
+            .map_or(hit.distance, |h| h.distance);
+        let resting = center - Vec3::Y * gap;
+        let mut faces = Vec::new();
+        self.mover
+            .intersections(shape, resting, Quat::IDENTITY, 3.0 * SKIN, &self.filter, |_, _, normal| {
+                faces.push(normal);
+                true
+            });
+        let fall = MoveAndSlide::project_velocity(Vec3::NEG_Y, &faces);
+        (fall.y > -0.5).then_some(Ground {
+            gap,
+            normal: Vec3::Y,
+            height: hit.point1.y,
         })
     }
 

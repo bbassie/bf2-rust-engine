@@ -218,6 +218,8 @@ struct Live {
     shooter_player: Entity,
     hitbox: Option<Entity>,
     travelled: f32,
+    /// Has touched something (bounced) since launch; the first touch is logged.
+    landed: bool,
     age: f32,
     /// Seconds after launch it goes off by itself (its lifetime, minus cooking).
     fuse: f32,
@@ -574,6 +576,7 @@ fn fire_weapons(
                             shooter_player: player,
                             hitbox: hitbox.map(|h| h.entity),
                             travelled: 0.0,
+                            landed: false,
                             age: 0.0,
                             fuse: desc.time_to_live - cooked,
                             guided: weapon.fire.guidance == Guidance::Wire,
@@ -871,6 +874,10 @@ fn simulate_projectiles(
             *motion = next;
         }
         live.travelled += step.distance;
+        if step.bounced && !live.landed {
+            live.landed = true;
+            info!("{} first touched down at {:.2} after {:.2} s", weapon.name, motion.position, live.age);
+        }
         if step.bounced {
             debug!("{} bounced at {:.2}, now {:.1} m/s", weapon.name, motion.position, motion.velocity.length());
         }
@@ -1361,6 +1368,7 @@ pub fn spawn_projectile(
             shooter_player,
             hitbox: ignore,
             travelled: 0.0,
+            landed: false,
             age: 0.0,
             fuse,
             guided,

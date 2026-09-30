@@ -234,7 +234,7 @@ fn helicopter(name: &str) {
 
 #[test]
 fn aircraft() {
-    for name in ["usair_f18", "air_j10", "ruair_mig29", "ruair_su34", "air_f35b"] {
+    for name in ["usair_f18", "air_j10", "ruair_mig29", "ruair_su34", "air_f35b", "air_a10", "air_su39"] {
         jet(name);
     }
     for name in ["ahe_ah1z", "usthe_uh60", "ahe_havoc"] {

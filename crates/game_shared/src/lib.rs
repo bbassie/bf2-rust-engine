@@ -49,7 +49,7 @@ pub const TICK_HZ: f64 = 60.0;
 pub const DEFAULT_PORT: u16 = 16567;
 
 /// Bump whenever the wire protocol changes in a way the protocol hash can't detect.
-pub const PROTOCOL_ID: u64 = 0x4246_325f_0005; // "BF2_" + version (5: mantling, grappling ropes' length and links)
+pub const PROTOCOL_ID: u64 = 0x4246_325f_0006; // "BF2_" + version (6: BF2's world gravity for everything, soldiers standing in crevices)
 
 /// Adds everything both client and server need. The messaging backend (renet) is added by
 /// the binaries so a future Steam backend can be swapped in.
@@ -58,6 +58,8 @@ pub struct SharedPlugin;
 impl Plugin for SharedPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Time::<Fixed>::from_hz(TICK_HZ))
+            // Vehicles fall with it times their `GravityScale` (BF2's `gravityModifier`).
+            .insert_resource(Gravity(Vec3::NEG_Y * physics::WORLD_GRAVITY))
             .add_systems(Startup, config::log_mods)
             .add_plugins((
                 // The server authorizes clients itself, after the join handshake (`join`).

@@ -1336,6 +1336,265 @@ fn no_mantle_without_room_or_with_it_off() {
     assert!((last.position.y - 1.01).abs() < 0.02, "couldn't jump onto a 1 m wall: {last:?}");
 }
 
+/// A corner of Karkand's square (around (-191.5, 155.81, 49.0); here the ground is at y = 0):
+/// a jersey barrier (`concretebarrier`) with a beam (`beam_01`) leaning on it at 57.5°, a
+/// little steeper than soldiers walk up, its foot in the ground. Both as BF2's soldier
+/// collision has them, triangle meshes like the level's: the barrier a prism 1.1 m high,
+/// 0.64 m wide at the foot and 0.34 m on top (82° sides), 1.6 m long; the beam a plank
+/// 0.71 m wide, 0.15 m thick and 3.6 m long.
+fn barrier_world() -> App {
+    let origin = Vec3::new(-191.5, 155.81, 49.0);
+    let (w0, w1, l) = (0.322, 0.17, 0.807);
+    let vertices = vec![
+        Vec3::new(-w0, -0.5, -l),
+        Vec3::new(w0, -0.5, -l),
+        Vec3::new(w0, -0.5, l),
+        Vec3::new(-w0, -0.5, l),
+        Vec3::new(-w1, 0.6, -l),
+        Vec3::new(w1, 0.6, -l),
+        Vec3::new(w1, 0.6, l),
+        Vec3::new(-w1, 0.6, l),
+    ];
+    // Counter-clockwise seen from outside.
+    let indices = vec![
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 6, 5],
+        [4, 7, 6],
+        [0, 4, 5],
+        [0, 5, 1],
+        [3, 2, 6],
+        [3, 6, 7],
+        [0, 3, 7],
+        [0, 7, 4],
+        [1, 5, 6],
+        [1, 6, 2],
+    ];
+    let mut app = physics_app();
+    let layers = CollisionLayers::new(GameLayer::World, LayerMask::ALL);
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(200.0, 1.0, 200.0),
+        Transform::from_xyz(0.0, -0.5, 0.0),
+        layers,
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::trimesh(vertices, indices),
+        Transform::from_translation(Vec3::new(-191.532, 156.29, 49.323) - origin)
+            .with_rotation(Quat::from_xyzw(0.0, 0.07149744, 0.0, 0.99744076)),
+        layers,
+    ));
+    // The beam: a plank with bevelled edges.
+    let vertices = [
+        [0.353, -0.037, 1.798],
+        [0.246, 0.047, 1.633],
+        [-0.347, -0.037, 1.778],
+        [-0.242, 0.047, 1.613],
+        [-0.233, 0.077, -1.674],
+        [-0.242, 0.026, 0.856],
+        [0.248, 0.040, -1.611],
+        [0.246, 0.007, 0.887],
+        [-0.347, -0.058, 0.830],
+        [-0.355, -0.003, -1.794],
+        [0.349, -0.044, -1.731],
+        [0.353, -0.077, 0.860],
+    ]
+    .map(Vec3::from_array)
+    .to_vec();
+    let indices = vec![
+        [0, 1, 2],
+        [1, 3, 2],
+        [4, 5, 6],
+        [6, 5, 7],
+        [2, 3, 8],
+        [3, 5, 8],
+        [9, 4, 10],
+        [10, 4, 6],
+        [8, 11, 2],
+        [2, 11, 0],
+        [7, 11, 6],
+        [6, 11, 10],
+        [5, 3, 7],
+        [7, 3, 1],
+        [5, 4, 8],
+        [8, 4, 9],
+        [9, 10, 8],
+        [11, 8, 10],
+        [0, 11, 1],
+        [11, 7, 1],
+    ];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::trimesh(vertices, indices),
+        Transform::from_translation(Vec3::new(-191.197, 156.532, 48.94) - origin)
+            .with_rotation(Quat::from_xyzw(0.30511707, 0.61282957, -0.37771323, 0.623439).normalize()),
+        layers,
+    ));
+    // Sandbags (`concretebags_01`) right beside the barrier, a hand's width away: a lumpy
+    // block 2.2 m by 2 m, 1.5 m high.
+    let vertices = [
+        [0.946, 0.534, -0.971],
+        [1.093, -0.748, -1.02],
+        [-1.126, 0.48, -0.99],
+        [-1.038, -0.748, -1.03],
+        [-1.035, 0.65, 0.07],
+        [-0.056, 0.748, -0.112],
+        [0.398, 0.659, -0.957],
+        [0.926, 0.662, -0.281],
+        [1.063, 0.423, 0.916],
+        [-0.993, 0.392, 0.88],
+        [1.138, -0.748, 0.903],
+        [-1.038, -0.748, 0.973],
+        [-0.51, 0.631, 0.733],
+    ]
+    .map(Vec3::from_array)
+    .to_vec();
+    let indices = vec![
+        [0, 1, 2],
+        [1, 3, 2],
+        [4, 5, 6],
+        [6, 5, 7],
+        [8, 9, 10],
+        [9, 11, 10],
+        [10, 11, 1],
+        [11, 3, 1],
+        [3, 11, 2],
+        [11, 9, 2],
+        [1, 0, 10],
+        [10, 0, 8],
+        [0, 2, 6],
+        [2, 4, 6],
+        [2, 9, 4],
+        [9, 12, 4],
+        [9, 8, 12],
+        [8, 7, 12],
+        [8, 0, 7],
+        [0, 6, 7],
+        [4, 12, 5],
+        [7, 5, 12],
+    ];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::trimesh(vertices, indices),
+        Transform::from_translation(Vec3::new(-189.963, 156.538, 49.447) - origin),
+        layers,
+    ));
+    ready(app)
+}
+
+/// Hanging in the air without moving for a while, or moving further in a tick than
+/// anyone walks.
+fn wedged_or_jumped(trace: &[SoldierMotion]) -> Option<String> {
+    let mut stuck = 0;
+    for (i, pair) in trace.windows(2).enumerate() {
+        let moved = pair[1].position.distance(pair[0].position);
+        if moved > 0.4 && !pair[1].mantling() && !pair[0].mantling() {
+            return Some(format!("jumped {moved:.2} m at tick {}", i + 1));
+        }
+        let hanging = !pair[1].grounded && !pair[1].mantling() && moved < 1e-3;
+        stuck = if hanging { stuck + 1 } else { 0 };
+        if stuck >= 10 {
+            return Some(format!("wedged in the air at tick {}", i + 1));
+        }
+    }
+    None
+}
+
+#[test]
+fn walks_into_sloped_statics_without_wedging() {
+    let mut app = barrier_world();
+    // Walking at the middle from all round (or past it at an angle), and off the tops of the
+    // barrier and the sandbags every way, into the crevice between them.
+    let middle = Vec3::new(0.1, 0.0, 0.1);
+    let mut starts = Vec::new();
+    for approach in (0..360).step_by(10) {
+        let a = (approach as f32).to_radians();
+        let from = middle + Vec3::new(a.sin(), 0.0, a.cos()) * 3.2 + Vec3::Y * 0.3;
+        for aim in [-40.0f32, -15.0, 0.0, 15.0, 40.0] {
+            starts.push((format!("from {approach} deg, aim {aim} deg"), from, a + aim.to_radians()));
+        }
+    }
+    for (top, feet) in [("barrier", Vec3::new(-0.03, 1.4, 0.32)), ("sandbags", Vec3::new(1.4, 1.8, 0.45))] {
+        for heading in (0..360).step_by(15) {
+            starts.push((format!("off the {top} heading {heading} deg"), feet, (heading as f32).to_radians()));
+        }
+    }
+    let mut failures = Vec::new();
+    for (label, feet, yaw) in starts {
+        let m = settled(&mut app, feet);
+        run_at_statics(&mut app, &label, m, yaw, &mut failures);
+    }
+    // Dropped in anywhere around and on them, from up to 2 m, running and jumping any way.
+    let mut seed = 0x2545_f491_u32;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as f32 / u32::MAX as f32
+    };
+    // Into the crevice between the barrier's top and the beam, where soldiers hung.
+    for feet in [Vec3::new(0.09, 1.59, -0.29), Vec3::new(0.2, 1.47, -0.31), Vec3::new(-0.11, 1.13, 0.58)] {
+        let yaw = 0.3;
+        run_at_statics(&mut app, &format!("dropped into the crevice at {feet:.2}"), SoldierMotion::at(feet, yaw), yaw, &mut failures);
+    }
+    let mut dropped = 0;
+    while dropped < 250 {
+        let feet = Vec3::new(-1.2 + 3.8 * random(), 0.3 + 2.0 * random(), -1.4 + 3.2 * random());
+        let yaw = random() * std::f32::consts::TAU;
+        if !room_to_stand(&mut app, feet) {
+            continue;
+        }
+        dropped += 1;
+        let m = SoldierMotion::at(feet, yaw);
+        run_at_statics(&mut app, &format!("dropped at {feet:.2}"), m, yaw, &mut failures);
+    }
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// Nothing in the way of a standing soldier with his feet here.
+fn room_to_stand(app: &mut App, feet: Vec3) -> bool {
+    app.world_mut()
+        .run_system_once(move |shapes: Res<SoldierShapes>, spatial: SpatialQuery| {
+            spatial
+                .shape_intersections(
+                    shapes.movement(Stance::Standing),
+                    feet + Stance::Standing.collision_center(),
+                    Quat::IDENTITY,
+                    &SpatialQueryFilter::default(),
+                )
+                .is_empty()
+        })
+        .unwrap()
+}
+
+/// Walks, sprints and jumps from `m` heading `yaw` for a few seconds each; notes where the
+/// soldier wedges in the air or leaps.
+fn run_at_statics(app: &mut App, label: &str, m: SoldierMotion, yaw: f32, failures: &mut Vec<String>) {
+    for (name, buttons, jump_at) in [
+        ("walk", Buttons::empty(), None),
+        ("sprint", Buttons::SPRINT, None),
+        ("jump", Buttons::SPRINT, Some(12)),
+        ("jump late", Buttons::empty(), Some(25)),
+    ] {
+        let mut frames: Vec<InputFrame> = (0..200)
+            .map(|i| input(0.0, 1.0, if jump_at == Some(i) { buttons | Buttons::JUMP } else { buttons }))
+            .collect();
+        for f in &mut frames {
+            f.yaw = yaw;
+        }
+        let mut start = m;
+        start.yaw = yaw;
+        let trace = simulate(app, start, frames);
+        if let Some(what) = wedged_or_jumped(&trace) {
+            failures.push(format!("{label} {name}: {what}"));
+            if failures.len() <= 3 {
+                print_trace(&failures[failures.len() - 1], &trace);
+            }
+        }
+    }
+}
+
 #[test]
 fn replays_mantles_identically() {
     let mut app = world(&[block([-5.0, 0.0, -5.0], [10.0, 1.4, 3.0])], true);

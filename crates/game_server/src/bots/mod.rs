@@ -32,7 +32,7 @@ use game_shared::{
     modes::{Charge, ChargeState, ModeState},
     input::{Buttons, InputFrame},
     level::LoadedLevel,
-    projectile::{GRAVITY, Smoke},
+    projectile::Smoke,
     protocol::{ControlledBy, Player, Team},
     revive::Downed,
     soldier::{Health, Soldier, SoldierMotion, Stance},
@@ -1832,7 +1832,7 @@ impl BotBrain {
         let eye = me.motion.eye_position();
         // A little short: grenades bounce and roll on.
         let aim = eye + (at - eye) * 0.9;
-        let pitch = tactics::throw_pitch(eye, aim, desc.projectile.velocity, GRAVITY * desc.projectile.gravity)
+        let pitch = tactics::throw_pitch(eye, aim, desc.projectile.velocity, game_shared::physics::gravity(desc.projectile.gravity))
             .unwrap_or(0.7);
         let yaw = yaw_to(aim - eye);
         self.yaw = turn_towards(self.yaw, yaw, 6.0 * dt);

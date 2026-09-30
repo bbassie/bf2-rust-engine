@@ -64,7 +64,6 @@ const FLYBY_MIN_TRAVEL: f32 = 3.0;
 const SEGMENT: f32 = 0.05;
 /// Traced paths end after this long, however long the bullet lives.
 const MAX_FLIGHT: f32 = 3.0;
-const GRAVITY: f32 = 9.81;
 /// Glancing hits (less than about 20° off the surface) may ricochet.
 const RICOCHET_COSINE: f32 = 0.35;
 /// Material ids (`materials.ron`).
@@ -151,7 +150,7 @@ impl BulletTracer<'_, '_> {
         let flight = projectile.time_to_live.min(MAX_FLIGHT);
         while t < flight {
             let dt = SEGMENT.min(flight - t);
-            let next = velocity + Vec3::NEG_Y * GRAVITY * projectile.gravity * dt;
+            let next = velocity + Vec3::NEG_Y * game_shared::physics::gravity(projectile.gravity) * dt;
             let step = (velocity + next) * 0.5 * dt;
             let length = step.length();
             let Ok(dir) = Dir3::new(step) else { break };

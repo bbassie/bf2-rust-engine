@@ -434,7 +434,7 @@ pub struct Pin {
 }
 
 /// Gravity on rope links: BF2's world gravity.
-pub const ROPE_GRAVITY: f32 = 14.73;
+pub const ROPE_GRAVITY: f32 = crate::physics::WORLD_GRAVITY;
 /// Constraint iterations per step.
 const ROPE_ITERATIONS: usize = 12;
 /// Share of the speed along a surface lost every step touching it.

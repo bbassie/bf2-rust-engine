@@ -9,7 +9,7 @@ use game_data::{AssetKind, RemoteKind};
 use game_shared::{
     commander::{ARTILLERY_DELAY, ARTILLERY_GUN_STAGGER, Asset, AssetEffect, CommanderAssets},
     level::LoadedLevel,
-    projectile::{GRAVITY, Projectile, ProjectileMotion},
+    physics, projectile::{Projectile, ProjectileMotion},
     statics::DestroyedStatics,
     vehicle::VehicleData,
     weapons::Armory,
@@ -201,7 +201,7 @@ fn whistle_shells(
         if !names.contains(&projectile.weapon) || motion.velocity.y >= 0.0 {
             continue;
         }
-        let gravity = GRAVITY * armory.weapon(&projectile.weapon).map_or(1.0, |w| w.projectile.gravity).max(0.1);
+        let gravity = physics::gravity(armory.weapon(&projectile.weapon).map_or(1.0, |w| w.projectile.gravity).max(0.1));
         let ground = level.heightmap.as_ref().map_or(0.0, |h| h.height_at(motion.position.x, motion.position.z));
         let fall = (motion.position.y - ground).max(0.0);
         let down = -motion.velocity.y;

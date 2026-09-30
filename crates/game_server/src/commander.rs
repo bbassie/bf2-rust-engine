@@ -29,7 +29,7 @@ use game_shared::{
     },
     conquest::team_index,
     effects::PlayEffect,
-    flight::{BodyState, Controls as FlightControls, FlightState, GRAVITY},
+    flight::{BodyState, Controls as FlightControls, FlightState},
     input::Buttons,
     level::{LevelEntity, LoadedLevel},
     physics::GameLayer,
@@ -453,7 +453,7 @@ fn launch_velocity(from: Vec3, to: Vec3, flight: f32, gravity: f32) -> Vec3 {
 
 /// Gravity on the gun's shells (m/s²).
 fn shell_gravity(model: &VehicleModel) -> f32 {
-    GRAVITY * model.guns.first().map_or(1.0, |g| g.projectile.gravity).max(0.1)
+    game_shared::physics::gravity(model.guns.first().map_or(1.0, |g| g.projectile.gravity).max(0.1))
 }
 
 /// How long a piece takes to turn from `joints` onto a shell to `target` flying `flight`
@@ -1066,7 +1066,7 @@ impl UavFlight {
         let (sin, cos) = self.angle.sin_cos();
         let position = self.center + Vec3::new(cos, 0.0, sin) * self.radius;
         let tangent = Vec3::new(-sin, 0.0, cos);
-        let bank = (self.speed * self.speed / (self.radius * GRAVITY)).atan();
+        let bank = (self.speed * self.speed / (self.radius * game_shared::physics::WORLD_GRAVITY)).atan();
         let rotation = Transform::IDENTITY.looking_to(tangent, Vec3::Y).rotation * Quat::from_rotation_z(-bank);
         (position, rotation)
     }
@@ -1340,7 +1340,7 @@ mod tests {
     fn shells_land_where_and_when_planned() {
         // The launch velocity's arc through the projectile's own integration (velocity
         // averaged over each tick) reaches the target at the planned time.
-        let (from, to, flight, gravity) = (Vec3::new(0.0, 2.0, 0.0), Vec3::new(300.0, -10.0, -400.0), 3.2, GRAVITY * 5.0);
+        let (from, to, flight, gravity) = (Vec3::new(0.0, 2.0, 0.0), Vec3::new(300.0, -10.0, -400.0), 3.2, game_shared::physics::gravity(5.0));
         let mut velocity = launch_velocity(from, to, flight, gravity);
         let mut position = from;
         let dt = 1.0 / 60.0;

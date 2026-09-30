@@ -415,7 +415,7 @@ impl BotBrain {
         intent.buttons |= Buttons::CROUCH;
         let eye = me.motion.eye_position();
         let guided = desc.fire.guidance == Guidance::Wire;
-        let gravity = GRAVITY * desc.projectile.gravity;
+        let gravity = game_shared::physics::gravity(desc.projectile.gravity);
         let to = point - eye;
         let pitch = match guided || desc.projectile.gravity < 0.2 {
             true => to.y.atan2(flat(to).length()),

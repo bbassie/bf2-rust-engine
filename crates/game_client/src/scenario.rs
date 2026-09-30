@@ -374,6 +374,12 @@ pub enum Step {
     /// started he got and how long he was off the ground, e.g. `JumpApex("in place", 1.5)`
     /// after `Hold([Jump])` logs `scenario: in place: apex 1.17 m, 0.78 s in the air`.
     JumpApex(String, f32),
+    /// For this many seconds, watches that our soldier never hangs in the air: off the
+    /// ground (not climbing, riding, swimming, under a parachute or mantling) without moving
+    /// for more than 0.3 s, as when wedged between steep faces. Logs the longest such hang
+    /// and fails the scenario past it, e.g. `NoHang("into the barrier", 1.5)` while walking
+    /// into something.
+    NoHang(String, f32),
     /// Puts our soldier this many meters from the foot of the newest grappling rope, this
     /// many degrees round from straight in front of it (90: beside it), looking at its
     /// middle, e.g. `ViewRope(6.0, 80.0)`; `ViewRope(1.0, 0.0)` and walking forward climbs
@@ -661,6 +667,9 @@ struct Runner {
     released: Vec<KeyCode>,
     /// Where something was when the current step began.
     mark: Option<Vec3>,
+    /// `NoHang`: our soldier's last position, how long he has hung in the air so far and
+    /// the longest hang (seconds).
+    hang: Option<(Vec3, f32, f32)>,
     /// The bot `ChaseBot` follows (a player entity).
     chased: Option<Entity>,
     /// Text of the last `Type` step, typed the next frame.
@@ -2348,6 +2357,37 @@ fn run_scenario(
                     writeln!(runner.report, "{line}").ok();
                 }
                 done_if(done)
+            }
+            Step::NoHang(label, seconds) => {
+                const LONGEST: f32 = 0.3;
+                if elapsed == 0.0 {
+                    runner.hang = None;
+                }
+                if let Ok((m, _)) = soldier.single() {
+                    let (last, mut hung, mut longest) = runner.hang.unwrap_or((m.position, 0.0, 0.0));
+                    let aloft = !m.grounded && !m.climbing && !m.riding && !m.swimming && !m.parachute && !m.mantling();
+                    if aloft && m.position.distance(last) < 1e-3 {
+                        hung += time.delta_secs();
+                    } else {
+                        hung = 0.0;
+                    }
+                    longest = longest.max(hung);
+                    runner.hang = Some((m.position, hung, longest));
+                }
+                if elapsed >= *seconds {
+                    let longest = runner.hang.take().map_or(0.0, |h| h.2);
+                    let line = format!("{label}: longest hang in the air {longest:.2} s");
+                    info!("scenario: {line}");
+                    writeln!(runner.report, "{line}").ok();
+                    if longest > LONGEST {
+                        finish(&mut runner, &mut exit, now, Some(format!("{label}: hung in the air for {longest:.2} s")));
+                        Progress::Waiting
+                    } else {
+                        Progress::Done
+                    }
+                } else {
+                    Progress::Waiting
+                }
             }
             Step::ViewRope(distance, angle) => {
                 let rope = ropes
