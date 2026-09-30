@@ -430,3 +430,168 @@ fn bf2_raw_pitch(model: &VehicleModel, speed: f32) -> f32 {
     }
     sim.local_rates().x
 }
+
+/// The level-flight speeds BF2's own wings need (`flight::bf2_wing_lift`, as `BF2.exe`
+/// computes them) with the jet's horizontal wings: at their best angle (22.5°, the slowest it
+/// can fly) and at 10° (a take-off's rotation).
+fn bf2_speeds(model: &VehicleModel) -> (f32, f32) {
+    let slope = game_shared::flight::bf2_lift_sum(model);
+    let weight = game_shared::physics::gravity(model.desc.physics.gravity);
+    let speed = |deg: f32| (weight / (game_shared::flight::bf2_lift_coefficient(deg.to_radians()) * slope)).sqrt();
+    (speed(22.5), speed(10.0))
+}
+
+/// A jet on a flat runway (ground at 0): full throttle from standing, stick back 0.6 from the
+/// stall speed on. Returns lift-off time, distance and speed (the wheels 1 m up). The wheels
+/// carry it and hold the nose off the ground (not below level, not over 12° up).
+fn takeoff(model: &VehicleModel) -> (f32, f32, f32) {
+    const REST: f32 = 2.0;
+    let envelope = JetEnvelope::of(&model.desc);
+    let mut sim = Sim::new(model, REST, 0.0);
+    sim.flight.throttle = 0.0;
+    sim.flight.gear_up = false;
+    while sim.time < 40.0 {
+        let airspeed = -(sim.body.rotation.inverse() * sim.body.velocity).z;
+        let pulling = airspeed >= envelope.stall;
+        let pitch = if pulling { 0.6 } else { 0.0 };
+        sim.step(&pilot(1.0, pitch, 0.0, 0.0));
+        if sim.body.position.y <= REST {
+            sim.body.position.y = REST;
+            sim.body.velocity.y = sim.body.velocity.y.max(0.0);
+            // The nose wheel holds it level until the pilot pulls.
+            let most = if pulling { 12.0 } else { 0.0 };
+            let nose = sim.pitch();
+            if !(0.0..=most).contains(&nose) {
+                let (yaw, _, _) = sim.body.rotation.to_euler(EulerRot::YXZ);
+                sim.body.rotation = Quat::from_euler(EulerRot::YXZ, yaw, nose.clamp(0.0, most).to_radians(), 0.0);
+                sim.body.angular_velocity = Vec3::ZERO;
+            }
+        } else if sim.body.position.y > REST + 1.0 {
+            return (sim.time, -sim.body.position.z, sim.speed());
+        }
+    }
+    (f32::NAN, f32::NAN, f32::NAN)
+}
+
+/// Full throttle, the stick holding a speed (nose up while faster): the climb rate it
+/// settles at, m/s.
+fn climb(model: &VehicleModel, speed: f32) -> f32 {
+    let mut sim = Sim::new(model, 1000.0, speed);
+    sim.flight.throttle = 1.0;
+    sim.run(25.0, |s| {
+        let wanted_path = ((s.speed() - speed) * 2.0).clamp(-20.0, 60.0);
+        let path = (s.body.velocity.y / s.speed().max(1.0)).asin().to_degrees();
+        let pitch = ((wanted_path - path) * 0.08 - s.local_rates().x * 0.02).clamp(-1.0, 1.0);
+        let roll = (-s.roll() * 0.03 - s.local_rates().z * 0.005).clamp(-1.0, 1.0);
+        pilot(1.0, pitch, roll, 0.0)
+    });
+    sim.body.velocity.y
+}
+
+/// A level turn at full throttle banked `bank` degrees, the stick holding the altitude: the
+/// speed and turn rate (degrees per second) over its last 5 s, and how far it sank (m).
+fn turn(model: &VehicleModel, bank: f32) -> (f32, f32, f32) {
+    let corner = JetEnvelope::of(&model.desc).corner;
+    let mut sim = Sim::new(model, 1000.0, corner);
+    sim.flight.throttle = 1.0;
+    let (mut heading, mut last, mut before) = (0.0, 0.0f32, 0.0);
+    let steps = (30.0 / DT) as usize;
+    for i in 0..steps {
+        let climb = sim.body.velocity.y;
+        let wanted = ((1000.0 - sim.body.position.y) * 0.3).clamp(-15.0, 15.0);
+        let pitch = ((wanted - climb) * 0.08 - sim.local_rates().x * 0.01).clamp(-1.0, 1.0);
+        let roll = ((bank - sim.roll()) * 0.05 - sim.local_rates().z * 0.005).clamp(-1.0, 1.0);
+        sim.step(&pilot(1.0, pitch, roll, 0.0));
+        let forward = sim.body.rotation * Vec3::NEG_Z;
+        let now = (-forward.x).atan2(-forward.z).to_degrees();
+        heading += (now - last + 540.0).rem_euclid(360.0) - 180.0;
+        last = now;
+        if i == steps - (5.0 / DT) as usize {
+            before = heading;
+        }
+    }
+    (sim.speed(), (heading - before).abs() / 5.0, 1000.0 - sim.body.position.y)
+}
+
+/// Idle and air brake holding the altitude: the speed below which it can't.
+fn stall_speed(model: &VehicleModel) -> f32 {
+    let mut sim = Sim::new(model, 1000.0, 100.0);
+    for _ in 0..80 {
+        sim.run(0.5, |s| hold_altitude(s, 1000.0, -1.0, false));
+        if sim.body.position.y < 990.0 {
+            return sim.speed();
+        }
+    }
+    f32::NAN
+}
+
+/// Each jet's take-off, stall, climb, top speeds and sustained turns, next to the speeds BF2's
+/// own wings need (`bf2_speeds`). Prints a table and checks each against what it did before BF2's
+/// world gravity (14.73 instead of 9.81) came in:
+///
+/// | J-10 (fighters alike) | lift-off     | best climb     | top / afterburner | 60° / 75° turn |
+/// |-----------------------|--------------|----------------|-------------------|----------------|
+/// | 9.81                  | 6.7 s, 128 m | 19.8 m/s       | 341 / 402 km/h    | 4.4 / 10.7°/s  |
+/// | 14.73, lift as before | 6.8 s, 132 m | 12.1 m/s       | 329 / 392 km/h    | 7.3 / 22.6°/s, sinking |
+/// | 14.73, BF2's lift     | 6.6 s, 126 m | 13.6 m/s       | 358 / 421 km/h    | 5.4 / 12.2°/s  |
+///
+/// The climb stays below 9.81's: BF2 doesn't scale the engines with the gravity, so the same
+/// thrust lifts the jet 1.5 times as heavy (the A-10 and Su-39, with twice the gravity: 3 to 4
+/// m/s, 1.0 to 1.5 at 14.73 before, 3.2 to 3.5 under 9.81; they top out at about 270 km/h, 178
+/// and 192 before).
+/// `cargo test -p game_shared --test flight jet_performance -- --nocapture`
+#[test]
+fn jet_performance() {
+    let mut failures = Vec::new();
+    println!("km/h, s, m, m/s   BF2 slowest rotate | lift-off s m km/h | stall | climb | top AB | turn 60°: km/h °/s sink, 75°: km/h °/s sink");
+    for name in ["air_j10", "air_f35b", "usair_f18", "ruair_su34", "ruair_mig29", "usair_f15", "air_su30mkk", "air_a10", "air_su39"] {
+        let Some(model) = load(name) else {
+            println!("{name}: not imported, skipped");
+            continue;
+        };
+        let (slowest, rotate) = bf2_speeds(&model);
+        let (t, distance, liftoff) = takeoff(&model);
+        let stall = stall_speed(&model);
+        // The best climb: at the speed (a share of the engines' top speed) that climbs fastest.
+        let top_speed = JetEnvelope::of(&model.desc).corner / 0.7;
+        let (climb, climb_speed) = [0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8]
+            .iter()
+            .map(|share| (climb(&model, top_speed * share), top_speed * share))
+            .fold((f32::MIN, 0.0), |best, c| if c.0 > best.0 { c } else { best });
+        let top = |boost: bool| {
+            let mut sim = Sim::new(&model, 1000.0, 90.0);
+            sim.run(40.0, |s| hold_altitude(s, 1000.0, 1.0, boost));
+            sim.speed()
+        };
+        let (full, afterburner) = (top(false), top(true));
+        let turns: Vec<(f32, f32, f32)> = [60.0, 75.0].iter().map(|bank| turn(&model, *bank)).collect();
+        let turn_text: Vec<String> = turns.iter().map(|(s, r, sink)| format!("{:3.0} {:4.1} {:4.0}", s * 3.6, r, sink)).collect();
+        println!(
+            "{name:12} {:4.0} {:4.0} | {t:4.1} {distance:4.0} {:4.0} | {:4.0} | {climb:5.1} at {:3.0} | {:4.0} {:4.0} | {}",
+            slowest * 3.6,
+            rotate * 3.6,
+            liftoff * 3.6,
+            stall * 3.6,
+            climb_speed * 3.6,
+            full * 3.6,
+            afterburner * 3.6,
+            turn_text.join(" | ")
+        );
+        // Fighters, and the attack jets with twice the gravity.
+        let heavy = model.desc.physics.gravity > 1.5;
+        let (most_time, least_climb, least_top) = if heavy { (8.0, 3.0, 240.0) } else { (7.5, 12.0, 340.0) };
+        if !(t < most_time) {
+            failures.push(format!("{name}: lifted off after {t:.1} s"));
+        }
+        if !(climb > least_climb) {
+            failures.push(format!("{name}: climbs at best {climb:.1} m/s at full throttle"));
+        }
+        if !(full * 3.6 > least_top) {
+            failures.push(format!("{name}: {:.0} km/h at full throttle", full * 3.6));
+        }
+        if !(turns.iter().all(|turn| turn.2 < 40.0)) {
+            failures.push(format!("{name}: sank {:.0} and {:.0} m in 60° and 75° banked turns at full throttle", turns[0].2, turns[1].2));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

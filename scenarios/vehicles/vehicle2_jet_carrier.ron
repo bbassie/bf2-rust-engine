@@ -1,0 +1,44 @@
+// A conventional take-off from the US ship on Gulf of Oman in the F-35B (no hover): full
+// throttle along the deck from the stern, stick back from the stall speed (about 125 km/h), climb out, gear up.
+// The report traces speed, height above the sea, climb rate and attitude: it should leave the
+// deck flying and climb without dipping to the water. vehicle2_jet.ron is the same from a
+// runway (Wake Island's).
+// client --scenario scenarios/vehicles/vehicle2_jet_carrier.ron --out target/scenarios/vehicle2/jet_carrier
+(
+    level: "gulf_of_oman",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        ForbidLog("air_f35b crashed"),
+        ForbidLog("air_f35b destroyed"),
+        Wait(2.0),
+        NearVehicle("air_f35b"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(1.0),
+        ThirdPerson(true),
+        // Moved from its parking spot beside the island to the stern, 9 m to port of the centre line
+        // (clear of the helicopters parked by the island), facing along the deck
+        // (about 200 m of it ahead).
+        PlaceVehicle((-678.5, 45.6, 495.9), -148.4, 0.0),
+        Wait(1.5),
+        VehicleInfo("parked"),
+        Screenshot("01_parked"),
+        Move(0.0, 1.0),
+        VehicleTrace("deck run", 5.5),
+        Screenshot("02_deck_run"),
+        Stick(0.0, 0.5),
+        VehicleTrace("rotate", 2.0),
+        Stick(0.0, 0.0),
+        VehicleTrace("climb out", 6.0),
+        Screenshot("03_climb_out"),
+        VehicleInfo("climbing"),
+        Move(0.0, 0.0),
+        ForbidLog("panicked"),
+        Quit,
+    ],
+)

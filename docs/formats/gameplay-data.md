@@ -441,7 +441,9 @@ PlayerControlObject usair_f18   mass 5000, drag 0.05, inertiaModifier 0.4/0.4/0.
 
 **AI:** `Unit equipmentTypeName Plane`. `ControlInfo` maps drive and aim to PIYaw/PIPitch/PIRoll/PIThrottle with `maxRollAngle 0.99`, `maxClimbAngle 0.3333` (radians). `Mobile maxSpeed 60`, `turnRadius 25`. Weapons AI: MG range 5–600, strengths Inf 9 / Light 4 / Heli 5 / Air 4, `allowedDeviation 20`; Sidewinder Heli 7 / Air 9.
 
-**Implicit or unknown:** lift and drag laws; stall; how `setPitchOffset` works; afterburner thrust scaling (probably thrust × `sprintFactor`); the `noPropellerEffectAtSpeed` falloff curve; landing-gear drag; ground friction of `grip 16` wheels and braking.
+**The lift law** (from `bf2_w32ded.exe`'s wing update, 0x62ebd0 and 0x62ea50): each `Wing` pushes along its normal with `(0.25 sin α + 0.75 f(α)) · v² · (setWingLift + setFlapLift) · world gravity / 9.82 · 0.0025` (m/s², clamped to ±200, fading out towards the world's top height), where α is the angle between the airflow and the wing's plane in degrees and `f(α) = α (45 − |α|) · 4 / 2025` (0 at 0°, 1 at 22.5°, 0 from 45°): no separate stall, lift falls off past 22.5°. Control surfaces lift by being rotated (their angle of attack changes); the lift is scaled with the world gravity, so wings carry the same share of the weight whatever it is. Forces are accelerations (masses differ fivefold between jets with the same engines). The plane engine's thrust (0x62ae10) isn't scaled with gravity; it fades with speed over `noPropellerEffectAtSpeed` and with height, and its size appears to come from `setDifferential` (× 3.5 over the gear ratio; not fully traced) rather than `setTorque`: the J-10's one engine (`setDifferential 20`) matches the F/A-18's and the A-10's two (10 each).
+
+**Implicit or unknown:** drag law; how `setPitchOffset` works; afterburner thrust scaling (probably thrust × `sprintFactor`); the `noPropellerEffectAtSpeed` falloff curve; landing-gear drag; ground friction of `grip 16` wheels and braking.
 
 ### 5.3 Helicopter: `ahe_ah1z` (AH-1Z; `Vehicles/Air/ahe_ah1z/`)
 

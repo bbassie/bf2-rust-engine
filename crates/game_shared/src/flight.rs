@@ -32,7 +32,8 @@
 //!   (a share of the engines' BF2 top speed, see [`JetEnvelope`]), mushy when slow, wider turns
 //!   when fast, so throttle and afterburner change the turn radius. BF2's wings still carry
 //!   the jet (lift from the angle of attack, times [`JET_LIFT_GAIN`] so the flight path follows
-//!   the nose closely) and their induced drag makes hard turns cost speed; the fin keeps the
+//!   the nose closely, and scaled with the world gravity like BF2's, [`jet_lift_scale`]) and
+//!   their induced drag (BF2's, [`bf2_lift_sum`]) makes hard turns cost speed; the fin keeps the
 //!   nose into the airflow ([`JET_WEATHERVANE`]), so rudder yaw and banked turns stay
 //!   coordinated. Too slow or past the stall angle the jet stalls ([`jet_stall`]): the stick
 //!   loses authority and the nose drops towards where it is going, until it has speed again.
@@ -54,7 +55,8 @@ use crate::{
 
 /// A stalled wing still brakes the flow through it like a plate, this much of its lift.
 const PLATE: f32 = 0.25;
-/// Drag from lift, per m/s² of lift (turning costs speed).
+/// Helicopters' and boats' drag from lift, per m/s² of lift (turning costs speed). Jets get
+/// BF2's instead (see [`bf2_lift_sum`]).
 const INDUCED_DRAG: f32 = 0.06;
 /// Jets in the air hold this throttle while neither W nor S is pressed.
 const CRUISE_THROTTLE: f32 = 0.5;
@@ -153,6 +155,70 @@ const HELI_HOVER_SPEED: f32 = 20.0;
 /// this share keeps their speeds and turns (an AH-1Z held 30° nose down settles at
 /// 246 km/h, 253 before, 319 with all of it; a UH-60 at 153 km/h, 151 before).
 const ROTOR_TILT_PUSH: f32 = 0.7;
+
+/// The gravity BF2's wing lift is made for, m/s². `BF2.exe` scales every wing's lift by the
+/// world gravity over this (its wing update multiplies `(wingLift + flapLift)` by the physics
+/// world's gravity and by 1/9.82), so its jets carry their weight at the same speeds whatever
+/// the world gravity; the engines' thrust and the drag aren't scaled.
+pub const BF2_LIFT_GRAVITY: f32 = 9.82;
+
+/// How much more a jet's wings lift under BF2's world gravity than the numbers they were
+/// imported with (fitted by flying under 9.81, where BF2's scale is 1): world gravity / 9.82.
+pub fn jet_lift_scale() -> f32 {
+    crate::physics::WORLD_GRAVITY / BF2_LIFT_GRAVITY
+}
+
+/// BF2's lift coefficient of a wing at an angle of attack (radians), as `BF2.exe` computes it:
+/// 0.25 sin α plus 0.75 times a curve rising from 0 at 0° to 1 at 22.5° and back to 0 at 45°
+/// (its wing then pushes `coefficient × v² × (wingLift + flapLift) × 0.0025 × gravity / 9.82`
+/// m/s² along its normal).
+pub fn bf2_lift_coefficient(aoa: f32) -> f32 {
+    let deg = aoa.to_degrees().clamp(-90.0, 90.0);
+    let curve = if deg.abs() < 45.0 { deg * (45.0 - deg.abs()) * 4.0 / 2025.0 } else { 0.0 };
+    0.25 * aoa.sin() + 0.75 * curve
+}
+
+/// [`bf2_lift_coefficient`]'s slope at small angles, per radian.
+pub const BF2_LIFT_SLOPE: f32 = 0.25 + 0.75 * 4.0 * 45.0 / 2025.0 * (180.0 / std::f32::consts::PI);
+
+/// The importer's units for BF2's `setWingLift` and `setFlapLift` (`bf2_import::vehicles`) and
+/// the share it gives landing flaps, to recover BF2's numbers from a jet's wings.
+const IMPORT_LIFT_PER_WING_LIFT: f32 = 0.01;
+const IMPORT_LIFT_PER_FLAP_LIFT: f32 = 0.003;
+const IMPORT_LANDING_FLAP_SHARE: f32 = 0.3;
+
+/// BF2's lift of a jet's horizontal wings together under the world gravity: the level lift
+/// (m/s²) is this times [`bf2_lift_coefficient`] times the airspeed squared.
+pub fn bf2_lift_sum(model: &VehicleModel) -> f32 {
+    let desc = &model.desc;
+    desc.wings
+        .iter()
+        .filter(|w| (model.rest_rotation(w.part as usize) * Vec3::Y).y > 0.7)
+        .map(|w| {
+            let share = if w.landing_flap { IMPORT_LANDING_FLAP_SHARE } else { 1.0 };
+            (w.lift / IMPORT_LIFT_PER_WING_LIFT + w.flap_lift / IMPORT_LIFT_PER_FLAP_LIFT) / share
+        })
+        .sum::<f32>()
+        * 0.0025
+        * jet_lift_scale()
+}
+
+/// BF2's `drag` of the fighters (all 0.05), which the importer's drag units were fitted to.
+const FIGHTER_DRAG: f32 = 0.05;
+
+/// Share of its imported air drag a jet flies with: 1 for the fighters, the square root of
+/// their `drag` over its own for the heavier ones (the A-10's and Su-39's 0.5 and 0.4, as the
+/// helicopters' `drag` counts). BF2 gives them the fighters' engines (the A-10's two are the
+/// F/A-18's) and the same 125 m/s where the thrust ends, twice the gravity and wings to carry
+/// it; ten times the fighters' drag held them below 180 km/h and to a 3 m/s climb even under
+/// 9.81, with the square root they cruise near 290 km/h.
+pub fn jet_drag_scale(desc: &game_data::VehicleDesc) -> f32 {
+    if desc.category == VehicleCategory::Air {
+        (FIGHTER_DRAG / desc.physics.drag.max(1e-3)).sqrt().min(1.0)
+    } else {
+        1.0
+    }
+}
 
 /// A jet's speeds that matter to its handling (m/s), from its engines' BF2 top speed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -496,6 +562,9 @@ pub fn flight_forces(
     if desc.category != VehicleCategory::Land || in_water > 0.0 {
         let tan_stall = aero.stall_angle.to_radians().tan();
         let gain = if fly_by_wire { JET_LIFT_GAIN } else { 1.0 };
+        // BF2 scales jets' wing lift with the world gravity (helicopters keep the lift they
+        // were tuned with).
+        let lift_scale = if jet { jet_lift_scale() } else { 1.0 };
         let mut lift = Vec3::ZERO;
         let mut wings = Vec::with_capacity(desc.wings.len());
         // A piloted helicopter's fins: BF2's are made for its own model; nose down in forward
@@ -525,8 +594,9 @@ pub fn flight_forces(
             } else {
                 model.deflection(joints, wing.part as usize)
             };
-            let accel = -wing.lift * (gain * lifting * along + PLATE * stalled * stalled.abs())
-                + wing.flap_lift * deflection * along * along;
+            let accel = (-wing.lift * (gain * lifting * along + PLATE * stalled * stalled.abs())
+                + wing.flap_lift * deflection * along * along)
+                * lift_scale;
             // Landing flaps only add lift; where BF2 puts them would pitch the jet over.
             // Flying by wire, the wings only carry the jet; the controller turns it.
             let at_com = wing.landing_flap || fly_by_wire || assisted_helicopter;
@@ -553,13 +623,26 @@ pub fn flight_forces(
             push.forces.push((accel * scale * mass, point));
         }
         if let Ok(direction) = Dir3::new(body.velocity) {
-            push.forces.push((-direction * lift.length() * scale * INDUCED_DRAG * mass, com));
+            let lift = lift.length() * scale;
+            let drag = if jet {
+                // BF2's: its wings push along their normals, so their lift leans back by the
+                // angle of attack it takes them ([`bf2_lift_sum`]); ours lean back by the
+                // hull's (the trim carries the weight nose on), this makes up the difference,
+                // at most INDUCED_DRAG of the lift (hard turns slow, bleeding speed as they
+                // were tuned to).
+                let needed = lift / (bf2_lift_sum(model) * BF2_LIFT_SLOPE * speed * speed).max(1e-3);
+                let aoa = (-local_velocity.y / airspeed.max(1.0)).max(0.0);
+                lift * (needed - aoa).clamp(0.0, INDUCED_DRAG)
+            } else {
+                lift * INDUCED_DRAG
+            };
+            push.forces.push((-direction * drag * mass, com));
         }
     }
 
     // Air drag, and the air brake of jets slowing down.
     let brake = if desc.category == VehicleCategory::Air && controls.throttle < 0.0 { AIR_BRAKE } else { 1.0 };
-    let drag = -local_velocity * speed * Vec3::from(desc.physics.drag_modifier) * aero.drag * brake;
+    let drag = -local_velocity * speed * Vec3::from(desc.physics.drag_modifier) * aero.drag * brake * jet_drag_scale(desc);
     push.forces.push((rotation * drag * mass, com));
 
     // Aerodynamic damping of rotation (flying by wire, the controller damps it).

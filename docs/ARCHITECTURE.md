@@ -182,7 +182,8 @@ hanging in the air, never grounded. Falling, it never gathers speed it doesn't m
 in `BF2.exe`; see docs/formats/gameplay-data.md), times its template's `gravityModifier`:
 `game_shared::physics::{WORLD_GRAVITY, gravity}`, also avian's `Gravity` resource (a
 vehicle's `GravityScale` is its modifier). Soldiers, ropes and ziplines have 1, ground
-vehicles 1.5-2, tank shells 0.4, rockets 0.05-0.1. The server, prediction, bots' aim and
+vehicles 1.5-2, tank shells 0.4, rockets 0.05-0.1 (BF2 scales wing lift with the world gravity
+over 9.82, see the jets below). The server, prediction, bots' aim and
 throws, the bomb marker and the commander's artillery arcs all derive from it;
 `scenarios/combat/gravity_ranges.ron` measures ranges (a hand grenade thrown 30° up first
 lands 39 m away, 57 m under 9.81; a tank shell fired level comes down after 120 m, not 146).
@@ -312,6 +313,16 @@ helicopter, sea, stationary) comes from the engine type.
     throttle and afterburner change the turn radius and hard turns bleed speed (induced
     drag). Wings lift 1.8× BF2's for the angle of attack (the path follows the nose); the fin
     weathervanes the nose into sideways airflow (coordinated banked turns and rudder yaw).
+    BF2's wing, from `BF2.exe`: each wing pushes along its normal with (0.25 sin α + 0.75 f(α))
+    v² (wingLift + flapLift) × 0.0025 × world gravity / 9.82 m/s², f rising from 0 at 0° to 1
+    at 22.5° and back to 0 at 45°, so its jets carry their weight at the same speeds whatever
+    the world gravity; the engines aren't scaled (a J-10 at 14.73 climbs at about 14 m/s at
+    best, 20 under 9.81). Jets' wing lift is scaled the same (`flight::jet_lift_scale`), their
+    drag from lift is BF2's (lift × the angle of attack its wings need, `bf2_lift_sum`, at most
+    6 % of it), and the heavy attack jets (A-10, Su-39: twice the gravity, the fighters'
+    engines) fly with the square root of their tenfold BF2 `drag` (`jet_drag_scale`: about
+    270 km/h, 180 with all of it). `tests/flight.rs` `jet_performance` prints take-off, stall,
+    climb, top speeds and sustained turns of every jet.
     Below 40 % of the corner speed or past the stall angle it stalls: the stick loses most
     authority, the nose drops towards the flight path, the HUD says STALL and the view
     shakes; with speed back it flies again. Unpiloted jets keep BF2's raw forces. Landing
