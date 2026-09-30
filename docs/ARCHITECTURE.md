@@ -254,7 +254,10 @@ helicopter, sea, stationary) comes from the engine type.
   even from a bot, which moves to a free seat (a gunner's first) or, with none left, gets out
   beside the vehicle (out of an aircraft only landed, or high enough for its parachute; in
   between the player can't get in), and a seat key for a bot's seat swaps with it; nobody
-  takes a player's seat. The bot's AI takes its new seat as its own. Out of an aircraft high
+  takes a player's seat. The bot's AI takes its new seat as its own: a bot handed the
+  controls on the move (a pilot swapping to the gun) flies on from where it is (no ground
+  take-off) or keeps driving, and a squad leader put out of a vehicle doesn't take his squad
+  mates aboard out with him (`VehicleClaims::displaced`). Out of an aircraft high
   up, one gets out with its speed, under a parachute (the jump key also opens one when
   falling fast). The parachute (`soldier::parachute_glide`) catches the fall
   over a moment (30 m/s²), then glides where the soldier looks (turning at most 70°/s):

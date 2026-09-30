@@ -256,6 +256,46 @@ impl Ride {
             .map_or(&[], |p| &p.points[self.waypoint.min(p.points.len())..])
     }
 
+    /// (seats for players) Taking the controls of a vehicle already under way (a player
+    /// swapped seats with us): an aircraft in the air flies on from where it is instead of
+    /// running its take-off from the ground, a vehicle on the move doesn't stop to wait for
+    /// riders, and the new path starts from here.
+    fn take_over(&mut self, w: &Senses, seen: &Seen, profile: &VehicleProfile) {
+        let motion = seen.motion;
+        let speed = motion.velocity.length();
+        self.last_velocity = motion.velocity;
+        self.last_position = motion.position;
+        self.path = None;
+        self.path_goal = None;
+        self.repath = true;
+        self.repath_cooldown = 0.0;
+        self.best_remaining = f32::MAX;
+        self.no_progress = 0.0;
+        self.stuck = 0.0;
+        self.reverse = 0.0;
+        // Nobody to wait for: it is on its way.
+        self.waited = BOARD_WAIT;
+        if profile.role.flies() {
+            let height = w.height_above_ground(motion.position, 400.0, seen.entity);
+            if height > LANDED_HEIGHT || speed > 5.0 {
+                self.airborne = true;
+                self.flight = match profile.role {
+                    Role::Jet if height > JET_HEIGHT * 0.6 => Flight::Orbit,
+                    Role::Jet => Flight::Climb,
+                    _ => Flight::Cruise,
+                };
+            } else {
+                self.flight = Flight::Ground;
+            }
+        }
+        info!(
+            "{} takes over at {:.0} m/s, {:?}",
+            seen.template,
+            speed,
+            if profile.role.flies() { Some(self.flight) } else { None }
+        );
+    }
+
     fn leave(&mut self, reason: &'static str) {
         if !self.leaving {
             self.leaving = true;
@@ -737,6 +777,7 @@ impl BotBrain {
             self.ride = Some(ride);
             self.activity = Activity::Objective;
             vcx.claims.release(me.player);
+            vcx.claims.boarded(me.player);
         }
         let mut ride = self.ride.take().unwrap();
         ride.time += dt;
@@ -758,6 +799,9 @@ impl BotBrain {
                     seen.template,
                     ride.purpose
                 );
+                if ride.purpose == Purpose::Drive {
+                    ride.take_over(w, &seen, profile);
+                }
             }
         }
         if ride.want_seat == Some(seated.seat) || ride.time > ride.want_until {
@@ -827,13 +871,11 @@ impl BotBrain {
                 if !fighting {
                     self.look_around(&mut ride, &seen, &mut frame, dt);
                 }
-                let drop_off = vcx.claims.dropping_off(seen.entity);
-                self.ride_along(w, me, &mut ride, &seen, profile, order, crew, drop_off);
+                self.ride_along(w, me, &mut ride, &seen, profile, order, crew, vcx.claims);
             }
             Purpose::Ride => {
                 self.look_around(&mut ride, &seen, &mut frame, dt);
-                let drop_off = vcx.claims.dropping_off(seen.entity);
-                self.ride_along(w, me, &mut ride, &seen, profile, order, crew, drop_off);
+                self.ride_along(w, me, &mut ride, &seen, profile, order, crew, vcx.claims);
             }
         }
 
@@ -884,11 +926,12 @@ impl BotBrain {
         profile: &VehicleProfile,
         order: Option<(OrderKind, usize)>,
         crew: &[Crew],
-        drop_off: bool,
+        claims: &VehicleClaims,
     ) {
         if profile.role == Role::Stationary {
             return;
         }
+        let drop_off = claims.dropping_off(seen.entity);
         let speed = seen.motion.velocity.length();
         let position = seen.motion.position;
         let height = if profile.role.flies() { w.height_above_ground(position, 50.0, seen.entity) } else { 0.0 };
@@ -906,6 +949,8 @@ impl BotBrain {
         }
         if let Some(leader) = leader
             && ride.with_leader
+            // (seats for players) Not when a player put him out to take his seat.
+            && !claims.was_displaced(leader, seen.entity)
             && squad.is_some_and(|s| s.leader_soldier.is_some())
             && !crew.iter().any(|c| c.player == leader)
             && speed < 4.0
@@ -1432,7 +1477,9 @@ impl BotBrain {
         let lookahead = (6.0 + speed.abs() * 0.9).clamp(6.0, 22.0) + profile.length * 0.3;
         let (target, remaining, corners) = match &ride.path {
             Some(path) if path.points.len() >= 2 => follow_polyline(&path.points, &mut ride.waypoint, position, lookahead),
-            // No path yet: carefully straight at it.
+            // No path yet: carefully straight at it (taken over on the move: the first path
+            // comes within a tick or two, so no braking for it).
+            _ if ride.path_task.is_some() => (goal, flat(goal - position).length(), speed.clamp(5.0, profile.top_speed * 0.8)),
             _ => (goal, flat(goal - position).length(), 5.0),
         };
         if let Some(path) = &ride.path

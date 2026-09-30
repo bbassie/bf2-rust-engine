@@ -644,6 +644,7 @@ fn enter_vehicles(
     teams: Query<&Team>,
     bots: Query<(), With<crate::bots::BotBrain>>,
     mut notices: Notices,
+    mut claims: Option<ResMut<crate::ai::vehicles::VehicleClaims>>,
 ) {
     let mut taken = occupancy(seated.iter().map(|(e, s, ..)| (e, s)));
     // Bots' soldiers in (or getting into) seats, and their players.
@@ -750,6 +751,10 @@ fn enter_vehicles(
                     continue;
                 };
                 step_out(&mut bot_motion, exit, vehicle, velocity.0, flies, &spatial);
+                // Its squad mates aboard don't follow it out.
+                if let Some(claims) = claims.as_mut() {
+                    claims.displaced(bot_soldiers[&bot], vehicle);
+                }
                 commands.entity(bot).remove::<Seated>();
                 set_hittable(&mut commands, bot_hitbox, true);
                 seats.remove(&seat);

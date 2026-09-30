@@ -1,0 +1,34 @@
+// A player putting a bot squad leader out of a vehicle doesn't take his squad out with him
+// (ai::vehicles::VehicleClaims::displaced): on Karkand a bot squad fills a Vodnik, its leader
+// driving; we get in, the leader gets out ("who got out at"), and his squad mates stay aboard
+// ("leader got out" never appears; LogSeats shows them still in their seats 5 s later).
+// client --scenario scenarios/vehicles/seats_bots_squad.ron --out target/scenarios/vehicles/seats_bots_squad
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 1,
+    bots: 24,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        Wait(5.0),
+        NearVehicle("jep_vodnik"),
+        SeatSquad("jep_vodnik"),
+        LogSeats("jep_vodnik"),
+        // Long enough for the riders to see their leader aboard.
+        Wait(0.3),
+        NearVehicle("jep_vodnik"),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        ExpectLog("who got out at", 3.0),
+        ForbidLog("(leader got out)"),
+        LogSeats("jep_vodnik"),
+        ThirdPerson(true),
+        VehicleLook(150.0, -15.0),
+        Wait(5.0),
+        LogSeats("jep_vodnik"),
+        Screenshot("01_squad_stays"),
+        Quit,
+    ],
+)

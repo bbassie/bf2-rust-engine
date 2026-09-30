@@ -35,7 +35,7 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | `perf/` | Frame times with many bots (Karkand, AIX 2 Archipelago): at spawn, a fixed view, in the fight |
 | `tactical_map/` | The generated tactical map (`tactical_map.rs`) of Karkand, Gulf of Oman, Dalian Plant and AIX 2 Archipelago, written to `target/scenarios/tactical_map/<level>.png`; a second run shows the cache hit in the log |
 | `terrain/` | Terrain, undergrowth, trees, water, horizon, view distance |
-| `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures, the minimap's air zoom (`minimap_air`), players taking seats from bots (`seats_bots`, `seats_bots_heli`) |
+| `vehicles/` | Driving, flying, boats, seats, sights, damage, tracks, countermeasures, the minimap's air zoom (`minimap_air`), players taking seats from bots (`seats_bots`, `seats_bots_heli`, `seats_bots_squad`) and handing the controls to a bot on the move (`seats_bots_takeover`, `seats_bots_takeover_land`) |
 | `voice/` | Voice chat, two clients and a dedicated server: squad and command channels, enemies, muting (`BF2_VOICE_TEST_INPUT`) |
 
 Files ending in `_host`/`_remote` or `_net` go in pairs or against a dedicated server; their

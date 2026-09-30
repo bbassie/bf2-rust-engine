@@ -145,10 +145,18 @@ pub enum Step {
     /// `SeatBot("jep_vodnik", 1)` for a bot driver (singleplayer and listen server only).
     /// Logs whom; takes a frame.
     SeatBot(String, u8),
+    /// Like `SeatBot` for every free seat, with one bot squad of our team: its leader drives
+    /// the nearest vehicle of this template, his squad mates (on foot) fill the other seats.
+    /// Logs whom; takes a frame.
+    SeatSquad(String),
     /// Lifts the nearest vehicle of this template this many meters (still, level as it
     /// stands), e.g. a helicopter to hover out of reach of a parachute (singleplayer and
     /// listen server only).
     LiftVehicle(String, f32),
+    /// For this many seconds, checks every frame that our vehicle stays at least this many
+    /// meters above the ground and keeps at least this speed (m/s); fails otherwise. Logs the
+    /// lowest height and speed seen, e.g. `VehicleKeeps("bot flies", 20.0, 0.0, 15.0)`.
+    VehicleKeeps(String, f32, f32, f32),
     /// Logs who sits in which seat of the nearest vehicle of this template:
     /// `seats of jep_vodnik: 1 Player, 2 Bravo (bot), 3 free` (bots' names end in "(bot)").
     LogSeats(String),
@@ -1152,6 +1160,55 @@ fn run_scenario(
                 vehicles.seat.0 = *seat;
                 Progress::Done
             }
+            Step::SeatSquad(template) => {
+                if runner.frames > 0 {
+                    Progress::Done
+                } else {
+                    runner.frames = 1;
+                    let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
+                    let my_team = local_team.single().ok().copied();
+                    // Bots of our team on foot and alive: soldier, name, squad, leads it.
+                    let on_foot: Vec<(Entity, String, u8, bool)> = bots
+                        .iter()
+                        .filter(|(.., team)| Some(**team) == my_team)
+                        .filter_map(|(_, _, player, controls, member, _)| {
+                            let soldier = controls?.0;
+                            let member = member?;
+                            let (.., health) = others.get(soldier).ok()?;
+                            (health.current > 0.0).then(|| (soldier, player.name.clone(), member.squad, member.leader))
+                        })
+                        .collect();
+                    // The squad with the most members on foot, led by one of them.
+                    let squad = on_foot
+                        .iter()
+                        .filter(|(.., leader)| *leader)
+                        .max_by_key(|(_, _, squad, _)| on_foot.iter().filter(|m| m.2 == *squad).count())
+                        .map(|(_, _, squad, _)| *squad);
+                    let vehicle = nearest_vehicle(&vehicles, template, origin).and_then(|(e, _)| Some((e, vehicles.vehicles.get(e).ok()?.2)));
+                    match (vehicle, squad) {
+                        (Some((vehicle, data)), Some(squad)) => {
+                            let taken: Vec<u8> = crews.iter().filter(|(s, _)| s.vehicle == vehicle).map(|(s, _)| s.seat).collect();
+                            let mut free = (0..data.0.desc.seats.len() as u8).filter(|s| !taken.contains(s));
+                            // The leader first.
+                            let mut members: Vec<&(Entity, String, u8, bool)> = on_foot.iter().filter(|m| m.2 == squad).collect();
+                            members.sort_by_key(|m| !m.3);
+                            for (bot, name, _, leader) in members {
+                                let Some(seat) = free.next() else { break };
+                                let Ok(hitbox) = hitboxes.get(*bot) else { continue };
+                                let open = data.0.desc.seats[seat as usize].open;
+                                game_server::vehicles::seat_soldier(&mut commands, *bot, hitbox, vehicle, seat, open);
+                                info!(
+                                    "scenario: seated {name}{} of squad {squad} in {template} seat {}",
+                                    if *leader { " (leader)" } else { "" },
+                                    seat + 1
+                                );
+                            }
+                        }
+                        _ => warn!("scenario: no {template} or no bot squad on foot to seat"),
+                    }
+                    Progress::Waiting
+                }
+            }
             Step::SeatBot(template, seat) => {
                 // The seats taken show once the commands are applied: one frame.
                 if runner.frames > 0 {
@@ -1211,6 +1268,39 @@ fn run_scenario(
                     None => warn!("scenario: no {template} to lift"),
                 }
                 Progress::Done
+            }
+            Step::VehicleKeeps(label, height, speed, seconds) => {
+                if runner.frames == 0 {
+                    runner.frames = 1;
+                    runner.mark = None;
+                }
+                let state = vehicles.seated.single().ok().and_then(|s| vehicles.vehicles.get(s.vehicle).ok()).map(|(_, view, _)| {
+                    let filter = avian3d::prelude::SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+                    let t = view.transform.translation;
+                    let altitude = vehicles.spatial.cast_ray(t, Dir3::NEG_Y, 2000.0, true, &filter).map_or(2000.0, |hit| hit.distance);
+                    (altitude, view.velocity.length())
+                });
+                let (low, slow) = runner.mark.map_or((f32::MAX, f32::MAX), |m| (m.x, m.y));
+                let (low, slow) = match state {
+                    Some((altitude, velocity)) => (low.min(altitude), slow.min(velocity)),
+                    None => (-1.0, -1.0),
+                };
+                runner.mark = Some(Vec3::new(low, slow, 0.0));
+                if low < *height || slow < *speed {
+                    let line = format!("{label}: at least {height:.1} m up at {speed:.1} m/s expected, lowest {low:.1} m, slowest {slow:.1} m/s after {elapsed:.1} s");
+                    writeln!(runner.report, "{line}").ok();
+                    finish(&mut runner, &mut exit, now, Some(line));
+                    return;
+                }
+                if elapsed >= *seconds {
+                    let line = format!("{label}: lowest {low:.1} m up, slowest {slow:.1} m/s over {seconds:.0} s");
+                    info!("scenario: {line}");
+                    writeln!(runner.report, "{line}").ok();
+                    runner.mark = None;
+                    Progress::Done
+                } else {
+                    Progress::Waiting
+                }
             }
             Step::LogSeats(template) => {
                 let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();

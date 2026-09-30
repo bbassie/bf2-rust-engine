@@ -342,6 +342,10 @@ pub enum SeatWish {
 pub struct VehicleClaims {
     /// Per vehicle: who, for which seat, until when (seconds of [`Self::clock`]).
     claims: HashMap<Entity, Vec<(Entity, SeatWish, f32)>>,
+    /// Bots a player put out of a vehicle to take their seat (`vehicles::boarding`): the
+    /// vehicle, until they board one again. Their squad mates riding along stay aboard: a
+    /// squad leader thrown out isn't the squad getting out.
+    displaced: HashMap<Entity, Entity>,
     /// Transport helicopters landed at their drop-off: everyone but the pilot gets out
     /// (until when, seconds of [`Self::clock`]; the pilot renews it every tick).
     drop_offs: HashMap<Entity, f32>,
@@ -404,6 +408,21 @@ impl VehicleClaims {
     /// Bots on their way into a vehicle.
     pub fn pending(&self, vehicle: Entity) -> usize {
         self.claims.get(&vehicle).map_or(0, |l| l.len())
+    }
+
+    /// A player put this bot (player) out of `vehicle` to take its seat.
+    pub fn displaced(&mut self, player: Entity, vehicle: Entity) {
+        self.displaced.insert(player, vehicle);
+    }
+
+    /// Whether a player put this bot out of `vehicle` (and it hasn't boarded one since).
+    pub fn was_displaced(&self, player: Entity, vehicle: Entity) -> bool {
+        self.displaced.get(&player) == Some(&vehicle)
+    }
+
+    /// The bot is in a vehicle again.
+    pub fn boarded(&mut self, player: Entity) {
+        self.displaced.remove(&player);
     }
 }
 

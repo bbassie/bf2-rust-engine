@@ -1,0 +1,41 @@
+// A bot takes the wheel from us at speed (bots::vehicle::Ride::take_over): on Karkand's road
+// north of the Gas Station we drive the Humvee at about 55 km/h with a bot gunner and press
+// F2: we gun, the bot drives on without stopping dead or braking hard (at least 6 m/s over the
+// next 2 s; the report traces the speed). No crash.
+// client --scenario scenarios/vehicles/seats_bots_takeover_land.ron --out target/scenarios/vehicles/seats_bots_takeover_land
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 12,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ForbidLog("usjep_hmmwv crashed"),
+        Wait(3.0),
+        NearVehicle("usjep_hmmwv"),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.3),
+        SeatBot("usjep_hmmwv", 2),
+        LogSeats("usjep_hmmwv"),
+        PlaceVehicle((-148.0, 163.0, 262.0), 0.0, 15.0),
+        Move(0.0, 1.0),
+        ThirdPerson(true),
+        VehicleTrace("we drive", 1.5),
+        Move(0.0, 0.0),
+        Screenshot("01_we_drive"),
+        Log("F2: we gun, the bot drives"),
+        Seat(2),
+        ExpectLog("swapped seats with", 3.0),
+        ExpectLog("usjep_hmmwv takes over at", 3.0),
+        LogSeats("usjep_hmmwv"),
+        VehicleKeeps("bot drives", -1.0, 6.0, 2.0),
+        Screenshot("02_bot_drives_2s"),
+        VehicleTrace("bot drives on", 6.0),
+        Screenshot("03_bot_drives_8s"),
+        LogSeats("usjep_hmmwv"),
+        Quit,
+    ],
+)
