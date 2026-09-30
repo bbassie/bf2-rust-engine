@@ -27,8 +27,6 @@ use game_shared::{
     vehicle::Seated,
 };
 
-use game_shared::conquest::{ControlPoint, FlagState};
-
 use crate::{
     camera::PlayerCamera,
     conquest_hud::{FRIENDLY, SQUAD},
@@ -38,7 +36,7 @@ use crate::{
     map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MapView, MarkerIcons, NotMarker, SOLDIER_LAYER, apply_map_view, drive_map_view},
     map_shapes::{
         OrderLines, ShapeKind, ShapeLook, ShapeMaterial, SquadSlots, is_order, map_lines, order_rings, soldier_look, spawn_shape, tactical,
-        team_zones,
+        BaseZones,
     },
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
@@ -69,8 +67,9 @@ impl Plugin for BigMapPlugin {
 #[derive(Resource, Default)]
 struct BigMapView(MapView);
 
+/// The big map (hidden while M isn't held): the tactical top bar hides its objectives under it.
 #[derive(Component)]
-struct BigMapRoot;
+pub(crate) struct BigMapRoot;
 /// The fixed-size, clipped viewport the map shows through.
 #[derive(Component)]
 struct BigMapFrame;
@@ -277,10 +276,10 @@ fn update_big_map(
     level: Option<Res<LoadedLevel>>,
     settings: Res<Settings>,
     view: Res<BigMapView>,
-    (slots, order_lines, points, orders): (
+    (slots, order_lines, base_zones, orders): (
         Res<SquadSlots>,
         Res<OrderLines>,
-        Query<(&ControlPoint, &FlagState)>,
+        Res<BaseZones>,
         Query<(), With<game_shared::commander::SquadOrder>>,
     ),
     mut surface: Single<&mut MapSurface, With<BigMapImage>>,
@@ -330,7 +329,7 @@ fn update_big_map(
             pixels_per_uv: content.x.max(1.0),
             grid: GRID as f32,
             lines: if tactical { map_lines(&level, &order_lines.ours) } else { Vec::new() },
-            zones: if tactical { team_zones(&level, &points, local) } else { Vec::new() },
+            zones: if tactical { base_zones.0.clone() } else { Vec::new() },
             ..MapSurface::default()
         },
     );

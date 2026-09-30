@@ -1,8 +1,10 @@
 // The map styles (`map_style`): the minimap in the tactical and the classic style at three
 // sizes (0.75, 1.0, 1.5: map, icons, our marker and pinned objectives all scale), objectives
 // out of range pinned to the tactical minimap's edge, our squad (numbered) and the dashed
-// line to its order, the big map, the deploy map and the HUD's objective row in the tactical
-// style, and the minimap easing out (never jumping) once we drive the HMMWV fast.
+// line to its order, a spotted enemy, the big map (the top bar's objectives hidden under it),
+// the deploy map (teammates, our squad numbered), main-base zones from the bases' spawns, the
+// HUD's objective row in the tactical style, and the minimap easing out (never jumping) once
+// we drive the HMMWV fast.
 // client --scenario scenarios/conquest/map_style.ron --out target/scenarios/map_style
 (
     level: "strike_at_karkand",
@@ -27,7 +29,7 @@
         Wait(1.0),
         Squad(Join(1)),
         Wait(2.0),
-        Teleport((-184.0, 157.0, -85.0), 30.0, -4.0),
+        Teleport((-184.0, 157.0, -85.0), 30.0, 0.0),
         Wait(1.5),
         Screenshot("tactical_100"),
         Setting("minimap_size", "0.75"),
@@ -100,6 +102,20 @@
         Screenshot("drive_06_stopping"),
         Wait(2.0),
         Screenshot("drive_07_stopped"),
+        // A spotted enemy (last: he fights back): a red diamond with its heading.
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(1.0),
+        SummonEnemy(20.0),
+        Wait(0.5),
+        Radio(Spotted),
+        Wait(1.0),
+        Screenshot("spotted"),
+        HoldKey(KeyM),
+        Wait(0.5),
+        Screenshot("spotted_bigmap"),
+        ReleaseKey(KeyM),
         Quit,
     ],
 )

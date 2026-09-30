@@ -122,7 +122,18 @@ fn map_markers(
     mut scan: ResMut<ScanContacts>,
     time: Res<Time>,
     mut markers: ResMut<MapMarkers>,
+    settings: Res<crate::settings::Settings>,
 ) {
+    // --- Map style: assets and what they do as small crisp badges on the tactical maps ---
+    let tactical = settings.map_style == crate::settings::MapStyle::Tactical;
+    let badge = |key: Entity, position: Vec3, kind: crate::map_shapes::ShapeKind, color: Color, size: f32| {
+        if tactical {
+            MapMarker::shape(key, position, crate::map_shapes::badge_look(kind, color), size)
+        } else {
+            MapMarker::dot(key, position, color, size)
+        }
+    };
+    // --- end map style ---
     if keys.0.len() != assets.instances.len() {
         for key in keys.0.drain(..) {
             commands.entity(key).despawn();
@@ -166,7 +177,7 @@ fn map_markers(
             Asset::Supply => "Supplies",
             Asset::Scan => continue,
         };
-        markers.0.push(MapMarker::dot(entity, effect.position, asset_color(effect.asset), 9.0).label(label));
+        markers.0.push(badge(entity, effect.position, crate::map_shapes::ShapeKind::Circle, asset_color(effect.asset), 10.0).label(label));
     }
     let destroyed = destroyed.single().ok();
     for (asset, key) in assets.instances.iter().zip(&keys.0) {
@@ -181,7 +192,7 @@ fn map_markers(
         };
         let color = if down { DESTROYED } else { GOLD };
         markers.0.push(
-            MapMarker::dot(*key, Vec3::from_array(asset.placement.position), color, 8.0)
+            badge(*key, Vec3::from_array(asset.placement.position), crate::map_shapes::ShapeKind::Square, color, 9.0)
                 .label(label)
                 .layer(crate::map_markers::VEHICLE_LAYER),
         );

@@ -1689,7 +1689,10 @@ impl BotBrain {
                     ride.orbit += dt * 18.0 / ORBIT_RADIUS;
                 }
                 let angle = ride.orbit;
-                Some(area.position + Vec3::new(angle.cos(), 0.0, angle.sin()) * ORBIT_RADIUS)
+                let point = area.position + Vec3::new(angle.cos(), 0.0, angle.sin()) * ORBIT_RADIUS;
+                // Not out of bounds, circling an objective near the edge of the level's area.
+                let inside = nav.and_then(|n| n.air_area(false)).map_or(point.xz(), |a| a.clamp(point.xz(), 40.0));
+                Some(Vec3::new(inside.x, point.y, inside.y))
             }
             // Passengers dropped: back to where it took off, for the next ones.
             (false, _) if ride.returning => Some(ride.home),
@@ -1706,14 +1709,6 @@ impl BotBrain {
             }
             _ => None,
         };
-        // Not out of bounds (circling an objective near the edge of the level's area).
-        let destination = destination.map(|d| match nav.and_then(|n| n.air_area(false)) {
-            Some(area) => {
-                let p = area.clamp(d.xz(), 40.0);
-                Vec3::new(p.x, d.y, p.y)
-            }
-            None => d,
-        });
         let pending = vcx.claims.pending(seen.entity);
         let spun_up = seen.state.engine > 0.95;
         let riders = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());

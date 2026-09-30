@@ -43,7 +43,9 @@ impl Plugin for MapShapesPlugin {
             .init_resource::<ObjectiveLetters>()
             .init_resource::<SquadSlots>()
             .init_resource::<OrderLines>()
-            .add_systems(PreUpdate, (assign_letters, assign_squad_slots))
+            .init_resource::<BaseExtents>()
+            .init_resource::<BaseZones>()
+            .add_systems(PreUpdate, (assign_letters, assign_squad_slots, (base_extents, base_zones).chain()))
             .add_systems(PostUpdate, order_lines.in_set(MarkerSystems));
     }
 }
@@ -459,22 +461,96 @@ fn order_lines(
     }
 }
 
-/// Main bases (uncapturable points) as tinted zones: map position, radius (map shares) and
-/// their owner's colour.
-pub fn team_zones<'a>(
-    level: &LoadedLevel,
-    points: impl IntoIterator<Item = (&'a ControlPoint, &'a FlagState)>,
-    local: Team,
-) -> Vec<(Vec2, f32, Color)> {
-    let size = map_size(level);
-    points
-        .into_iter()
+/// Where each main base (uncapturable point, by [`ControlPoint::index`]) is on the ground:
+/// its flag and the soldier spawns and vehicle spawners of its layout that belong to it (world
+/// X, Z), and its capture radius. Worked out when the level or the points change.
+#[derive(Resource, Default)]
+pub struct BaseExtents(HashMap<u8, (Vec<Vec2>, f32)>);
+
+fn base_extents(
+    level: Option<Res<LoadedLevel>>,
+    matches: Query<&game_shared::protocol::MatchInfo>,
+    added: Query<(), Added<ControlPoint>>,
+    points: Query<&ControlPoint>,
+    mut extents: ResMut<BaseExtents>,
+) {
+    let level_changed = level.as_ref().is_some_and(|l| l.is_changed());
+    if !level_changed && added.is_empty() {
+        return;
+    }
+    extents.0.clear();
+    let (Some(level), Ok(info)) = (level, matches.single()) else {
+        return;
+    };
+    // The layout, and the one it takes what it doesn't list from.
+    let layouts: Vec<&game_data::GameModeDesc> =
+        [level.game_mode(&info.mode, info.size), level.base_layout(&info.mode, info.size)].into_iter().flatten().collect();
+    let flat = |p: [f32; 3]| Vec2::new(p[0], p[2]);
+    for cp in points.iter().filter(|cp| cp.uncapturable) {
+        let at = Vec2::new(cp.position.x, cp.position.z);
+        // Its description: the one standing where it stands.
+        let Some(desc) = layouts
+            .iter()
+            .flat_map(|l| &l.control_points)
+            .filter(|d| flat(d.position).distance(at) < 2.0)
+            .min_by(|a, b| flat(a.position).distance(at).total_cmp(&flat(b.position).distance(at)))
+        else {
+            continue;
+        };
+        let mut spots = vec![at];
+        for layout in &layouts {
+            spots.extend(layout.spawn_points.iter().filter(|s| s.control_point == desc.id).map(|s| flat(s.placement.position)));
+            spots.extend(
+                layout
+                    .vehicle_spawners
+                    .iter()
+                    .filter(|v| v.control_point.as_deref() == Some(desc.id.as_str()))
+                    .map(|v| flat(v.placement.position)),
+            );
+        }
+        // Stray spawns far away (another base's, misassigned) would stretch it over the map.
+        spots.retain(|p| p.distance(at) < 250.0);
+        extents.0.insert(cp.index, (spots, cp.radius));
+    }
+}
+
+/// The main bases as tinted zones in their owner's colour (map shares), for the tactical maps:
+/// an octagon around the base's spawns (see [`BaseExtents`]), at least around its flag.
+#[derive(Resource, Default)]
+pub struct BaseZones(pub Vec<crate::map_background::Zone>);
+
+fn base_zones(
+    level: Option<Res<LoadedLevel>>,
+    local: Query<&Team, With<LocalPlayer>>,
+    points: Query<(&ControlPoint, &FlagState)>,
+    extents: Res<BaseExtents>,
+    mut zones: ResMut<BaseZones>,
+) {
+    let Some(level) = level else {
+        return;
+    };
+    let local = local.single().copied().unwrap_or_default();
+    let size = map_size(&level);
+    let to_uv = |p: Vec2| map_uv(&level, Vec3::new(p.x, 0.0, p.y));
+    let next: Vec<crate::map_background::Zone> = points
+        .iter()
         .filter(|(cp, state)| cp.uncapturable && state.owner != Team::Spectator)
         .map(|(cp, state)| {
-            let radius = (cp.radius * 2.5).clamp(45.0, 120.0) / size;
-            (map_uv(level, cp.position), radius, Side::of(state.owner, local).color())
+            let color = Side::of(state.owner, local).color();
+            let center = map_uv(&level, cp.position);
+            let minimum = (cp.radius * 1.5).clamp(35.0, 80.0) / size;
+            let mut spots: Vec<Vec2> = vec![center];
+            if let Some((ground, _)) = extents.0.get(&cp.index) {
+                spots.extend(ground.iter().map(|p| to_uv(*p)));
+            }
+            // At least the circle around the flag: its octagon's corners.
+            spots.extend(crate::map_background::zone_normals().iter().map(|n| center + *n * minimum));
+            crate::map_background::Zone::around(&spots, 25.0 / size, color)
         })
-        .collect()
+        .collect();
+    if zones.0 != next {
+        zones.0 = next;
+    }
 }
 
 /// `lines` as map positions.
@@ -518,12 +594,14 @@ pub fn is_order(marker: &crate::map_markers::MapMarker, orders: &Query<(), With<
 /// A Rush charge's look (tactical style), `None` while its stage hasn't come: the defenders'
 /// shape with its letter while it is to be armed (the arming progress as a pie in the
 /// attackers' colour), the attackers' shape pulsing once armed (the defusing progress in the
-/// defenders' colour), a dim square once destroyed.
+/// defenders' colour, else what is left of the fuse, of `fuse` seconds, draining), a dim
+/// square once destroyed.
 pub fn charge_look(
     state: &game_shared::modes::ChargeState,
     mode: &game_shared::modes::ModeState,
     local: Team,
     name: &str,
+    fuse: Option<f32>,
 ) -> Option<ShapeLook> {
     use game_shared::modes::ChargeState;
     let attackers = Side::of(mode.attacker, local);
@@ -543,8 +621,13 @@ pub fn charge_look(
         ChargeState::Active { progress } => {
             Some(shaped(defenders, (progress > 0.001).then(|| (progress, attackers.color())), progress > 0.001))
         }
-        ChargeState::Armed { progress, .. } => {
-            Some(shaped(attackers, (progress > 0.001).then(|| (progress, defenders.color())), true))
+        ChargeState::Armed { progress, fuse: left } => {
+            let pie = if progress > 0.001 {
+                Some((progress, defenders.color()))
+            } else {
+                fuse.filter(|f| *f > 0.0).map(|f| ((left / f).clamp(0.0, 1.0), attackers.color()))
+            };
+            Some(shaped(attackers, pie, true))
         }
         ChargeState::Destroyed => Some(ShapeLook {
             kind: ShapeKind::Square,
@@ -556,5 +639,34 @@ pub fn charge_look(
             text_color: Color::srgba(0.6, 0.62, 0.66, 0.8),
             heading: None,
         }),
+    }
+}
+
+/// A spotted enemy soldier on the tactical maps: a small red diamond with a heading triangle.
+pub fn enemy_look(heading: f32) -> ShapeLook {
+    ShapeLook {
+        kind: ShapeKind::Diamond,
+        fill: palette::ENEMY,
+        outline: Color::srgb(0.35, 0.07, 0.04),
+        progress: None,
+        pulse: false,
+        text: None,
+        text_color: Color::WHITE,
+        heading: Some(heading),
+    }
+}
+
+/// A small badge on the tactical maps (the commander's assets and what they are doing): a
+/// dark shape with an outline in `color`.
+pub fn badge_look(kind: ShapeKind, color: Color) -> ShapeLook {
+    ShapeLook {
+        kind,
+        fill: Color::srgba(0.05, 0.06, 0.08, 0.8),
+        outline: color,
+        progress: None,
+        pulse: false,
+        text: None,
+        text_color: Color::WHITE,
+        heading: None,
     }
 }

@@ -15,7 +15,6 @@
 
 use bevy::prelude::*;
 use game_shared::{
-    conquest::{ControlPoint, FlagState},
     level::LoadedLevel,
     protocol::{ControlledBy, Team},
     soldier::Soldier,
@@ -31,7 +30,7 @@ use crate::{
     map_markers::{IconStyle, MapMarker, MapMarkers, MapPoint, MarkerIcons, NotMarker, SOLDIER_LAYER},
     map_shapes::{
         OrderLines, ShapeKind, ShapeLook, ShapeMaterial, SquadSlots, is_order, map_lines, order_rings, soldier_look, spawn_shape,
-        team_zones,
+        BaseZones,
     },
     net::{LocalPlayer, LocalSoldier},
     prediction::SoldierRender,
@@ -547,10 +546,10 @@ fn update_minimap(
         (Entity, &SoldierRender, &ControlledBy, Has<game_shared::revive::Downed>),
         (With<Soldier>, Without<LocalSoldier>, Without<Seated>),
     >,
-    (slots, order_lines, points, orders): (
+    (slots, order_lines, base_zones, orders): (
         Res<SquadSlots>,
         Res<OrderLines>,
-        Query<(&ControlPoint, &FlagState)>,
+        Res<BaseZones>,
         Query<(), With<game_shared::commander::SquadOrder>>,
     ),
     mut map: Single<&mut MapSurface, With<MinimapMap>>,
@@ -605,7 +604,7 @@ fn update_minimap(
             opacity: TACTICAL_OPACITY,
             grid: 0.0,
             lines: if look.tactical { map_lines(&level, &order_lines.ours) } else { Vec::new() },
-            zones: if look.tactical { team_zones(&level, &points, local) } else { Vec::new() },
+            zones: if look.tactical { base_zones.0.clone() } else { Vec::new() },
         },
     );
 

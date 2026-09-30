@@ -1,6 +1,7 @@
 // The top bar in Rush (Karkand 32, attacking US), classic and tactical style: tickets (ours
 // only: the defenders have none), the stage's charges as objective shapes, arming charge B
-// (the pie fills in our colour, then the charge pulses armed), and the stage line; the charges
+// (the pie fills in our colour, then the charge pulses armed, its fuse counting down under it and draining its pie; the
+// announcement sits below the whole bar), and the stage line; the charges
 // on the tactical minimap.
 // client --scenario scenarios/modes/objective_bar_rush.ron --out target/scenarios/objective_bar_rush
 (
@@ -29,6 +30,8 @@
         Release([Use]),
         Wait(0.5),
         Screenshot("tactical_armed"),
+        Wait(3.0),
+        Screenshot("tactical_armed_3s"),
         Setting("map_style", "classic"),
         Wait(0.3),
         Screenshot("classic_armed"),

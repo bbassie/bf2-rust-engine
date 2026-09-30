@@ -21,7 +21,6 @@ use bevy::{
 };
 use game_shared::{
     commander::{Asset, AssetEffect, CommanderAssets, CommanderRequest, OrderKind, SquadOrder, TeamAssets},
-    conquest::{ControlPoint, FlagState},
     level::LoadedLevel,
     protocol::{ControlledBy, Player, Team},
     soldier::Soldier,
@@ -40,7 +39,7 @@ use crate::{
     prediction::SoldierRender,
     // --- Map style ---
     map_background::{GRID, MapFrameLook, MapSurface, legend, spawn_grid_labels},
-    map_shapes::{OrderLines, ShapeLook, SquadSlots, is_order, map_lines, order_rings, soldier_look, tactical, team_zones},
+    map_shapes::{OrderLines, ShapeLook, SquadSlots, is_order, map_lines, order_rings, soldier_look, tactical, BaseZones},
     settings::Settings,
     // --- end map style ---
 };
@@ -757,12 +756,12 @@ fn update_map(
     mut areas: Query<(Entity, &MapIcon, &mut Node), NotMarker>,
     mut icons: MarkerIcons,
     // --- Map style ---
-    (settings, view, slots, order_lines, points, mut surface, orders): (
+    (settings, view, slots, order_lines, base_zones, mut surface, orders): (
         Res<Settings>,
         Res<ScreenView>,
         Res<SquadSlots>,
         Res<OrderLines>,
-        Query<(&ControlPoint, &FlagState)>,
+        Res<BaseZones>,
         Single<&mut MapSurface, With<ScreenMap>>,
         Query<(), With<SquadOrder>>,
     ),
@@ -781,7 +780,7 @@ fn update_map(
             pixels_per_uv: content.x.max(1.0),
             grid: GRID as f32,
             lines: if tactical { map_lines(&level, &order_lines.all) } else { Vec::new() },
-            zones: if tactical { team_zones(&level, &points, team) } else { Vec::new() },
+            zones: if tactical { base_zones.0.clone() } else { Vec::new() },
             ..MapSurface::default()
         },
     );

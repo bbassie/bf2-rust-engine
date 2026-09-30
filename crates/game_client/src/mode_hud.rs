@@ -280,7 +280,7 @@ fn charge_map_markers(
             if !matches!(state, ChargeState::Destroyed) && charge.stage != mode.stage {
                 continue;
             }
-            let Some(look) = charge_look(state, mode, team, &charge.name) else { continue };
+            let Some(look) = charge_look(state, mode, team, &charge.name, None) else { continue };
             let current = charge.stage == mode.stage;
             let size = if current { crate::map_icons::TACTICAL_FLAG_SIZE } else { 13.0 };
             let marker = MapMarker::shape(entity, charge.position, look, size).layer(FLAG_LAYER);

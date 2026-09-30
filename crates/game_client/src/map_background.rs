@@ -91,8 +91,8 @@ pub struct MapSurface {
     pub grid: f32,
     /// Order lines, map positions (tactical style).
     pub lines: Vec<(Vec2, Vec2)>,
-    /// Team zones: centre, radius (map shares), colour (tactical style).
-    pub zones: Vec<(Vec2, f32, Color)>,
+    /// Team zones (tactical style).
+    pub zones: Vec<Zone>,
 }
 
 impl Default for MapSurface {
@@ -120,6 +120,30 @@ impl MapSurface {
     }
 }
 
+/// A team zone (a main base): an octagon, the intersection of the half planes
+/// `dot(uv, ZONE_NORMALS[i]) <= planes[i]` in map shares, tinted in `color`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Zone {
+    pub planes: [f32; 8],
+    pub color: Color,
+}
+
+/// The zones' plane normals: every 45 degrees from +x.
+pub fn zone_normals() -> [Vec2; 8] {
+    std::array::from_fn(|i| Vec2::from_angle(i as f32 * std::f32::consts::FRAC_PI_4))
+}
+
+impl Zone {
+    /// The octagon around `points` (map shares), `margin` further out.
+    pub fn around(points: &[Vec2], margin: f32, color: Color) -> Self {
+        let normals = zone_normals();
+        let planes = std::array::from_fn(|i| {
+            points.iter().map(|p| p.dot(normals[i])).fold(f32::MIN, f32::max) + margin
+        });
+        Self { planes, color }
+    }
+}
+
 /// Draws a map for a [`MapSurface`] (see `map_background.wgsl`).
 #[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
 pub struct MapBackground {
@@ -142,7 +166,7 @@ struct MapParams {
     line: Vec4,
     line_color: LinearRgba,
     segments: [Vec4; MAX_LINES],
-    zones: [Vec4; MAX_ZONES],
+    zones: [Vec4; MAX_ZONES * 2],
     zone_colors: [LinearRgba; MAX_ZONES],
 }
 
@@ -169,12 +193,14 @@ fn build_material(surface: &MapSurface, style: MapStyle, images: &MapImages) -> 
     for (slot, (a, b)) in segments.iter_mut().zip(&surface.lines) {
         *slot = Vec4::new(a.x, a.y, b.x, b.y);
     }
-    let mut zones = [Vec4::ZERO; MAX_ZONES];
+    let mut zones = [Vec4::ZERO; MAX_ZONES * 2];
     let mut zone_colors = [LinearRgba::NONE; MAX_ZONES];
     if tactical {
-        for (i, (center, radius, color)) in surface.zones.iter().take(MAX_ZONES).enumerate() {
-            zones[i] = Vec4::new(center.x, center.y, *radius, 0.0);
-            zone_colors[i] = color.to_linear();
+        for (i, zone) in surface.zones.iter().take(MAX_ZONES).enumerate() {
+            let p = zone.planes;
+            zones[i * 2] = Vec4::new(p[0], p[1], p[2], p[3]);
+            zones[i * 2 + 1] = Vec4::new(p[4], p[5], p[6], p[7]);
+            zone_colors[i] = zone.color.to_linear();
         }
     }
     MapBackground {

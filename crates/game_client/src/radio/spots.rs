@@ -58,6 +58,7 @@ fn spawn_root(mut commands: Commands) {
 
 #[allow(clippy::type_complexity)]
 fn find_targets(
+    settings: Res<Settings>,
     local: Query<&Team, With<LocalPlayer>>,
     spotted: Query<(Entity, &Spotted, Option<&SoldierRender>, Option<&VehicleView>)>,
     mut targets: ResMut<SpottedTargets>,
@@ -78,7 +79,14 @@ fn find_targets(
         };
         targets.0.push((entity, position));
         // Spotted vehicles show with their icon (`map_icons`).
-        if soldier.is_some() {
+        if let Some(soldier) = soldier {
+            // --- Map style: a red diamond with its heading on the tactical maps ---
+            if settings.map_style == crate::settings::MapStyle::Tactical {
+                let look = crate::map_shapes::enemy_look(-soldier.yaw);
+                markers.0.push(MapMarker::shape(entity, position, look, 9.0));
+                continue;
+            }
+            // --- end map style ---
             markers.0.push(MapMarker::dot(entity, position, ENEMY, 7.0));
         }
     }

@@ -24,8 +24,9 @@ struct MapParams {
     line_color: vec4<f32>,
     // Order lines: from xy to zw (map positions).
     segments: array<vec4<f32>, 12>,
-    // Team zones: centre xy, radius z (map shares); colour in `zone_colors` (alpha 0: unused).
-    zones: array<vec4<f32>, 4>,
+    // Team zones: octagons, 8 plane offsets each (two vec4s; normals every 45 degrees from
+    // +x, map shares); colour in `zone_colors` (alpha 0: unused).
+    zones: array<vec4<f32>, 8>,
     zone_colors: array<vec4<f32>, 4>,
 }
 
@@ -88,8 +89,17 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
         if zone_color.a <= 0.0 {
             continue;
         }
-        let zone = params.zones[i];
-        let d = distance(uv, zone.xy) - zone.z;
+        let a = params.zones[i * 2];
+        let b = params.zones[i * 2 + 1];
+        let k = 0.70710678;
+        var d = uv.x - a.x;
+        d = max(d, (uv.x + uv.y) * k - a.y);
+        d = max(d, uv.y - a.z);
+        d = max(d, (uv.y - uv.x) * k - a.w);
+        d = max(d, -uv.x - b.x);
+        d = max(d, (-uv.x - uv.y) * k - b.y);
+        d = max(d, -uv.y - b.z);
+        d = max(d, (uv.x - uv.y) * k - b.w);
         let fill = clamp(0.5 - d / uv_pixel, 0.0, 1.0);
         let ring = clamp(1.0 - abs(d) / max(params.line.z, uv_pixel), 0.0, 1.0);
         color = over(vec4(zone_color.rgb, 0.16 * fill), color);

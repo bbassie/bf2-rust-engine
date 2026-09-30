@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use game_shared::{
     conquest::{ControlPoint, FlagState, Tickets},
     level::LoadedLevel,
-    modes::{Charge, ChargeState, Locked, ModeState},
+    modes::{Charge, ChargeState, ChargeTimes, Locked, ModeState},
     protocol::Team,
 };
 
@@ -63,6 +63,9 @@ enum Objective {
 }
 #[derive(Component)]
 struct ObjectiveLine;
+/// An armed charge's fuse, under its shape.
+#[derive(Component)]
+struct FuseText(Entity);
 
 fn spawn_bar(mut commands: Commands) {
     let root = commands
@@ -193,19 +196,38 @@ fn sides(local: Team) -> [Team; 2] {
 fn apply_style(
     settings: Res<Settings>,
     tickets: Query<(), With<Tickets>>,
-    mut tactical: Query<&mut Visibility, (With<TacticalBar>, Without<ClassicBar>)>,
+    mut tactical: Query<(&mut Visibility, &ComputedNode), (With<TacticalBar>, Without<ClassicBar>)>,
     mut classic: Query<&mut Visibility, (With<ClassicBar>, Without<TacticalBar>)>,
     mut feed: Query<&mut Node, With<FlagFeedRoot>>,
+    big_map: Query<&Visibility, (With<crate::bigmap::BigMapRoot>, Without<TacticalBar>, Without<ClassicBar>)>,
+    mut below_big_map: Query<
+        &mut Visibility,
+        (
+            Or<(With<ObjectiveRow>, With<ObjectiveLine>)>,
+            Without<TacticalBar>,
+            Without<ClassicBar>,
+            Without<crate::bigmap::BigMapRoot>,
+        ),
+    >,
 ) {
     let on = settings.map_style == MapStyle::Tactical;
     let shown = |show: bool| if show { Visibility::Inherited } else { Visibility::Hidden };
-    for mut visibility in &mut tactical {
+    let mut height = 0.0;
+    for (mut visibility, node) in &mut tactical {
         visibility.set_if_neq(shown(on && !tickets.is_empty()));
+        height = node.size.y * node.inverse_scale_factor;
     }
     for mut visibility in &mut classic {
         visibility.set_if_neq(shown(!on));
     }
-    let top = px(if on { 104.0 } else { 72.0 });
+    // The objectives would peek out over the big map's top edge.
+    let big_map_open = big_map.iter().any(|v| *v != Visibility::Hidden);
+    for mut visibility in &mut below_big_map {
+        visibility.set_if_neq(shown(!big_map_open));
+    }
+    // The notifications go under whichever bar shows (its whole height: with a fuse under a
+    // charge it grows).
+    let top = px(if on { (10.0 + height + 8.0).round().max(72.0) } else { 72.0 });
     for mut node in &mut feed {
         if node.top != top {
             node.top = top;
@@ -253,14 +275,25 @@ fn rebuild_objectives(
         commands.entity(*child).despawn();
     }
     for objective in &wanted {
+        // The shape, and under it (in the flow, so the bar grows) an armed charge's fuse.
         let cell = commands
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ChildOf(row),
+            ))
+            .id();
+        let shape_box = commands
             .spawn((
                 Node {
                     width: px(SHAPE + 4.0),
                     height: px(SHAPE + 4.0),
                     ..default()
                 },
-                ChildOf(row),
+                ChildOf(cell),
             ))
             .id();
         let center = commands
@@ -271,7 +304,7 @@ fn rebuild_objectives(
                     top: percent(50),
                     ..default()
                 },
-                ChildOf(cell),
+                ChildOf(shape_box),
             ))
             .id();
         let letter = match objective {
@@ -280,6 +313,24 @@ fn rebuild_objectives(
         };
         let look = objective_look(&FlagState::default(), false, Team::Spectator, &letter);
         spawn_shape(&mut commands, &mut shapes, center, &look, SHAPE, 0.0, *objective);
+        if let Objective::Charge(charge) = objective {
+            commands.spawn((
+                FuseText(*charge),
+                Text::new(""),
+                font(11.0),
+                TextColor(Side::Friendly.color()),
+                TextShadow {
+                    offset: Vec2::splat(1.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.9),
+                },
+                TextLayout::new(Justify::Center, LineBreak::NoWrap),
+                Node {
+                    display: Display::None,
+                    ..default()
+                },
+                ChildOf(cell),
+            ));
+        }
     }
     *built = wanted;
 }
@@ -352,19 +403,42 @@ fn update_tickets(
 fn update_objectives(
     settings: Res<Settings>,
     players: Query<&Team, With<LocalPlayer>>,
-    modes: Query<&ModeState>,
+    modes: Query<(&ModeState, Option<&ChargeTimes>)>,
     points: Query<(&ControlPoint, &FlagState)>,
     charges: Query<(&Charge, &ChargeState)>,
     letters: Res<ObjectiveLetters>,
     mut materials: ResMut<Assets<ShapeMaterial>>,
     mut shapes: Query<(&Objective, &MaterialNode<ShapeMaterial>, &Children, &mut Visibility)>,
-    mut texts: Query<&mut TextColor, With<ShapeText>>,
+    mut texts: Query<&mut TextColor, (With<ShapeText>, Without<FuseText>)>,
+    mut fuses: Query<(&FuseText, &mut Text, &mut TextColor, &mut Node), Without<ShapeText>>,
 ) {
     if settings.map_style != MapStyle::Tactical {
         return;
     }
     let local = local_team(&players);
-    let mode = modes.single().ok();
+    let (mode, times) = modes.single().ok().map_or((None, None), |(m, t)| (Some(m), t));
+    let fuse = times.map(|t| t.fuse);
+    // An armed charge's fuse, in whole seconds (the text changes once a second).
+    for (fuse_text, mut text, mut color, mut node) in &mut fuses {
+        let left = match charges.get(fuse_text.0) {
+            Ok((_, ChargeState::Armed { fuse, .. })) => Some(*fuse),
+            _ => None,
+        };
+        let display = if left.is_some() { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        if let (Some(left), Some(mode)) = (left, mode) {
+            let wanted = format!("{:.0}", left.ceil().max(0.0));
+            if text.0 != wanted {
+                text.0 = wanted;
+            }
+            let side = Side::of(mode.attacker, local).color();
+            if color.0 != side {
+                color.0 = side;
+            }
+        }
+    }
     for (objective, material, children, mut visibility) in &mut shapes {
         let look = match *objective {
             Objective::Flag(e) => points
@@ -372,7 +446,7 @@ fn update_objectives(
                 .ok()
                 .map(|(cp, state)| objective_look(state, cp.uncapturable, local, letters.get(e))),
             Objective::Charge(e) => {
-                mode.zip(charges.get(e).ok()).and_then(|(mode, (charge, state))| charge_look(state, mode, local, &charge.name))
+                mode.zip(charges.get(e).ok()).and_then(|(mode, (charge, state))| charge_look(state, mode, local, &charge.name, fuse))
             }
         };
         visibility.set_if_neq(if look.is_some() { Visibility::Inherited } else { Visibility::Hidden });

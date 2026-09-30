@@ -78,8 +78,8 @@ fn shape_distance(q: vec2<f32>) -> f32 {
 fn pointer_distance(q: vec2<f32>) -> f32 {
     let r = params.shape.y;
     let p = unturn(q, params.extra.x);
-    let tip = vec2(0.0, -r * 1.9);
-    let base = -r * 1.18;
+    let tip = vec2(0.0, -r * 1.95);
+    let base = -r * 1.28;
     return sd_triangle(p, tip, vec2(r * 0.46, base), vec2(-r * 0.46, base));
 }
 

@@ -38,7 +38,7 @@ use crate::{
     ui_theme::font,
     // --- Map style ---
     map_background::{GRID, MapSurface, legend, spawn_grid_labels},
-    map_shapes::{ObjectiveLetters, OrderLines, ShapeMaterial, ShapeText, objective_look, spawn_shape, map_lines, team_zones, update_shape, ShapeParams},
+    map_shapes::{ObjectiveLetters, OrderLines, ShapeMaterial, ShapeText, objective_look, spawn_shape, map_lines, BaseZones, update_shape, ShapeParams},
     settings::{MapStyle, Settings},
     // --- end map style ---
 };
@@ -48,7 +48,7 @@ pub struct DeployPlugin;
 impl Plugin for DeployPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DeployScreen>()
-            .add_systems(Startup, spawn_deploy_screen)
+            .add_systems(Startup, (spawn_deploy_screen, spawn_deploy_icons).chain())
             .add_systems(
                 Update,
                 (
@@ -66,6 +66,7 @@ impl Plugin for DeployPlugin {
                     send_choice,
                     update_markers,
                     update_charge_markers,
+                    update_deploy_icons,
                     update_kits,
                     update_status,
                 )
@@ -160,6 +161,83 @@ struct ChargeMarker(Entity);
 /// A control point's objective shape (tactical style).
 #[derive(Component)]
 struct PointShape(Entity);
+/// Our teammates on the map (see `map_markers`), under the flags.
+#[derive(Component)]
+struct DeployIcons;
+
+fn spawn_deploy_icons(mut commands: Commands, map: Single<Entity, With<MapImage>>) {
+    commands.spawn((
+        DeployIcons,
+        Node {
+            position_type: PositionType::Absolute,
+            width: percent(100),
+            height: percent(100),
+            ..default()
+        },
+        ZIndex(-1),
+        bevy::ui::FocusPolicy::Pass,
+        Pickable::IGNORE,
+        ChildOf(*map),
+    ));
+}
+
+/// Our teammates, while the screen shows: like the big map, squad mates green (numbered in
+/// the tactical style) and the others blue, with their heading in the tactical style.
+#[allow(clippy::type_complexity)]
+fn update_deploy_icons(
+    screen: Res<DeployScreen>,
+    settings: Res<Settings>,
+    level: Option<Res<LoadedLevel>>,
+    players: Query<(&Team, Option<&SquadMember>), With<LocalPlayer>>,
+    teams: Query<(&Team, Option<&SquadMember>)>,
+    soldiers: Query<
+        (Entity, &crate::prediction::SoldierRender, &game_shared::protocol::ControlledBy),
+        (With<game_shared::soldier::Soldier>, Without<LocalSoldier>, Without<game_shared::vehicle::Seated>),
+    >,
+    slots: Res<crate::map_shapes::SquadSlots>,
+    layer: Single<Entity, With<DeployIcons>>,
+    mut icons: crate::map_markers::MarkerIcons,
+) {
+    let Some(level) = level.filter(|_| screen.open) else {
+        return;
+    };
+    let tactical = settings.map_style == MapStyle::Tactical;
+    let (local, local_squad) = players.single().map(|(t, s)| (*t, s.copied())).unwrap_or_default();
+    let mut teammates = Vec::new();
+    for (entity, render, controlled_by) in &soldiers {
+        let (team, squad) = teams.get(controlled_by.0).map(|(t, s)| (*t, s.copied())).unwrap_or_default();
+        if team != local || local == Team::Spectator {
+            continue;
+        }
+        let squad_mate = local_squad.zip(squad).is_some_and(|(a, b)| a.squad == b.squad);
+        let marker = match (tactical, squad_mate) {
+            (true, true) => {
+                let slot = slots.0.get(&controlled_by.0).copied().unwrap_or(0);
+                crate::map_markers::MapMarker::shape(entity, render.position, crate::map_shapes::soldier_look(Some(slot), -render.yaw), 11.0)
+            }
+            (true, false) => {
+                crate::map_markers::MapMarker::shape(entity, render.position, crate::map_shapes::soldier_look(None, -render.yaw), 6.5)
+            }
+            (false, true) => crate::map_markers::MapMarker::dot(entity, render.position, SQUAD, 7.0),
+            (false, false) => crate::map_markers::MapMarker::dot(entity, render.position, FRIENDLY, 7.0),
+        };
+        teammates.push(marker.layer(crate::map_markers::SOLDIER_LAYER));
+    }
+    let placed = teammates.iter().map(|marker| {
+        let uv = map_uv(&level, marker.position).clamp(Vec2::ZERO, Vec2::ONE);
+        (marker, crate::map_markers::MapPoint::Share(uv), true)
+    });
+    icons.sync(
+        *layer,
+        placed,
+        crate::map_markers::IconStyle {
+            scale: 1.0,
+            labels: false,
+            turn: 0.0,
+            size: Vec2::splat(MAP_SIZE),
+        },
+    );
+}
 
 fn spawn_deploy_screen(mut commands: Commands) {
     commands
@@ -338,8 +416,7 @@ fn update_deploy_surface(
     settings: Res<Settings>,
     level: Option<Res<LoadedLevel>>,
     order_lines: Res<OrderLines>,
-    players: Query<(&Team, &Deployment), With<LocalPlayer>>,
-    points: Query<(&ControlPoint, &FlagState)>,
+    base_zones: Res<BaseZones>,
     mut surface: Single<&mut MapSurface, With<MapImage>>,
 ) {
     let Some(level) = level.filter(|_| screen.open) else {
@@ -352,7 +429,7 @@ fn update_deploy_surface(
             pixels_per_uv: MAP_SIZE * screen.view.zoom,
             grid: GRID as f32,
             lines: if tactical { map_lines(&level, &order_lines.ours) } else { Vec::new() },
-            zones: if tactical { team_zones(&level, &points, local_team(&players)) } else { Vec::new() },
+            zones: if tactical { base_zones.0.clone() } else { Vec::new() },
             ..MapSurface::default()
         },
     );
@@ -423,6 +500,7 @@ fn rebuild_markers(
     charges: Query<(Entity, &Charge)>,
     map: Single<(Entity, Option<&Children>), With<MapImage>>,
     mut shapes: ResMut<Assets<ShapeMaterial>>,
+    icon_layers: Query<(), With<DeployIcons>>,
 ) {
     let level_changed = level.as_ref().is_some_and(|l| l.is_changed());
     if added.is_empty() && added_charges.is_empty() && removed.read().next().is_none() && !level_changed {
@@ -433,7 +511,9 @@ fn rebuild_markers(
     };
     let (map, children) = *map;
     for child in children.into_iter().flatten() {
-        commands.entity(*child).despawn();
+        if !icon_layers.contains(*child) {
+            commands.entity(*child).despawn();
+        }
     }
     spawn_grid_labels(&mut commands, map);
     // Names where they don't cover each other or the flags (see `map_markers::place_labels`).
