@@ -83,7 +83,7 @@ fn undergrowth(vfs: &Vfs, base: &str, level_dir: &Path) -> Result<Option<Undergr
     let cfg = vfs.read_text(&format!("{base}/undergrowth.cfg")).unwrap_or_default();
     let setting = |key: &str, default: f32| -> f32 {
         cfg.lines()
-            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .map(|l| l.split_ascii_whitespace().collect::<Vec<_>>())
             .take_while(|w| w.first().is_none_or(|k| !k.eq_ignore_ascii_case("material")))
             .find(|w| w.first().is_some_and(|k| k.eq_ignore_ascii_case(key)))
             .and_then(|w| w.get(1)?.parse().ok())

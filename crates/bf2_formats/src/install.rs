@@ -205,7 +205,7 @@ impl Bf2Install {
 pub fn parse_archive_list(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
-            let mut parts = line.split_whitespace();
+            let mut parts = line.split_ascii_whitespace();
             let command = parts.next()?;
             if !command.eq_ignore_ascii_case("fileManager.mountArchive") {
                 return None;

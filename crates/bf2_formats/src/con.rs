@@ -58,14 +58,16 @@ pub enum Node {
     },
 }
 
-/// Splits a line into whitespace-separated tokens; `"..."` groups without escapes.
+/// Splits a line into whitespace-separated tokens; `"..."` groups without escapes. Only ASCII
+/// whitespace separates, as in BF2: AIX 2's Damocles names spawners `Pagoda<U+00A0>_1` (a
+/// non-breaking space), which Unicode whitespace splitting turned into extra `Pagoda` flags.
 pub fn tokenize_line(line: &str) -> Vec<Token> {
     let chars: Vec<char> = line.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c.is_whitespace() {
+        if c.is_ascii_whitespace() {
             i += 1;
             continue;
         }
@@ -82,7 +84,7 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
             continue;
         }
         let mut j = i;
-        while j < chars.len() && !chars[j].is_whitespace() {
+        while j < chars.len() && !chars[j].is_ascii_whitespace() {
             if chars[j] == '"' {
                 // Embedded quote (`a="b c"`): read through the closing quote.
                 j = chars[j + 1..]
@@ -902,6 +904,13 @@ fn build_template_index(vfs: &Vfs) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_ascii_whitespace_separates() {
+        let tokens = tokenize_line("Object.create Pagoda\u{a0}_1");
+        let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["Object.create", "Pagoda\u{a0}_1"]);
+    }
 
     #[test]
     fn tokenizes_quotes() {

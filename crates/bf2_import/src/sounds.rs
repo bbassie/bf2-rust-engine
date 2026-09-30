@@ -64,7 +64,7 @@ impl<'a> SoundConverter<'a> {
     pub fn new(vfs: &'a Vfs, out: &'a Path) -> Self {
         let mut tweaks = HashMap::new();
         for line in vfs.read_text("common/sound/audiotweak.con").unwrap_or_default().lines() {
-            let mut words = line.split_whitespace();
+            let mut words = line.split_ascii_whitespace();
             if !words.next().is_some_and(|w| w.eq_ignore_ascii_case("sound.tweaktemplate")) {
                 continue;
             }

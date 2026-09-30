@@ -618,9 +618,10 @@ fn build_game_mode(
                     .get_str("controlpointid")
                     .unwrap_or(&template.name)
                     .to_string(),
-                name: localization.resolve(
-                    template.get_str("setcontrolpointname").unwrap_or(&template.name),
-                ),
+                // AIX 2 writes some names with non-breaking spaces ("Battlehawk\u{a0}Down").
+                name: localization
+                    .resolve(template.get_str("setcontrolpointname").unwrap_or(&template.name))
+                    .replace('\u{a0}', " "),
                 position: placement.position,
                 initial_team: template.get_f32("team").unwrap_or(0.0) as u8,
                 radius: template.get_f32("radius").unwrap_or(10.0),
