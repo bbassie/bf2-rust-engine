@@ -1,36 +1,36 @@
-// Squads move on after taking a flag (crates/game_server/src/ai/strategy.rs): on Dalian Plant
-// (64) the PLA takes the neutral Main Entrance first (-254, 153, 210), the US South Docks.
-// A squad mostly at a flag its team takes (or three of it) gets its next order in the tick
-// the flag changes hands ("ai flow: ... new order": the commander plans at once) and most of
-// it leaves ("squad moved off": no more than a third of its members within the flag's radius
-// plus 40 m, not counting the one or two left to guard it while enemies are about). Fails if
-// nobody takes Main Entrance within 150 s, if no such squad gets an order elsewhere within
-// 240 s after that (the first flags often fall to a tank or a few soldiers), or if it
-// doesn't move off within 60 s. The server log's `ai flow:` lines say what every squad did
-// after a capture (`still there 15 s after its new order: ...` lists what keeps one).
+// Squads move on after taking a flag (crates/game_server/src/ai/strategy.rs): on Gulf of Oman
+// (16) the US squads walk from the Beachhead to the neutral Village (10, 33, 136) and take
+// it. A squad mostly at a flag its team takes (or three of it) gets its next order in the
+// tick the flag changes hands ("ai flow: ... new order": the commander plans at once) and
+// most of it leaves ("squad moved off": no more than a third of its members within the flag's
+// radius plus 40 m, not counting the one or two left to guard it while enemies are about).
+// Fails if nobody takes the Village within 180 s, if no such squad gets an order elsewhere
+// within 60 s after that, or if it doesn't move off within 60 s. The server log's `ai flow:`
+// lines say what every squad did after a capture (`still there 15 s after its new order:
+// ...` lists what keeps one).
 // client --scenario scenarios/ai/capture_flow.ron --out target/scenarios/ai/capture_flow
 (
-    level: "dalian_plant",
-    size: 64,
-    bots: 64,
+    level: "gulf_of_oman",
+    size: 16,
+    bots: 16,
     spectate: true,
     steps: [
         WaitReady,
         ForbidLog("panicked"),
-        // Main Entrance from the south-east, 70 m off and 45 m up.
-        Camera((-204.0, 198.0, 260.0), 45.0, -30.0),
-        Wait(25.0),
-        Screenshot("approach"),
-        ExpectLog("ai flow: team 1 took Main Entrance", 150.0),
-        Screenshot("taken"),
-        ExpectLog("ago): new order", 240.0),
+        // The Village from the north-east, 35 m off and 22 m up.
+        Camera((35.0, 55.0, 161.0), 45.0, -32.0),
         Wait(8.0),
+        Screenshot("approach"),
+        ExpectLog("took Village", 180.0),
+        Screenshot("taken"),
+        ExpectLog("ago): new order", 60.0),
+        Wait(6.0),
         Screenshot("moving_on"),
         ExpectLog("squad moved off", 60.0),
         Screenshot("moved_off"),
-        // Wider, from higher up: the squads on their way to the next flags.
-        Camera((-164.0, 250.0, 300.0), 45.0, -38.0),
-        Wait(10.0),
+        // Wider, from higher up: the squad on its way to the next flag.
+        Camera((110.0, 130.0, 236.0), 45.0, -38.0),
+        Wait(5.0),
         Screenshot("overview"),
         Quit,
     ],

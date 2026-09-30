@@ -28,7 +28,7 @@ to get the real timing back. See the top of `crates/game_client/src/scenario.rs`
 | Folder | What the scenarios check |
 |---|---|
 | `abilities/` | Man-down and revive, medic, support and engineer gadgets |
-| `ai/` | Bot strategy (`capture_flow`: squads move on once their flag is taken), navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles (`heli_dropoff`: transport helicopters land and everyone gets out), carriers |
+| `ai/` | Bot strategy (`capture_flow`: squads move on once their flag is taken, Gulf of Oman 16), navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles (`heli_dropoff`: transport helicopters land and everyone gets out), carriers |
 | `animation/` | Third- and first-person animation, view model, scopes |
 | `audio/` | Sounds, checked through the log |
 | `combat/` | Grenades, launchers, explosives, hit zones and hit registration against target dummies (`hitreg`, `hitreg_net`), a despawn stress (`despawn_stress`: bots killed at close range over and over, which must not panic the client), lag compensation, destruction, effects, SF gadgets, the weapon list and the melee and grenade keys (`quick_weapons`) |
