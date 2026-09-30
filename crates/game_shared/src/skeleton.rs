@@ -184,18 +184,26 @@ pub struct AnimState {
     pub clock: f32,
     /// Seconds into a reload.
     pub reload: Option<f32>,
+    /// Seconds since the last shot.
+    pub fire: Option<f32>,
     /// The held weapon (index into the loadout), for its upper-body clips.
     pub weapon: u8,
 }
 
 impl AnimState {
-    /// The reload clip and its time, while it plays (the client plays it once, then the
-    /// loops again for the rest of a long reload).
-    fn reload_clip(&self, upper: &impl Fn(&str) -> Option<f32>) -> Option<(&'static str, f32)> {
-        let name = clips::RELOAD[usize::from(self.stance == Stance::Prone)];
-        let reload = self.reload?;
-        let duration = upper(name)?;
-        (reload < duration).then_some((name, reload))
+    /// The upper-body one-shot playing and its time: the reload clip or the shot's, whichever
+    /// started last, while it plays (the client plays each once, then the loops again, also
+    /// for the rest of a long reload).
+    fn action_clip(&self, upper: &impl Fn(&str) -> Option<f32>) -> Option<(&'static str, f32)> {
+        let prone = usize::from(self.stance == Stance::Prone);
+        let playing = |name: &'static str, time: Option<f32>| {
+            let time = time?;
+            (time < upper(name)?).then_some((name, time))
+        };
+        match (playing(clips::RELOAD[prone], self.reload), playing(clips::FIRE[prone], self.fire)) {
+            (Some(reload), Some(fire)) => Some(if fire.1 < reload.1 { fire } else { reload }),
+            (reload, fire) => reload.or(fire),
+        }
     }
 
     /// What the client's animator crossfades between: the legs' state.
@@ -205,7 +213,7 @@ impl AnimState {
     /// The state of a soldier on his feet with a weapon in hand; `None` when the client draws
     /// him some other way (climbing, swimming, under a parachute, hanging from a zipline,
     /// airborne), where hit zones keep their stance's pose.
-    pub fn of(motion: &SoldierMotion, clock: f32, reload: Option<f32>, weapon: u8) -> Option<Self> {
+    pub fn of(motion: &SoldierMotion, clock: f32, reload: Option<f32>, fire: Option<f32>, weapon: u8) -> Option<Self> {
         let on_foot = motion.grounded && !motion.climbing && !motion.riding && !motion.parachute && !motion.swimming;
         on_foot.then(|| Self {
             stance: motion.stance,
@@ -213,6 +221,7 @@ impl AnimState {
             stride: motion.stride,
             clock,
             reload,
+            fire,
             weapon,
         })
     }
@@ -238,7 +247,7 @@ impl AnimState {
                 out.push((false, name, weight, time(duration)));
             }
         }
-        if let Some((name, time)) = self.reload_clip(&upper) {
+        if let Some((name, time)) = self.action_clip(&upper) {
             out.push((true, name, 1.0, time));
             return out;
         }
@@ -260,6 +269,7 @@ pub mod fade {
     pub const START_MOVING: f32 = 0.15;
     pub const STANCE: f32 = 0.3;
     pub const PRONE: f32 = 0.4;
+    pub const FIRE_IN: f32 = 0.05;
     pub const RELOAD_IN: f32 = 0.15;
     pub const ACTION_OUT: f32 = 0.2;
     /// The longest of them.
@@ -299,7 +309,8 @@ struct Fading {
 #[derive(Clone, Debug, Default)]
 pub struct Blend {
     tracks: Vec<Fading>,
-    last: Option<((Stance, Gait), bool)>,
+    /// The last state's legs and upper-body one-shot (and its time).
+    last: Option<((Stance, Gait), Option<(&'static str, f32)>)>,
     legs_fade: f32,
     upper_fade: f32,
 }
@@ -308,18 +319,25 @@ impl Blend {
     /// The next state, `dt` seconds after the last.
     pub fn step(&mut self, state: &AnimState, dt: f32, legs: impl Fn(&str) -> Option<f32>, upper: impl Fn(&str) -> Option<f32>) {
         let key = state.legs_state();
-        let action = state.reload_clip(&upper).is_some();
+        let action = state.action_clip(&upper);
         let settled = self.last.is_none();
         if let Some((last, last_action)) = self.last {
             if last != key {
                 self.legs_fade = fade_time(last, key);
-                if !action && !last_action {
+                if action.is_none() && last_action.is_none() {
                     self.upper_fade = self.legs_fade;
                 }
             }
-            if action && !last_action {
-                self.upper_fade = fade::RELOAD_IN;
-            } else if !action && last_action {
+            // A one-shot starting (again, for a shot: its time went back), or ending.
+            let started = match (action, last_action) {
+                (Some((name, time)), Some((last_name, last_time))) => name != last_name || time < last_time,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if started {
+                let reload = action.is_some_and(|(name, _)| clips::RELOAD.contains(&name));
+                self.upper_fade = if reload { fade::RELOAD_IN } else { fade::FIRE_IN };
+            } else if action.is_none() && last_action.is_some() {
                 self.upper_fade = fade::ACTION_OUT;
             }
         }

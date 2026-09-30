@@ -35,7 +35,7 @@ use game_shared::skeleton::{self, Gait};
 use game_shared::{
     config::GamePaths,
     level::LoadedLevel,
-    protocol::{ControlledBy, ShotFired, ThrowReleased, Team},
+    protocol::{ControlledBy, ThrowReleased, Team},
     soldier::{SOLDIER_CENTER, SOLDIER_HEIGHT, SOLDIER_RADIUS, Soldier, Stance},
     statics::StaticMesh,
     vehicle::{Seated, VehicleData},
@@ -484,8 +484,11 @@ struct SoldierAnimator {
     hand: Option<Arc<WeaponDesc>>,
     /// Hands busy (on a ladder, or down): no weapon shown.
     stowed: bool,
-    /// Our own soldier: shots fired so far (others' shots arrive as [`ShotFired`]).
+    /// Our own soldier: shots fired so far (others' arrive as `ShotFired`, see `combat::ShotSeen`).
     shots_seen: Option<u32>,
+    /// Everyone else: seconds since his last shot, and into his reload, last frame.
+    fire_seen: Option<f32>,
+    reload_seen: Option<f32>,
     was_reloading: bool,
     /// Nobody sees the soldier: its graph, taken off the animation player meanwhile.
     sleeping: Option<Handle<AnimationGraph>>,
@@ -1226,6 +1229,10 @@ struct Cues<'a> {
     reloading: bool,
     /// Seconds into the reload, when it is timed by the server's tick (everyone but us).
     reload_time: Option<f32>,
+    /// Seconds since the last shot, the same way.
+    fire_time: Option<f32>,
+    /// A reload started again right after the last (its time went back).
+    reload_again: bool,
     /// The server clock idle loops run on (see `game_shared::skeleton`).
     clock: f32,
     /// Critically wounded.
@@ -1442,7 +1449,7 @@ impl SoldierAnimator {
             one_shot(clips::DEPLOY).map(|clip| (ActionKind::Deploy, clip, FADE_DEPLOY_IN))
         } else if cues.fired {
             one_shot(clips::FIRE).map(|clip| (ActionKind::Fire, clip, FADE_FIRE_IN))
-        } else if cues.reloading && !self.was_reloading {
+        } else if (cues.reloading && !self.was_reloading) || cues.reload_again {
             one_shot(clips::RELOAD).map(|clip| (ActionKind::Reload, clip, FADE_RELOAD_IN))
         } else {
             None
@@ -1453,8 +1460,12 @@ impl SoldierAnimator {
             self.upper.set_fade(fade);
         } else if let Some(action) = &mut self.action {
             action.time += dt;
-            let timed_out = action.kind == ActionKind::Reload
-                && cues.reload_time.is_some_and(|t| t >= action.clip.duration);
+            let timed = match action.kind {
+                ActionKind::Reload => cues.reload_time,
+                ActionKind::Fire => cues.fire_time,
+                ActionKind::Deploy => None,
+            };
+            let timed_out = timed.is_some_and(|t| t >= action.clip.duration);
             let done = action.clip.finished(player) || (action.kind == ActionKind::Reload && !cues.reloading) || timed_out;
             if done {
                 self.action = None;
@@ -1466,8 +1477,8 @@ impl SoldierAnimator {
             // Held on its first frame while the old weapon goes down.
             let speed = if action.lowering() { 0.0 } else { 1.0 };
             let play = Play::once(started.is_some()).speed(speed);
-            let play = match cues.reload_time {
-                Some(time) if action.kind == ActionKind::Reload => play.at(time),
+            let play = match (action.kind, cues.reload_time, cues.fire_time) {
+                (ActionKind::Reload, Some(time), _) | (ActionKind::Fire, _, Some(time)) => play.at(time),
                 _ => play,
             };
             self.upper.play(player, action.clip, play);
@@ -1516,7 +1527,6 @@ fn animate(
     clip_assets: Res<Assets<AnimationClip>>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     (feedback, view): (Res<CombatFeedback>, Res<crate::combat::ViewTick>),
-    mut shots: MessageReader<ShotFired>,
     mut throws: MessageReader<ThrowReleased>,
     soldiers: Query<(
         &SoldierRender,
@@ -1525,19 +1535,19 @@ fn animate(
         Has<LocalSoldier>,
         Has<game_shared::revive::Downed>,
         Option<&Seated>,
+        Option<&crate::combat::ShotSeen>,
     )>,
     vehicles: Query<&VehicleData>,
     canopies: Query<&Canopy>,
     mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
     mut players: Query<&mut AnimationPlayer>,
 ) {
-    let fired: Vec<Entity> = shots.read().map(|shot| shot.soldier).collect();
     // Throws and placed charges animate from the wind-up releasing, not from the moment the
     // projectile actually appears (`ShotFired`, which for these is delayed by
     // `fire.fireLaunchDelay` and would otherwise restart the arm swing mid-air).
     let released: Vec<Entity> = throws.read().map(|t| t.soldier).collect();
     for (visual, body, rig, mut animator) in &mut visuals {
-        let (Ok((render, loadout, inventory, local, downed, seated)), Some(body_name)) =
+        let (Ok((render, loadout, inventory, local, downed, seated, shot)), Some(body_name)) =
             (soldiers.get(visual.soldier), body.0.as_deref())
         else {
             continue;
@@ -1599,7 +1609,12 @@ fn animate(
             let fired = if is_throw {
                 released.contains(&visual.soldier)
             } else {
-                fired.contains(&visual.soldier)
+                // From the tick of the shot, once we draw that moment: a new shot is a time
+                // that went back.
+                let fire_time = shot.and_then(|s| s.since(view.seconds));
+                let new_shot = fire_time.is_some_and(|t| animator.fire_seen.is_none_or(|seen| t < seen));
+                animator.fire_seen = fire_time;
+                new_shot
             };
             (fired, inventory.is_some_and(|i| i.reloading))
         };
@@ -1610,6 +1625,9 @@ fn animate(
             _ => None,
         };
         let reloading = if local { reloading } else { reload_time.is_some() };
+        let fire_time = if local { None } else { shot.and_then(|s| s.since(view.seconds)) };
+        let reload_again = reload_time.is_some_and(|t| animator.reload_seen.is_some_and(|seen| t < seen));
+        animator.reload_seen = reload_time;
         let cues = Cues {
             render,
             weapon,
@@ -1617,6 +1635,8 @@ fn animate(
             fired,
             reloading,
             reload_time,
+            fire_time,
+            reload_again,
             clock: skeleton::clock(view.seconds),
             downed,
             seat_pose: seat_pose.as_deref(),

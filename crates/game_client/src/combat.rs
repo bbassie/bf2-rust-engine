@@ -70,6 +70,8 @@ pub struct ViewTick {
     /// The same, with the fraction of a tick: seconds on the server clock (for the idle
     /// animations, which run on it).
     pub seconds: f64,
+    /// The latest server tick we know of (the state just received, or simulated).
+    pub latest_tick: u32,
     latest: u32,
     received: f64,
 }
@@ -107,6 +109,21 @@ fn track_view_tick(
     };
     view.tick = (tick.round() as i64).max(1) as u32;
     view.seconds = tick / game_shared::TICK_HZ;
+    view.latest_tick = clock.0;
+}
+
+/// On another soldier: the server tick he last fired a gun on, as far as we can tell (the tick
+/// of the state that came with the `ShotFired`). His shot animation runs from it, and his hit
+/// zones follow it (`game_shared::skeleton`).
+#[derive(Component, Clone, Copy)]
+pub(crate) struct ShotSeen(pub u32);
+
+impl ShotSeen {
+    /// Seconds since the shot at a moment on the server clock, once we draw it.
+    pub fn since(&self, server_seconds: f64) -> Option<f32> {
+        let since = server_seconds - self.0 as f64 / game_shared::TICK_HZ;
+        (since >= 0.0).then_some(since as f32)
+    }
 }
 
 /// `BF2_SIM_INPUT_DELAY_MS`: our inputs are held back this long before they go to the
@@ -631,6 +648,7 @@ fn receive_shots(
     library: Option<Res<EffectLibrary>>,
     mut effects: MessageWriter<SpawnEffect>,
     mut flashed: Local<Vec<Entity>>,
+    view: Res<ViewTick>,
 ) {
     flashed.clear();
     let library = library.as_deref();
@@ -641,6 +659,9 @@ fn receive_shots(
         let Some(weapon) = loadout.weapons.get(shot.weapon as usize).and_then(|w| armory.weapon(w)) else {
             continue;
         };
+        if weapon.fire.kind == FireKind::Gun {
+            commands.entity(shot.soldier).try_insert(ShotSeen(view.latest_tick));
+        }
         // Drawn from the gun rather than the eye (the bullet flies from the eye).
         let gun = shot.origin - Vec3::Y * 0.15;
         if !weapon.projectile.is_object() {
@@ -714,7 +735,13 @@ pub fn weapon_display_name(name: &str) -> String {
 
 /// Where a soldier's hit zones are as drawn now: the pose the server judges the shots
 /// against that were fired looking at this moment (see `ViewTick`).
-pub(crate) fn drawn_body_pose(render: &SoldierRender, inventory: Option<&Inventory>, seated: bool, view: &ViewTick) -> BodyPose {
+pub(crate) fn drawn_body_pose(
+    render: &SoldierRender,
+    inventory: Option<&Inventory>,
+    shot: Option<&ShotSeen>,
+    seated: bool,
+    view: &ViewTick,
+) -> BodyPose {
     let on_foot = render.grounded && !render.climbing && !render.riding && !render.parachute && !render.swimming;
     let anim = (on_foot && !seated).then(|| AnimState {
         stance: render.stance,
@@ -722,6 +749,7 @@ pub(crate) fn drawn_body_pose(render: &SoldierRender, inventory: Option<&Invento
         stride: render.stride,
         clock: skeleton::clock(view.seconds),
         reload: inventory.and_then(|i| skeleton::reload_elapsed(i.reloading, i.reload_started, view.seconds)),
+        fire: shot.and_then(|s| s.since(view.seconds)),
         weapon: inventory.map_or(0, |i| i.active),
     });
     BodyPose {
@@ -742,15 +770,18 @@ fn record_drawn_anim(
     mut commands: Commands,
     time: Res<Time>,
     view: Res<ViewTick>,
-    mut soldiers: Query<(Entity, &SoldierRender, Option<&Inventory>, Has<Seated>, Option<&mut DrawnAnim>), With<Soldier>>,
+    mut soldiers: Query<
+        (Entity, &SoldierRender, Option<&Inventory>, Option<&ShotSeen>, Has<Seated>, Option<&mut DrawnAnim>),
+        With<Soldier>,
+    >,
 ) {
     let dt = time.delta_secs();
-    for (entity, render, inventory, seated, history) in &mut soldiers {
+    for (entity, render, inventory, shot, seated, history) in &mut soldiers {
         let Some(mut history) = history else {
             commands.entity(entity).insert(DrawnAnim::default());
             continue;
         };
-        match drawn_body_pose(render, inventory, seated, &view).anim {
+        match drawn_body_pose(render, inventory, shot, seated, &view).anim {
             Some(anim) => {
                 history.0.push_back((anim, dt));
                 // As far back as the longest crossfade reaches.
@@ -776,6 +807,7 @@ pub(crate) struct DrawnTargets<'w, 's> {
             Option<&'static Inventory>,
             Option<&'static Seated>,
             Option<&'static DrawnAnim>,
+            Option<&'static ShotSeen>,
         ),
         (With<Soldier>, Without<Downed>),
     >,
@@ -802,16 +834,16 @@ impl DrawnTargets<'_, '_> {
     pub(crate) fn collect(&self) -> Vec<DrawnTarget<'_>> {
         self.soldiers
             .iter()
-            .filter(|(.., seated, _)| {
+            .filter(|(.., seated, _, _)| {
                 seated.is_none_or(|s| {
                     self.vehicles
                         .get(s.vehicle)
                         .is_ok_and(|v| v.0.desc.seats.get(s.seat as usize).is_some_and(|seat| seat.open))
                 })
             })
-            .map(|(entity, render, loadout, inventory, seated, recent)| DrawnTarget {
+            .map(|(entity, render, loadout, inventory, seated, recent, shot)| DrawnTarget {
                 entity,
-                pose: drawn_body_pose(render, inventory, seated.is_some(), &self.view),
+                pose: drawn_body_pose(render, inventory, shot, seated.is_some(), &self.view),
                 zones: self.armory.hit_zones(&loadout.kit),
                 loadout,
                 recent,

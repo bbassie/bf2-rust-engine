@@ -240,6 +240,11 @@ impl Live {
     }
 }
 
+/// The tick a soldier last fired a gun, for the shot's animation his hit zones follow (server
+/// only; clients time it by when `ShotFired` arrives).
+#[derive(Component, Clone, Copy)]
+struct LastShot(u32);
+
 /// Where a soldier was over the last ticks, by server tick (server only).
 #[derive(Component, Default)]
 struct PoseHistory(VecDeque<(u32, BodyPose)>);
@@ -289,7 +294,10 @@ fn record_poses(
     server_tick: Res<ServerTick>,
     mut sim_tick: ResMut<SimTick>,
     mut clock: Query<&mut ServerClock>,
-    mut soldiers: Query<(Entity, &SoldierMotion, Has<Seated>, Option<&Inventory>, Option<&mut PoseHistory>), With<Soldier>>,
+    mut soldiers: Query<
+        (Entity, &SoldierMotion, Has<Seated>, Option<&Inventory>, Option<&LastShot>, Option<&mut PoseHistory>),
+        With<Soldier>,
+    >,
 ) {
     let tick = server_tick.get().wrapping_add(1).max(sim_tick.0.wrapping_add(1));
     sim_tick.0 = tick;
@@ -300,13 +308,14 @@ fn record_poses(
             commands.spawn((ServerClock(tick), Replicated));
         }
     }
-    for (entity, motion, seated, inventory, history) in &mut soldiers {
+    for (entity, motion, seated, inventory, last_shot, history) in &mut soldiers {
         let mut pose = BodyPose::of(motion, seated);
         // On foot, the zones follow the animations clients draw (see `game_shared::skeleton`).
         if !seated {
             let reload = inventory.and_then(|i| skeleton::reload_elapsed(i.reloading, i.reload_started, seconds));
             let weapon = inventory.map_or(0, |i| i.active);
-            pose.anim = AnimState::of(motion, skeleton::clock(seconds), reload, weapon);
+            let fire = last_shot.map(|shot| (tick.wrapping_sub(shot.0) as f64 / game_shared::TICK_HZ) as f32);
+            pose.anim = AnimState::of(motion, skeleton::clock(seconds), reload, fire, weapon);
         }
         match history {
             Some(mut history) => {
@@ -594,6 +603,9 @@ fn fire_weapons(
                         Some(client) => SendTargets::AllExcept(client),
                         None => SendTargets::All,
                     };
+                    if weapon.fire.kind == FireKind::Gun {
+                        commands.entity(soldier).insert(LastShot(now));
+                    }
                     shots.write(ToClients {
                         targets,
                         message: ShotFired {
@@ -1474,6 +1486,7 @@ mod tests {
             stride,
             clock: 0.0,
             reload: None,
+            fire: None,
             weapon: 0,
         };
         let mut history = runner();

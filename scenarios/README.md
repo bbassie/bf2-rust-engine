@@ -20,7 +20,7 @@ writes `result.txt` (`PASS` / `FAIL: reason`). `scripts/smoke.sh` runs a quick s
 | Folder | What the scenarios check |
 |---|---|
 | `abilities/` | Man-down and revive, medic, support and engineer gadgets |
-| `ai/` | Bot strategy, navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles, carriers |
+| `ai/` | Bot strategy, navigation, infantry tactics (`bots_tactics`: cover, bounding squads), bots in vehicles (`heli_dropoff`: transport helicopters land and everyone gets out), carriers |
 | `animation/` | Third- and first-person animation, view model, scopes |
 | `audio/` | Sounds, checked through the log |
 | `combat/` | Grenades, launchers, explosives, hit zones and hit registration against target dummies (`hitreg`, `hitreg_net`), lag compensation, destruction, effects, SF gadgets, the weapon list and the melee and grenade keys (`quick_weapons`) |

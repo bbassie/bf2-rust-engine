@@ -440,7 +440,11 @@ walk up to it and hold the use key, crouched, before fighting anyone not close. 
 Breakthrough the commanders only value the open sector's flags: attackers take what they
 don't hold and hold what is being taken back, defenders hold theirs and retake what they
 lost. Orders in the staged modes are dropped once their objective is worth less than 40 % of
-the best one, so squads react to an armed charge.
+the best one, so squads react to an armed charge, except the only squad defending an
+objective: defenders keep a squad on every flag of the open sector and on both charges of a
+stage while they have squads enough, moving one over from where two or more were sent
+(`ai::strategy::cover_defences`). The per-minute `ai objectives` log line has, per objective,
+the soldiers there and the bots sent there.
 
 ### Bots
 
@@ -459,7 +463,11 @@ paths go around them; a goal at a vehicle's door snaps to the nearest free cell
 (`nav::obstacles`). Where bots get stuck again and again (three stuck events on a cell: a
 tree's low branches, a railing or a bank the grid doesn't see) the cells just ahead of them
 join that set (`nav::StuckCells`), so later paths go round them, and spots where drivers keep
-getting stuck (a street too narrow) become obstacles for vehicle paths. A swimmer only finds
+getting stuck (a street too narrow) become obstacles for vehicle paths. A bot that keeps
+getting stuck on the way to the same goal leaves it alone for 20 s. A bot knows which walkable
+region it is in: that of the nearest cell it can see from its knees (on the coarse grid of a
+big map the nearest cell may be behind a thin wall, in a closed room of a house), and its
+paths, spots, cover and bounds start there (`NavGrid::find_path_from`). A swimmer only finds
 its feet where the bottom is within wading depth (0.4 m) of the surface, so a bot swimming
 without getting anywhere (against a hull or a quay) swims straight for the nearest shore
 shallower than that, and another one if that fails too.
@@ -472,23 +480,34 @@ of the utility behaviours:
   the threat (the grid's cheap line of sight), scores them by distance, the way it is going
   and teammates' spots, and checks the best few with rays: hidden crouching but not standing
   is low cover (stand up to shoot), hidden standing needs a peek spot a step to the side past
-  the corner. Rays are rationed per tick (`COVER_RAYS`). From cover it is up shooting a few
-  seconds (longer while it wins), down to reload, when hurt or when the fire gets close;
-  attackers move on from cover to cover towards their flag; with the enemy gone it watches.
+  the corner. Rays are rationed per tick (`COVER_RAYS`). With the enemy in sight it only runs
+  for cover a few steps away (unless pinned down or hurt), walking and shooting back on the
+  way. From cover it is up shooting a few seconds (longer while it wins), down to reload, when
+  hurt or when the fire gets close; up again, it looks for its enemy at once, still aimed about
+  where he was. Attackers don't take cover on the flag they are taking, pick cover on the way
+  to it, and move on from cover to cover towards it (also while trading shots, after a while);
+  they shoot as they advance. With the enemy gone it watches a moment.
 - *Suppression*: enemy fire whose aim passes within 4 m (the client's flyby crack radius)
-  raises it; it shakes the aim, slows reactions, sends the bot to cover or low (crouched,
-  prone at range) and tells it where the shooter is.
+  raises it; it sends the bot to cover or low (crouched, prone at range), tells it where the
+  shooter is and shakes the aim and slows reactions a little (`SUPPRESSED_AIM`).
+- *Grenades*: a live grenade lying close by, once seen for a moment, makes the bot run from
+  it; at an enemy in sight it only throws one from cover (winding up in the open is time not
+  shooting back).
 - *Awareness*: a memory of contacts (seen, heard firing or running, spotted by the team or
   seen by a teammate, shooting at it) that ages and is forgotten; it points holders the way
   the enemy comes, gives grenades and suppressive fire their targets, and a known enemy
-  coming back into view is shot at sooner. Bots call out enemies they see with the commo
-  rose's spot, which marks them for the whole team.
-- *Squads* of bots work as two fire teams: near the fight they **bound** (one team moves
-  25 m while the other holds low, covering, then the other team moves past it); pinned down
-  (members fighting under fire for a while), team 0 lays down suppressive fire while team 1
-  flanks. Medics go to downed squad mates first, medics and support run their bags to squad
-  mates who need them, and defenders take cover facing the way the enemy comes, the leader
-  (whom the squad spawns on) behind the flag.
+  coming back into view, or one the team spotted or saw lately, is shot at sooner. Bots call
+  out enemies they see with the commo rose's spot, which marks them for the whole team, and
+  pick the wounded among the enemies in sight first.
+- *Squads* of bots work as two fire teams: on the last 120 m to their objective, or with
+  enemies seen within 50 m, they **bound** (one team moves 25 m while the other holds low,
+  covering, then the other team moves past it; 8 s at most per bound); pinned down (members
+  fighting under fire for a while), team 0 lays down suppressive fire while team 1 flanks.
+  Medics go to downed squad mates first and see a revive through (a teammate down within
+  25 m, or a squad mate they can reach in time, even in a firefight unless the enemy is close
+  or the fire too heavy); medics and support run their bags to squad mates who need them, and
+  defenders take cover facing the way the enemy comes, the leader (whom the squad spawns on)
+  behind the flag.
 - *Difficulty* (`ai::skill::BotDifficulty`, `--bot-difficulty`, the host menu) sets the
   default skill and scales reaction time, aim error, tactics (how often bots take cover,
   flank, suppress, throw grenades behind cover, spot) and awareness (sight, hearing, memory):
@@ -499,7 +518,16 @@ of the utility behaviours:
   per-minute `ai team` log line has the time spent in cover while engaged (a ray from the
   threat's eye to the body, sampled for both behaviours), cover runs, suppression, spots,
   bounds and pins, and the `bots:` lines idle bots by what they were doing and where bots
-  and drivers got stuck.
+  and drivers got stuck. The `ai combat` and `ai combat2` lines (`ai::stats::CombatStats`,
+  both behaviours) break firefights down: time with an enemy in sight and on the trigger,
+  rounds, hits and accuracy by distance, time to the first shot, engaged time, hits made and
+  taken and deaths by what the bot was doing (in the open, up or down in cover, running to
+  cover, bounding, ...), deaths by cause (bullet, vehicle, explosive, artillery), time by
+  state, time by distance to the objective, and revives and how they ended.
+- Tuning (2026-09-30, A/B soaks against `--bot-legacy-team`, 64-player layouts, 32 bots):
+  bounding everywhere near the fight made squads slow to the flags, running for cover under
+  fire and ducking lost more than it saved, grenades found bots sitting in cover, and medics
+  hardly ever finished a revive; see the statistics above for how to measure.
 
 **Bots in vehicles** (`game_server::bots::vehicle`, `ai::vehicles`, `nav::vehicle`) use the
 use button, the seat keys and ordinary `InputFrame`s like players:
@@ -526,7 +554,10 @@ use button, the seat keys and ordinary `InputFrame`s like players:
   (parking there when nobody comes), attack helicopters circle the objective and fire; jets
   with a runway take off, climb and circle, diving on targets.
 - *Getting out*: at the objective, when the vehicle is badly damaged (aircrews on the ground,
-  or high enough up for their parachute), on its roof, stuck for good, or when the driver left.
+  or high enough up for their parachute), on its roof, stuck for good, or when the driver left
+  (aircraft: again only on the ground or high enough). A transport helicopter's pilot, landed
+  at the drop-off, tells everyone aboard to get out (`VehicleClaims::drop_off`), whatever their
+  own objective, and waits up to 8 s for them before he flies back.
 
 The **vehicle grid** is built like the infantry grid, but only from what actually blocks a
 vehicle (terrain and BF2's vehicle-type collision, `GameLayer::VehicleGround`): small plants
