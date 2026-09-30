@@ -479,6 +479,22 @@ stage while they have squads enough, moving one over from where two or more were
 (`ai::strategy::cover_defences`). The per-minute `ai objectives` log line has, per objective,
 the soldiers there and the bots sent there.
 
+**After a capture** the commanders plan at once (a flag changing hands skips the 3 s wait).
+An attacking squad moves on to the next objective rather than defending the flag it took,
+unless the enemy is taking it back; it leaves one or two members nearest the flag as guards
+(`ai::strategy::Guard`) while enemies were seen at it in the last 12 s (two from three
+enemies on) or while it is a spawn by the enemy and the team holds two flags or fewer, and
+they rejoin once that ends, after 90 s, or when the squad is sent back. In the attack
+posture a flag the team holds is a squad's objective only while the enemy is taking it or
+three enemies gather at it (the ones who fell there no longer count: the team's intel
+forgets the dead and the downed), and a flag being taken with nobody sent to it pulls back
+the nearest bot-led squad within 300 m (conquest). Squad leaders wait for members within
+120 m only, and their waiting time comes back slowly on the move rather than whenever the
+squad closes up. The `ai flow:` log lines follow every squad that was mostly (or three of it)
+at a flag its team took: its new order, when it moved off (no more than a third of it, guards not counted,
+within the radius plus 40 m) and, when it is still there 15 s after an order elsewhere, what
+each member is doing (`scenarios/ai/capture_flow.ron`).
+
 ### Bots
 
 Bots are `Player`s whose `InputBuffer` is filled by a `BotBrain` instead of the network.

@@ -1,13 +1,13 @@
 // Squads move on after taking a flag (crates/game_server/src/ai/strategy.rs): on Dalian Plant
 // (64) the PLA takes the neutral Main Entrance first (-254, 153, 210), the US South Docks.
-// A squad mostly at a flag its team takes gets its next order in the tick the flag changes
-// hands ("ai flow: ... new order": the commander plans at once) and most of it leaves ("squad
-// moved off": no more than a third of its members within the flag's radius plus 40 m, not
-// counting the one or two left to guard it while enemies are about). Fails if nobody takes
-// Main Entrance within 150 s, if no such squad gets an order elsewhere within 90 s after
-// that, or if it doesn't move off within 60 s. The server log's `ai flow:` lines say what
-// every squad did after a capture (`still there 15 s after its new order: ...` lists what
-// keeps one).
+// A squad mostly at a flag its team takes (or three of it) gets its next order in the tick
+// the flag changes hands ("ai flow: ... new order": the commander plans at once) and most of
+// it leaves ("squad moved off": no more than a third of its members within the flag's radius
+// plus 40 m, not counting the one or two left to guard it while enemies are about). Fails if
+// nobody takes Main Entrance within 150 s, if no such squad gets an order elsewhere within
+// 240 s after that (the first flags often fall to a tank or a few soldiers), or if it
+// doesn't move off within 60 s. The server log's `ai flow:` lines say what every squad did
+// after a capture (`still there 15 s after its new order: ...` lists what keeps one).
 // client --scenario scenarios/ai/capture_flow.ron --out target/scenarios/ai/capture_flow
 (
     level: "dalian_plant",
@@ -23,7 +23,7 @@
         Screenshot("approach"),
         ExpectLog("ai flow: team 1 took Main Entrance", 150.0),
         Screenshot("taken"),
-        ExpectLog("ago): new order", 90.0),
+        ExpectLog("ago): new order", 240.0),
         Wait(8.0),
         Screenshot("moving_on"),
         ExpectLog("squad moved off", 60.0),

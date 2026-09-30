@@ -76,6 +76,10 @@ const CLIMBER_REACH: f32 = 1.2;
 #[derive(Resource, Default)]
 struct RopeClock {
     accumulator: f32,
+    /// Frame time statistics while ropes move (logged at debug level every few seconds):
+    /// frames, total and worst milliseconds of [`simulate_ropes`], most ropes awake.
+    stats: (u32, f32, f32, usize),
+    since_log: f32,
 }
 
 #[derive(Resource)]
@@ -345,6 +349,7 @@ fn simulate_ropes(
     mut strung: Query<(&Rope, &mut RopeVisual, &mut StrungRope)>,
     mut hook_models: Query<&mut Transform, (Without<ProjectileVisual>, Without<RopeVisual>, Without<Rope>)>,
 ) {
+    let started = std::time::Instant::now();
     let dt = time.delta_secs();
     clock.accumulator = (clock.accumulator + dt).min(STEP * MAX_STEPS as f32);
     let steps = (clock.accumulator / STEP) as u32;
@@ -448,6 +453,9 @@ fn simulate_ropes(
         }
     }
 
+    let awake = flights.iter().filter(|(_, v, _)| !v.sim.asleep()).count()
+        + strung.iter().filter(|(_, v, _)| !v.sim.asleep()).count();
+
     // The tubes.
     let visuals = flights
         .iter_mut()
@@ -460,6 +468,23 @@ fn simulate_ropes(
         visual.dirty = false;
         if let Some(mut mesh) = meshes.get_mut(&visual.mesh) {
             *mesh = tube_mesh(&visual.sim.points, visual.sim.radius);
+        }
+    }
+
+    if awake > 0 {
+        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        let stats = &mut clock.stats;
+        *stats = (stats.0 + 1, stats.1 + ms, stats.2.max(ms), stats.3.max(awake));
+    }
+    clock.since_log += dt;
+    if clock.since_log >= 2.0 {
+        clock.since_log = 0.0;
+        let (frames, total, worst, ropes) = std::mem::take(&mut clock.stats);
+        if frames > 0 {
+            debug!(
+                "ropes: up to {ropes} moving, {:.3} ms a frame on average, {worst:.3} ms at most ({frames} frames)",
+                total / frames as f32
+            );
         }
     }
 }
