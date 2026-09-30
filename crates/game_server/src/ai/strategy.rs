@@ -812,7 +812,10 @@ pub fn plan(
                     .filter(|(_, _, human)| !human)
                     .filter_map(|&(squad, position, _)| {
                         let order = strategy.orders.get(&(team, squad))?;
-                        let free = !order.commanded && order.age > RESCUE_MIN_AGE && !under_attack(order.area);
+                        // Not off a flag it is raising its own flag on.
+                        let taking = order.kind == OrderKind::Attack
+                            && states.get(order.area).copied().flatten().is_some_and(|s| s.flag == team && s.rate > 0.0);
+                        let free = !order.commanded && order.age > RESCUE_MIN_AGE && !under_attack(order.area) && !taking;
                         let distance = position?.distance(at);
                         (free && distance < RESCUE_DISTANCE).then_some((squad, distance))
                     })
