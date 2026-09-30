@@ -156,9 +156,18 @@ fn main() -> Result<()> {
                 }
                 names
                     .iter()
-                    .map(|n| install.find_level(n))
+                    .map(|n| find_level(&install, n, bf2_mod.as_deref()))
                     .collect::<Result<Vec<_>, _>>()?
             };
+            if namespace.is_none() {
+                if let Some(level) = levels.iter().find(|l| !Bf2Install::is_base_mod(&l.mod_name)) {
+                    bail!(
+                        "{} is from the {} mod: import it into its own folder with --out mods/<name> --namespace <name>                          (or pick the base game's level with --bf2-mod bf2 / xpack)",
+                        level.name,
+                        level.mod_name
+                    );
+                }
+            }
             std::fs::create_dir_all(&cli.out)?;
             write_readme(&cli.out)?;
             import_soldiers(&install, &cli.out, &mods);
@@ -199,13 +208,13 @@ fn main() -> Result<()> {
             import_soldiers(&install, &cli.out, &mods)
         }
         Command::Ai { names, all, bf2_mod } => {
-            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| install.mods());
+            let mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| install.mods());
             let levels = if all {
                 mods.iter().flat_map(|m| install.levels(m)).collect()
             } else {
                 names
                     .iter()
-                    .map(|n| install.find_level(n))
+                    .map(|n| find_level(&install, n, bf2_mod.as_deref()))
                     .collect::<Result<Vec<_>, _>>()?
             };
             for level in levels {
@@ -216,7 +225,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Light { names, all, bf2_mod } => {
-            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| install.mods());
+            let mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| install.mods());
             let levels = if all {
                 mods.iter().flat_map(|m| install.levels(m)).collect()
             } else {
@@ -225,7 +234,7 @@ fn main() -> Result<()> {
                 }
                 names
                     .iter()
-                    .map(|n| install.find_level(n))
+                    .map(|n| find_level(&install, n, bf2_mod.as_deref()))
                     .collect::<Result<Vec<_>, _>>()?
             };
             for level in levels {
@@ -249,6 +258,14 @@ fn main() -> Result<()> {
         Command::Check { r#mod } => check(&install, &r#mod)?,
     }
     Ok(())
+}
+
+/// Finds a level by name in the `--bf2-mod` mod, or in every mod with the base game first.
+fn find_level(install: &Bf2Install, name: &str, bf2_mod: Option<&str>) -> Result<bf2_formats::LevelInfo, bf2_formats::InstallError> {
+    match bf2_mod {
+        Some(m) => install.find_level_in(name, &[m.to_string()]),
+        None => install.find_level(name),
+    }
 }
 
 fn import_soldiers(install: &Bf2Install, out: &std::path::Path, mods: &[String]) {

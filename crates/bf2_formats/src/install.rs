@@ -101,13 +101,30 @@ impl Bf2Install {
         levels
     }
 
-    /// Finds a level by case-insensitive name across all mods.
+    /// Finds a level by case-insensitive name across all mods. The base game (`bf2`, then
+    /// `xpack`) wins over other mods, which often ship their own version of a vanilla map
+    /// under the same name (AIX 2's `Gulf_of_Oman`).
     pub fn find_level(&self, name: &str) -> Result<LevelInfo, InstallError> {
-        self.mods()
-            .iter()
+        let mut mods = self.mods();
+        mods.sort_by_key(|m| match m.to_ascii_lowercase().as_str() {
+            "bf2" => 0,
+            "xpack" => 1,
+            _ => 2,
+        });
+        self.find_level_in(name, &mods)
+    }
+
+    /// Finds a level by case-insensitive name in the given mods, searched in order.
+    pub fn find_level_in(&self, name: &str, mods: &[String]) -> Result<LevelInfo, InstallError> {
+        mods.iter()
             .flat_map(|m| self.levels(m))
             .find(|l| l.name.eq_ignore_ascii_case(name))
             .ok_or_else(|| InstallError::UnknownLevel(name.to_string()))
+    }
+
+    /// Whether a mod folder is part of the base game (`bf2`, or `xpack` = Special Forces).
+    pub fn is_base_mod(mod_name: &str) -> bool {
+        mod_name.eq_ignore_ascii_case("bf2") || mod_name.eq_ignore_ascii_case("xpack")
     }
 
     /// Mounts a mod's archives as listed in its `ClientArchives.con` / `ServerArchives.con`,

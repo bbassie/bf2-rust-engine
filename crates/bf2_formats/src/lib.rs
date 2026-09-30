@@ -14,5 +14,5 @@ pub mod road;
 pub mod terrain;
 pub mod vfs;
 
-pub use install::{Bf2Install, LevelInfo, Side};
+pub use install::{Bf2Install, InstallError, LevelInfo, Side};
 pub use vfs::Vfs;
