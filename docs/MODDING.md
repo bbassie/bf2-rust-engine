@@ -152,8 +152,11 @@ doesn't list from that one, so it holds nothing but its own stages (and no EA da
                             (name: "B", position: (-185.0, 156.0, -16.0), yaw: 180.0,
                              template: Some("woodencrate_destructible_tools")),
                         ],
-                        // Control point ids: who spawns where during this stage (points in
-                        // neither list are neutral; nothing is captured in the Rush).
+                        // Control point ids: who holds what during this stage, and so whose
+                        // vehicles spawn there (points in neither list are neutral; nothing
+                        // is captured in the Rush). Each side spawns at the ones it holds
+                        // near the stage's charges (see "Spawns follow the front" in
+                        // ARCHITECTURE.md).
                         attacker_spawns: ["305"],
                         defender_spawns: ["302", "306", "307"],
                     ),
@@ -170,7 +173,7 @@ doesn't list from that one, so it holds nothing but its own stages (and no EA da
                 tickets: 170.0,
                 stages: [
                     // A sector: its control points (ids), all of which the attackers must
-                    // hold at once. Spawns follow who holds the flags.
+                    // hold at once. Spawns follow who holds the flags, near the front.
                     (name: "Old Town", control_points: ["301", "302"]),
                     (name: "Market", control_points: ["306", "307"]),
                 ],

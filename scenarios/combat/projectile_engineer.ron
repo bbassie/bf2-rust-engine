@@ -10,9 +10,9 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:4"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         // Shotgun at the house across the square.
         Teleport((-184.0, 157.0, -85.0), 180.0, 1.0),
         Weapon(5),
@@ -33,9 +33,9 @@
         Wait(2.0),
         Screenshot("at_mine"),
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:1"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         Teleport((-184.0, 157.0, -85.0), 180.0, -30.0),
         Weapon(0),
         Wait(1.5),

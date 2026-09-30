@@ -290,10 +290,12 @@ helicopter, sea, stationary) comes from the engine type.
     stall angle; plate and induced drag and a load limit. Piloted, a jet flies by wire, a
     gameplay layer for BF3/BF4-like handling (BF2's raw wing torques rolled the J-10 at
     20°/s at take-off speed and let it wander): the stick and rudder ask for rates (pitch
-    48°/s, roll 170°/s, yaw 29°/s at the corner speed) that a controller holds, so centred it
+    57°/s, roll 170°/s, yaw 29°/s at the corner speed) that a controller holds, so centred it
     keeps its attitude, trimmed to fly where it points. The share of those rates depends on
     airspeed: best at the corner speed (70 % of the engines' BF2 top speed, 315 km/h for
-    most jets; the HUD lights the airspeed in that band), mushy below, wider above, so the
+    most jets; the HUD lights the airspeed in that band), less below and above (pitch about
+    32°/s just above the stall, 43°/s at full throttle, near BF2's own rates; `tests/flight.rs`
+    `jet_mouse` prints both), so the
     throttle and afterburner change the turn radius and hard turns bleed speed (induced
     drag). Wings lift 1.8× BF2's for the angle of attack (the path follows the nose); the fin
     weathervanes the nose into sideways airflow (coordinated banked turns and rudder yaw).
@@ -380,9 +382,14 @@ slows a jump jet into hover; helicopters and hovering jets: collective), A/D ste
 or tail rotor, mouse, arrow keys or the gamepad's right stick as the stick (pitch and roll;
 up raises the nose, like looking up; the "invert jet/helicopter pitch" settings make all
 three flight-stick style, BF2's default; settings saved before this swap their old arrow
-keys once, `Settings::migrate`; the mouse's stick centres itself in 1/8 s, so the aircraft
-stops turning soon after the mouse does; `heli_pedals_roll` ("Helicopter A/D: roll") swaps
-helicopters to A/D roll and mouse X on the tail rotor, BF3/BF4's alternative), Alt
+keys once, `Settings::migrate`; in a helicopter the mouse's stick centres itself in 1/8 s,
+so it stops turning soon after the mouse does; `heli_pedals_roll` ("Helicopter A/D: roll")
+swaps helicopters to A/D roll and mouse X on the tail rotor, BF3/BF4's alternative; in a
+jet the mouse turns the nose like aiming, `flight::JetMouse`: each count asks for 0.2° of
+pitch or 0.4° of roll whatever the airspeed, which the jet flies off at up to its rates, so
+a climb is one mouse movement that then holds, times "Jet mouse sensitivity"
+(`jet_mouse_sensitivity`), and "Jet mouse X: yaw" (`jet_mouse_x yaw`) puts mouse X on the
+rudder and A/D on the roll; a hovering jump jet uses the helicopters' stick), Alt
 free look, Shift afterburner, Space wheel brakes, fire/aim buttons the seat's
 primary/secondary guns, weapon keys the gun on a trigger, G countermeasures (flares, smoke),
 V chase camera, F1..F8 seats, E enter/exit.
@@ -411,12 +418,24 @@ the next round (or the rotation's next map) starts. A mode is a unit of its own:
   armed one in 6 s (progress drains when they let go), and an armed charge goes off after
   30 s (a 12 m blast of 300 damage). With both charges of a stage destroyed the front moves:
   the attackers' tickets are refilled and both sides spawn further on (control points only
-  say where each side spawns: nothing is captured). Only the attackers have tickets, one per
-  death; they win by destroying the last pair and lose when out of tickets, unless a charge
-  is armed (overtime). In both staged modes nobody spawns at a flag with enemies within 30 m
-  (`SpawnBlocked`): the defenders spawn at the stage's own flags only while the attackers
-  aren't at them. Charges are drawn from a template (BF2's `xp1_generator` by default)
-  with a beacon that blinks once armed.
+  say which side holds them during a stage, and so whose vehicles spawn there: nothing is
+  captured). Only the attackers have tickets, one per death; they win by destroying the last
+  pair and lose when out of tickets, unless a charge is armed (overtime). Charges are drawn
+  from a template (BF2's `xp1_generator` by default) with a beacon that blinks once armed.
+- **Spawns follow the front** in both staged modes (`modes::staged::front_open`, replicated
+  as `SpawnBlocked(team, Front)` on the points, so the deploy screen, the server's spawn
+  pick and the bots all go by it): of the points a side holds, it spawns at those within
+  150 m of the stage's objectives (Rush: its charges; Breakthrough: its sector's flags), at
+  the nearest one farther than 40 m from them (where it falls back to while enemies block
+  those; the attackers' start in the first stage) and at any up to 30 m farther than that
+  one, measured from the points' spawn points. The attackers' start points with vehicles
+  for them stay open all round, so their vehicles aren't lost. So the defenders spawn at the
+  stage and the flags just behind it, not at a base 500 m back, and the attackers move up to
+  the stage they took. Nobody spawns at a point with enemies within 30 m either
+  (`SpawnBlocked(team, Enemies)`): the defenders spawn at the stage's own flags only while
+  the attackers aren't at them. The deploy screen hides the bases away from the front; the
+  server logs each side's spawns and their distances whenever they change, with a `front
+  check` line that warns when a side's nearest spawn is more than 250 m from the objectives.
 - **Breakthrough**: sectors of conquest flags. Only the open sector's flags move (conquest's
   capture rules; the others are `Locked`), defenders can take back what they lost, and once
   the attackers hold all of a sector's flags it falls: they get their tickets back and the
@@ -432,10 +451,16 @@ from the gas station); the other flags are ordered by how far along the way from
 attackers' start to the defenders' base (or the farthest flag) they are, over the relative
 neighbourhood graph of the flags; they are grouped into stages or sectors (one to three
 flags, at most five stages); a stage's two charges go on either side of a lone flag, or beside
-two of its flags about 80 m apart; and each stage lists who spawns where (attackers at their
-start and every stage taken, defenders at the stage's flags, the ones behind and their bases). Once the
-navigation grid is there the server moves generated charges onto walkable ground in their
-flag's walkable region, with room around them and at ground level. A generated layout is
+two of its flags about 80 m apart; and each stage lists who holds what (attackers their
+start and every stage taken, defenders the stage's flags, the ones behind and their bases: see "Spawns follow the front" for where they spawn). Once the
+navigation grid is there the server moves generated charges onto dry walkable ground
+(`modes::rush::place_all`): never under water (the seabed beside a pier is walkable), in a
+region of the grid soldiers spawn in, with room around them, at the level of the ground at
+their flag (where its spawn points are) rather than on a roof or indoors, and 20 m from the
+other charge of the stage where there's room; within 16 m of the layout's spot, 40 m if
+nothing nearer will do. Every spot it had to correct is logged; `cargo test -p game_server
+--lib charges_on_levels -- --ignored --nocapture` lists them for every level. Points
+sharing an id with others are left out of the generated stages. A generated layout is
 `based_on` its conquest layout, whose navigation grid and BF2 strategic areas it shares.
 Layouts written by hand in `level.ron` or `levels/<name>/modes.ron` take the place of the
 generated ones (see [MODDING.md](MODDING.md#game-mode-layouts)).
@@ -685,6 +710,32 @@ by the view distance setting (`render::statics`, `render::unit_lods`).
 - `BF2_STATIC_LODS=off` / `BF2_UNIT_LODS=off` draw full detail at any distance (for
   comparisons), `BF2_UNIT_LOD_STATS` logs the vehicle and soldier triangles drawn.
 
+### Caches
+
+Generated data that is slow to make is kept between runs in one cache folder
+(`game_shared::cache`), never in `imported/` or the mods, so content sharing can't offer it and
+deleting it only costs rebuild time: bots' navigation grids (`nav/<level>/infantry-<key>.bin`,
+`vehicle-<key>.bin`, 0.7-3 s to build) and the tactical map's base picture
+(`tactical/<level>/base-<key>.bin`, 2-3 s). The folder is `--cache-dir` (client and server),
+else `$BF2_CACHE_DIR`, else `%LOCALAPPDATA%f2-rust-engine\cache`, `~/.cache/bf2-rust-engine`
+(`$XDG_CACHE_HOME`) or `~/Library/Caches/bf2-rust-engine`; a client and a local dedicated
+server share it safely.
+
+- **Content addressed**: `<key>` hashes everything the result is made from (generator
+  version, terrain, colliders, play area, parameters), so a level's layouts with the same
+  inputs share an entry and a changed input (a re-import, a code change bumping the version)
+  writes a new one. Nothing ever needs invalidating by hand.
+- **Eviction**: the file's modification time is its last use (set on every hit, no shared
+  index); entries of a level and kind unused for 30 days while another was used since go,
+  then the least recently used ones beyond the size limit (`--cache-limit-gb`,
+  `$BF2_CACHE_LIMIT_GB`, default 2 GB). Runs after each write and at startup.
+- **Format**: 1 MiB chunks of raw deflate with a CRC-32 each, compressed and decompressed on
+  several threads (a 4096x4096 map: 64 MB in about 12 MB); written to a temporary file and
+  renamed. A damaged entry is a miss and is removed.
+- Settings > Game > Caches shows the size and clears it; `server --clear-cache` does the same
+  and exits. At startup older builds' caches in the content folders (`navgrid*.bin` in level
+  folders, `imported/cache/tactical/`) are deleted (logged).
+
 ### Frame time
 
 What a frame with 63 bots costs, and the rules that keep it low (see `render::perf_stats` and
@@ -701,9 +752,10 @@ What a frame with 63 bots costs, and the rules that keep it low (see `render::pe
   dedicated server): its systems are tiny, and handing each to a worker cost more than it saved
   while the render thread keeps the workers busy. `BF2_SCHEDULES=parallel` switches back.
 - One camera draws everything, the first-person view model included (`render::viewmodel`: the
-  model is shrunk towards the eye so it never clips into walls, and scaled for BF2's 60°
-  first-person field of view): a second camera was a whole extra view, about 1.4 ms of the
-  render thread and 0.5 ms of the main thread a frame.
+  model is shrunk towards the eye and scaled for BF2's 60° first-person field of view, and its
+  own vertex shader moves its depth in front of the world's so walls and the ground never cut
+  into it; its transparent parts sort after the world's): a second camera was a whole extra
+  view, about 1.4 ms of the render thread and 0.5 ms of the main thread a frame.
 - The player camera and its shadow cascades draw directly (`NoIndirectDrawing`): Bevy's
   GPU-driven indirect draws rebuild bin unpacking bind groups and indirect parameters for
   every batch of every view each frame, which costs more CPU here than the draw calls it

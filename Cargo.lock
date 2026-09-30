@@ -3472,6 +3472,7 @@ dependencies = [
  "bevy_replicon",
  "bitflags 2.13.2",
  "blake3",
+ "flate2",
  "game_auth",
  "game_data",
  "gltf",

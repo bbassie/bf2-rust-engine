@@ -50,11 +50,11 @@ const BLEND: f32 = 0.08;
 /// What a projectile looks like (and where): its source is the replicated projectile, or
 /// none while it is our prediction.
 #[derive(Component)]
-struct ProjectileVisual {
+pub(crate) struct ProjectileVisual {
     source: Option<Entity>,
-    weapon: Arc<WeaponDesc>,
+    pub(crate) weapon: Arc<WeaponDesc>,
     /// Simulated between server updates.
-    motion: ProjectileMotion,
+    pub(crate) motion: ProjectileMotion,
     /// Seconds since launch.
     age: f32,
     /// The rest of the last correction, blended out over [`BLEND`].
@@ -193,7 +193,7 @@ fn track_projectiles(
     }
 }
 
-fn move_visuals(
+pub(crate) fn move_visuals(
     mut commands: Commands,
     time: Res<Time>,
     spatial: SpatialQuery,

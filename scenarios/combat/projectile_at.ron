@@ -10,9 +10,9 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:6"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         Teleport((-184.0, 157.0, -85.0), 180.0, 1.0),
         Weapon(0),
         Wait(1.5),

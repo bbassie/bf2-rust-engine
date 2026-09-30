@@ -1,0 +1,52 @@
+// Rush on Strike at Karkand (32): spawns follow the front. The deploy screen of both sides at
+// every stage (stages taken with `TakeStage`): the defenders spawn at the stage's flags and
+// the ones just behind, not at the far end of town; the attackers at the gas station first,
+// then at the flags of the stage they took (and the gas station for its vehicles). The server
+// logs each side's spawns with their distance from the charges and checks that each side's
+// nearest one is within 250 m (the attackers' from stage 2 on); the deploy screen logs the
+// spawns it offers.
+// client --scenario scenarios/modes/rush_spawns_karkand.ron
+(
+    level: "strike_at_karkand",
+    mode: "gpm_rush",
+    size: 32,
+    bots: 0,
+    team: 2,
+    steps: [
+        // From the start: the first stage's check comes while the level loads.
+        ForbidLog("spawn FAR from the objectives"),
+        ForbidLog("have no spawn open"),
+        WaitReady,
+        ExpectLog("front check Stage 1", 10.0),
+        ExpectLog("charges placed on walkable ground", 30.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s1_attackers"),
+        SetTeam(1),
+        ExpectLog("deploy: spawn options for One (Stage 1)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s1_defenders"),
+        TakeStage,
+        ExpectLog("Rush Stage 2: attackers spawn at", 5.0),
+        ExpectLog("front check Stage 2", 5.0),
+        ExpectLog("deploy: spawn options for One (Stage 2)", 5.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s2_defenders"),
+        SetTeam(2),
+        ExpectLog("deploy: spawn options for Two (Stage 2)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s2_attackers"),
+        TakeStage,
+        ExpectLog("front check Stage 3", 5.0),
+        ExpectLog("deploy: spawn options for Two (Stage 3)", 5.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s3_attackers"),
+        SetTeam(1),
+        ExpectLog("deploy: spawn options for One (Stage 3)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s3_defenders"),
+        Quit,
+    ],
+)

@@ -87,6 +87,9 @@ pub struct ServerSettings {
     pub respawn_seconds: f32,
     /// Whether bullets hurt teammates.
     pub friendly_fire: bool,
+    /// Soldiers climb onto ledges by jumping into them (not in BF2; see
+    /// `game_shared::soldier::SoldierTuning::mantle`).
+    pub mantle: bool,
     /// How well bots aim and how quickly they react, 0..1 (BF2's bot skill).
     pub bot_skill: f32,
     /// How hard the bots are: scales reaction, aim, tactics and awareness (see
@@ -135,6 +138,7 @@ impl Default for ServerSettings {
             local_team: 1,
             respawn_seconds: 10.0,
             friendly_fire: false,
+            mantle: true,
             bot_skill: 0.5,
             bot_difficulty: ai::skill::BotDifficulty::Normal,
             bot_legacy_team: 0,
@@ -861,7 +865,7 @@ fn pick_spawn(
     let held: Vec<(u8, &str)> = control_points
         .iter()
         // Not where the mode closed it to us (enemies at the flag, see `modes::staged`).
-        .filter(|(_, state, _, blocked)| state.owner == team && blocked.is_none_or(|b| b.0 != team))
+        .filter(|(_, state, _, blocked)| game_shared::modes::can_spawn_at(state.owner, *blocked, team))
         .map(|(cp, _, rules, _)| (cp.index, rules.id.as_str()))
         .collect();
     let at = |ids: &[&str]| -> Vec<_> {

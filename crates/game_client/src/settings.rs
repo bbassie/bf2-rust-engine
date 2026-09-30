@@ -272,6 +272,12 @@ pub struct Settings {
     /// Helicopters: A/D roll and the mouse (or the right stick) turns the tail, instead of
     /// BF3/BF4's default of A/D on the tail rotor (yaw) and the mouse rolling.
     pub heli_pedals_roll: bool,
+    /// Jets: how far the nose turns per mouse count, as a multiplier (separate from the mouse
+    /// sensitivity on foot; see `flight::JET_MOUSE_GAIN`).
+    pub jet_mouse_sensitivity: f32,
+    /// Jets: the mouse's sideways movement works the rudder (yaw) and A/D roll, instead of
+    /// BF3/BF4's default of the mouse rolling and A/D on the rudder.
+    pub jet_mouse_yaw: bool,
     // --- end flight controls ---
     // --- Voice chat (voice) ---
     /// Push-to-talk voice chat: on or off, push to talk or voice activation, devices, gain and
@@ -365,6 +371,8 @@ impl Default for Settings {
             invert_heli_pitch: false,
             controls_revision: CONTROLS_REVISION,
             heli_pedals_roll: false,
+            jet_mouse_sensitivity: 1.0,
+            jet_mouse_yaw: false,
             // --- Voice chat (voice) ---
             voice: Default::default(),
             // --- end voice chat ---
@@ -576,6 +584,16 @@ impl Settings {
                 }
             }
             "heli_pedals_roll" => self.heli_pedals_roll = on()?,
+            "jet_mouse_sensitivity" => self.jet_mouse_sensitivity = num()?.clamp(0.1, 4.0),
+            // Jets' mouse X: `roll` (BF3/BF4's default) or `yaw`.
+            "jet_mouse_x" => {
+                self.jet_mouse_yaw = match value {
+                    "roll" => false,
+                    "yaw" => true,
+                    _ => return Err(format!("setting {key}: expected roll or yaw, got {value}")),
+                }
+            }
+            "jet_mouse_yaw" => self.jet_mouse_yaw = on()?,
             // Lighting: `off`, `on` or `shadows`; `level` or `night`.
             "dynamic_lamps" | "lamps" => {
                 self.dynamic_lamps = crate::render::lamps::DynamicLamps::parse(value)

@@ -400,13 +400,7 @@ fn combat_areas_on_levels() {
     let levels = std::env::var("NAV_LEVELS")
         .unwrap_or_else(|_| "strike_at_karkand:64,gulf_of_oman:64,dalian_plant:64,aix2_aix_archipelago:64".into());
     let params = NavParams::from_tuning(&SoldierTuning::default());
-    let file_size = |grid: &NavGrid| {
-        let path = std::env::temp_dir().join(format!("navgrid_area_{}.bin", std::process::id()));
-        super::cache::save(&path, 1, grid).unwrap();
-        let size = std::fs::metadata(&path).unwrap().len();
-        std::fs::remove_file(&path).unwrap();
-        size as f32 / 1e6
-    };
+    let file_size = |grid: &NavGrid| game_shared::cache::encode(1, &super::cache::encode(grid)).len() as f32 / 1e6;
     // The fastest of two builds.
     fn timed<T>(mut f: impl FnMut() -> T) -> (T, f32) {
         let started = Instant::now();
@@ -515,4 +509,203 @@ fn combat_areas_on_levels() {
             );
         }
     }
+}
+
+/// Places the charges of every Rush layout of every level (imported and in the mods) the way
+/// the server does and lists each charge whose spot from the layout needed correcting (under
+/// water, indoors, on a roof, next to the other charge, ...) or that found no walkable ground:
+///
+/// `cargo test -p game_server --lib charges_on_levels -- --ignored --nocapture`
+///
+/// `CHARGE_LEVELS=leviathan,strike_at_karkand` picks levels. Takes the cached grids (see
+/// [`game_shared::cache`]) where there are, else builds and caches them (`CHARGE_BUILD=0`:
+/// skip those layouts instead).
+#[test]
+#[ignore]
+fn charges_on_levels() {
+    use crate::modes::rush::{CHARGES_APART, ChargeToPlace, flag_ground, place_all};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let paths = GamePaths::resolve_with_mods(Some(root.join("imported")), Some(root.join("mods")));
+    let wanted = std::env::var("CHARGE_LEVELS").ok();
+    let build_missing = std::env::var("CHARGE_BUILD").map_or(true, |v| v != "0");
+    // `CHARGE_VERBOSE=1`: every charge's spot.
+    let verbose = std::env::var("CHARGE_VERBOSE").is_ok_and(|v| v == "1");
+    let tuning = NavParams::from_tuning(&SoldierTuning::default());
+    let cache = game_shared::cache::Cache::resolve(None, None);
+    let (mut layouts, mut total, mut corrected, mut stuck, mut close) = (0, 0, 0, 0, 0);
+    let mut report = Vec::new();
+    for name in paths.level_names() {
+        if wanted.as_ref().is_some_and(|w| !w.split(',').any(|x| x == name)) {
+            continue;
+        }
+        let Ok(level) = load_level(&paths, &name) else {
+            println!("{name}: doesn't load");
+            continue;
+        };
+        let params = NavParams {
+            water_height: level.desc.water.as_ref().map(|w| w.height),
+            ..tuning
+        };
+        let rush: Vec<game_data::GameModeDesc> =
+            level.desc.game_modes.iter().filter(|l| l.mode == game_data::modes::RUSH).cloned().collect();
+        for layout in rush {
+            let Some(staged) = &layout.staged else { continue };
+            let Some(base) = level.base_layout(&layout.mode, layout.size) else { continue };
+            let mut world = World::new();
+            {
+                let mut commands = world.commands();
+                spawn_statics(&mut commands, &level.desc.statics, &paths);
+            }
+            world.flush();
+            let mut colliders = world
+                .query_filtered::<(&Collider, &Transform, &CollisionLayers), (With<LevelEntity>, Without<ColliderDisabled>)>();
+            let mut ladders = world.query_filtered::<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>();
+            let strategic = super::strategic_points(&level, Some(base));
+            let collected =
+                collect_geometry(level.heightmap.clone(), colliders.iter(&world), ladders.iter(&world), Some(base), &strategic);
+            let patches = detail_patches(&level, &collected.geometry, Some(&paths));
+            let started = Instant::now();
+            let key = super::build::geometry_key(&collected.geometry, &params)
+                ^ super::build::words_key(&super::patch::hash_rects(&patches));
+            let grid = match cache.as_ref().and_then(|c| super::cache::load(c, &level.desc.name, "infantry", key, params)) {
+                Some(grid) => grid,
+                None if build_missing => {
+                    let grid = super::load_or_build(&collected.geometry, &patches, params, cache.as_ref(), &level.desc.name);
+                    println!("{name} {}: grid built in {:.1} s", layout.size, started.elapsed().as_secs_f32());
+                    grid
+                }
+                None => {
+                    println!("{name} {}: no cached grid, skipped", layout.size);
+                    continue;
+                }
+            };
+            layouts += 1;
+            let charges: Vec<(String, ChargeToPlace)> = staged
+                .stages
+                .iter()
+                .enumerate()
+                .flat_map(|(s, stage)| {
+                    let layout = &layout;
+                    stage.charges.iter().map(move |c| {
+                        let near = c.control_point.as_deref().and_then(|id| flag_ground(layout, id));
+                        let label = format!(
+                            "stage {} charge {} at {}",
+                            s + 1,
+                            c.name,
+                            c.control_point
+                                .as_ref()
+                                .and_then(|id| layout.control_points.iter().find(|cp| &cp.id == id))
+                                .map_or("-", |cp| cp.name.as_str())
+                        );
+                        (
+                            label,
+                            ChargeToPlace {
+                                stage: s as u8,
+                                wanted: Vec3::from_array(c.position),
+                                near,
+                                approximate: c.approximate,
+                            },
+                        )
+                    })
+                })
+                .collect();
+            let list: Vec<ChargeToPlace> = charges.iter().map(|(_, c)| c.clone()).collect();
+            let spawns: Vec<Vec3> = layout.spawn_points.iter().map(|sp| Vec3::from_array(sp.placement.position)).collect();
+            let placed = place_all(&grid, &list, &spawns);
+            let at: Vec<Vec3> = list.iter().zip(&placed).map(|(c, p)| p.spot.unwrap_or(c.wanted)).collect();
+            for (i, ((label, charge), placed)) in charges.iter().zip(&placed).enumerate() {
+                if !charge.approximate {
+                    continue;
+                }
+                total += 1;
+                let apart = list
+                    .iter()
+                    .zip(&at)
+                    .enumerate()
+                    .filter(|(j, (other, _))| *j != i && other.stage == charge.stage)
+                    .map(|(_, (_, p))| p.xz().distance(at[i].xz()))
+                    .fold(f32::INFINITY, f32::min);
+                if verbose {
+                    let before = previous_spot(&grid, level.heightmap.as_deref(), charge.wanted, charge.near);
+                    println!(
+                        "  {name} {} {label}: layout {:.1}, before {}, now {}{}",
+                        layout.size,
+                        charge.wanted,
+                        before.map_or("-".to_string(), |b| format!(
+                            "{b:.1}{}",
+                            params.water_height.filter(|w| b.y < *w).map_or(String::new(), |w| format!(" ({:.1} m under water)", w - b.y))
+                        )),
+                        placed.spot.map_or("-".to_string(), |s| format!("{s:.1}")),
+                        if placed.remaining.is_empty() { String::new() } else { format!(" ({})", placed.remaining.join(", ")) }
+                    );
+                }
+                match placed.spot {
+                    None => {
+                        stuck += 1;
+                        report.push(format!("{name} {} {label}: NOT PLACED ({})", layout.size, placed.problems.join(", ")));
+                    }
+                    Some(spot) if !placed.problems.is_empty() => {
+                        corrected += 1;
+                        report.push(format!(
+                            "{name} {} {label}: moved {:.1} m to {spot:.0} (was {}){}{}",
+                            layout.size,
+                            spot.distance(charge.wanted),
+                            placed.problems.join(", "),
+                            if placed.remaining.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", still {}", placed.remaining.join(", "))
+                            },
+                            if apart < CHARGES_APART { format!(", {apart:.0} m from the other") } else { String::new() }
+                        ));
+                    }
+                    // Nothing better near (a flag indoors keeps its charges indoors: not listed).
+                    Some(spot) if placed.remaining.iter().any(|p| *p != "indoors") => {
+                        report.push(format!(
+                            "{name} {} {label}: at {spot:.0}, {} (nothing better near)",
+                            layout.size,
+                            placed.remaining.join(", ")
+                        ));
+                    }
+                    Some(_) => {}
+                }
+                if apart < CHARGES_APART {
+                    close += 1;
+                }
+            }
+        }
+    }
+    println!("\n{} charges needing a correction or not placed:", report.len());
+    for line in &report {
+        println!("  {line}");
+    }
+    println!(
+        "\n{layouts} Rush layouts, {total} generated charges: {corrected} corrected, {stuck} not placed, {close} less than {CHARGES_APART} m from their partner"
+    );
+}
+
+/// Where the server put a generated charge before its placement checked for water, indoors
+/// and the other charge: the walkable cell in its flag's region within 16 m scoring best on
+/// distance, room and height above the terrain.
+fn previous_spot(grid: &NavGrid, heightmap: Option<&game_shared::level::Heightmap>, wanted: Vec3, near: Option<Vec3>) -> Option<Vec3> {
+    let region = crate::ai::strategy::walk_region(grid, near.unwrap_or(wanted));
+    let mut best: Option<(f32, Vec3)> = None;
+    for cell in grid.cells_near(wanted.xz(), 16.0) {
+        let c = grid.cell(cell);
+        if region.is_some_and(|r| r != c.region) {
+            continue;
+        }
+        let spot = grid.position(cell);
+        let mut score = spot.xz().distance(wanted.xz());
+        score += 1.5 * (6.0 - c.dist as f32).max(0.0);
+        if let Some(heightmap) = heightmap
+            && spot.y - heightmap.height_at(spot.x, spot.z) > 1.5
+        {
+            score += 12.0;
+        }
+        if best.is_none_or(|(b, _)| score < b) {
+            best = Some((score, spot));
+        }
+    }
+    best.map(|(_, spot)| spot)
 }

@@ -4,7 +4,8 @@
 //! - Night vision (BF2 `isNightVision` goggles, [`Action::NightVision`]): the picture's
 //!   brightness amplified, with interference, through BF2's `night_vision_gradient`. BF2
 //!   gives the goggles no battery, so neither do we. A flashbang blinds from farther with
-//!   them on (`flashbangRadiusWithNightVision`).
+//!   them on (`flashbangRadiusWithNightVision`). On night levels (and night versions of day
+//!   levels) everyone has it, goggles or not; otherwise the key says why nothing happens.
 //! - Gas mask (BF2 `isGasMask`, [`Action::GasMask`]): the view through two lenses; the
 //!   server stops tear gas hurting the wearer (`game_server::gear`).
 //! - Tear gas ([`TearGas`] clouds): without a mask the picture swims and blurs and the
@@ -57,7 +58,7 @@ impl Plugin for GadgetsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(vision::VisionPlugin)
             .init_resource::<Gadgets>()
-            .add_systems(Startup, load_assets)
+            .add_systems(Startup, (load_assets, spawn_hint))
             .add_systems(
                 Update,
                 (toggle_gear, take_hits, breathe, remote_coughs, show).chain(),
@@ -147,6 +148,39 @@ pub(crate) fn load_assets(mut commands: Commands, paths: Res<GamePaths>, asset_s
     commands.insert_resource(Files { assets });
 }
 
+/// The line under the crosshair that says why night vision didn't come on.
+#[derive(Component)]
+struct GearHint;
+
+/// Seconds the hint stays.
+const HINT_SECONDS: f32 = 2.5;
+/// Levels whose sun (`LevelLight::sun`, luminance) is dimmer than this are night for night
+/// vision: moonlit and stormy levels that BF2 lit like day ones (AIX 2's Dragon Valley Moon
+/// 0.09, Wake Twilight 0.2; Damocles' dusk 0.39 and Strike at Karkand 0.61 are day).
+const DARK_SUN: f32 = 0.25;
+
+fn spawn_hint(mut commands: Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                top: percent(62),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_child((
+            GearHint,
+            Text::new(""),
+            crate::ui_theme::font(16.0),
+            TextColor(Color::srgb(0.95, 0.96, 0.98)),
+            crate::ui_theme::shadow(),
+            Visibility::Hidden,
+        ));
+}
+
 /// Which gear the local soldier carries: (night vision goggles, gas mask).
 fn carried(loadout: Option<&Loadout>, library: Option<&EffectLibrary>) -> (bool, bool) {
     let (Some(loadout), Some(library)) = (loadout, library) else {
@@ -167,13 +201,29 @@ fn toggle_gear(
     chat: Res<ChatBox>,
     soldier: Query<(&Loadout, Has<Downed>), With<LocalSoldier>>,
     library: Option<Res<EffectLibrary>>,
+    light: Option<Res<crate::render::environment::LevelLight>>,
     files: Res<Files>,
+    time: Res<Time>,
+    mut hint: Query<(&mut Text, &mut Visibility), With<GearHint>>,
+    mut hint_age: Local<f32>,
     mut gadgets: ResMut<Gadgets>,
     mut requests: MessageWriter<GearRequest>,
     mut sounds: MessageWriter<PlaySound>,
 ) {
     let soldier = soldier.single().ok();
     let (goggles, mask) = carried(soldier.map(|s| s.0), library.as_deref());
+    // At night everyone has night vision: BF2 only gave it to the Special Forces kits, and
+    // mods' night maps (AIX 2's moonlit ones) and night versions of day levels have no kit
+    // with goggles.
+    let sun = light.as_ref().map_or(1.0, |l| l.sun.dot(Vec3::new(0.2126, 0.7152, 0.0722)));
+    let night = light.as_ref().is_some_and(|l| l.night || l.night_version) || sun < DARK_SUN;
+    let goggles = goggles || (night && soldier.is_some());
+    *hint_age += time.delta_secs();
+    if let Ok((_, mut visibility)) = hint.single_mut()
+        && *hint_age > HINT_SECONDS
+    {
+        visibility.set_if_neq(Visibility::Hidden);
+    }
     // Gear comes off with the soldier.
     if !goggles {
         gadgets.night_vision = false;
@@ -186,12 +236,20 @@ fn toggle_gear(
     if !usable {
         return;
     }
-    if goggles && actions.just_pressed(Action::NightVision) {
-        gadgets.night_vision = !gadgets.night_vision;
-        if gadgets.night_vision
-            && let Some(sound) = Files::sound(&files.assets.night_vision_on)
-        {
-            sounds.write(PlaySound::local(sound).reason("night vision"));
+    if actions.just_pressed(Action::NightVision) {
+        if goggles {
+            gadgets.night_vision = !gadgets.night_vision;
+            info!("night vision {} (sun {sun:.3})", if gadgets.night_vision { "on" } else { "off" });
+            if gadgets.night_vision
+                && let Some(sound) = Files::sound(&files.assets.night_vision_on)
+            {
+                sounds.write(PlaySound::local(sound).reason("night vision"));
+            }
+        } else if let Ok((mut text, mut visibility)) = hint.single_mut() {
+            info!("night vision not available (sun {sun:.3})");
+            text.0 = "No night vision: this kit has no goggles, and it isn't night".into();
+            visibility.set_if_neq(Visibility::Inherited);
+            *hint_age = 0.0;
         }
     }
     if mask && actions.just_pressed(Action::GasMask) {

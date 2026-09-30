@@ -14,7 +14,20 @@
 //!
 //! `ExpectLog` and `ForbidLog` steps turn a scenario into a check: they watch the log (captured
 //! only while a scenario runs) and fail the run with exit code 1. Every run writes
-//! `result.txt` (`PASS`, or `FAIL: <reason>`) next to its screenshots.
+//! `result.txt` (`PASS`, or `FAIL: <reason>`) next to its screenshots. `ExpectLog` doubles as a
+//! condition wait: it returns as soon as its text is logged, so a step that just needs to know
+//! something happened (a spawn, a pickup, a round change) can use it in place of a guessed
+//! `Wait`, as long as there is a log line to watch for.
+//!
+//! A scripted run's own local server (singleplayer or a listen server; not `--connect`) uses a
+//! fast deploy: death to respawn takes a fraction of a second instead of the real game's 10 s
+//! (`main::FAST_DEPLOY_SECONDS`), so `WaitSpawned`/`WaitDeployScreen` below return in about a
+//! frame. A scenario that checks the deploy countdown itself (its text, or a screenshot timed
+//! from it) sets the `respawn_time` field to keep the real timing, e.g. `respawn_time: Some(10.0)`.
+//! `WaitSpawned`, `WaitDeployScreen`, `WaitInVehicle` and `WaitBotsDeployed` replace a fixed
+//! `Wait` guessed to outlast a respawn, a death, boarding a vehicle or bots spawning in: they
+//! return as soon as the condition holds and fail the scenario (like `ExpectLog`) if it doesn't
+//! within their timeout, so they're never slower than the old guess and usually much faster.
 //!
 //! ```ron
 //! (
@@ -68,6 +81,7 @@ use game_shared::{
     input::Buttons,
     level::LoadedLevel,
     protocol::{ControlledBy, Team},
+    revive::Downed,
     soldier::{Health, Soldier, SoldierMotion},
     vehicle::{Seated, Vehicle, VehicleData, VehicleHealth},
 };
@@ -100,6 +114,11 @@ pub struct Scenario {
     pub menu: bool,
     /// Layout size (16, 32, 64).
     pub size: Option<u32>,
+    /// Seconds between death and respawn on this run's own local server (default: a fast
+    /// deploy, see `main::FAST_DEPLOY_SECONDS`). Set this (e.g. `respawn_time: Some(10.0)`)
+    /// for a scenario that checks the deploy countdown itself, its text or a screenshot timed
+    /// from it; other scenarios should wait on `WaitSpawned` instead of a fixed `Wait`.
+    pub respawn_time: Option<f32>,
     pub steps: Vec<Step>,
 }
 
@@ -135,6 +154,24 @@ pub enum Step {
     WalkToVehicle(String),
     /// Until someone drives a vehicle of this template (gives up after 60 s).
     WaitDriver(String),
+    /// Until our soldier is spawned in and controllable: exists, alive (not critically
+    /// wounded) and the deploy screen is closed. Replaces a fixed `Wait` after
+    /// `Click("kit:N")`, `Down`/`Kill` with an automatic respawn, or giving up
+    /// (`Key(KeyX)`); resolves in about a frame with the default fast deploy (see
+    /// `Scenario::respawn_time`). Fails the scenario if this takes longer than the timeout,
+    /// e.g. `WaitSpawned(20.0)`.
+    WaitSpawned(f32),
+    /// Until the deploy screen opens, e.g. after `Kill`/`Down` giving up, or a staged mode's
+    /// next wave. Fails the scenario if this takes longer than the timeout.
+    WaitDeployScreen(f32),
+    /// Until our soldier is seated in any vehicle (`Seat`, walking aboard, or a bot handing
+    /// the seat over). Fails the scenario if this takes longer than the timeout.
+    WaitInVehicle(f32),
+    /// Until at least this many bots have a soldier of their own (deployed in, not just
+    /// registered): faster than guessing how long a match's worth of bots takes to spawn in.
+    /// Fails the scenario if this takes longer than the timeout, e.g.
+    /// `WaitBotsDeployed(16, 20.0)`.
+    WaitBotsDeployed(u32, f32),
     /// Moves our soldier this many meters in front of the nearest vehicle of this template,
     /// facing it (singleplayer and listen server only).
     InFrontOf(String, f32),
@@ -202,6 +239,14 @@ pub enum Step {
     /// roll, else its pitch, else the heading. E.g.
     /// `RateResponse("yaw", (1.0, 0.0, 0.0, 0.0), 1.5)`.
     RateResponse(String, (f32, f32, f32, f32), f32),
+    /// Like `RateResponse`, moving the mouse (counts per second right and up, through the
+    /// jet mouse sensitivity or the mouse sensitivity) for `seconds` and stopping it; also
+    /// reports how far the vehicle turned by then and by the end, e.g. one 150-count
+    /// movement up in 0.5 s: `MouseResponse("pitch up", (0.0, 300.0), 0.5)`. The axis is the
+    /// roll if the mouse moves sideways, else the pitch.
+    MouseResponse(String, (f32, f32), f32),
+    /// Moves the mouse at this many counts per second (right, up) until `Mouse(0, 0)`.
+    Mouse(f32, f32),
     /// Buttons stay held until released.
     Hold(Vec<Button>),
     Release(Vec<Button>),
@@ -262,6 +307,12 @@ pub enum Step {
     SetClipboard(String),
     /// Our soldier dies outright (singleplayer and listen server only).
     Kill,
+    /// Staged modes: the attackers take the current stage at once, Rush's charges of it
+    /// destroyed or Breakthrough's flags of it theirs (singleplayer and listen server only).
+    TakeStage,
+    /// We move to team 1 or 2: our soldier dies, we leave our squad (singleplayer and listen
+    /// server only).
+    SetTeam(u8),
     /// Our soldier is critically wounded: man down, waiting for a medic (singleplayer and
     /// listen server only, like the steps below).
     Down,
@@ -319,6 +370,18 @@ pub enum Step {
     /// Adds our soldier's movement state, stamina (and the last prediction correction when
     /// connected) to the report every frame for this many seconds.
     Trace(String, f32),
+    /// Watches our soldier's height for this many seconds and logs how high above where it
+    /// started he got and how long he was off the ground, e.g. `JumpApex("in place", 1.5)`
+    /// after `Hold([Jump])` logs `scenario: in place: apex 1.17 m, 0.78 s in the air`.
+    JumpApex(String, f32),
+    /// Puts our soldier this many meters from the foot of the newest grappling rope, this
+    /// many degrees round from straight in front of it (90: beside it), looking at its
+    /// middle, e.g. `ViewRope(6.0, 80.0)`; `ViewRope(1.0, 0.0)` and walking forward climbs
+    /// it.
+    ViewRope(f32, f32),
+    /// Hosting: strings this many more grappling ropes along the same edge as the newest one,
+    /// 1.5 m apart (for frame times with several ropes up), e.g. `ExtraRopes(4)`.
+    ExtraRopes(u32),
     /// Passes once a log line containing the text has been logged since the scenario began
     /// (or since the line the previous `ExpectLog` matched, so expectations go in order),
     /// waiting up to this many seconds; otherwise the scenario fails, e.g.
@@ -386,6 +449,17 @@ pub struct ScenarioInput {
     pub buttons: Buttons,
     pub movement: Option<Vec2>,
     pub stick: Option<Vec2>,
+    /// Mouse movement, counts per second (right, up), sent as real mouse motion.
+    pub mouse: Vec2,
+}
+
+/// Sends the scenario's mouse movement as mouse motion, as a real mouse would, so it goes
+/// through the sensitivity and whatever reads the mouse (aiming, the flight stick).
+fn inject_mouse(input: Res<ScenarioInput>, time: Res<Time<Real>>, mut motion: MessageWriter<bevy::input::mouse::MouseMotion>) {
+    if input.mouse != Vec2::ZERO {
+        let delta = Vec2::new(input.mouse.x, -input.mouse.y) * time.delta_secs();
+        motion.write(bevy::input::mouse::MouseMotion { delta });
+    }
 }
 
 /// A synthetic gamepad's held state, resent as raw gamepad events every frame by
@@ -466,6 +540,9 @@ impl Scenario {
         if let Some(size) = self.size {
             cli.size = size;
         }
+        if let Some(respawn_time) = self.respawn_time {
+            cli.respawn_time = Some(respawn_time);
+        }
     }
 
     /// `--screenshot <path>`: one screenshot once everything is loaded.
@@ -502,7 +579,7 @@ impl Plugin for ScenarioPlugin {
         .add_plugins(crate::hitreg::HitregPlugin)
         .add_systems(
             bevy::app::PreUpdate,
-            inject_gamepad.before(bevy::input::InputSystems),
+            (inject_gamepad, inject_mouse).before(bevy::input::InputSystems),
         )
         .add_systems(
             Update,
@@ -731,6 +808,8 @@ struct Soldiers<'w, 's> {
         (With<Soldier>, Without<LocalSoldier>),
     >,
     spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+    /// Grappling ropes and ziplines, for `ViewRope`.
+    ropes: Query<'w, 's, (Entity, &'static game_shared::rope::Rope)>,
     /// Bots of an in-process server, for `ChaseBot`.
     bots: Query<
         'w,
@@ -752,6 +831,8 @@ struct Soldiers<'w, 's> {
     /// Rush's charges and the mode, for `NearCharge`.
     charges: Query<'w, 's, &'static game_shared::modes::Charge>,
     modes: Query<'w, 's, &'static game_shared::modes::ModeState>,
+    /// Whether our soldier is critically wounded, for `WaitSpawned`.
+    downed: Query<'w, 's, (), (With<LocalSoldier>, With<Downed>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -792,6 +873,54 @@ fn scenario_logical_key(code: KeyCode) -> Key {
         KeyCode::KeyX => Key::Character("x".into()),
         _ => Key::Unidentified(NativeKey::Unidentified),
     }
+}
+
+/// `TakeStage`: the current stage's objectives go to the attackers (Rush: its charges are
+/// destroyed; Breakthrough: its flags are theirs), and the mode's own rules move the front on.
+fn take_stage(world: &mut World) {
+    use game_shared::{
+        conquest::FlagState,
+        modes::{Charge, ChargeState, ModeState, Sector},
+    };
+    let Some(mode) = world.query::<&ModeState>().iter(world).next().copied() else {
+        warn!("scenario: no staged mode to take a stage of");
+        return;
+    };
+    let mut taken = 0;
+    if mode.kind == game_data::modes::ModeKind::Rush {
+        for (charge, mut state) in world.query::<(&Charge, &mut ChargeState)>().iter_mut(world) {
+            if charge.stage == mode.stage {
+                *state = ChargeState::Destroyed;
+                taken += 1;
+            }
+        }
+    } else {
+        for (sector, mut flag) in world.query::<(&Sector, &mut FlagState)>().iter_mut(world) {
+            if sector.0 == mode.stage {
+                *flag = FlagState::held_by(mode.attacker);
+                taken += 1;
+            }
+        }
+    }
+    info!("scenario: taking {} ({taken} objectives handed to the attackers)", mode.stage_label());
+}
+
+/// `SetTeam`: we play for `team` from now on, out of our squad and with no spawn picked.
+fn set_team(world: &mut World, team: Team) {
+    let Some(player) = world.query_filtered::<Entity, With<LocalPlayer>>().iter(world).next() else {
+        warn!("scenario: no local player to move to {team:?}");
+        return;
+    };
+    let mut entity = world.entity_mut(player);
+    if let Some(mut current) = entity.get_mut::<Team>() {
+        *current = team;
+    }
+    if let Some(mut deployment) = entity.get_mut::<game_shared::conquest::Deployment>() {
+        deployment.control_point = None;
+        deployment.on_squad_leader = false;
+    }
+    entity.remove::<game_shared::squad::SquadMember>();
+    info!("scenario: we play for {team:?} now");
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -851,6 +980,7 @@ fn run_scenario(
         local_team,
         drawn,
         spatial,
+        ropes,
         bots,
         squad_tactics,
         crews,
@@ -858,6 +988,7 @@ fn run_scenario(
         hitboxes,
         charges,
         modes,
+        downed,
     } = soldiers;
     let now = time.elapsed_secs();
     if runner.finished {
@@ -967,6 +1098,7 @@ fn run_scenario(
                 if let Ok((mut motion, _)) = soldier.single_mut() {
                     motion.position = Vec3::from(*position);
                     motion.velocity = Vec3::ZERO;
+                    motion.mantle = 0.0;
                 } else {
                     warn!("scenario: no soldier to teleport");
                 }
@@ -1067,6 +1199,48 @@ fn run_scenario(
                         && vehicles.all.get(seated.vehicle).is_ok_and(|(_, v, _)| v.template == *template)
                 });
                 done_if(driven || elapsed > 60.0)
+            }
+            Step::WaitSpawned(seconds) => {
+                let spawned = !soldier.is_empty() && !deploy_screen.open && downed.is_empty();
+                if spawned {
+                    Progress::Done
+                } else if elapsed > *seconds {
+                    finish(&mut runner, &mut exit, now, Some(format!("not spawned within {seconds} s")));
+                    Progress::Waiting
+                } else {
+                    Progress::Waiting
+                }
+            }
+            Step::WaitDeployScreen(seconds) => {
+                if deploy_screen.open {
+                    Progress::Done
+                } else if elapsed > *seconds {
+                    finish(&mut runner, &mut exit, now, Some(format!("the deploy screen didn't open within {seconds} s")));
+                    Progress::Waiting
+                } else {
+                    Progress::Waiting
+                }
+            }
+            Step::WaitInVehicle(seconds) => {
+                if vehicles.seated.single().is_ok() {
+                    Progress::Done
+                } else if elapsed > *seconds {
+                    finish(&mut runner, &mut exit, now, Some(format!("not seated in a vehicle within {seconds} s")));
+                    Progress::Waiting
+                } else {
+                    Progress::Waiting
+                }
+            }
+            Step::WaitBotsDeployed(count, seconds) => {
+                let deployed = bots.iter().filter(|(.., controls, _, _)| controls.is_some()).count() as u32;
+                if deployed >= *count {
+                    Progress::Done
+                } else if elapsed > *seconds {
+                    finish(&mut runner, &mut exit, now, Some(format!("only {deployed}/{count} bots deployed within {seconds} s")));
+                    Progress::Waiting
+                } else {
+                    Progress::Waiting
+                }
             }
             Step::InFrontOf(template, distance) => {
                 // A driven one if there is, else the nearest.
@@ -1558,7 +1732,15 @@ fn run_scenario(
                     Progress::Waiting
                 }
             }
-            Step::RateResponse(label, (steer, throttle, roll, pitch), seconds) => {
+            Step::RateResponse(..) | Step::MouseResponse(..) => {
+                // The input held: movement (steer, throttle), stick (roll, pitch), mouse.
+                let (label, seconds, movement, stick, mouse) = match &step {
+                    Step::RateResponse(label, (steer, throttle, roll, pitch), seconds) => {
+                        (label, seconds, Vec2::new(*steer, *throttle), Vec2::new(*roll, *pitch), Vec2::ZERO)
+                    }
+                    Step::MouseResponse(label, mouse, seconds) => (label, seconds, Vec2::ZERO, Vec2::ZERO, Vec2::from(*mouse)),
+                    _ => unreachable!(),
+                };
                 let rotation = vehicles
                     .seated
                     .single()
@@ -1576,9 +1758,9 @@ fn run_scenario(
                     continue;
                 };
                 // 0 heading (world up), 1 pitch, 2 roll (right wing down), in degrees.
-                let axis = if *roll != 0.0 {
+                let axis = if stick.x != 0.0 || mouse.x != 0.0 {
                     2
-                } else if *pitch != 0.0 {
+                } else if stick.y != 0.0 || mouse.y != 0.0 {
                     1
                 } else {
                     0
@@ -1596,8 +1778,9 @@ fn run_scenario(
                 if runner.frames == 0 {
                     runner.rates.clear();
                     runner.rate_started = vehicles.game_time.elapsed_secs_f64();
-                    input.movement = Some(Vec2::new(*steer, *throttle)).filter(|m| *m != Vec2::ZERO);
-                    input.stick = Some(Vec2::new(*roll, *pitch)).filter(|s| *s != Vec2::ZERO);
+                    input.movement = Some(movement).filter(|m| *m != Vec2::ZERO);
+                    input.stick = Some(stick).filter(|s| *s != Vec2::ZERO);
+                    input.mouse = mouse;
                 }
                 // Unwrapped across ±180°.
                 let unwrap = |now: f32, before: f32| before + (now - before + 540.0).rem_euclid(360.0) - 180.0;
@@ -1611,15 +1794,31 @@ fn run_scenario(
                     runner.rates.push((game, vehicle_angle, camera_angle));
                 }
                 runner.frames += 1;
-                if game >= *seconds && (input.movement.is_some() || input.stick.is_some()) {
+                if game >= *seconds && (input.movement.is_some() || input.stick.is_some() || input.mouse != Vec2::ZERO) {
                     input.movement = None;
                     input.stick = None;
+                    input.mouse = Vec2::ZERO;
                 }
                 if game < *seconds * 2.0 {
                     Progress::Waiting
                 } else {
                     let fps = runner.frames as f32 / elapsed.max(0.001);
-                    let line = format!("{} ({fps:.0} fps)", rate_report(label, &runner.rates, *seconds));
+                    let mut line = format!("{} ({fps:.0} fps)", rate_report(label, &runner.rates, *seconds));
+                    if mouse != Vec2::ZERO {
+                        // How far one mouse movement turned it: when the mouse stopped, and
+                        // once it had settled.
+                        let start = runner.rates.first().map_or(0.0, |s| s.1);
+                        let at = |t: f32| runner.rates.iter().find(|s| s.0 >= t).or(runner.rates.last()).map_or(0.0, |s| s.1 - start);
+                        let counts = mouse * *seconds;
+                        line += &format!(
+                            "\n{label}: mouse ({:.0}, {:.0}) counts: turned {:.1}° when it stopped, {:.1}° after {:.1} s",
+                            counts.x,
+                            counts.y,
+                            at(*seconds),
+                            at(*seconds * 2.0),
+                            *seconds * 2.0
+                        );
+                    }
                     for line in line.lines() {
                         info!("scenario: {line}");
                     }
@@ -1643,6 +1842,10 @@ fn run_scenario(
                     }
                     Err(_) => warn!("scenario: not in a vehicle to place"),
                 }
+                Progress::Done
+            }
+            Step::Mouse(right, up) => {
+                input.mouse = Vec2::new(*right, *up);
                 Progress::Done
             }
             Step::Stick(roll, pitch) => {
@@ -1865,6 +2068,18 @@ fn run_scenario(
                 for (_, mut health) in &mut soldier {
                     health.current = -1000.0;
                 }
+                Progress::Done
+            }
+            Step::TakeStage => {
+                commands.queue(take_stage);
+                Progress::Done
+            }
+            Step::SetTeam(team) => {
+                let team = game_shared::conquest::team_from_id(*team);
+                for (_, mut health) in &mut soldier {
+                    health.current = -1000.0;
+                }
+                commands.queue(move |world: &mut World| set_team(world, team));
                 Progress::Done
             }
             Step::Down => {
@@ -2135,6 +2350,77 @@ fn run_scenario(
                 } else {
                     Progress::Waiting
                 }
+            }
+            Step::JumpApex(label, seconds) => {
+                if let Ok((m, _)) = soldier.single() {
+                    // x: the starting height, y: the highest, z: seconds in the air.
+                    let started = runner.mark.filter(|_| elapsed > 0.0);
+                    let mut mark = started.unwrap_or(Vec3::new(m.position.y, m.position.y, 0.0));
+                    mark.y = mark.y.max(m.position.y);
+                    if !m.grounded {
+                        mark.z += time.delta_secs();
+                    }
+                    runner.mark = Some(mark);
+                }
+                let done = elapsed >= *seconds;
+                if done && let Some(mark) = runner.mark.take() {
+                    let line = format!("{label}: apex {:.2} m, {:.2} s in the air", mark.y - mark.x, mark.z);
+                    info!("scenario: {line}");
+                    writeln!(runner.report, "{line}").ok();
+                }
+                done_if(done)
+            }
+            Step::ViewRope(distance, angle) => {
+                let rope = ropes
+                    .iter()
+                    .filter(|(_, r)| r.kind == game_data::RopeKind::Grapple)
+                    .max_by_key(|(e, _)| e.index_u32())
+                    .map(|(_, r)| *r);
+                match (rope, soldier.single_mut()) {
+                    (Some(rope), Ok((mut motion, _))) => {
+                        let out = Quat::from_rotation_y(angle.to_radians()) * rope.out();
+                        let feet = rope.end + out * (*distance + game_shared::rope::OFF_WALL) + Vec3::Y * 0.3;
+                        let middle = (rope.top + rope.end) * 0.5 + Vec3::Y * 1.0;
+                        let to = middle - (feet + Vec3::Y * 1.65);
+                        motion.position = feet;
+                        motion.velocity = Vec3::ZERO;
+                        motion.mantle = 0.0;
+                        let yaw = (-to.x).atan2(-to.z).to_degrees();
+                        let pitch = to.y.atan2(Vec2::new(to.x, to.z).length()).to_degrees().min(45.0);
+                        set_look(&mut look, yaw, pitch);
+                        info!("scenario: at the rope from {feet:.1}");
+                    }
+                    (None, _) => warn!("scenario: no grappling rope to look at"),
+                    (_, Err(_)) => warn!("scenario: no soldier to move to the rope"),
+                }
+                Progress::Done
+            }
+            Step::ExtraRopes(count) => {
+                let newest = ropes
+                    .iter()
+                    .filter(|(_, r)| r.kind == game_data::RopeKind::Grapple)
+                    .max_by_key(|(e, _)| e.index_u32())
+                    .map(|(_, r)| *r);
+                if let Some(rope) = newest {
+                    let along = Vec3::Y.cross(rope.out());
+                    let mut strung = 0;
+                    for i in 1..=*count as i32 {
+                        let side = if i % 2 == 0 { -1.0 } else { 1.0 } * ((i + 1) / 2) as f32 * 1.5;
+                        let hook = rope.anchor - rope.out() * 0.5 + along * side + Vec3::Y * 0.05;
+                        if let Some(extra) = game_shared::rope::grapple(&spatial, hook, hook + rope.out() * 12.0, rope.length) {
+                            commands.spawn((
+                                game_shared::rope::Rope { links: rope.links, ..extra },
+                                game_shared::rope::RopeLife { owner: Entity::PLACEHOLDER, remaining: 60.0 },
+                                bevy_replicon::prelude::Replicated,
+                            ));
+                            strung += 1;
+                        }
+                    }
+                    info!("scenario: strung {strung} more ropes");
+                } else {
+                    warn!("scenario: no grappling rope to string more beside");
+                }
+                Progress::Done
             }
             Step::Trace(name, seconds) => {
                 if let Ok((m, _)) = soldier.single() {

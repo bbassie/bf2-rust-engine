@@ -177,6 +177,7 @@ pub const ATTRIBUTE_LIGHTMAP_UV: MeshVertexAttribute =
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[data(50, Bf2LayersUniform, binding_array(101))]
 #[bindless(index_table(range(50..59), binding(100)))]
+#[bind_group_data(Bf2LayersKey)]
 pub struct Bf2Layers {
     /// [`Bf2Layers`] flag constants.
     pub flags: u32,
@@ -269,8 +270,42 @@ impl Bf2Layers {
     pub const DYNAMIC: u32 = 1 << 16;
     /// `lightmap` holds the level's static lightmap atlases.
     pub const LIGHTMAPPED: u32 = 1 << 17;
-    /// First-person view model (`viewmodel`): no screen-space ambient occlusion.
+    /// First-person view model (`viewmodel`): no screen-space ambient occlusion, drawn in
+    /// front of the world (see [`Bf2LayersKey`]). Set it with [`Bf2Layers::make_view_model`].
     pub const VIEW_MODEL: u32 = 1 << 18;
+
+    /// Flags a material as the view model's: [`Self::VIEW_MODEL`] and, for its transparent
+    /// parts, [`VIEW_MODEL_SORT_BIAS`].
+    pub fn make_view_model(material: &mut Bf2Material) {
+        material.extension.flags |= Self::VIEW_MODEL;
+        material.base.depth_bias = VIEW_MODEL_SORT_BIAS;
+    }
+
+    pub fn is_view_model(material: &Bf2Material) -> bool {
+        material.extension.flags & Self::VIEW_MODEL != 0 && material.base.depth_bias == VIEW_MODEL_SORT_BIAS
+    }
+}
+
+/// Added to the sort distance of the view model's transparent parts (scope lenses, the
+/// blurred scope frames, sights) so they draw after every transparent thing of the world:
+/// roads and decals lying on the ground sort by their centres, which can be nearer than the
+/// view model's. It is not a depth bias here (`Bf2Layers::specialize` takes that out).
+pub const VIEW_MODEL_SORT_BIAS: f32 = 1.0e6;
+
+/// Pipeline key of [`Bf2Layers`]: view model materials get their own vertex shader, which
+/// puts their depth in front of the world's (`BF2_VIEW_MODEL` in `bf2_material.wgsl`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct Bf2LayersKey {
+    view_model: u32,
+}
+
+impl From<&Bf2Layers> for Bf2LayersKey {
+    fn from(layers: &Bf2Layers) -> Self {
+        Self {
+            view_model: (layers.flags & Bf2Layers::VIEW_MODEL != 0) as u32,
+        }
+    }
 }
 
 #[derive(ShaderType, Clone, Default)]
@@ -316,7 +351,7 @@ impl MaterialExtension for Bf2Layers {
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
+        key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         static DEBUG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
         let debug = DEBUG.get_or_init(|| std::env::var("BF2_MATERIAL_DEBUG").ok());
@@ -330,6 +365,22 @@ impl MaterialExtension for Bf2Layers {
             .shader_defs
             .iter()
             .any(|def| matches!(def, ShaderDefVal::Bool(name, true) if name == "PREPASS_PIPELINE"));
+        if key.bind_group_data.view_model != 0 {
+            // `depth_bias` only sorts the view model's transparent parts (VIEW_MODEL_SORT_BIAS).
+            if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+                depth_stencil.bias.constant = 0;
+            }
+            // The main pass draws it in front of the world. (The prepass keeps its true depth:
+            // the main pass's depth test only passes more, and soft particles and SSAO see
+            // it where it is.)
+            if let (false, Some(fragment)) = (prepass, descriptor.fragment.as_mut()) {
+                fragment.shader_defs.push("BF2_VIEW_MODEL".into());
+                descriptor.vertex.shader_defs.push("BF2_VIEW_MODEL".into());
+                descriptor.vertex.shader = fragment.shader.clone();
+                descriptor.vertex.entry_point = Some("vertex".into());
+            }
+            return Ok(());
+        }
         let lightmap_uv = layout
             .0
             .attribute_ids()
@@ -406,6 +457,17 @@ impl Bf2Materials<'_> {
             Some(copy) => self.materials.add(copy),
             None => material.clone(),
         }
+    }
+
+    /// A changed copy of a material.
+    pub fn duplicate_with(
+        &mut self,
+        material: &Handle<Bf2Material>,
+        change: impl FnOnce(&mut Bf2Material),
+    ) -> Handle<Bf2Material> {
+        let mut copy = self.materials.get(material).cloned().unwrap_or_default();
+        change(&mut copy);
+        self.materials.add(copy)
     }
 
     /// The material of a glTF primitive; `None` while the glTF's materials are loading.

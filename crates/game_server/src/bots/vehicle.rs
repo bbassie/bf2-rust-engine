@@ -142,9 +142,17 @@ pub(super) struct Ride {
     goal: Option<Vec3>,
     path: Option<VehiclePath>,
     path_goal: Option<Vec3>,
-    path_task: Option<Task<Option<VehiclePath>>>,
+    path_task: Option<Task<(Option<VehiclePath>, Option<Vec3>)>>,
     repath: bool,
     repath_cooldown: f32,
+    /// Consecutive route searches that found nothing to drive on at all (backs off the next
+    /// try, and past a few in a row gets logged so soaks can count it); reset by any usable
+    /// path or a goal that moved.
+    route_failures: u32,
+    /// Nearest point of the grid to head for while routeless (see `route_failures`): driving
+    /// there beats creeping straight at a goal it can't reach directly, through whatever is
+    /// in the way.
+    grid_point: Option<Vec3>,
     waypoint: usize,
     stuck: f32,
     reverse: f32,
@@ -213,6 +221,8 @@ impl Ride {
             path_task: None,
             repath: true,
             repath_cooldown: 0.0,
+            route_failures: 0,
+            grid_point: None,
             waypoint: 0,
             stuck: 0.0,
             reverse: 0.0,
@@ -269,6 +279,8 @@ impl Ride {
         self.path_goal = None;
         self.repath = true;
         self.repath_cooldown = 0.0;
+        self.route_failures = 0;
+        self.grid_point = None;
         self.best_remaining = f32::MAX;
         self.no_progress = 0.0;
         self.stuck = 0.0;
@@ -1420,21 +1432,47 @@ impl BotBrain {
         stats.driving_seconds += dt;
         // Paths.
         if let Some(task) = &mut ride.path_task
-            && let Some(result) = check_ready(task)
+            && let Some((path, nearest)) = check_ready(task)
         {
             ride.path_task = None;
             stats.vehicle_paths += 1;
-            match &result {
-                Some(path) if !path.complete => stats.vehicle_partial_paths += 1,
+            match &path {
+                Some(p) if !p.complete => stats.vehicle_partial_paths += 1,
                 None => stats.vehicle_failed_paths += 1,
                 _ => {}
             }
-            ride.path = result;
+            // A search that couldn't even leave the start (off the grid entirely, a blocked
+            // start cell) is worse than a partial or complete path: back off (1, 2, 4 s,
+            // capped) and try again on its own, rather than waiting for the goal to move or a
+            // stuck event to force a retry.
+            let failed = match &path {
+                None => true,
+                Some(p) => p.points.len() < 2 && !p.complete,
+            };
+            if failed {
+                ride.route_failures = ride.route_failures.saturating_add(1);
+                ride.grid_point = nearest.or(ride.grid_point);
+                ride.repath = true;
+                ride.repath_cooldown = 2f32.powi(ride.route_failures.min(3) as i32 - 1).min(4.0);
+                if ride.route_failures >= 3 && ride.route_failures % 3 == 0 {
+                    info!(
+                        "{} found no route for {} after {} tries, at {position:.0} towards {goal:.0}",
+                        w.name(me.player),
+                        seen.template,
+                        ride.route_failures,
+                    );
+                    stats.vehicle_route_failures += 1;
+                }
+            } else {
+                ride.route_failures = 0;
+            }
+            ride.path = path;
             ride.waypoint = 0;
         }
         ride.repath_cooldown -= dt;
         if ride.path_goal.is_none_or(|g| flat(g - goal).length() > 12.0) {
             ride.repath = true;
+            ride.route_failures = 0;
         }
         if ride.repath && ride.path_task.is_none() && ride.repath_cooldown <= 0.0 {
             ride.repath = false;
@@ -1464,11 +1502,15 @@ impl BotBrain {
             ride.path_task = Some(AsyncComputeTaskPool::get().spawn(async move {
                 let started = Instant::now();
                 let path = grid.find_path(&spec, from, goal, 30.0, &obstacles);
+                // Nowhere to drive from here at all: somewhere on the grid to head for
+                // meanwhile, so it makes for the road network instead of a straight line
+                // through whatever's in the way (see the failure handling above).
+                let nearest = path.is_none().then(|| grid.nearest_point(from)).flatten();
                 let ms = started.elapsed().as_secs_f32() * 1000.0;
                 if ms > 50.0 {
                     debug!("vehicle path took {ms:.0} ms");
                 }
-                path
+                (path, nearest)
             }));
         }
         ride.goal = Some(goal);
@@ -1480,7 +1522,13 @@ impl BotBrain {
             // No path yet: carefully straight at it (taken over on the move: the first path
             // comes within a tick or two, so no braking for it).
             _ if ride.path_task.is_some() => (goal, flat(goal - position).length(), speed.clamp(5.0, profile.top_speed * 0.8)),
-            _ => (goal, flat(goal - position).length(), 5.0),
+            // Routeless (the search found nothing to drive on and is backing off before it
+            // tries again): head for the nearest point of the grid instead of creeping
+            // straight at a goal that isn't reachable that way, through whatever's in the way.
+            _ => match ride.grid_point.filter(|p| flat(*p - position).length() > 3.0) {
+                Some(p) => (p, flat(p - position).length(), 5.0),
+                None => (goal, flat(goal - position).length(), 5.0),
+            },
         };
         if let Some(path) = &ride.path
             && ride.waypoint + 1 >= path.points.len()

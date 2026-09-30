@@ -1,0 +1,45 @@
+// A bot-driven jeep placed on Karkand's southern road (tarmac19, the straight stretch
+// vehicle2_drive.ron drives up and down: outside the driving grid's coverage - the land grid
+// is cropped to the combat area plus a margin, see nav::vehicle and nav::area) must get a
+// route and reach a normal cruising speed within a few seconds, not creep forever at the old
+// "no route" 5 m/s cap (bots::vehicle::Ride::route_failures backs off and retries a failed
+// search, and nav::vehicle::VehicleNavGrid::locate_vehicle snaps the start to the nearest
+// reachable cell). No "found no route" log expected: the widened start snap should get a
+// route on the very first try here. Checked through LogVehicles, added to the report.
+// client --scenario scenarios/vehicles/route_retry_karkand.ron --out target/scenarios/route_retry
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 16,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ForbidLog("found no route for"),
+        Wait(4.0),
+        NearVehicle("usjep_hmmwv"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        // On the straight tarmac south of the combat area (see vehicle2_drive.ron's header).
+        PlaceVehicle((-200.6, 157.5, -373.0), 180.0, 0.0),
+        Wait(0.3),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        SeatBot("usjep_hmmwv", 1),
+        LogSeats("usjep_hmmwv"),
+        ExpectLog("to Drive", 3.0),
+        LogVehicles("t+0s"),
+        Wait(3.0),
+        LogVehicles("t+3s"),
+        Wait(4.0),
+        LogVehicles("t+7s"),
+        Wait(6.0),
+        LogVehicles("t+13s"),
+        Quit,
+    ],
+)

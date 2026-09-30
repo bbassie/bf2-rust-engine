@@ -86,6 +86,11 @@ fn vertex(in: Vertex) -> Varyings {
     }
     let world = p.position + offset;
     out.clip = view.clip_from_world * vec4(world, 1.0);
+#ifdef VIEW_MODEL
+    // First-person effects: in front of the world like the view model (VIEW_MODEL_DEPTH in
+    // bf2_material.wgsl).
+    out.clip.z = 0.5 * out.clip.w + 0.5 * out.clip.z;
+#endif
     out.uv = p.uv.xy + vec2(in.position.y, 1.0 - in.position.z) * p.uv.zw;
     out.color = p.color;
     out.world_position = world;

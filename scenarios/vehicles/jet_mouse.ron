@@ -1,0 +1,93 @@
+// Jet mouse control (BF3/BF4-style: the mouse turns the nose like aiming, `flight::JetMouse`),
+// the J-10 over Wake Island, placed level at the corner speed for each test. `MouseResponse`
+// moves the mouse (counts per second right and up, like a real mouse through the jet mouse
+// sensitivity) and reports how far the jet turned when the mouse stopped and once settled:
+// a 150-count movement up (30° climb), holding it, levelling off; a quick flick; a loop with
+// the mouse moving up; a dive and pull-up; a roll-and-pull turn; mouse X on the rudder
+// (`jet_mouse_x yaw`). `python scripts/flight_rates.py <out>/report.txt` turns the traces
+// into rates. jet_mouse_f35.ron is the same for the F-35B.
+// client --scenario scenarios/vehicles/jet_mouse.ron --out target/scenarios/vehicles/jet_mouse
+(
+    level: "wake_island_2007",
+    size: 64,
+    team: 1,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(2.0),
+        NearVehicle("air_j10"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        ThirdPerson(true),
+
+        // 150 counts up in 0.5 s: a 30° climb that holds; then 150 down levels off.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Wait(0.3),
+        MouseResponse("pitch up 150", (0.0, 300.0), 0.5),
+        VehicleInfo("climbing"),
+        Screenshot("01_climb_chase"),
+        VehicleTrace("hold", 2.0),
+        VehicleInfo("held"),
+        MouseResponse("level off 150", (0.0, -300.0), 0.5),
+        VehicleTrace("level", 1.0),
+
+        // The same 150 counts in 0.1 s: a quick flick outruns the jet.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Wait(0.3),
+        MouseResponse("flick up 150", (0.0, 1500.0), 0.1),
+        Wait(1.0),
+        VehicleInfo("after flick"),
+
+        // A loop: full throttle, the mouse moving up steadily.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Wait(0.3),
+        Move(0.0, 1.0),
+        Mouse(0.0, 1200.0),
+        VehicleTrace("loop", 11.0),
+        Mouse(0.0, 0.0),
+        Move(0.0, 0.0),
+        VehicleInfo("after loop"),
+
+        // Dive (300 counts down: 60° nose down) and pull up (300 counts up).
+        PlaceVehicle((400.0, 700.0, 0.0), 0.0, 87.0),
+        Wait(0.3),
+        MouseResponse("push over 300", (0.0, -300.0), 1.0),
+        VehicleInfo("diving"),
+        Screenshot("02_dive_chase"),
+        VehicleTrace("dive", 1.5),
+        MouseResponse("pull up 300", (0.0, 300.0), 1.0),
+        VehicleTrace("pull out", 2.0),
+        VehicleInfo("pulled out"),
+
+        // Roll-and-pull turn: 200 counts right (80° bank), then the mouse up steadily.
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Wait(0.3),
+        MouseResponse("roll right 200", (1000.0, 0.0), 0.2),
+        Mouse(0.0, 400.0),
+        VehicleTrace("turn", 3.0),
+        Screenshot("03_turn_chase"),
+        ThirdPerson(false),
+        Wait(0.2),
+        Screenshot("04_turn_cockpit"),
+        Mouse(0.0, 0.0),
+        ThirdPerson(true),
+        VehicleInfo("after turn"),
+
+        // Mouse X on the rudder: the jet yaws, A/D roll.
+        Setting("jet_mouse_x", "yaw"),
+        PlaceVehicle((400.0, 450.0, 0.0), 0.0, 87.0),
+        Wait(0.3),
+        VehicleInfo("before yaw"),
+        Mouse(300.0, 0.0),
+        VehicleTrace("mouse yaw", 0.5),
+        Mouse(0.0, 0.0),
+        VehicleTrace("mouse yaw stop", 1.0),
+        VehicleInfo("after yaw"),
+        Setting("jet_mouse_x", "roll"),
+        ForbidLog("panicked"),
+        Quit,
+    ],
+)

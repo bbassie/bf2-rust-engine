@@ -246,8 +246,10 @@ pub struct FlightStick {
     pub active: bool,
     /// x = roll right, y = nose up, -1..1.
     pub stick: Vec2,
-    /// The mouse's share of the stick.
+    /// The mouse's share of the stick (helicopters).
     mouse: Vec2,
+    /// Jets: the turn the mouse asked for that the jet hasn't flown yet.
+    jet_mouse: game_shared::flight::JetMouse,
     /// Free look: the view's yaw (left positive) and pitch away from straight ahead.
     pub look: Vec2,
     /// Helicopter pedals from the mouse instead of A/D (`Settings::heli_pedals_roll`), right
@@ -255,9 +257,10 @@ pub struct FlightStick {
     pub steer: Option<f32>,
 }
 
-/// Stick travel per mouse count at sensitivity 1, and how quickly it centres (1/s). Their
-/// ratio is how far the aircraft turns per mouse count; the centring is how long it keeps
-/// turning after the mouse stops (1/8 s; it was 1/3 s, which felt like lag).
+/// Helicopters: stick travel per mouse count at sensitivity 1, and how quickly it centres
+/// (1/s). Their ratio is how far the helicopter turns per mouse count; the centring is how
+/// long it keeps turning after the mouse stops (1/8 s; it was 1/3 s, which felt like lag).
+/// Jets fly the mouse like aiming instead (`flight::JetMouse`).
 const STICK_PER_COUNT: f32 = 0.032;
 const STICK_CENTERING: f32 = 8.0;
 /// Free look reaches this far down and up (radians from the aircraft's nose): nearly
@@ -292,6 +295,7 @@ fn fly(
     let Some((view, data)) = pilot else {
         flight.stick = Vec2::ZERO;
         flight.mouse = Vec2::ZERO;
+        flight.jet_mouse = default();
         flight.look = Vec2::ZERO;
         flight.steer = None;
         return;
@@ -310,14 +314,51 @@ fn fly(
             flight.look.x -= stick.x * sensitivity * 60.0 * dt;
             flight.look.y = (flight.look.y - gv * sensitivity * 60.0 * dt).clamp(-FREE_LOOK_DOWN, FREE_LOOK_UP);
         }
-    } else {
-        // The mouse moves the stick: up raises the nose (like looking up), unless the invert
-        // pitch setting makes it a flight stick (see below).
-        let scale = STICK_PER_COUNT * look.sensitivity / crate::local_input::BASE_SENSITIVITY;
-        flight.mouse = (flight.mouse + Vec2::new(delta.x, -delta.y) * scale).clamp(Vec2::NEG_ONE, Vec2::ONE);
-        flight.look *= (-LOOK_RETURN * dt).exp();
     }
-    flight.mouse *= (-STICK_CENTERING * dt).exp();
+    // The mouse's movement, right and up (up raises the nose, like looking up, unless the
+    // invert pitch setting makes it a flight stick; see below).
+    let counts = if actions.pressed(Action::FreeLook) {
+        Vec2::ZERO
+    } else {
+        flight.look *= (-LOOK_RETURN * dt).exp();
+        Vec2::new(delta.x, -delta.y)
+    };
+    let helicopter = data.0.desc.category == game_data::VehicleCategory::Helicopter;
+    // Swapped: A/D (and the left stick) roll, the mouse's (and the right stick's) sideways
+    // share works the rudder or tail rotor.
+    let swapped = if helicopter { settings.heli_pedals_roll } else { settings.jet_mouse_yaw };
+    let local_velocity = view.transform.rotation.inverse() * view.velocity;
+    let airspeed = (-local_velocity.z).max(0.0);
+    // A jump jet slow enough to hover flies like a helicopter.
+    let hovers = data.0.desc.rotor.is_some() && airspeed < game_shared::flight::VTOL_SPEEDS[1];
+    let mouse_share = if helicopter || hovers {
+        // The mouse deflects a stick that centres itself.
+        let scale = STICK_PER_COUNT * look.sensitivity / crate::local_input::BASE_SENSITIVITY;
+        flight.mouse = (flight.mouse + counts * scale).clamp(Vec2::NEG_ONE, Vec2::ONE);
+        flight.mouse *= (-STICK_CENTERING * dt).exp();
+        flight.jet_mouse = default();
+        flight.mouse
+    } else {
+        // Jets: the mouse turns the nose like aiming (`flight::JetMouse`), sideways it rolls
+        // (or swapped, yaws).
+        let counts = counts * settings.jet_mouse_sensitivity.clamp(0.1, 4.0);
+        let rates = game_shared::flight::jet_full_rates(&data.0.desc, airspeed);
+        let sideways = if swapped { Vec3::new(0.0, counts.x, 0.0) } else { Vec3::new(0.0, 0.0, counts.x) };
+        // The fly-by-wire's angle of attack limit (on the stick as sent: inverted, it's the
+        // other way round).
+        let body = game_shared::flight::BodyState {
+            position: view.transform.translation,
+            rotation: view.transform.rotation,
+            velocity: view.velocity,
+            angular_velocity: Vec3::ZERO,
+        };
+        let stall_angle = data.0.desc.aero.as_ref().map_or(90.0, |aero| aero.stall_angle);
+        let sign = if settings.invert_pitch(false) { -1.0 } else { 1.0 };
+        let limit = |pitch: f32| sign * game_shared::flight::limit_pitch(&body, stall_angle, sign * pitch);
+        let stick = flight.jet_mouse.update(Vec3::new(counts.y, 0.0, 0.0) + sideways, rates, dt, limit);
+        flight.mouse = Vec2::ZERO;
+        Vec2::new(if swapped { stick.y } else { stick.z }, stick.x)
+    };
     let keys = Vec2::new(
         actions.axis(Action::RollRight, Action::RollLeft),
         actions.axis(Action::PitchUp, Action::PitchDown),
@@ -332,18 +373,16 @@ fn fly(
             .map(|gamepad| crate::local_input::deadzone(gamepad.right_stick(), settings.gamepad.look_deadzone))
             .unwrap_or_default()
     };
-    let helicopter = data.0.desc.category == game_data::VehicleCategory::Helicopter;
-    flight.stick = compose_stick(flight.mouse, keys, gamepad_stick, settings.invert_pitch(helicopter));
-    // BF3/BF4's default: A/D work the tail rotor, the mouse rolls. Swapped, A/D (and the left
-    // stick) roll and the mouse's (and the right stick's) sideways share turns the tail.
+    flight.stick = compose_stick(mouse_share, keys, gamepad_stick, settings.invert_pitch(helicopter));
+    // BF3/BF4's default: A/D work the rudder or tail rotor, the mouse rolls.
     flight.steer = None;
-    if helicopter && settings.heli_pedals_roll {
+    if swapped {
         let left_stick = actions
             .gamepad()
             .map(|gamepad| crate::local_input::deadzone(gamepad.left_stick(), settings.gamepad.move_deadzone).x)
             .unwrap_or_default();
         let pedals = actions.axis(Action::MoveRight, Action::MoveLeft) + left_stick;
-        flight.steer = Some((flight.mouse.x + gamepad_stick.x).clamp(-1.0, 1.0));
+        flight.steer = Some((mouse_share.x + gamepad_stick.x).clamp(-1.0, 1.0));
         flight.stick.x = (pedals + keys.x).clamp(-1.0, 1.0);
     }
     // The soldier looks where the camera does (the server aims with it, and it's the

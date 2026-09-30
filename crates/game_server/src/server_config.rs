@@ -14,6 +14,8 @@
 //!     // Aim and reaction 0..1; default: the difficulty's (Normal 0.5).
 //!     bot_skill: 0.5,
 //!     friendly_fire: false,
+//!     // Jumping into a ledge up to about 1.6 m high climbs onto it (not in BF2; default on).
+//!     mantle: true,
 //!     respawn_time: 10.0,
 //!     // Percent of each level's tickets.
 //!     ticket_ratio: 100.0,
@@ -105,6 +107,8 @@ pub struct ServerConfig {
     /// `Easy`, `Normal`, `Hard` or `Expert`. Also sets `bot_skill` unless that is given.
     pub bot_difficulty: Option<crate::ai::skill::BotDifficulty>,
     pub friendly_fire: bool,
+    /// Climbing onto ledges by jumping into them (`game_shared::soldier::SoldierTuning::mantle`).
+    pub mantle: bool,
     /// Seconds between death and respawn.
     pub respawn_time: f32,
     pub ticket_ratio: f32,
@@ -166,6 +170,7 @@ impl Default for ServerConfig {
             bot_skill: None,
             bot_difficulty: None,
             friendly_fire: settings.friendly_fire,
+            mantle: settings.mantle,
             respawn_time: settings.respawn_seconds,
             ticket_ratio: settings.ticket_ratio,
             admin_password: String::new(),
@@ -246,6 +251,7 @@ impl ServerConfig {
             local_team: 1,
             respawn_seconds: self.respawn_time.max(0.0),
             friendly_fire: self.friendly_fire,
+            mantle: self.mantle,
             bot_skill: self
                 .bot_skill
                 .unwrap_or(self.bot_difficulty.unwrap_or_default().params().skill)

@@ -213,6 +213,11 @@ pub struct ZoomDesc {
     /// Bolt-action rifles leave the zoom after every shot.
     #[serde(default)]
     pub out_after_fire: bool,
+    /// What the HUD shows while zoomed in instead of the crosshair (BF2's HUD for the
+    /// weapon's `weaponHud.altGuiIndex`): the red dot of the M4, SCAR, P90 and AK-74U and
+    /// their mods' kin, a launcher's sight. Empty for most, whose sights are in `mesh_1p`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sight: Vec<crate::HudPicture>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -294,7 +299,7 @@ pub struct ProjectileDesc {
 
 /// A rope soldiers climb or ride, strung by a projectile (BF2 SF's `GrapplingHookRope` and
 /// `Zipline` templates).
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RopeDesc {
     pub kind: RopeKind,
     /// Meters: grappling ropes hang at most this far down, ziplines reach at most this far.
@@ -304,6 +309,42 @@ pub struct RopeDesc {
     /// Climbing speed on it, m/s (grappling ropes).
     #[serde(default)]
     pub climb_speed: f32,
+    /// Grappling ropes: the links the rope is simulated as (`setNumberOfLinks`), each
+    /// `max_length / links` long.
+    #[serde(default = "default_rope_links")]
+    pub links: u32,
+    /// Share of the speed into a surface a link keeps bouncing off it (`elasticity`).
+    #[serde(default = "default_rope_elasticity")]
+    pub elasticity: f32,
+    /// Share of a link's speed kept every 1/30 s in the air (`airFriction`).
+    #[serde(default = "default_rope_air_friction")]
+    pub air_friction: f32,
+    /// Seconds the links move after being thrown or disturbed before they go to sleep
+    /// (`AwakeTime`).
+    #[serde(default = "default_rope_awake_time")]
+    pub awake_time: f32,
+    /// Radius of the rope (m), from its link model (`ropelink`).
+    #[serde(default = "default_rope_radius")]
+    pub radius: f32,
+    /// The rope's color texture (`.dds`, relative to the imported root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
+}
+
+fn default_rope_links() -> u32 {
+    26
+}
+fn default_rope_elasticity() -> f32 {
+    0.2
+}
+fn default_rope_air_friction() -> f32 {
+    0.95
+}
+fn default_rope_awake_time() -> f32 {
+    6.0
+}
+fn default_rope_radius() -> f32 {
+    0.02
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

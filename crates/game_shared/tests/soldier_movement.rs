@@ -1038,11 +1038,64 @@ fn strings_grappling_ropes_over_ledges() {
     println!("{ropes:?}");
     let rope = ropes.0.expect("no rope over the ledge");
     assert!(
-        (rope.top.z - -1.65).abs() < 0.15 && (rope.top.y - 4.0).abs() < 0.05,
+        (rope.top.z - -(2.0 - rope::OFF_WALL)).abs() < 0.12 && (rope.top.y - 4.0).abs() < 0.05,
         "{rope:?}"
     );
     assert!(rope.end.y.abs() < 0.05, "{rope:?}");
     assert!(ropes.1.is_none());
+}
+
+#[test]
+fn grappling_hooks_catch_on_sloped_roofs_and_parapets() {
+    // The 4 m building with a roof sloping up 25° from its front edge, and a second one
+    // with a 1 m parapet along its front edge.
+    let mut roof = ramp(-2.0, 25.0, 6.0);
+    roof.transform.translation.y += 4.0;
+    let mut app = world(
+        &[
+            block([-5.0, 0.0, -10.0], [10.0, 4.0, 8.0]),
+            roof,
+            block([15.0, 0.0, -10.0], [10.0, 4.0, 8.0]),
+            block([15.0, 4.0, -2.3], [10.0, 1.0, 0.3]),
+            // A third, 6 m high, with a cornice sticking out 0.4 m at 2.5 m.
+            block([35.0, 0.0, -10.0], [10.0, 6.0, 8.0]),
+            block([35.0, 2.5, -2.0], [10.0, 0.3, 0.4]),
+        ],
+        true,
+    );
+    let cornice = app
+        .world_mut()
+        .run_system_once(|spatial: SpatialQuery| {
+            rope::grapple(&spatial, Vec3::new(40.0, 6.02, -5.0), Vec3::new(40.0, 0.0, 6.0), 14.0)
+        })
+        .unwrap()
+        .expect("didn't catch on the cornice building");
+    // Hangs (and is climbed) past the cornice to the ground.
+    assert!(cornice.end.y.abs() < 0.05 && (cornice.top.y - 6.0).abs() < 0.05, "{cornice:?}");
+    let (sloped, parapet, behind_wall) = app
+        .world_mut()
+        .run_system_once(|spatial: SpatialQuery| {
+            let slope_y = 4.0 + 2.0 * 25f32.to_radians().tan();
+            (
+                // On the slope 2 m up from the edge: slides down to the eave.
+                rope::grapple(&spatial, Vec3::new(0.5, slope_y + 0.02, -4.0), Vec3::new(0.0, 0.0, 6.0), 14.0),
+                // Behind the parapet: over it.
+                rope::grapple(&spatial, Vec3::new(20.0, 4.02, -5.0), Vec3::new(20.0, 0.0, 6.0), 14.0),
+                // Against the building's back wall, thrown from behind it: held by the wall.
+                rope::grapple(&spatial, Vec3::new(20.0, 0.02, -10.2), Vec3::new(20.0, 0.0, -20.0), 14.0),
+            )
+        })
+        .unwrap();
+    println!("{sloped:?} / {parapet:?} / {behind_wall:?}");
+    let sloped = sloped.expect("didn't catch on the sloped roof's eave");
+    assert!(
+        (sloped.top.y - 4.0).abs() < 0.15 && (sloped.top.z - -(2.0 - rope::OFF_WALL)).abs() < 0.2,
+        "{sloped:?}"
+    );
+    assert!(sloped.end.y.abs() < 0.05);
+    let parapet = parapet.expect("didn't catch on the parapet");
+    assert!((parapet.top.y - 5.0).abs() < 0.05 && parapet.top.z > -2.0, "{parapet:?}");
+    assert!(behind_wall.is_none(), "{behind_wall:?}");
 }
 
 #[test]
@@ -1051,8 +1104,10 @@ fn climbs_grappling_ropes() {
     let rope = Rope {
         kind: RopeKind::Grapple,
         anchor: Vec3::new(0.0, 4.0, -5.0),
-        top: Vec3::new(0.0, 4.0, -1.65),
-        end: Vec3::new(0.0, 0.0, -1.65),
+        top: Vec3::new(0.0, 4.0, -2.0 + rope::OFF_WALL),
+        end: Vec3::new(0.0, 0.0, -2.0 + rope::OFF_WALL),
+        length: 14.0,
+        links: 26,
     };
     let mut app = rope_world(rope);
     let m = settled(&mut app, Vec3::new(0.2, 0.0, 1.0));
@@ -1068,11 +1123,21 @@ fn climbs_grappling_ropes() {
             .position(|t| !t.climbing)
             .expect("never got off");
     let seconds = (off - on) as f32 * DT;
-    println!("on the rope for {seconds:.2} s");
+    println!("on the rope for {seconds:.2} s, then {:?}", trace[off]);
+    // Up until the hands reach the top (the feet 1.3 m below it), then over the edge.
     assert!(
-        (seconds - 4.0 / tuning.rope_climb_speed).abs() < 0.4,
+        (seconds - (4.0 - 1.3) / tuning.rope_climb_speed).abs() < 0.3,
         "{seconds}"
     );
+    assert!(trace[off].mantling(), "didn't climb over the edge: {:?}", trace[off]);
+    let standing = off
+        + trace[off..]
+            .iter()
+            .position(|t| !t.mantling())
+            .expect("never got onto the roof");
+    let over = (standing - off) as f32 * DT;
+    println!("over the edge in {over:.2} s");
+    assert!(over > 0.3 && over < 1.0, "{over}");
     let last = trace.last().unwrap();
     assert!(
         last.grounded && (last.position.y - 4.01).abs() < 0.01 && last.position.z < -2.0,
@@ -1090,6 +1155,8 @@ fn rides_ziplines() {
         anchor: start,
         top: start,
         end: Vec3::new(0.0, 1.0, 27.5),
+        length: 30.0,
+        links: 1,
     };
     let mut app = rope_world(rope);
     let mut m = settled(&mut app, Vec3::new(0.0, 4.5, -4.0));
@@ -1188,4 +1255,98 @@ fn swims_in_deep_water_and_climbs_out_at_shore() {
     let sprint_speed = trace[60..90].iter().map(horizontal_speed).sum::<f32>() / 30.0;
     println!("swim sprint speed {sprint_speed:.2} m/s (tuning {})", tuning.swim_sprint_speed);
     assert!((sprint_speed - tuning.swim_sprint_speed).abs() < 0.15, "{sprint_speed}");
+}
+
+/// Runs up to a wall `height` m high and `depth` m thick (its face 2 m ahead) and presses
+/// jump right in front of it (holding it `hold` ticks). Returns the trace from the press.
+fn jump_at_wall(height: f32, depth: f32, mantle: bool, hold: usize) -> (Vec<SoldierMotion>, f32) {
+    let mut app = world(&[block([-5.0, 0.0, -2.0 - depth], [10.0, height, depth])], true);
+    app.world_mut().resource_mut::<SoldierTuning>().mantle = mantle;
+    let m = settled(&mut app, Vec3::ZERO);
+    // Up to half a meter in front of it.
+    let run = walk(&mut app, m, 60, Buttons::empty());
+    let near = run.iter().position(|t| t.position.z < -1.25).expect("never got near the wall");
+    let mut frames = vec![input(0.0, 1.0, Buttons::JUMP); hold];
+    frames.extend(vec![input(0.0, 1.0, Buttons::empty()); 90]);
+    (simulate(&mut app, run[near], frames), -2.0 - depth)
+}
+
+#[test]
+fn mantles_onto_ledges() {
+    for height in [0.6, 1.0, 1.4, 1.6] {
+        let (trace, back) = jump_at_wall(height, 10.0, true, 1);
+        let started = trace.iter().position(|t| t.mantling()).unwrap_or_else(|| {
+            print_trace(&format!("{height} m"), &trace[..30]);
+            panic!("didn't climb onto a {height} m ledge")
+        });
+        let done = started + trace[started..].iter().position(|t| !t.mantling()).unwrap();
+        let seconds = (done - started) as f32 * DT;
+        let last = trace.last().unwrap();
+        println!("{height} m ledge: climbed in {seconds:.2} s, {last:?}");
+        assert!(started <= 1, "started late: {started}");
+        assert!(seconds < 0.7, "{height} m took {seconds} s");
+        assert!(last.grounded && (last.position.y - (height + 0.01)).abs() < 0.02 && last.position.z < -2.2 && last.position.z > back, "{last:?}");
+        assert!(trace[started..done].iter().all(|t| !t.can_fire()));
+    }
+    // Too high to reach from the ground; nothing to climb on a jump without holding it.
+    let (trace, _) = jump_at_wall(2.0, 10.0, true, 1);
+    assert!(trace.iter().all(|t| !t.mantling() && t.position.y < 1.3), "climbed a 2 m wall");
+    // Holding jump grabs its top on the way up.
+    let (trace, _) = jump_at_wall(2.0, 10.0, true, 40);
+    let last = trace.last().unwrap();
+    assert!((last.position.y - 2.01).abs() < 0.02, "didn't grab a 2 m wall: {last:?}");
+    let (trace, _) = jump_at_wall(3.0, 10.0, true, 40);
+    assert!(trace.iter().all(|t| !t.mantling()), "grabbed a 3 m wall");
+}
+
+#[test]
+fn vaults_over_thin_walls() {
+    // A 1.1 m wall 0.2 m thick: over it and down the other side.
+    let (trace, back) = jump_at_wall(1.1, 0.2, true, 1);
+    assert!(trace.iter().any(|t| t.mantling()), "didn't vault");
+    let last = trace.last().unwrap();
+    assert!(last.grounded && last.position.y < 0.02 && last.position.z < back, "{last:?}");
+}
+
+#[test]
+fn no_mantle_without_room_or_with_it_off() {
+    // A 1.2 m ledge under a 1.5 m high ceiling: no room to stand on it.
+    let mut app = world(
+        &[
+            block([-5.0, 0.0, -5.0], [10.0, 1.2, 3.0]),
+            block([-5.0, 2.7, -5.0], [10.0, 0.3, 3.0]),
+        ],
+        true,
+    );
+    let m = settled(&mut app, Vec3::ZERO);
+    let run = walk(&mut app, m, 60, Buttons::empty());
+    let near = run.iter().position(|t| t.position.z < -1.25).unwrap();
+    let mut frames = vec![input(0.0, 1.0, Buttons::JUMP)];
+    frames.extend(vec![input(0.0, 1.0, Buttons::empty()); 60]);
+    let trace = simulate(&mut app, run[near], frames);
+    assert!(trace.iter().all(|t| !t.mantling()), "climbed under a ceiling");
+
+    // BF2's movement: a 1.4 m ledge is out of reach, a 1 m wall can be jumped onto.
+    let (trace, _) = jump_at_wall(1.4, 10.0, false, 1);
+    assert!(trace.iter().all(|t| !t.mantling() && t.position.y < 0.1 || !t.grounded), "mantled with it off");
+    assert!(trace.last().unwrap().position.y < 0.1);
+    let (trace, _) = jump_at_wall(1.0, 10.0, false, 1);
+    let last = trace.last().unwrap();
+    assert!(trace.iter().all(|t| !t.mantling()));
+    assert!((last.position.y - 1.01).abs() < 0.02, "couldn't jump onto a 1 m wall: {last:?}");
+}
+
+#[test]
+fn replays_mantles_identically() {
+    let mut app = world(&[block([-5.0, 0.0, -5.0], [10.0, 1.4, 3.0])], true);
+    let m = settled(&mut app, Vec3::ZERO);
+    let mut frames = vec![input(0.0, 1.0, Buttons::empty()); 30];
+    frames.push(input(0.0, 1.0, Buttons::JUMP));
+    frames.extend(vec![input(0.0, 1.0, Buttons::empty()); 60]);
+    let a = simulate(&mut app, m, frames.clone());
+    assert!(a.iter().any(|t| t.mantling()));
+    for from in [30, 34, 40] {
+        let b = simulate(&mut app, a[from], frames[from + 1..].to_vec());
+        assert_eq!(&a[from + 1..], &b[..], "mantle replay from tick {from} diverged");
+    }
 }

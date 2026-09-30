@@ -145,6 +145,14 @@ pub struct Cli {
     /// $GAME_CONTENT_CACHE).
     #[arg(long)]
     content_cache: Option<PathBuf>,
+    /// Folder for generated data kept between runs: bots' navigation grids, tactical maps
+    /// (default: the platform's cache folder, or $BF2_CACHE_DIR; see docs/ARCHITECTURE.md,
+    /// "Caches").
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Size limit of `--cache-dir` in GB (default 2, or $BF2_CACHE_LIMIT_GB).
+    #[arg(long)]
+    cache_limit_gb: Option<f64>,
     /// Save a screenshot to this path once everything is loaded (plus
     /// `--screenshot-delay` seconds), then exit.
     #[arg(long)]
@@ -158,6 +166,11 @@ pub struct Cli {
     /// Where scenario screenshots and the report go (default `target/scenarios/<name>`).
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Seconds between death and respawn, for a scripted run's own local server (default:
+    /// `FAST_DEPLOY_SECONDS`, overridable per scenario with its `respawn_time` field). Doesn't
+    /// affect `--host`/singleplayer outside a scenario (the server's own default, 10 s).
+    #[arg(long, hide = true)]
+    respawn_time: Option<f32>,
     /// Your team (1 or 2) when hosting or in singleplayer.
     #[arg(long, default_value_t = 1)]
     team: u8,
@@ -201,6 +214,12 @@ pub struct Cli {
     settings: Option<PathBuf>,
 }
 
+/// Respawn time a scripted run's own local server uses unless the scenario opts out with its
+/// `respawn_time` field (or `--respawn-time`): fast enough that a `WaitSpawned` step returns in
+/// about a frame instead of the real game's 10 s. A scenario that tests the deploy countdown
+/// itself (its text, or a screenshot mid-countdown) sets `respawn_time: Some(10.0)` to keep it.
+const FAST_DEPLOY_SECONDS: f32 = 0.5;
+
 impl Cli {
     /// The match the command line asks for, or `None` to open the main menu.
     fn match_setup(&self, settings: &Settings, menu_scenario: bool) -> Option<MatchSetup> {
@@ -226,6 +245,9 @@ impl Cli {
                 public: self.public,
                 local_player: (!self.spectate).then_some(name),
                 local_team: self.team,
+                respawn_seconds: self
+                    .respawn_time
+                    .unwrap_or(if scripted { FAST_DEPLOY_SECONDS } else { ServerSettings::default().respawn_seconds }),
                 coop: game_server::coop::CoopSettings {
                     human_team: self.team,
                     ..default()
@@ -355,9 +377,14 @@ fn main() -> AppExit {
             start: if start.is_some() { Screen::Loading } else { Screen::Menu },
         },
     ))
-    .insert_resource(paths)
     .insert_resource(settings)
     .insert_resource(settings_file);
+    let cache = game_shared::cache::Cache::resolve(cli.cache_dir.clone(), cli.cache_limit_gb);
+    game_shared::cache::housekeeping(cache.clone(), &paths);
+    if let Some(cache) = cache {
+        app.insert_resource(cache);
+    }
+    app.insert_resource(paths);
 
     if cli.diagnostics {
         app.add_plugins((

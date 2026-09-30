@@ -11,7 +11,7 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Screenshot("deploy_1x"),
         Click("kit:0"),
         // Zooms around the current view center (a scenario has no real cursor to hover).
@@ -31,7 +31,7 @@
         Click("map:reset"),
         Wait(0.3),
         Screenshot("deploy_reset"),
-        Wait(8.0),
+        WaitSpawned(15.0),
         Screenshot("respawned"),
         Quit,
     ],

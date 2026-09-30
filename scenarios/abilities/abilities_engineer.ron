@@ -11,9 +11,9 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:4"),
-        Wait(11.0),
+        WaitSpawned(20.0),
         NearVehicle("usjep_hmmwv"),
         Wait(1.0),
         DamageVehicle(600.0),

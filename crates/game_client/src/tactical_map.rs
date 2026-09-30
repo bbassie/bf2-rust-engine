@@ -14,9 +14,9 @@
 //!   their triangles are rasterized top down into a height buffer, and whatever stands more
 //!   than [`STRUCTURE_MIN_HEIGHT`] above the terrain is a structure. Trees are the static
 //!   objects with vegetation meshes and the level's overgrowth, drawn as blobs sized by
-//!   their meshes. Cached on disk (`<imported>/cache/tactical/<level>_<mode>_<size>.bin`,
-//!   raw RGBA with a key of the inputs and [`GENERATOR_VERSION`]), so the next load of the
-//!   level only reads it back.
+//!   their meshes. Cached ([`game_shared::cache`], `tactical/<level>/base-<key>.bin`, RGBA)
+//!   under a hash of the inputs and [`GENERATOR_VERSION`], so the next load of the level only
+//!   reads it back, and the layouts of a level share one picture unless their statics differ.
 //! - **Composite** for the local player's team: the base with the combat area's outside
 //!   darkened and hatched and its border drawn ([`TacticalMap::image`]), plus a mask of the
 //!   combat area ([`TacticalMap::bounds`]). Redone (a fraction of a second) when the team
@@ -47,6 +47,7 @@ use bevy::{
 };
 use game_data::VegetationDesc;
 use game_shared::{
+    cache::Cache,
     physics::GameLayer,
     config::GamePaths,
     level::{Heightmap, LevelEntity, LoadedLevel},
@@ -221,7 +222,7 @@ struct Inputs {
     /// The level's vegetation file, relative to the imported root.
     vegetation: Option<String>,
     paths: GamePaths,
-    cache: Option<PathBuf>,
+    cache: Option<Cache>,
 }
 
 fn team_number(team: Team) -> u8 {
@@ -234,13 +235,13 @@ fn team_number(team: Team) -> u8 {
 #[allow(clippy::type_complexity)]
 fn start_generation(
     level: Res<LoadedLevel>,
-    info: Query<&MatchInfo>,
     paths: Option<Res<GamePaths>>,
     colliders: Query<
         (&Collider, &Transform, &CollisionLayers, Option<&StaticMesh>),
         (With<LevelEntity>, Without<ColliderDisabled>, Without<Inactive>),
     >,
     visuals: Query<(&StaticMesh, &Transform), (With<LevelEntity>, Without<Collider>, Without<Inactive>)>,
+    cache: Option<Res<Cache>>,
     mut generator: ResMut<Generator>,
     mut map: ResMut<TacticalMap>,
 ) {
@@ -273,15 +274,9 @@ fn start_generation(
             trees.push((mesh.path.clone(), transform.compute_affine()));
         }
     }
-    let layout = info
-        .iter()
-        .next()
-        .map_or_else(|| "default".to_string(), |i| format!("{}_{}", i.mode, i.size));
     let name = level.desc.name.clone();
-    let cache = level
-        .dir
-        .is_some()
-        .then(|| paths.imported.join("cache").join("tactical").join(format!("{name}_{layout}.bin")));
+    // Imported levels only: the built-in test range is quick to draw.
+    let cache = cache.filter(|_| level.dir.is_some()).map(|c| c.clone());
     let inputs = Inputs {
         level: name.clone(),
         heightmap,
@@ -379,11 +374,14 @@ fn load_or_generate(inputs: Inputs) -> Option<BaseMap> {
     let started = Instant::now();
     let size = resolution(inputs.heightmap.world_size());
     let key = inputs_key(&inputs, size);
-    if let Some(path) = &inputs.cache
-        && let Some(rgba) = read_cache(path, key, size)
+    if let Some(rgba) = inputs
+        .cache
+        .as_ref()
+        .and_then(|cache| cache.load(CACHE_KIND, &inputs.level, CACHE_NAME, key))
+        .filter(|rgba| rgba.len() == size as usize * size as usize * 4)
     {
         info!(
-            "tactical map: {} loaded from cache in {:.0} ms",
+            "tactical map: {} loaded from cache ({key:016x}) in {:.0} ms",
             inputs.level,
             started.elapsed().as_secs_f32() * 1000.0
         );
@@ -401,10 +399,12 @@ fn load_or_generate(inputs: Inputs) -> Option<BaseMap> {
         inputs.structures.len(),
         inputs.trees.len()
     );
-    if let Some(path) = &inputs.cache
-        && let Err(err) = write_cache(path, key, size, &rgba)
-    {
-        warn!("tactical map cache {}: {err:#}", path.display());
+    if let Some(cache) = &inputs.cache {
+        let started = Instant::now();
+        match cache.store(CACHE_KIND, &inputs.level, CACHE_NAME, key, &rgba) {
+            Ok(_) => info!("tactical map: {} cached in {:.0} ms", inputs.level, started.elapsed().as_secs_f32() * 1000.0),
+            Err(err) => warn!("tactical map: can't cache {} in {}: {err:#}", inputs.level, cache.root().display()),
+        }
     }
     Some(BaseMap {
         level: inputs.level,
@@ -483,33 +483,9 @@ fn inputs_key(inputs: &Inputs, size: u32) -> u64 {
     h.0
 }
 
-const CACHE_MAGIC: &[u8; 4] = b"TACM";
-
-fn read_cache(path: &Path, key: u64, size: u32) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
-    let header = 4 + 4 + 8;
-    let expected = header + (size as usize * size as usize * 4);
-    if bytes.len() != expected || &bytes[..4] != CACHE_MAGIC {
-        return None;
-    }
-    let stored_size = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    let stored_key = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
-    (stored_size == size && stored_key == key).then(|| bytes[header..].to_vec())
-}
-
-fn write_cache(path: &Path, key: u64, size: u32, rgba: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut bytes = Vec::with_capacity(16 + rgba.len());
-    bytes.extend_from_slice(CACHE_MAGIC);
-    bytes.extend_from_slice(&size.to_le_bytes());
-    bytes.extend_from_slice(&key.to_le_bytes());
-    bytes.extend_from_slice(rgba);
-    let temp = path.with_extension("tmp");
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, path)
-}
+/// The cache's folder and entry name for base pictures.
+const CACHE_KIND: &str = "tactical";
+const CACHE_NAME: &str = "base";
 
 /// Calls `f` with every triangle of a shape, in world space.
 fn for_each_triangle(shape: &SharedShape, transform: Affine3A, f: &mut impl FnMut([Vec3; 3])) {

@@ -1,24 +1,24 @@
-//! `navgrid_<mode>_<size>.bin`: a built grid, so later loads of the level skip the build.
+//! A built grid in the cache (`nav/<level>/infantry-<key>.bin` and `vehicle-<key>.bin`, see
+//! [`game_shared::cache`]), so later loads of the level skip the build. The key is the hash
+//! of the build's inputs ([`super::build::geometry_key`]), so layouts built from the same
+//! inputs share an entry.
 //!
-//! Layout: magic, the geometry key (see [`super::build::geometry_key`]), then deflated:
-//! cell size, origin (2 x f32), width, depth, cell count (u32), the column offsets (of the
-//! level grid and the patches), the cells, the ladder count (u32) and the ladders (see
-//! [`LADDER_WORDS`]), the level grid's cell count, the patch count and the patches (see
-//! [`PATCH_WORDS`]), the portal count and the portals (from, to x, z, index).
-
-use std::{
-    fs,
-    io::{Read, Write},
-    path::Path,
-};
+//! Layout (compressed by the cache): magic, cell size, origin (2 x f32), width, depth, cell
+//! count (u32), the column offsets (of the level grid and the patches), the cells, the ladder
+//! count (u32) and the ladders (see [`LADDER_WORDS`]), the level grid's cell count, the patch
+//! count and the patches (see [`PATCH_WORDS`]), the portal count and the portals (from, to x,
+//! z, index).
 
 use anyhow::ensure;
 use bevy::prelude::*;
-use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
+use game_shared::cache::Cache;
 
 use super::{CellRef, NavCell, NavGrid, NavLadder, NavParams, NavPatch, build::Frame};
 
-const MAGIC: &[u8; 8] = b"BF2NAVG2";
+/// The cache's folder for grids.
+const KIND: &str = "nav";
+
+const MAGIC: &[u8; 8] = b"BF2NAVG3";
 
 /// 4-byte words per patch: frame center and axis, origin (x, z each), cell size, width,
 /// depth, first column and first cell.
@@ -87,59 +87,56 @@ fn ladder_from_words(w: &[u32]) -> NavLadder {
     }
 }
 
-pub fn save(path: &Path, key: u64, grid: &NavGrid) -> anyhow::Result<()> {
-    // Written next to it and renamed, so a crash or a second process never leaves a torn file.
-    let tmp = path.with_extension("bin.tmp");
-    let mut out = std::io::BufWriter::new(fs::File::create(&tmp)?);
-    out.write_all(MAGIC)?;
-    out.write_all(&key.to_le_bytes())?;
-    let mut z = DeflateEncoder::new(out, Compression::fast());
+/// Caches a grid under `name` (`infantry`, `vehicle`) for `level` and `key`. Returns the
+/// file.
+pub fn save(cache: &Cache, level: &str, name: &str, key: u64, grid: &NavGrid) -> std::io::Result<std::path::PathBuf> {
+    cache.store(KIND, level, name, key, &encode(grid))
+}
+
+/// The cached grid, if there is one for this key.
+pub fn load(cache: &Cache, level: &str, name: &str, key: u64, params: NavParams) -> Option<NavGrid> {
+    let bytes = cache.load(KIND, level, name, key)?;
+    decode(&bytes, params)
+        .map_err(|err| warn!("nav: ignoring the cached {name} grid of {level}: {err:#}"))
+        .ok()
+}
+
+/// The most recently used grid of a level, whatever its inputs (tests with imported levels).
+#[cfg(test)]
+pub fn load_newest(cache: &Cache, level: &str, name: &str, params: NavParams) -> Option<NavGrid> {
+    let (key, _) = cache.newest(KIND, level, name)?;
+    decode(&cache.load(KIND, level, name, key)?, params).ok()
+}
+
+/// The grid as bytes.
+pub fn encode(grid: &NavGrid) -> Vec<u8> {
+    let mut z = Vec::with_capacity(grid.cells.len() * size_of::<NavCell>() + grid.columns.len() * 4 + 1024);
+    z.extend_from_slice(MAGIC);
     for v in [grid.params.cell, grid.origin.x, grid.origin.y] {
-        z.write_all(&v.to_le_bytes())?;
+        z.extend_from_slice(&v.to_le_bytes());
     }
     for v in [grid.width, grid.depth, grid.cells.len() as u32, grid.columns.len() as u32] {
-        z.write_all(&v.to_le_bytes())?;
+        z.extend_from_slice(&v.to_le_bytes());
     }
-    z.write_all(bytemuck::cast_slice(&grid.columns))?;
-    z.write_all(bytemuck::cast_slice(&grid.cells))?;
-    z.write_all(&(grid.ladders.len() as u32).to_le_bytes())?;
+    z.extend_from_slice(bytemuck::cast_slice(&grid.columns));
+    z.extend_from_slice(bytemuck::cast_slice(&grid.cells));
+    z.extend_from_slice(&(grid.ladders.len() as u32).to_le_bytes());
     for ladder in &grid.ladders {
-        z.write_all(bytemuck::cast_slice(&ladder_words(ladder)))?;
+        z.extend_from_slice(bytemuck::cast_slice(&ladder_words(ladder)));
     }
-    z.write_all(&grid.base_cells.to_le_bytes())?;
-    z.write_all(&(grid.patches.len() as u32).to_le_bytes())?;
+    z.extend_from_slice(&grid.base_cells.to_le_bytes());
+    z.extend_from_slice(&(grid.patches.len() as u32).to_le_bytes());
     for patch in &grid.patches {
-        z.write_all(bytemuck::cast_slice(&patch_words(patch)))?;
+        z.extend_from_slice(bytemuck::cast_slice(&patch_words(patch)));
     }
     let portals: Vec<[u32; 4]> = grid
         .portals
         .iter()
         .flat_map(|(&from, to)| to.iter().map(move |c| [from, c.x, c.z, c.index]))
         .collect();
-    z.write_all(&(portals.len() as u32).to_le_bytes())?;
-    z.write_all(bytemuck::cast_slice(&portals))?;
-    z.finish()?.flush()?;
-    fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-/// The cached grid, if there is one for this key.
-pub fn load(path: &Path, key: u64, params: NavParams) -> Option<NavGrid> {
-    let bytes = fs::read(path).ok()?;
-    if bytes.len() < 16 || &bytes[..8] != MAGIC || bytes[8..16] != key.to_le_bytes() {
-        return None;
-    }
-    parse(&bytes[16..], params)
-        .map_err(|err| warn!("nav: ignoring {}: {err:#}", path.display()))
-        .ok()
-}
-
-/// A cached grid whatever geometry it was built from (tests with imported levels).
-#[cfg(test)]
-pub fn load_unchecked(path: &Path, params: NavParams) -> Option<NavGrid> {
-    let bytes = fs::read(path).ok()?;
-    (bytes.len() >= 16 && &bytes[..8] == MAGIC).then_some(())?;
-    parse(&bytes[16..], params).ok()
+    z.extend_from_slice(&(portals.len() as u32).to_le_bytes());
+    z.extend_from_slice(bytemuck::cast_slice(&portals));
+    z
 }
 
 /// Reads the decompressed data front to back.
@@ -168,10 +165,10 @@ impl Reader<'_> {
     }
 }
 
-fn parse(compressed: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
-    let mut data = Vec::new();
-    DeflateDecoder::new(compressed).read_to_end(&mut data)?;
-    let mut r = Reader { data: &data, at: 0 };
+/// A grid from [`encode`]'s bytes.
+pub fn decode(data: &[u8], mut params: NavParams) -> anyhow::Result<NavGrid> {
+    ensure!(data.len() >= MAGIC.len() && &data[..MAGIC.len()] == MAGIC, "another version");
+    let mut r = Reader { data, at: MAGIC.len() };
     params.cell = r.f32()?;
     let origin = Vec2::new(r.f32()?, r.f32()?);
     let (width, depth, count, column_count) = (r.u32()?, r.u32()?, r.u32()? as usize, r.u32()? as usize);

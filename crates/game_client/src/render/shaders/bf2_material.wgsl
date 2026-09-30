@@ -44,8 +44,9 @@
 }
 #else
 #import bevy_pbr::{
-    forward_io::{VertexOutput, FragmentOutput},
+    forward_io::{Vertex, VertexOutput, FragmentOutput},
     pbr_fragment::pbr_input_from_standard_material,
+    skinning,
 }
 #endif
 
@@ -596,6 +597,57 @@ fn standard_vertex_output(lightmapped: LightmapVertexOutput) -> VertexOutput {
 }
 #endif  // BF2_LIGHTMAP_UV
 
+#ifdef BF2_VIEW_MODEL
+// The first-person view model (viewmodel.rs): Bevy's vertex shader (with skinning for the
+// arms; no morph targets) with the depth moved in front of the world's. Reverse-Z depth is
+// near / z: the world only reaches VIEW_MODEL_DEPTH closer than 2 x the near plane (4 mm),
+// so the model's depth squeezed into VIEW_MODEL_DEPTH..1 is never behind a wall or the ground
+// it is pushed into (crouched, prone on a slope, at a wall), and keeps its own order.
+const VIEW_MODEL_DEPTH: f32 = 0.5;
+
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var out: VertexOutput;
+#ifdef SKINNED
+    let world_from_local = skinning::skin_model(vertex.joint_indices, vertex.joint_weights, vertex.instance_index);
+#else
+    let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
+#endif
+#ifdef VERTEX_NORMALS
+#ifdef SKINNED
+    out.world_normal = skinning::skin_normals(world_from_local, vertex.normal);
+#else
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
+#endif
+#endif
+    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(vertex.position, 1.0));
+    out.position = position_world_to_clip(out.world_position.xyz);
+    out.position.z = VIEW_MODEL_DEPTH * out.position.w + (1.0 - VIEW_MODEL_DEPTH) * out.position.z;
+#ifdef VERTEX_UVS_A
+    out.uv = vertex.uv;
+#endif
+#ifdef VERTEX_UVS_B
+    out.uv_b = vertex.uv_b;
+#endif
+#ifdef VERTEX_TANGENTS
+    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(world_from_local, vertex.tangent, vertex.instance_index);
+#endif
+#ifdef VERTEX_COLORS
+    out.color = vertex.color;
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = vertex.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
+        vertex.instance_index,
+        mesh_functions::get_world_from_local(vertex.instance_index)[3],
+    );
+#endif
+    return out;
+}
+#endif  // BF2_VIEW_MODEL
+
 @fragment
 #ifdef BF2_LIGHTMAP_UV
 fn fragment(lightmapped: LightmapVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
@@ -710,7 +762,12 @@ fn fragment(vertex: VertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #endif
 
     var out: FragmentOutput;
-    out.color = pbr_functions::apply_pbr_lighting(pbr_input);
+    if (pbr_input.material.flags & pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u {
+        // Unlit (light glows, the reticles of zoom models): the colour as it is.
+        out.color = pbr_input.material.base_color;
+    } else {
+        out.color = pbr_functions::apply_pbr_lighting(pbr_input);
+    }
     out.color = pbr_functions::main_pass_post_lighting_processing(pbr_input, out.color);
 #ifdef BF2_DEBUG_NORMALS
     out.color = vec4(pbr_input.N * 0.5 + vec3(0.5), 1.0);

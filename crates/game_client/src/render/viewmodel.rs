@@ -1,15 +1,18 @@
 //! First-person view model: BF2's first-person arms and weapon, animated with the weapon's
 //! first-person set.
 //!
-//! It is drawn by the player camera, shrunk towards the eye so it never clips into walls: a
-//! uniform scale about the eye changes nothing on screen, only the depth. The model hangs
-//! under a [`ViewModelAnchor`] on the camera whose scale is [`VIEW_MODEL_SHRINK`], and in x
-//! and y also the ratio of the camera's field of view to BF2's first-person one
-//! ([`VIEW_MODEL_FOV`]), so it looks as if a 60° camera drew it at any field of view and
-//! zoom. A second camera cost about 1.4 ms of the render thread and 0.5 ms of the main
-//! thread a frame (its own view, passes and post-processing). The model is lit like the
-//! world, sun shadows included; `bf2_material.wgsl` keeps screen-space ambient occlusion off
-//! it (materials flagged [`Bf2Layers::VIEW_MODEL`]).
+//! It is drawn by the player camera, shrunk towards the eye: a uniform scale about the eye
+//! changes nothing on screen, only the depth. The model hangs under a [`ViewModelAnchor`] on
+//! the camera whose scale is [`VIEW_MODEL_SHRINK`], and in x and y also the ratio of the
+//! camera's field of view to BF2's first-person one ([`VIEW_MODEL_FOV`]), so it looks as if a
+//! 60° camera drew it at any field of view and zoom. Its materials (flagged with
+//! [`Bf2Layers::make_view_model`]) have their own vertex shader that moves their depth in
+//! front of all of the world's (`BF2_VIEW_MODEL` in `bf2_material.wgsl`), so walls and the
+//! ground never cut into it, and their transparent parts (scope lenses, blurred scope frames)
+//! sort after the world's transparent things (roads, decals). A second camera cost about
+//! 1.4 ms of the render thread and 0.5 ms of the main thread a frame (its own view, passes
+//! and post-processing). The model is lit like the world, sun shadows included;
+//! `bf2_material.wgsl` keeps screen-space ambient occlusion off it.
 
 use bevy::{
     app::AnimationSystems,
@@ -45,7 +48,9 @@ use crate::{
 pub const VIEW_MODEL_LAYER: usize = 1;
 
 /// How far towards the eye the view model is pulled (a scale about the eye): a rifle reaching
-/// 0.8 m ahead ends at 0.16 m, closer than any wall the soldier can stand at.
+/// 0.8 m ahead ends at 0.16 m. (Its depth is moved in front of the world's anyway; much
+/// smaller and its vertices, placed in world space, would lose float precision far from the
+/// level's centre.)
 pub const VIEW_MODEL_SHRINK: f32 = 0.2;
 
 /// Field of view BF2's first-person models are drawn with.
@@ -233,18 +238,19 @@ fn scale_anchor(
     }
 }
 
-/// Keeps screen-space ambient occlusion off the view model (its own camera had none): the
-/// shrunk model is a tiny object right at the eye to it. Also after a level change rebuilt
-/// the materials.
+/// Flags the view model's materials ([`Bf2Layers::make_view_model`]): drawn in front of the
+/// world, transparent parts after the world's, no screen-space ambient occlusion (the shrunk
+/// model is a tiny object right at the eye to it). Also after a level change rebuilt the
+/// materials.
 fn flag_view_model_materials(
     meshes: Query<&MeshMaterial3d<Bf2Material>, With<ViewModelMesh>>,
     mut materials: ResMut<Assets<Bf2Material>>,
 ) {
     for material in &meshes {
-        if materials.get(&material.0).is_some_and(|m| m.extension.flags & Bf2Layers::VIEW_MODEL == 0)
+        if materials.get(&material.0).is_some_and(|m| !Bf2Layers::is_view_model(m))
             && let Some(mut material) = materials.get_mut(&material.0)
         {
-            material.extension.flags |= Bf2Layers::VIEW_MODEL;
+            Bf2Layers::make_view_model(&mut material);
         }
     }
 }

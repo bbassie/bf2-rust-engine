@@ -83,6 +83,9 @@ struct Cli {
     /// BF2's kits exactly as they are: no picking weapons from each class's pool.
     #[arg(long)]
     classic_kits: bool,
+    /// BF2's movement: no climbing onto ledges by jumping into them (mantling).
+    #[arg(long)]
+    no_mantle: bool,
     /// Players may only pick weapons that kits of their own team carry.
     #[arg(long)]
     faction_locked_weapons: bool,
@@ -135,6 +138,17 @@ struct Cli {
     /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
     #[arg(long)]
     mods: Option<PathBuf>,
+    /// Folder for generated data kept between runs: bots' navigation grids (default: the
+    /// platform's cache folder, or $BF2_CACHE_DIR; see docs/ARCHITECTURE.md, "Caches").
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Size limit of `--cache-dir` in GB (default 2, or $BF2_CACHE_LIMIT_GB).
+    #[arg(long)]
+    cache_limit_gb: Option<f64>,
+    /// Delete everything in the cache folder (and older builds' caches in the content
+    /// folders), then exit.
+    #[arg(long)]
+    clear_cache: bool,
     /// Soak test: log the server's health (entities, memory, frame times, round) every
     /// `--soak-every` seconds and quit after this many minutes (0: keep running).
     #[arg(long)]
@@ -214,6 +228,20 @@ fn main() -> AppExit {
                 AppExit::error()
             }
         };
+    }
+    let cache = game_shared::cache::Cache::resolve(cli.cache_dir.clone(), cli.cache_limit_gb);
+    if cli.clear_cache {
+        let paths = GamePaths::resolve_with_mods(cli.imported.clone(), cli.mods.clone());
+        let roots: Vec<PathBuf> = paths.roots().into_iter().map(PathBuf::from).collect();
+        let legacy = game_shared::cache::remove_legacy(&roots, &paths.imported);
+        if legacy.files > 0 {
+            println!("removed {legacy} of old caches from the content folders");
+        }
+        match &cache {
+            Some(cache) => println!("removed {} from {}", cache.clear(), cache.root().display()),
+            None => println!("no cache folder (set {})", game_shared::cache::DIR_ENV),
+        }
+        return AppExit::Success;
     }
     let config = match &cli.config {
         Some(path) => match ServerConfig::load(path) {
@@ -311,8 +339,10 @@ fn main() -> AppExit {
     settings.public |= cli.public;
     settings.friendly_fire |= cli.friendly_fire;
     settings.loadouts.arsenal &= !cli.classic_kits;
+    settings.mantle &= !cli.no_mantle;
     settings.loadouts.faction_locked |= cli.faction_locked_weapons;
 
+    let paths = GamePaths::resolve_with_mods(cli.imported, cli.mods);
     let mut app = App::new();
     // Explicit plugin list rather than DefaultPlugins, so the server stays headless even
     // when a workspace build unifies rendering features into Bevy.
@@ -331,7 +361,7 @@ fn main() -> AppExit {
     ))
     // Physics may expect mesh assets depending on unified features; they are CPU-only here.
     .init_asset::<Mesh>()
-    .insert_resource(GamePaths::resolve_with_mods(cli.imported, cli.mods))
+    .insert_resource(paths.clone())
     .add_plugins((
         SharedPlugin,
         RepliconRenetPlugins,
@@ -339,6 +369,10 @@ fn main() -> AppExit {
             settings: Some(settings),
         },
     ));
+    game_shared::cache::housekeeping(cache.clone(), &paths);
+    if let Some(cache) = cache {
+        app.insert_resource(cache);
+    }
     // Profiling reports with the soak's reports; without `--soak` they go on forever.
     let soak = cli.soak.or(cli.profile_ticks.then_some(0.0));
     if let Some(minutes) = soak {

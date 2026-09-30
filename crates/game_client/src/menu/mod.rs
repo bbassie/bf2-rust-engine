@@ -8,6 +8,7 @@
 
 mod account;
 mod browser;
+mod caches;
 mod download;
 mod input;
 mod levels;
@@ -77,6 +78,7 @@ impl Plugin for MenuPlugin {
         app.insert_resource(compiling)
             .add_plugins((
                 download::DownloadUiPlugin,
+                caches::CachesUiPlugin,
                 account::AccountUiPlugin,
                 voice::VoiceUiPlugin,
                 text_input::TextInputPlugin,
@@ -415,6 +417,7 @@ enum Toggle {
     InvertJetPitch,
     InvertHeliPitch,
     HeliPedalsRoll,
+    JetMouseYaw,
     MinimapSpeedZoom,
 }
 
@@ -436,6 +439,7 @@ impl Toggle {
             Toggle::InvertJetPitch => "invert_jet_pitch",
             Toggle::InvertHeliPitch => "invert_heli_pitch",
             Toggle::HeliPedalsRoll => "heli_pedals_roll",
+            Toggle::JetMouseYaw => "jet_mouse_yaw",
             Toggle::MinimapSpeedZoom => "minimap_speed_zoom",
         }
     }
@@ -457,6 +461,7 @@ impl Toggle {
             Toggle::InvertJetPitch => settings.invert_jet_pitch,
             Toggle::InvertHeliPitch => settings.invert_heli_pitch,
             Toggle::HeliPedalsRoll => settings.heli_pedals_roll,
+            Toggle::JetMouseYaw => settings.jet_mouse_yaw,
             Toggle::MinimapSpeedZoom => settings.minimap_speed_zoom,
         }
     }
@@ -478,6 +483,7 @@ impl Toggle {
             Toggle::InvertJetPitch => settings.invert_jet_pitch ^= true,
             Toggle::InvertHeliPitch => settings.invert_heli_pitch ^= true,
             Toggle::HeliPedalsRoll => settings.heli_pedals_roll ^= true,
+            Toggle::JetMouseYaw => settings.jet_mouse_yaw ^= true,
             Toggle::MinimapSpeedZoom => settings.minimap_speed_zoom ^= true,
         }
     }
@@ -486,6 +492,7 @@ impl Toggle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slider {
     Sensitivity,
+    JetSensitivity,
     MouseSmoothing,
     FieldOfView,
     Volume,
@@ -512,6 +519,7 @@ impl Slider {
     fn id(self) -> &'static str {
         match self {
             Slider::Sensitivity => "sensitivity",
+            Slider::JetSensitivity => "jet_sensitivity",
             Slider::MouseSmoothing => "mouse_smoothing",
             Slider::FieldOfView => "fov",
             Slider::Volume => "volume",
@@ -538,7 +546,7 @@ impl Slider {
     /// Minimum, maximum, step.
     fn range(self) -> (f32, f32, f32) {
         match self {
-            Slider::Sensitivity => (0.1, 4.0, 0.05),
+            Slider::Sensitivity | Slider::JetSensitivity => (0.1, 4.0, 0.05),
             Slider::MouseSmoothing => (0.0, 0.9, 0.05),
             Slider::FieldOfView => (60.0, 100.0, 1.0),
             Slider::Volume | Slider::EffectsVolume | Slider::AmbienceVolume => (0.0, 1.0, 0.05),
@@ -560,6 +568,7 @@ impl Slider {
     fn get(self, settings: &Settings) -> f32 {
         match self {
             Slider::Sensitivity => settings.mouse_sensitivity,
+            Slider::JetSensitivity => settings.jet_mouse_sensitivity,
             Slider::MouseSmoothing => settings.mouse_smoothing,
             Slider::FieldOfView => settings.field_of_view,
             Slider::Volume => settings.master_volume,
@@ -595,6 +604,7 @@ impl Slider {
         }
         match self {
             Slider::Sensitivity => settings.mouse_sensitivity = value,
+            Slider::JetSensitivity => settings.jet_mouse_sensitivity = value,
             Slider::MouseSmoothing => settings.mouse_smoothing = value,
             Slider::FieldOfView => settings.field_of_view = value,
             Slider::Volume => settings.master_volume = value,
@@ -632,7 +642,7 @@ impl Slider {
     fn display(self, settings: &Settings) -> String {
         let value = self.get(settings);
         match self {
-            Slider::Sensitivity | Slider::GamepadLookSensitivity => format!("{value:.2}"),
+            Slider::Sensitivity | Slider::JetSensitivity | Slider::GamepadLookSensitivity => format!("{value:.2}"),
             Slider::MouseSmoothing
             | Slider::RenderScale
             | Slider::LodDetailScale

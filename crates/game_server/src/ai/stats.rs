@@ -522,7 +522,12 @@ pub fn log_stats(
                     OrderKind::Attack => "attack",
                     OrderKind::Defend => "defend",
                 };
-                let note = if order.suggestion { " (suggested)" } else { "" };
+                let mut note = if order.suggestion { " (suggested)".to_string() } else { String::new() };
+                if let Some(guard) = strategy.guards.get(&(team, *squad))
+                    && let Some(at) = map.areas.get(guard.area)
+                {
+                    note += &format!(" ({} guarding {})", guard.members.len(), at.name);
+                }
                 Some((*squad, format!("{} {verb} {}{note}", squad_name(*squad), area.name)))
             })
             .collect();
@@ -635,4 +640,216 @@ pub fn log_stats(
 
 fn t_team(t: usize) -> Team {
     if t == 0 { Team::One } else { Team::Two }
+}
+
+/// Seconds a squad is watched after its team took the flag it was at.
+const FLOW_WATCH: f32 = 120.0;
+
+/// A squad that was at a flag when its team took it: how long until the commander gives it
+/// something else to do, and until it leaves.
+struct FlowWatch {
+    team: Team,
+    squad: u8,
+    area: usize,
+    since: f32,
+    /// The first order other than the one it had (and what it was), then the first one for
+    /// another objective.
+    first: Option<(f32, String)>,
+    away: Option<(f32, String)>,
+    left: Option<f32>,
+    /// Logged what keeps it there (15 s after an order elsewhere).
+    probed: bool,
+}
+
+/// What happens after a capture ([`track_flow`]).
+#[derive(Default)]
+pub struct CaptureFlow {
+    watches: Vec<FlowWatch>,
+    owners: HashMap<usize, Team>,
+    /// Orders at the last tick: the plan may already have moved a squad on in the tick its
+    /// flag was taken.
+    orders: HashMap<(Team, u8), (OrderKind, usize)>,
+    generation: u32,
+}
+
+fn describe_order(map: &StrategicMap, order: Option<&super::strategy::SquadOrder>) -> String {
+    match order {
+        Some(o) => {
+            let verb = match o.kind {
+                OrderKind::Attack => "attack",
+                OrderKind::Defend => "defend",
+            };
+            format!("{verb} {}", map.areas.get(o.area).map_or("?", |a| a.name.as_str()))
+        }
+        None => "no order".into(),
+    }
+}
+
+/// Logs what squads do after their team took the flag they were at (`ai flow:` lines): the
+/// time to their next order, the time to an order for another objective, and the time until
+/// most of the squad left the flag (no more than a third of its living members within the
+/// radius plus 40 m, not counting members left to guard it).
+pub fn track_flow(
+    time: Res<Time>,
+    map: Res<StrategicMap>,
+    strategy: Res<Strategy>,
+    snapshot: Res<SquadSnapshot>,
+    flags: Query<&FlagState>,
+    brains: Query<&BotBrain>,
+    seated: Query<(), With<game_shared::vehicle::Seated>>,
+    controls: Query<&crate::Controls>,
+    mut flow: Local<CaptureFlow>,
+) {
+    let now = time.elapsed_secs();
+    if flow.generation != map.generation {
+        *flow = CaptureFlow { generation: map.generation, ..default() };
+    }
+    let near = |info: &super::squad::SquadInfo, area: usize, skip: &[Entity]| {
+        let a = &map.areas[area];
+        let alive = || info.alive.iter().filter(|s| !skip.contains(&s.player));
+        let there = alive().filter(|s| s.position.xz().distance(a.position.xz()) < a.radius + 40.0).count();
+        (there, alive().count())
+    };
+    for (index, area) in map.areas.iter().enumerate() {
+        let Some(state) = area
+            .control_point
+            .and_then(|i| map.control_points.get(i as usize).copied().flatten())
+            .and_then(|e| flags.get(e).ok())
+        else {
+            continue;
+        };
+        let previous = flow.owners.insert(index, state.owner);
+        if previous.is_none_or(|p| p == state.owner) || team_index(state.owner).is_none() {
+            continue;
+        }
+        let team = state.owner;
+        let mut there = Vec::new();
+        for (&(squad_team, squad), info) in &snapshot.squads {
+            if squad_team != team || !info.leader_is_bot {
+                continue;
+            }
+            let (at, alive) = near(info, index, &[]);
+            let before = flow.orders.get(&(team, squad)).copied();
+            let ordered = before.is_some_and(|(_, area)| area == index);
+            if at == 0 || !(ordered || at * 2 >= alive) {
+                continue;
+            }
+            let was = match before {
+                Some((OrderKind::Attack, a)) => format!("attack {}", map.areas.get(a).map_or("?", |a| a.name.as_str())),
+                Some((OrderKind::Defend, a)) => format!("defend {}", map.areas.get(a).map_or("?", |a| a.name.as_str())),
+                None => "no order".into(),
+            };
+            there.push(format!("{} ({at} of {alive}, {was})", squad_name(squad)));
+            flow.watches.push(FlowWatch {
+                team,
+                squad,
+                area: index,
+                since: now,
+                first: None,
+                away: None,
+                left: None,
+                probed: false,
+            });
+        }
+        info!(
+            "ai flow: team {} took {}; squads there: {}",
+            team_index(team).unwrap() + 1,
+            area.name,
+            if there.is_empty() { "none".into() } else { there.join(", ") }
+        );
+    }
+    flow.watches.retain_mut(|watch| {
+        let age = now - watch.since;
+        let order = strategy.orders.get(&(watch.team, watch.squad));
+        let info = snapshot.squads.get(&(watch.team, watch.squad));
+        let guards = strategy
+            .guards
+            .get(&(watch.team, watch.squad))
+            .filter(|g| g.area == watch.area)
+            .map_or(&[][..], |g| g.members.as_slice());
+        let (at, alive) = info.map_or((0, 0), |info| near(info, watch.area, guards));
+        // The order it had at the capture counts as the old one while it stays.
+        let changed = |o: Option<&super::strategy::SquadOrder>| match o {
+            Some(o) => !(o.area == watch.area && o.kind == OrderKind::Attack),
+            None => true,
+        };
+        let who = || {
+            format!(
+                "team {} {} ({} taken {age:.1} s ago)",
+                team_index(watch.team).unwrap() + 1,
+                squad_name(watch.squad),
+                map.areas[watch.area].name
+            )
+        };
+        if watch.first.is_none() && changed(order) {
+            watch.first = Some((age, describe_order(&map, order)));
+        }
+        if watch.away.is_none() && order.is_some_and(|o| o.area != watch.area) {
+            info!("ai flow: {}: new order {}", who(), describe_order(&map, order));
+            watch.away = Some((age, describe_order(&map, order)));
+        }
+        if watch.left.is_none() && alive > 0 && at * 3 <= alive {
+            info!("ai flow: {}: squad moved off ({at} of {alive} still there)", who());
+            watch.left = Some(age);
+        }
+        // Still there a while after an order elsewhere: what keeps the squad?
+        if !watch.probed
+            && watch.left.is_none()
+            && let Some((t, _)) = &watch.away
+            && age > t + 15.0
+            && let Some(info) = info
+        {
+            watch.probed = true;
+            let a = &map.areas[watch.area];
+            let describe = |s: &super::squad::SoldierInfo| {
+                let riding = controls.get(s.player).is_ok_and(|c| seated.contains(c.0));
+                format!(
+                    "{} {:.0} m{}",
+                    brains.get(s.player).map_or("human", |b| b.doing()),
+                    s.position.xz().distance(a.position.xz()),
+                    if riding { " seated" } else { "" }
+                )
+            };
+            let leader = info.leader_soldier.as_ref().map_or("leader down".to_string(), |l| format!("leader {}", describe(l)));
+            let members: Vec<String> = info
+                .alive
+                .iter()
+                .filter(|s| Some(s.player) != info.leader)
+                .map(|s| describe(s))
+                .collect();
+            info!("ai flow: {}: still there 15 s after its new order: {leader}; members {}", who(), members.join(", "));
+        }
+        let done = watch.away.is_some() && watch.left.is_some();
+        if done || age > FLOW_WATCH || info.is_none() {
+            let time = |t: &Option<(f32, String)>| match t {
+                Some((s, what)) => format!("{what} after {s:.1} s"),
+                None => format!("none in {age:.0} s"),
+            };
+            // What those still there are doing.
+            let doing: Vec<&str> = info
+                .map(|info| {
+                    let a = &map.areas[watch.area];
+                    info.alive
+                        .iter()
+                        .filter(|s| s.position.xz().distance(a.position.xz()) < a.radius + 40.0)
+                        .filter_map(|s| brains.get(s.player).ok().map(|b| b.doing()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            info!(
+                "ai flow: team {} {} after taking {}: next order {}, away {}, left {} ({at} of {alive} there, now {}{})",
+                team_index(watch.team).unwrap() + 1,
+                squad_name(watch.squad),
+                map.areas[watch.area].name,
+                time(&watch.first),
+                time(&watch.away),
+                watch.left.map_or(format!("no, after {age:.0} s"), |s| format!("after {s:.1} s")),
+                describe_order(&map, order),
+                if doing.is_empty() { String::new() } else { format!("; doing: {}", doing.join(", ")) },
+            );
+            return false;
+        }
+        true
+    });
+    flow.orders = strategy.orders.iter().map(|(key, o)| (*key, (o.kind, o.area))).collect();
 }

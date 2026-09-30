@@ -3,6 +3,11 @@
 //! opaque tube around an alpha-blended lens with the reticle), the others their sights up
 //! close with a blurred rear sight. It hangs on bone `mesh1` in the zoom pose and is built
 //! for the unzoomed view model field of view, while the world camera narrows its own.
+//!
+//! Red dot sights are not in the model: BF2 draws the HUD of the weapon's alternative GUI
+//! index while zoomed (`WeaponDesc::zoom.sight`, the M4's, SCAR's, P90's and AK-74U's
+//! `AimPoint.tga` dot in the middle of the screen), which [`show_sight`] puts on the screen
+//! over the zoom model. Being HUD, it is as bright at night as by day.
 
 use bevy::{
     animation::RepeatAnimation,
@@ -17,7 +22,10 @@ use game_shared::{
     weapons::{Armory, Inventory, Loadout},
 };
 
-use super::viewmodel::VIEW_MODEL_LAYER;
+use super::{
+    materials::{Bf2Layers, Bf2Materials},
+    viewmodel::VIEW_MODEL_LAYER,
+};
 use crate::{
     camera::ThirdPerson,
     combat::{CombatFeedback, apply_zoom},
@@ -31,7 +39,7 @@ impl Plugin for ScopePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Zoom>().add_systems(
             Update,
-            (update_zoom.before(apply_zoom), spawn_zoom_model, show_zoom_model).chain(),
+            (update_zoom.before(apply_zoom), spawn_zoom_model, show_zoom_model, show_sight).chain(),
         );
     }
 }
@@ -123,6 +131,24 @@ fn update_zoom(
         && (zoom.scoped || !moving);
 }
 
+/// A zoom model material showing a lit reticle: holographic and red dot sights modelled in
+/// the zoom model (AIX 2's EOTech on the Magpul, `sig552_eotech_c`), by their colour map's
+/// name. Drawn unlit, its colour shows as it is at night as by day (a scope's black
+/// crosshair stays black). As emissive light the tone mapping washed the red out to white.
+fn is_reticle(material: &super::materials::Bf2Material) -> bool {
+    material
+        .base
+        .base_color_texture
+        .as_ref()
+        .and_then(|texture| texture.path())
+        .is_some_and(|path| {
+            let path = path.path().to_string_lossy().to_ascii_lowercase();
+            ["eotech", "aimpoint", "reddot", "red_dot", "holo", "reticle"]
+                .iter()
+                .any(|name| path.contains(name))
+        })
+}
+
 /// The zoom model of the weapon in hand, on the bone of weapon part 0.
 #[derive(Default)]
 struct ZoomModel {
@@ -140,7 +166,7 @@ fn spawn_zoom_model(
     asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: Bf2Materials,
     soldier: Query<(&Loadout, &Inventory), With<LocalSoldier>>,
     weapon_parts: Query<(&WeaponPart, &ChildOf)>,
     zoom_parts: Query<(), With<ZoomPart>>,
@@ -163,26 +189,34 @@ fn spawn_zoom_model(
     let (Some(bone), Some(gltf)) = (model.bone, model.gltf.as_ref().and_then(|h| gltfs.get(h))) else {
         return;
     };
-    for mesh in gltf.meshes.iter().filter_map(|m| gltf_meshes.get(m)) {
-        for primitive in &mesh.primitives {
-            let material: Handle<StandardMaterial> = primitive
-                .material
-                .as_ref()
-                .and_then(|m| m.path())
-                .and_then(|path| {
-                    let label = format!("{}/std", path.label()?);
-                    Some(asset_server.load(path.clone().with_label(label)))
-                })
-                .unwrap_or_default();
-            // BF2 only adds gloss where the color map's alpha asks for it; Bevy's Fresnel
-            // would turn the black scope tube, seen at grazing angles, grey.
-            let material = match materials.get(&material).cloned() {
-                Some(original) => materials.add(StandardMaterial {
-                    reflectance: 0.0,
-                    ..original
-                }),
-                None => material,
-            };
+    let primitives: Vec<_> = gltf
+        .meshes
+        .iter()
+        .filter_map(|m| gltf_meshes.get(m))
+        .flat_map(|mesh| &mesh.primitives)
+        .collect();
+    // Wait until the glTF's materials are ready.
+    let Some(part_materials) = primitives
+        .iter()
+        .map(|primitive| materials.for_primitive(primitive))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    for (primitive, material) in primitives.into_iter().zip(part_materials) {
+        {
+            // In front of the world like the rest of the view model. Matte: the scope tubes'
+            // colour maps are black with full gloss in their alpha, and a highlight or
+            // Fresnel would turn the tube, seen at grazing angles, grey.
+            let material = materials.duplicate_with(&material, |m| {
+                Bf2Layers::make_view_model(m);
+                m.extension.flags &= !(Bf2Layers::GLOSS_FROM_BASE | Bf2Layers::GLOSS_FROM_NORMAL | Bf2Layers::ENV_MAP);
+                m.extension.gloss = 0.0;
+                m.base.reflectance = 0.0;
+                if is_reticle(m) {
+                    m.base.unlit = true;
+                }
+            });
             let part = commands
                 .spawn((
                     ZoomPart,
@@ -215,4 +249,74 @@ fn show_zoom_model(
     for mut visibility in &mut zoom_parts {
         visibility.set_if_neq(scope);
     }
+}
+
+/// The zoomed weapon's HUD sight on the screen ([`WeaponDesc::zoom`]`.sight`).
+#[derive(Default)]
+struct Sight {
+    /// What is drawn: weapon and window size.
+    shown: Option<(String, UVec2)>,
+    root: Option<Entity>,
+}
+
+/// Shows the weapon's HUD sight (its red dot) once the zoom has come in: from the zoom delay,
+/// when the zoom model replaces the weapon.
+fn show_sight(
+    mut commands: Commands,
+    mut sight: Local<Sight>,
+    zoom: Res<Zoom>,
+    armory: Res<Armory>,
+    third_person: Res<ThirdPerson>,
+    asset_server: Res<AssetServer>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    soldier: Query<(&Loadout, &Inventory), (With<LocalSoldier>, Without<game_shared::vehicle::Seated>)>,
+) {
+    let weapon = active_weapon(&armory, soldier.single().ok())
+        .filter(|w| !w.zoom.sight.is_empty() && !third_person.0 && zoom.held > 0.0 && zoom.held >= w.zoom.delay);
+    let size = UVec2::new(window.width() as u32, window.height() as u32);
+    let key = weapon.map(|w| (w.name.clone(), size));
+    if key == sight.shown {
+        return;
+    }
+    sight.shown = key;
+    if let Some(root) = sight.root.take() {
+        commands.entity(root).despawn();
+    }
+    let Some(weapon) = weapon else {
+        return;
+    };
+    info!("zoom sight of {}: {} pictures", weapon.name, weapon.zoom.sight.len());
+    // BF2's HUD is laid out on an 800x600 screen: scaled with the height, centred.
+    let scale = window.height() / 600.0;
+    let left = (window.width() - 800.0 * scale) * 0.5;
+    let root = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            GlobalZIndex(-1),
+            Pickable::IGNORE,
+        ))
+        .id();
+    for picture in &weapon.zoom.sight {
+        let [x, y, w, h] = picture.rect;
+        let [r, g, b, a] = picture.color;
+        commands.spawn((
+            ImageNode::new(asset_server.load(format!("imported://{}", picture.texture))).with_color(Color::srgba(r, g, b, a)),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(left + x * scale),
+                top: px(y * scale),
+                width: px(w * scale),
+                height: px(h * scale),
+                ..default()
+            },
+            Pickable::IGNORE,
+            ChildOf(root),
+        ));
+    }
+    sight.root = Some(root);
 }

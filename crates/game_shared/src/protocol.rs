@@ -43,6 +43,7 @@ impl Plugin for ProtocolPlugin {
             .replicate::<crate::projectile::SmokeCloud>()
             .replicate::<crate::hitzones::ServerClock>()
             .replicate::<crate::rope::Rope>()
+            .replicate::<crate::soldier::MovementRules>()
             .replicate::<Vehicle>()
             .replicate::<VehicleMotion>()
             .replicate::<VehicleState>()

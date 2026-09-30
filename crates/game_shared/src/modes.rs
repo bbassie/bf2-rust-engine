@@ -123,9 +123,36 @@ pub struct Sector(pub u8);
 pub struct Locked;
 
 /// Staged modes: players of this team (the point's owner) can't spawn at the point right now,
-/// as enemies are at it. Replicated.
+/// for this reason. Replicated.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SpawnBlocked(pub Team);
+pub struct SpawnBlocked(pub Team, pub SpawnBlockReason);
+
+impl SpawnBlocked {
+    /// Whether `team` can't spawn at the point.
+    pub fn blocks(&self, team: Team) -> bool {
+        self.0 == team
+    }
+
+    /// Closed while the front is where it is (not a spawn option at all), rather than for as
+    /// long as enemies are at it.
+    pub fn off_front(&self) -> bool {
+        self.1 == SpawnBlockReason::Front
+    }
+}
+
+/// Why a point is closed for spawning.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnBlockReason {
+    /// Enemies are at it.
+    Enemies,
+    /// Too far from the stage being fought over: the owner's spawns follow the front.
+    Front,
+}
+
+/// Whether players of `team` may spawn at a point held by `owner` and closed by `blocked`.
+pub fn can_spawn_at(owner: Team, blocked: Option<&SpawnBlocked>, team: Team) -> bool {
+    owner == team && blocked.is_none_or(|b| !b.blocks(team))
+}
 
 /// Server -> everyone: an objective changed.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug, MapEntities)]

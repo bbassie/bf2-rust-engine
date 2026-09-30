@@ -988,7 +988,7 @@ impl BotBrain {
         match self.activity {
             Activity::Objective if self.stranded > 0.0 => "stranded",
             Activity::Objective if self.overwatch.is_some() => "overwatch",
-            Activity::Objective if self.regroup > 0.0 => "waiting for squad",
+            Activity::Objective if self.regroup > 0.0 && self.goal.is_none() => "waiting for squad",
             Activity::Objective if self.goal.is_none() => "holding",
             Activity::Objective => "moving",
             Activity::Engage => "fighting",

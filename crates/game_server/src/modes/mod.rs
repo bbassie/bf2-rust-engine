@@ -272,8 +272,16 @@ fn start_round(
         },
     };
     (server_mode(kind).setup)(commands, &mut setup);
+    // Staged modes: spawns follow the front from the start.
+    let mut fronts = if kind.staged() { staged::front_setup(&setup) } else { Vec::new() }.into_iter();
     for point in setup.points {
         let mut entity = commands.spawn((point.point, point.flag, point.rules, Replicated));
+        if let Some((front, blocked)) = fronts.next() {
+            entity.insert(front);
+            if let Some(blocked) = blocked {
+                entity.insert(blocked);
+            }
+        }
         if let Some(sector) = point.sector {
             entity.insert(Sector(sector));
         }

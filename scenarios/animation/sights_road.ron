@@ -1,0 +1,39 @@
+// A zoom model over a road (AIX 2 Damocles' runway, UN P90): roads are transparent decals
+// sorted by their centre, and standing just past the runway's centre, looking away from it,
+// that centre is nearer than the view model. The runway must not draw over the P90's blurred
+// scope frame (it did: the user's "terrain over the weapon" screenshot).
+// client --scenario scenarios/animation/sights_road.ron --out target/scenarios/sights/road
+(
+    level: "aix2_aix_damocles",
+    bots: 0,
+    team: 2,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ExpectLog("spawned as", 30.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Click("kit:0"),
+        ExpectLog("spawned as un_specops", 30.0),
+        Wait(0.5),
+        Teleport((-593.5, 58.0, 471.2), 180.0, 0.0),
+        Weapon(7),
+        Wait(3.0),
+        Screenshot("runway_hip"),
+        Hold([Aim]),
+        Wait(0.8),
+        Screenshot("runway_aim"),
+        Look(180.0, -8.0),
+        Wait(0.3),
+        Screenshot("runway_aim_down"),
+        Release([Aim]),
+        Key(KeyZ),
+        Wait(2.0),
+        Look(180.0, 2.0),
+        Hold([Aim]),
+        Wait(0.8),
+        Screenshot("runway_prone_aim"),
+        Release([Aim]),
+        Quit,
+    ],
+)

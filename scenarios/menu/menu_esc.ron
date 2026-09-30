@@ -19,7 +19,7 @@
         Wait(0.3),
         Screenshot("resumed"),
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Screenshot("dead"),
         Key(Escape),
         Wait(0.3),

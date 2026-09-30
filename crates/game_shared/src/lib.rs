@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 pub mod arsenal;
+pub mod cache;
 pub mod chat;
 pub mod commander;
 pub mod config;
@@ -48,7 +49,7 @@ pub const TICK_HZ: f64 = 60.0;
 pub const DEFAULT_PORT: u16 = 16567;
 
 /// Bump whenever the wire protocol changes in a way the protocol hash can't detect.
-pub const PROTOCOL_ID: u64 = 0x4246_325f_0003; // "BF2_" + version (3: the legs' stride and reload ticks)
+pub const PROTOCOL_ID: u64 = 0x4246_325f_0005; // "BF2_" + version (5: mantling, grappling ropes' length and links)
 
 /// Adds everything both client and server need. The messaging backend (renet) is added by
 /// the binaries so a future Steam backend can be swapped in.

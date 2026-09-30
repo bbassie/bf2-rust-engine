@@ -9,9 +9,9 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:0"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         Teleport((-184.0, 157.0, -85.0), 180.0, -8.0),
         Weapon(1),
         Wait(1.2),
@@ -43,7 +43,7 @@
         Release([Fire]),
         Wait(1.0),
         Click("kit:0"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         // C4: two charges on the ground ahead, then the detonator from 15 m back.
         Teleport((-184.0, 157.0, -85.0), 180.0, -35.0),
         Weapon(3),

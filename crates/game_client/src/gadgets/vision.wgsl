@@ -29,7 +29,7 @@ const PI: f32 = 3.14159265;
 const INTERFERENCE: f32 = 0.05;
 const TV_AMBIENT: f32 = 0.15;
 // Night vision amplifies light: brightness b becomes 1 - exp(-b * GAIN).
-const NV_GAIN: f32 = 4.0;
+const NV_GAIN: f32 = 7.0;
 
 fn hash(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);

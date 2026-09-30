@@ -21,7 +21,7 @@ use bevy::{
 };
 use game_shared::{
     conquest::{ControlPoint, DeployRequest, Deployment, FlagState, RoundState, Tickets},
-    modes::{Charge, ChargeState, ModeState, SpawnBlocked},
+    modes::{Charge, ChargeState, ModeState, SpawnBlocked, can_spawn_at},
     protocol::Player,
     squad::{MAX_MEMBERS, SquadMember, SquadRequest, squad_name},
     level::LoadedLevel,
@@ -781,7 +781,7 @@ fn pick_control_point(
     for (interaction, marker) in &markers {
         let ours = flags
             .get(marker.entity)
-            .is_ok_and(|(f, blocked)| f.owner == *team && blocked.is_none_or(|b| b.0 != *team));
+            .is_ok_and(|(f, blocked)| can_spawn_at(f.owner, blocked, *team));
         if *interaction == Interaction::Pressed && ours {
             let choice = screen.choice(server);
             choice.1 = Some(marker.index);
@@ -980,11 +980,12 @@ fn update_markers(
     let team = local_team(&players);
     let tactical = settings.map_style == MapStyle::Tactical;
     for (shape, material, children, mut visibility) in &mut point_shapes {
-        visibility.set_if_neq(if tactical { Visibility::Inherited } else { Visibility::Hidden });
-        if !tactical || !screen.open {
+        let Ok((cp, state, blocked)) = flags.get(shape.0) else { continue };
+        let shown = tactical && !hidden_point(cp, state, blocked);
+        visibility.set_if_neq(if shown { Visibility::Inherited } else { Visibility::Hidden });
+        if !shown || !screen.open {
             continue;
         }
-        let Ok((cp, state, _)) = flags.get(shape.0) else { continue };
         let look = objective_look(state, cp.uncapturable, team, letters.get(shape.0));
         update_shape(&mut shapes, material, ShapeParams::new(&look, SHAPE, 0.0));
         for child in children {
@@ -1023,11 +1024,10 @@ fn update_markers(
         let Ok((cp, state, blocked)) = flags.get(marker.entity) else {
             continue;
         };
-        // Rush's points nobody spawns at right now aren't worth showing.
-        let hidden = cp.uncapturable && state.owner == Team::Spectator;
+        let hidden = hidden_point(cp, state, blocked);
         shown.set_if_neq(if hidden { Visibility::Hidden } else { Visibility::Inherited });
-        // Ours, unless enemies are at it (staged modes).
-        let closed = blocked.is_some_and(|b| b.0 == team);
+        // Ours, unless enemies are at it or it's away from the front (staged modes).
+        let closed = blocked.is_some_and(|b| b.blocks(team));
         let ours = state.owner == team && !closed;
         let mut color = team_color(state.owner, team);
         if closed {
@@ -1048,6 +1048,12 @@ fn update_markers(
         background.0 = color;
         *border = BorderColor::all(if selected { TEXT } else { Color::srgba(0.0, 0.0, 0.0, 0.6) });
     }
+}
+
+/// Rush's points nobody spawns at right now aren't worth showing, nor the bases a side holds
+/// away from the front (staged modes: spawns follow it).
+fn hidden_point(cp: &ControlPoint, state: &FlagState, blocked: Option<&SpawnBlocked>) -> bool {
+    cp.uncapturable && (state.owner == Team::Spectator || blocked.is_some_and(|b| b.off_front()))
 }
 
 /// Rush's charges in their state's colour; those of stages still to come stay hidden.
@@ -1091,15 +1097,30 @@ fn update_status(
     control_points: Query<(&ControlPoint, &FlagState, Option<&SpawnBlocked>)>,
     rounds: Query<(&RoundState, Option<&ModeState>, Option<&Tickets>)>,
     mut text: Single<(&mut Text, &mut TextColor), With<StatusText>>,
+    mut logged: Local<Option<(Team, Option<String>, Vec<u8>)>>,
 ) {
     let Ok((team, deployment)) = players.single() else {
         return;
     };
-    let held: Vec<&ControlPoint> = control_points
+    let mut held: Vec<&ControlPoint> = control_points
         .iter()
-        .filter(|(_, state, blocked)| state.owner == *team && blocked.is_none_or(|b| b.0 != *team))
+        .filter(|(_, state, blocked)| can_spawn_at(state.owner, *blocked, *team))
         .map(|(cp, ..)| cp)
         .collect();
+    held.sort_by_key(|cp| cp.index);
+    // The log (scenarios check it): the spawns offered, whenever they change.
+    let options: Vec<u8> = held.iter().map(|cp| cp.index).collect();
+    let stage = rounds.single().ok().and_then(|(_, mode, _)| mode.filter(|m| m.staged()).map(|m| m.stage_label()));
+    let key = (*team, stage, options);
+    if logged.as_ref() != Some(&key) {
+        let names: Vec<&str> = held.iter().map(|cp| cp.name.as_str()).collect();
+        info!(
+            "deploy: spawn options for {team:?}{}: {}",
+            key.1.as_ref().map_or(String::new(), |s| format!(" ({s})")),
+            if names.is_empty() { "none".to_string() } else { names.join(", ") }
+        );
+        *logged = Some(key);
+    }
     let at = deployment
         .control_point
         .and_then(|i| held.iter().find(|cp| cp.index == i))

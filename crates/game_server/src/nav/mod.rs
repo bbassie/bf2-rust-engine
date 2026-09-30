@@ -7,8 +7,9 @@
 //! Cells link to the neighbours a soldier can walk, step or jump to. Paths are found with A*
 //! on background tasks and shortened by walking straight lines over the grid (see
 //! [`NavGrid::find_path`]). The grid covers the played layout's control points and spawns.
-//! Grids are cached next to the level (`navgrid_<mode>_<size>.bin`), keyed by a hash of
-//! the collision geometry, the movement limits and the play area.
+//! Grids are cached ([`game_shared::cache`], `nav/<level>/infantry-<key>.bin`), keyed by a
+//! hash of the collision geometry, the movement limits and the play area, so layouts with the
+//! same inputs share one.
 //!
 //! Levels with combat areas (BF2 `CombatArea`) confine their grids to the area that bounds
 //! each kind of traveller, plus a margin ([`area`]): columns outside get no cells and the
@@ -45,6 +46,7 @@ use bytemuck::{Pod, Zeroable};
 use game_data::GameModeDesc;
 use area::{COMBAT_AREA_MARGIN, KEEP_RADIUS, LADDER_REACH, PlayArea, Traveller};
 use game_shared::{
+    cache::Cache,
     ladder::{Ladder, LadderPart},
     level::{LevelEntity, LoadedLevel, Terrain},
     physics::GameLayer,
@@ -689,6 +691,7 @@ fn start_build(
     >,
     ladder_parts: Query<(&Collider, &Transform), (With<LadderPart>, Without<ColliderDisabled>)>,
     paths: Option<Res<game_shared::config::GamePaths>>,
+    cache: Option<Res<Cache>>,
 ) {
     commands.remove_resource::<Navigation>();
     commands.remove_resource::<vehicle::VehicleNavigation>();
@@ -712,13 +715,9 @@ fn start_build(
         &strategic,
     );
     let patches = detail_patches(&level, &geometry, paths.as_deref());
-    start_vehicle_build(&mut commands, &level, layout, &geometry, vehicle_meshes, paths.as_deref());
-    let cache_path = level.dir.as_ref().map(|dir| {
-        dir.join(match layout {
-            Some(l) => format!("navgrid_{}_{}.bin", l.mode, l.size),
-            None => "navgrid.bin".into(),
-        })
-    });
+    // Imported levels only: the built-in test range builds in no time.
+    let cache = cache.filter(|_| level.dir.is_some()).map(|c| c.clone());
+    start_vehicle_build(&mut commands, &level, layout, &geometry, vehicle_meshes, paths.as_deref(), cache.clone());
     let name = level.desc.name.clone();
     let spawns = SpawnCheck {
         spawns: layout.map_or_else(Vec::new, |l| {
@@ -732,7 +731,7 @@ fn start_build(
         }),
     };
     let task = AsyncComputeTaskPool::get()
-        .spawn(async move { load_or_build(&geometry, &patches, params, cache_path.as_deref(), &name) });
+        .spawn(async move { load_or_build(&geometry, &patches, params, cache.as_ref(), &name) });
     commands.insert_resource(NavBuild { task, spawns });
 }
 
@@ -741,17 +740,16 @@ fn load_or_build(
     geometry: &build::LevelGeometry,
     patches: &[build::Rect],
     params: NavParams,
-    cache_path: Option<&std::path::Path>,
+    cache: Option<&Cache>,
     name: &str,
 ) -> NavGrid {
     let started = Instant::now();
     let key = build::geometry_key(geometry, &params) ^ build::words_key(&patch::hash_rects(patches));
-    if let Some(path) = cache_path
-        && let Some(grid) = cache::load(path, key, params)
+    if let Some(cache) = cache
+        && let Some(grid) = cache::load(cache, name, "infantry", key, params)
     {
         info!(
-            "nav: loaded {} ({} cells, {} in {} detail patches, {} ladders, {:.1} MB) in {:.2} s",
-            path.display(),
+            "nav: loaded the cached grid of `{name}` ({key:016x}: {} cells, {} in {} detail patches, {} ladders, {:.1} MB) in {:.2} s",
             grid.cell_count(),
             grid.patch_cell_count(),
             grid.patches().len(),
@@ -773,10 +771,10 @@ fn load_or_build(
         grid.ladders().len(),
         grid.memory_bytes() as f32 / 1e6
     );
-    if let Some(path) = cache_path
-        && let Err(err) = cache::save(path, key, &grid)
+    if let Some(cache) = cache
+        && let Err(err) = cache::save(cache, name, "infantry", key, &grid)
     {
-        warn!("nav: can't write {}: {err:#}", path.display());
+        warn!("nav: can't cache the grid of `{name}` in {}: {err:#}", cache.root().display());
     }
     grid
 }
@@ -846,17 +844,13 @@ fn start_vehicle_build(
     infantry: &build::LevelGeometry,
     vehicle_meshes: Vec<build::MeshInstance>,
     paths: Option<&game_shared::config::GamePaths>,
+    cache: Option<Cache>,
 ) {
     let (geometry, areas) = vehicle_geometry(infantry, vehicle_meshes, layout);
     let water = level.desc.water.as_ref().map(|w| w.height);
     let roads_desc = level.desc.roads.clone();
     let paths = paths.cloned();
-    let cache_path = level.dir.as_ref().map(|dir| {
-        dir.join(match layout {
-            Some(l) => format!("navgrid_vehicle_{}_{}.bin", l.mode, l.size),
-            None => "navgrid_vehicle.bin".into(),
-        })
-    });
+    let name = level.desc.name.clone();
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let started = Instant::now();
         let roads = paths.as_ref().map_or_else(Vec::new, |p| vehicle::road_triangles(p, &roads_desc));
@@ -868,14 +862,14 @@ fn start_vehicle_build(
         };
         let params = vehicle::land_params();
         let key = build::geometry_key(&input.geometry, &params);
-        let cached = cache_path.as_ref().and_then(|path| cache::load(path, key, params));
+        let cached = cache.as_ref().and_then(|c| cache::load(c, &name, "vehicle", key, params));
         let was_cached = cached.is_some();
         let grid = vehicle::build_all(&input, cached);
         if !was_cached
-            && let Some(path) = &cache_path
-            && let Err(err) = cache::save(path, key, &grid.land)
+            && let Some(cache) = &cache
+            && let Err(err) = cache::save(cache, &name, "vehicle", key, &grid.land)
         {
-            warn!("nav: can't write {}: {err:#}", path.display());
+            warn!("nav: can't cache the vehicle grid of `{name}` in {}: {err:#}", cache.root().display());
         }
         info!(
             "nav: vehicle grids in {:.2} s ({}): land {}x{} ({} cells, {} road columns from {} road triangles),              water {}, air {}",
@@ -1103,10 +1097,7 @@ mod tests {
         let down = grid.find_path(top, ground).unwrap();
         assert!(down.complete && down.waypoints.iter().any(|w| w.ladder.is_some_and(|s| !s.up)), "{down:?}");
 
-        let path = std::env::temp_dir().join(format!("navgrid_ladder_{}.bin", std::process::id()));
-        super::cache::save(&path, 7, &grid).unwrap();
-        let loaded = super::cache::load(&path, 7, grid.params).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let loaded = super::cache::decode(&super::cache::encode(&grid), grid.params).unwrap();
         assert_eq!(loaded.ladders(), grid.ladders());
     }
 
@@ -1203,11 +1194,13 @@ mod tests {
     #[test]
     fn caches_grids() {
         let grid = grid(wall(Some((4.1, 5.1))));
-        let path = std::env::temp_dir().join(format!("navgrid_test_{}.bin", std::process::id()));
-        super::cache::save(&path, 42, &grid).unwrap();
-        assert!(super::cache::load(&path, 43, grid.params).is_none());
-        let loaded = super::cache::load(&path, 42, grid.params).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let root = std::env::temp_dir().join(format!("navgrid_test_{}", std::process::id()));
+        let cache = game_shared::cache::Cache::new(&root, game_shared::cache::DEFAULT_LIMIT);
+        super::cache::save(&cache, "x", "infantry", 42, &grid).unwrap();
+        assert!(super::cache::load(&cache, "x", "infantry", 43, grid.params).is_none());
+        assert!(super::cache::load(&cache, "x", "vehicle", 42, grid.params).is_none());
+        let loaded = super::cache::load(&cache, "x", "infantry", 42, grid.params).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             (loaded.origin, loaded.width, loaded.depth),
             (grid.origin, grid.width, grid.depth)

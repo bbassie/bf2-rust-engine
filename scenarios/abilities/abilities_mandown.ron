@@ -19,7 +19,7 @@
         Key(KeyX),
         Wait(1.0),
         Screenshot("gave_up"),
-        Wait(9.0),
+        WaitSpawned(15.0),
         Vitals("respawned"),
         Down,
         Wait(16.0),

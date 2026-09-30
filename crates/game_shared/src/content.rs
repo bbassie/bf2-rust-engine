@@ -620,14 +620,14 @@ pub struct LocalFile {
     pub size: u64,
 }
 
-/// Whether a file (path relative to a layer root) is shared: a valid data path, and not a
-/// server-side cache (bots' navigation grids).
+/// Whether a file (path relative to a layer root) is shared: a valid data path, not hidden.
+/// (Generated caches live outside the content folders, see [`crate::cache`].)
 pub fn is_shared(path: &str) -> bool {
     if validate_path(path).is_err() {
         return false;
     }
     let name = path.rsplit('/').next().unwrap_or(path);
-    !(name.starts_with('.') || (name.starts_with("navgrid") && name.ends_with(".bin")))
+    !name.starts_with('.')
 }
 
 /// Every shared file under `root`, sorted by path. Symbolic links are skipped, so a layer
@@ -807,7 +807,7 @@ mod tests {
             assert!(validate_path(bad).is_err(), "{bad:?} accepted");
         }
         assert!(is_shared("levels/x/level.ron"));
-        assert!(!is_shared("levels/x/navgrid_gpm_cq_16.bin"));
+        assert!(!is_shared("levels/x/.hidden"));
         assert!(!is_shared("README.txt"));
     }
 
@@ -891,7 +891,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("mod/levels/x")).unwrap();
         let a = dir.join("mod/levels/x/level.ron");
         std::fs::write(&a, b"(name: \"x\")").unwrap();
-        std::fs::write(dir.join("mod/levels/x/navgrid_gpm_cq_16.bin"), b"cache").unwrap();
+        std::fs::write(dir.join("mod/levels/x/.hidden"), b"hidden").unwrap();
         std::fs::write(dir.join("mod/notes.txt"), b"not shared").unwrap();
         let found = walk_layer(&dir.join("mod"));
         assert_eq!(found.len(), 1);

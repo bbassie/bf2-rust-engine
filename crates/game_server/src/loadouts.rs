@@ -11,6 +11,7 @@ use game_shared::{
     conquest::team_index,
     join::AccountBadge,
     protocol::{MatchInfo, Player, Team},
+    soldier::MovementRules,
     weapons::{Armory, Loadout, WeaponState},
 };
 
@@ -37,15 +38,20 @@ impl Plugin for LoadoutsPlugin {
 /// Loadout requests from one player: a handful when joining or changing picks.
 const LOADOUT_RATE: Rate = Rate { burst: 8.0, per_second: 1.0 };
 
-/// The server's rules on the match entity (replicated), kept in step with the settings.
+/// The server's rules on the match entity (replicated), kept in step with the settings:
+/// loadouts, and movement (mantling), which clients predict with.
 fn publish_rules(
     mut commands: Commands,
     settings: Res<ServerSettings>,
-    matches: Query<(Entity, Option<&LoadoutRules>), With<MatchInfo>>,
+    matches: Query<(Entity, Option<&LoadoutRules>, Option<&MovementRules>), With<MatchInfo>>,
 ) {
-    for (entity, rules) in &matches {
+    let movement = MovementRules { mantle: settings.mantle };
+    for (entity, rules, moves) in &matches {
         if rules != Some(&settings.loadouts) {
             commands.entity(entity).insert(settings.loadouts.clone());
+        }
+        if moves != Some(&movement) {
+            commands.entity(entity).insert(movement);
         }
     }
 }

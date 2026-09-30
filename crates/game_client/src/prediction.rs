@@ -83,7 +83,7 @@ pub struct SoldierRender {
     pub stance: Stance,
     pub velocity: Vec3,
     pub grounded: bool,
-    /// On a ladder, or on a grappling rope if `on_rope`.
+    /// On a ladder, on a grappling rope if `on_rope`, or climbing onto a ledge.
     pub climbing: bool,
     pub on_rope: bool,
     /// Hanging from a zipline.
@@ -150,7 +150,7 @@ fn add_render_state(add: On<Add, Soldier>, mut commands: Commands, motions: Quer
             stance: motion.stance,
             velocity: motion.velocity,
             grounded: motion.grounded,
-            climbing: motion.climbing,
+            climbing: motion.climbing || motion.mantling(),
             on_rope: motion.on_rope,
             riding: motion.riding,
             parachute: motion.parachute,
@@ -323,7 +323,8 @@ fn update_render_state(
             stance: to.stance,
             velocity: to.velocity,
             grounded: to.grounded,
-            climbing: to.climbing,
+            // Climbing onto a ledge looks like climbing.
+            climbing: to.climbing || to.mantling(),
             on_rope: to.on_rope,
             riding: to.riding,
             parachute: to.parachute,

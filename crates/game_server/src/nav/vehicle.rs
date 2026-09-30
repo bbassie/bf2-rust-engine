@@ -714,11 +714,21 @@ impl VehicleNavGrid {
         self.land.locate(p, 1.5, None).is_some_and(|c| self.factor(spec, &[], c).is_some())
     }
 
-    /// The land cell under a vehicle whose hull origin is at `p`.
+    /// The land cell under a vehicle whose hull origin is at `p`: near its wheels first, then
+    /// (off the grid entirely, or a start cell the grid leaves out) widening the search, so a
+    /// vehicle just outside the driving grid's coverage (a road beyond the combat area, one
+    /// nudged off the edge) still finds somewhere on the grid to route from.
     fn locate_vehicle(&self, p: Vec3) -> Option<CellRef> {
         // The hull origin is somewhere above the ground.
         let feet = p - Vec3::Y * 1.0;
-        self.land.locate(feet, 3.0, None).or_else(|| self.land.locate(feet, 8.0, None))
+        [3.0, 8.0, 30.0, 80.0].into_iter().find_map(|radius| self.land.locate(feet, radius, None))
+    }
+
+    /// The nearest point of the land grid to `p`, regardless of what can drive there: where a
+    /// vehicle with no route yet should head to get itself onto the grid and its roads,
+    /// instead of creeping straight at a goal it can't reach directly.
+    pub fn nearest_point(&self, p: Vec3) -> Option<Vec3> {
+        self.locate_vehicle(p).map(|c| self.land.position(c))
     }
 
     /// Cell costs and connected areas for a kind of vehicle: cells it fits on, joined where
@@ -845,16 +855,20 @@ impl VehicleNavGrid {
         let obstacles = &obstacles[..];
         let start = self.locate_vehicle(from)?;
         let costs = self.class_costs(spec);
-        // The area it can drive around in: the start's, or (wedged somewhere it doesn't fit)
-        // the nearest one around it.
+        // The area it can drive around in: the start's, or (wedged somewhere it doesn't fit,
+        // or standing right at the edge of where its class can go) the nearest one around it,
+        // widening the search before giving up on it.
         let region = match costs.regions[start.index as usize] {
-            NO_REGION => self
-                .land
-                .cells_near(from.xz(), 6.0)
-                .filter(|c| costs.regions[c.index as usize] != NO_REGION)
-                .min_by(|a, b| {
-                    let d = |c: &CellRef| self.land.position(*c).distance_squared(from);
-                    d(a).total_cmp(&d(b))
+            NO_REGION => [6.0, 20.0, 60.0]
+                .into_iter()
+                .find_map(|radius| {
+                    self.land
+                        .cells_near(from.xz(), radius)
+                        .filter(|c| costs.regions[c.index as usize] != NO_REGION)
+                        .min_by(|a, b| {
+                            let d = |c: &CellRef| self.land.position(*c).distance_squared(from);
+                            d(a).total_cmp(&d(b))
+                        })
                 })
                 .map_or(NO_REGION, |c| costs.regions[c.index as usize]),
             region => region,
@@ -1299,7 +1313,56 @@ mod tests {
         assert!(sail.complete, "{sail:?}");
     }
 
-    /// Paths from the vehicle spawners to the flags of imported levels (their cached grids):
+    /// Like `level`, but the grid is cropped to `bounds` (world XZ), as a level's combat area
+    /// (plus margin) crops the driving grid to less than the full terrain.
+    fn level_bounded(bounds: (Vec2, Vec2)) -> VehicleNavGrid {
+        let resolution: u32 = 65;
+        let spacing = 2.0;
+        let origin = Vec3::new(-64.0, 0.0, -64.0);
+        let heights = vec![0.0; (resolution * resolution) as usize];
+        let terrain = Heightmap {
+            resolution,
+            spacing,
+            origin,
+            heights,
+        };
+        let geometry = VehicleGeometry {
+            geometry: LevelGeometry {
+                terrain: Some(Arc::new(terrain)),
+                bounds: Some(bounds),
+                ..default()
+            },
+            roads: Vec::new(),
+            water: None,
+            areas: default(),
+        };
+        build_all(&geometry, None)
+    }
+
+    #[test]
+    fn snaps_a_start_outside_the_grid_to_the_nearest_cell() {
+        // The driving grid is cropped to [-20, 20] on both axes (its combat area), as
+        // Karkand's southern road sits outside the driving grid's coverage. A jeep 10 m
+        // beyond the edge (further than a close-in few meters' search) still finds the grid
+        // once the start snap widens, and gets a route across it.
+        let nav = level_bounded((Vec2::splat(-20.0), Vec2::splat(20.0)));
+        let to = Vec3::new(-15.0, 0.0, 0.0);
+        // Sanity check: a start already on the grid finds a path at all.
+        assert!(nav.find_path(&JEEP, Vec3::new(0.0, 1.0, 0.0), to, 5.0, &[]).unwrap().complete);
+        let from = Vec3::new(30.0, 1.0, 0.0);
+        assert!(nav.nearest_point(from).is_some_and(|p| p.xz().distance(from.xz()) < 15.0), "{:?}", nav.nearest_point(from));
+        let path = nav.find_path(&JEEP, from, to, 5.0, &[]).expect("a path even starting outside the grid");
+        assert!(path.points.len() >= 2, "{path:?}");
+        assert!(path.points.last().unwrap().xz().distance(to.xz()) < 6.0, "{path:?}");
+        // Far enough out that even the widened search finds nothing: no route, and no grid
+        // point to fall back on either.
+        let far = Vec3::new(500.0, 1.0, 0.0);
+        assert!(nav.find_path(&JEEP, far, to, 5.0, &[]).is_none());
+        assert!(nav.nearest_point(far).is_none());
+    }
+
+    /// Paths from the vehicle spawners to the flags of imported levels (their most recently
+    /// used cached grids, see [`game_shared::cache`]):
     /// `cargo test -p game_server --lib vehicle_paths_on_levels -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -1314,8 +1377,9 @@ mod tests {
             let Some(layout) = desc.game_modes.iter().find(|l| l.mode == "gpm_cq" && l.size == 64) else {
                 continue;
             };
-            let Some(land) = super::super::cache::load_unchecked(&dir.join("navgrid_vehicle_gpm_cq_64.bin"), land_params())
-            else {
+            let cached = game_shared::cache::Cache::resolve(None, None)
+                .and_then(|cache| super::super::cache::load_newest(&cache, level, "vehicle", land_params()));
+            let Some(land) = cached else {
                 println!("{level}: no cached vehicle grid");
                 continue;
             };

@@ -1,0 +1,22 @@
+// Night vision on an AIX 2 night map (Dragon Valley Moon): AIX's kits carry no goggles, but the
+// level is dark enough (its sun under `gadgets::DARK_SUN`) for everyone to have night vision.
+// client --scenario scenarios/combat/gadgets_nv_moon.ron --out target/scenarios/gadgets/nv_moon
+(
+    level: "aix2_dragon_valley_moon",
+    bots: 0,
+    steps: [
+        WaitReady,
+        ExpectLog("spawned as", 30.0),
+        Wait(1.5),
+        Screenshot("nv_off"),
+        Key(KeyL),
+        ExpectLog("night vision on", 3.0),
+        Wait(0.6),
+        Screenshot("nv_on"),
+        Hold([Aim]),
+        Wait(0.8),
+        Screenshot("nv_on_aim"),
+        Release([Aim]),
+        Quit,
+    ],
+)

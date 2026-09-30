@@ -1,5 +1,5 @@
-//! What the eyes see through gadgets and after hits, as a post-process on the last camera
-//! (the view model's, so the weapon is part of the picture): night vision, tear gas, the gas
+//! What the eyes see through gadgets and after hits, as a post-process on the player camera
+//! (which draws the view model too, so the weapon is part of the picture): night vision, tear gas, the gas
 //! mask's lenses, a flashbang's white-out and afterimage, the blur of a nearby blast.
 //! See `vision.wgsl`; BF2's shaders are `PostProduction_*.fx` (`TVEffect_Gradient_Tex`,
 //! `WaveDistortion`, `Flashbang`, `Tinnitus`).

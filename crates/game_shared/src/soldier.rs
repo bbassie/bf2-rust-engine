@@ -39,7 +39,23 @@ impl Plugin for SoldierPlugin {
             .add_observer(add_soldier_physics)
             .add_observer(add_ladder_volume)
             .add_plugins(crate::rope::RopePlugin)
-            .add_systems(FixedPostUpdate, fit_hitboxes_to_stance);
+            .add_systems(FixedPostUpdate, fit_hitboxes_to_stance)
+            .add_systems(PreUpdate, apply_movement_rules);
+    }
+}
+
+/// Movement rules the server sets for everyone, replicated on the match entity so clients
+/// predict with the same ones (see [`SoldierTuning::mantle`]).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MovementRules {
+    pub mantle: bool,
+}
+
+fn apply_movement_rules(rules: Query<&MovementRules, Changed<MovementRules>>, mut tuning: ResMut<SoldierTuning>) {
+    for rules in &rules {
+        if tuning.mantle != rules.mantle {
+            tuning.mantle = rules.mantle;
+        }
     }
 }
 
@@ -134,6 +150,14 @@ pub struct SoldierMotion {
     /// [`crate::skeleton`]).
     #[serde(default)]
     pub stride: f32,
+    /// Seconds left of climbing onto a ledge (0: not): up to the height of `mantle_to`,
+    /// then over onto it (see [`MANTLE_REACH`]). Collisions are ignored meanwhile; the way
+    /// was checked when it started.
+    #[serde(default)]
+    pub mantle: f32,
+    /// Where the feet end up climbing onto a ledge.
+    #[serde(default)]
+    pub mantle_to: Vec3,
 }
 
 impl Default for SoldierMotion {
@@ -161,6 +185,8 @@ impl Default for SoldierMotion {
             parachute: false,
             swimming: false,
             stride: 0.0,
+            mantle: 0.0,
+            mantle_to: Vec3::ZERO,
         }
     }
 }
@@ -180,7 +206,17 @@ impl SoldierMotion {
     pub fn can_fire(&self) -> bool {
         // Under a parachute both hands are on the risers; swimming, the weapon is slung and
         // both arms stroke (BF2 puts every weapon away in the water).
-        !self.climbing && !self.riding && !self.parachute && !self.swimming && self.fire_lock <= 0.0
+        !self.climbing
+            && !self.riding
+            && !self.parachute
+            && !self.swimming
+            && self.mantle <= 0.0
+            && self.fire_lock <= 0.0
+    }
+
+    /// Climbing onto a ledge (see [`SoldierMotion::mantle`]).
+    pub fn mantling(&self) -> bool {
+        self.mantle > 0.0
     }
 
     pub fn eye_position(&self) -> Vec3 {
@@ -236,15 +272,24 @@ pub struct SoldierTuning {
     /// fades out over `air_control_time` after the jump; falling off a ledge gives none.
     pub air_speed: f32,
     pub air_control_time: f32,
-    /// How quickly air control changes the velocity, m/s².
+    /// How quickly air control changes the velocity, m/s² (BF2's `phy-soldier-air-movement-factor`
+    /// is a small 0.05): about half a meter of drift over a whole jump.
     pub air_acceleration: f32,
-    /// Vertical launch speed. BF2 sets 6 × `phy-soldier-jump-factor`.
+    /// Vertical launch speed. BF2 sets 6 × `phy-soldier-jump-factor` (1.0 in both BF2's and
+    /// the xpack's `soldiers/common/Common.con`).
     pub jump_speed: f32,
     /// Share of the ground velocity kept when jumping (`phy-soldier-jump-length-factor`).
     pub jump_momentum: f32,
-    /// Soldier gravity, m/s². BF2's world gravity is 10 and ground vehicles use 1.5-2×;
-    /// 20 turns the 6 m/s launch into a short 0.9 m hop.
+    /// Soldier gravity, m/s²: BF2's world gravity, which its physics constructor sets to
+    /// -14.73 (the only such constant in `BF2.exe`; no level or template overrides it). With
+    /// the 6 m/s launch a jump peaks at 1.22 m after 0.41 s and lands after 0.81 s: high
+    /// enough to get onto the ~1 m sandbag walls, low walls and jeep hoods BF2 soldiers
+    /// jump onto.
     pub gravity: f32,
+    /// Jumping into an obstacle whose top is within reach climbs onto it (see
+    /// [`MANTLE_REACH`]). Not in BF2 (a server setting, `mantle`, on by default); getting off
+    /// the top of a grappling rope onto the ledge works this way either way.
+    pub mantle: bool,
     /// `jump-delay-after-prone`.
     pub jump_delay_after_prone: f32,
     /// Landing faster than this (m/s) starts a recovery: `landing_time` seconds during
@@ -347,10 +392,11 @@ impl Default for SoldierTuning {
             deceleration: 0.4,
             air_speed: 2.0,
             air_control_time: 2.0,
-            air_acceleration: 3.0,
+            air_acceleration: 1.6,
             jump_speed: 6.0,
             jump_momentum: 0.98,
-            gravity: 20.0,
+            gravity: 14.73,
+            mantle: true,
             jump_delay_after_prone: 0.8,
             landing_impact: 4.5,
             landing_time: 0.35,
@@ -562,6 +608,12 @@ fn step(
     let fresh_jump = jump_pressed && !m.jump_held;
     m.jump_held = jump_pressed;
 
+    if m.mantling() {
+        m.sprinting = false;
+        update_stamina(m, tuning, false, dt);
+        mantle(m, dt);
+        return;
+    }
     if m.climbing {
         m.sprinting = false;
         update_stamina(m, tuning, false, dt);
@@ -691,6 +743,15 @@ fn step(
 
         let jump =
             fresh_jump && m.stance == Stance::Standing && m.recovery == 0.0 && m.prone_lock == 0.0;
+        // Jumping into something low enough to climb onto climbs onto it.
+        if jump
+            && tuning.mantle
+            && wish != Vec3::ZERO
+            && let Some(to) = world.ledge(shapes, m.position, wish, MANTLE_REACH)
+        {
+            start_mantle(m, to, tuning);
+            return;
+        }
         if jump {
             m.velocity = horizontal * tuning.jump_momentum + Vec3::Y * tuning.jump_speed;
             m.air_control = tuning.air_control_time;
@@ -728,6 +789,18 @@ fn step(
             (m.velocity.y - tuning.gravity * dt).max(-sink)
         };
     } else {
+        // Jumped at something too high to climb onto from the ground: holding jump grabs its
+        // top once it is within reach.
+        if tuning.mantle
+            && jump_pressed
+            && m.air_control > 0.0
+            && m.velocity.y > -MANTLE_GRAB_FALL
+            && wish != Vec3::ZERO
+            && let Some(to) = world.ledge(shapes, m.position, wish, MANTLE_REACH_AIR)
+        {
+            start_mantle(m, to, tuning);
+            return;
+        }
         // Airborne: keep momentum, steer a little right after a jump.
         let control = m.air_control / tuning.air_control_time;
         if control > 0.0 && wish != Vec3::ZERO {
@@ -885,6 +958,19 @@ fn climb(
             climb_speed(tuning, dir)
         };
 
+    // Hands at the top of a grappling rope: over the edge onto the ledge (BF2's
+    // `climbontop`), whether or not mantling is on.
+    if ladder.rope
+        && speed > 0.0
+        && ladder.top() - ladder.local(m.position).y <= ROPE_TOP_REACH
+        && let Some(to) = world.ledge(shapes, m.position, -ladder.front, (-0.3, ROPE_TOP_REACH + 0.5))
+    {
+        m.climbing = false;
+        m.on_rope = false;
+        start_mantle(m, to, tuning);
+        return;
+    }
+
     // Down to the ground: off at the bottom.
     if speed < 0.0 {
         let shape = shapes.movement(Stance::Standing);
@@ -914,6 +1000,62 @@ fn climb(
     } else if speed < 0.0 && height < -ladder.top() - 0.2 {
         // Off the bottom of a ladder that ends in the air.
         m.climbing = false;
+    }
+}
+
+/// Mantling: how far above the feet the top of an obstacle can be to climb onto it by
+/// jumping into it (below the lower bound a jump or a step does), and grabbing it later in a
+/// jump while jump is held (BF3's reach: about 1.6 m from the ground, a little more from a
+/// jump).
+pub const MANTLE_REACH: (f32, f32) = (0.5, 1.65);
+pub const MANTLE_REACH_AIR: (f32, f32) = (0.3, 1.3);
+/// Falling faster than this (m/s), a ledge is no longer grabbed.
+const MANTLE_GRAB_FALL: f32 = 4.0;
+/// How far ahead of the soldier (m, from the capsule) an obstacle is found.
+const MANTLE_PROBE: f32 = 0.6;
+/// Climbing onto it: up at this speed, and over the edge at this one once the feet are
+/// within `MANTLE_OVER_AT` of its height (m/s, m). About half a second for a 1.4 m ledge.
+const MANTLE_RISE_SPEED: f32 = 4.0;
+const MANTLE_OVER_SPEED: f32 = 4.0;
+const MANTLE_OVER_AT: f32 = 0.3;
+/// Most seconds a mantle takes; it ends where it was headed then.
+const MANTLE_TIME_LIMIT: f32 = 1.5;
+/// On a grappling rope, the hands reach the top of the rope (and climb over the edge) with
+/// the feet this far below it.
+const ROPE_TOP_REACH: f32 = 1.3;
+
+fn start_mantle(m: &mut SoldierMotion, to: Vec3, tuning: &SoldierTuning) {
+    m.mantle = MANTLE_TIME_LIMIT;
+    m.mantle_to = to;
+    m.velocity = Vec3::ZERO;
+    m.grounded = false;
+    m.stance = Stance::Standing;
+    m.parachute = false;
+    m.air_control = 0.0;
+    m.fire_lock = m.fire_lock.max(tuning.fire_delay_after_jump);
+}
+
+/// One tick of climbing onto a ledge: up to its height, then over onto it. Like the ladder
+/// "seat" this ignores collisions: the way was checked when it started.
+fn mantle(m: &mut SoldierMotion, dt: f32) {
+    m.stance = Stance::Standing;
+    m.grounded = false;
+    m.mantle = (m.mantle - dt).max(0.0);
+    let start = m.position;
+    let to = m.mantle_to;
+    let rise = (to.y - m.position.y).clamp(-MANTLE_RISE_SPEED * dt, MANTLE_RISE_SPEED * dt);
+    m.position.y += rise;
+    if to.y - m.position.y < MANTLE_OVER_AT {
+        let flat = Vec3::new(to.x - m.position.x, 0.0, to.z - m.position.z);
+        m.position += flat.normalize_or_zero() * (MANTLE_OVER_SPEED * dt).min(flat.length());
+    }
+    m.velocity = (m.position - start) / dt;
+    if m.position.distance_squared(to) < 1e-6 || m.mantle <= 0.0 {
+        m.position = to;
+        m.mantle = 0.0;
+        // Standing on top (the next tick finds the ground), or over a thin wall and falling.
+        m.velocity = Vec3::new(m.velocity.x, 0.0, m.velocity.z).clamp_length_max(1.0);
+        m.grounded = true;
     }
 }
 
@@ -1419,6 +1561,53 @@ impl Surroundings<'_, '_, '_> {
             },
             &self.filter,
         )
+    }
+
+    /// The top of an obstacle right in front of the soldier in direction `towards`, if it
+    /// can be climbed onto: its top `reach.0..reach.1` above the feet and walkable, room to
+    /// stand on it, and nothing in the way up and over. Returns where the feet end up: on
+    /// top, or (over a wall thinner than the soldier) just past it, to drop down.
+    fn ledge(&self, shapes: &SoldierShapes, feet: Vec3, towards: Vec3, reach: (f32, f32)) -> Option<Vec3> {
+        let dir = Dir3::new(Vec3::new(towards.x, 0.0, towards.z)).ok()?;
+        let shape = shapes.movement(Stance::Standing);
+        let offset = Stance::Standing.collision_center();
+        let center = feet + offset;
+        let wall = self.cast(shape, center, dir, MANTLE_PROBE)?;
+        if wall.normal1.y >= self.min_normal_y {
+            // A slope to walk up, not a wall.
+            return None;
+        }
+        let into = -Vec3::new(wall.normal1.x, 0.0, wall.normal1.z).normalize_or_zero();
+        if into.dot(*dir) < 0.5 {
+            return None;
+        }
+        // Its top, just past the face.
+        let above = feet.y + reach.1 + 0.05;
+        let probe = Vec3::new(wall.point1.x, above, wall.point1.z) + into * 0.15;
+        let top = self.mover.spatial_query.cast_ray(
+            probe,
+            Dir3::NEG_Y,
+            reach.1 - reach.0 + 0.15,
+            true,
+            &self.filter,
+        )?;
+        let height = above - top.distance;
+        if top.distance < 0.02 || top.normal.y < self.min_normal_y || height - feet.y < reach.0 {
+            return None;
+        }
+        let to = Vec3::new(wall.point1.x, height + SKIN, wall.point1.z) + into * (SOLDIER_RADIUS + 0.15);
+        // Room to stand there.
+        let room = self
+            .mover
+            .spatial_query
+            .shape_intersections(shape, to + offset, Quat::IDENTITY, &self.filter)
+            .is_empty();
+        // Nothing overhead on the way up, nor on the way over.
+        let lift = (to.y - feet.y).max(0.0) + 0.02;
+        let over = Vec3::new(to.x - feet.x, 0.0, to.z - feet.z);
+        let clear = self.cast(shape, center, Dir3::Y, lift).is_none()
+            && Dir3::new(over).is_ok_and(|d| self.cast(shape, center + Vec3::Y * lift, d, over.length()).is_none());
+        (room && clear).then_some(to)
     }
 
     /// The closest ladder (or grappling rope) within reach.

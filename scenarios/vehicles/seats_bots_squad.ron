@@ -11,7 +11,7 @@
     steps: [
         WaitReady,
         ForbidLog("panicked"),
-        Wait(5.0),
+        WaitBotsDeployed(24, 10.0),
         NearVehicle("jep_vodnik"),
         SeatSquad("jep_vodnik"),
         LogSeats("jep_vodnik"),

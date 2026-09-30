@@ -12,7 +12,7 @@
     steps: [
         WaitReady,
         ForbidLog("panicked"),
-        Wait(3.0),
+        WaitBotsDeployed(20, 10.0),
         NearVehicle("ahe_z10"),
         Log("a bot pilot on the ground; we get in"),
         SeatBot("ahe_z10", 1),

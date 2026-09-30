@@ -13,7 +13,7 @@
     steps: [
         WaitReady,
         ForbidLog("panicked"),
-        Wait(3.0),
+        WaitBotsDeployed(20, 10.0),
         NearVehicle("jep_vodnik"),
         Log("a bot drives; we get in"),
         SeatBot("jep_vodnik", 1),

@@ -29,6 +29,7 @@ use game_shared::{
 use game_shared::{
     commander::{Commander, OrderKind as CommanderOrderKind, SquadOrder as CommanderOrder},
     protocol::Player,
+    revive::Downed,
     soldier::SoldierMotion,
     vehicle::VehicleMotion,
 };
@@ -46,6 +47,18 @@ const INTEL_MAX_AGE: f32 = 20.0;
 const AREA_RADIUS: f32 = 15.0;
 /// Radius of a charge's area (Rush), meters.
 const CHARGE_RADIUS: f32 = 6.0;
+/// Enemies seen within this many seconds count as a threat to a flag the team holds (older
+/// sightings are of enemies long gone, or of the ones the team just fought off there).
+const FRESH_THREAT: f32 = 12.0;
+/// In the attack posture a whole squad defends a flag the team holds only while the enemy
+/// is taking it, or this many enemies gather at it; fewer get a guard ([`Guard`]).
+const DEFEND_THREAT: f32 = 3.0;
+/// Guards stay at most this long, seconds.
+const GUARD_TIME: f32 = 90.0;
+/// A squad defending a flag the enemy is taking is found among bot-led squads this close,
+/// meters, whose orders are at least this old, seconds.
+const RESCUE_DISTANCE: f32 = 300.0;
+const RESCUE_MIN_AGE: f32 = 5.0;
 
 /// An area the commanders reason about (a BF2 strategic area).
 #[derive(Clone, Debug)]
@@ -402,6 +415,18 @@ pub struct SquadOrder {
     pub point: Option<Vec3>,
 }
 
+/// Members of a squad left behind at a flag the squad took while the rest moves on: one or
+/// two, and only while the flag is threatened (enemies seen at it lately) or the team can't
+/// afford to lose it (a spawn by the enemy with few flags held).
+#[derive(Clone, Debug)]
+pub struct Guard {
+    pub area: usize,
+    /// Player entities.
+    pub members: Vec<Entity>,
+    /// Seconds since it was left.
+    pub age: f32,
+}
+
 /// A flag worth attacking or defending, and how much.
 #[derive(Clone, Copy, Debug)]
 pub struct Objective {
@@ -428,10 +453,19 @@ pub struct Strategy {
     /// Per team, most valuable first.
     pub objectives: [Vec<Objective>; 2],
     pub posture: [Posture; 2],
+    /// By (team, squad): members left to guard a flag the squad took.
+    pub guards: HashMap<(Team, u8), Guard>,
+    /// Owner of every area's flag at the last look: a flag changing hands means a plan at once.
+    owners: Vec<Option<Team>>,
     timer: f32,
 }
 
 impl Strategy {
+    /// The flag `player` of squad `(team, squad)` guards, if it was left to guard one.
+    pub fn guarding(&self, team: Team, squad: u8, player: Entity) -> Option<usize> {
+        self.guards.get(&(team, squad)).filter(|g| g.members.contains(&player)).map(|g| g.area)
+    }
+
     /// An objective for a bot of `team` without a squad order: the best one given the
     /// distance, varied a little per bot (`seed`).
     pub fn objective_for(&self, team: Team, position: Vec3, map: &StrategicMap, seed: u32) -> Option<Objective> {
@@ -480,6 +514,18 @@ impl TeamIntel {
             .values()
             .filter(|(p, time)| self.clock - time < INTEL_MAX_AGE && p.distance_squared(position) < radius * radius)
             .count()
+    }
+
+    /// Enemies of `team` seen within `radius` of `position` in the last `max_age` seconds.
+    pub fn enemies_near_since(&self, team: Team, position: Vec3, radius: f32, max_age: f32) -> usize {
+        self.sightings_near(team, position, radius, max_age).count()
+    }
+
+    /// Forgets enemies that are gone (dead, down, or no more).
+    pub fn forget_unless(&mut self, mut alive: impl FnMut(Entity) -> bool) {
+        for seen in &mut self.seen {
+            seen.retain(|enemy, _| alive(*enemy));
+        }
     }
 
     /// Where enemies of `team` were seen in the last `max_age` seconds.
@@ -549,13 +595,15 @@ pub fn plan(
     commanders: Query<(&Team, &Player), With<Commander>>,
     commander_orders: Query<&CommanderOrder>,
     mut spots: MessageReader<Spot>,
-    spotted: Query<(Option<&SoldierMotion>, Option<&VehicleMotion>)>,
+    spotted: Query<(Option<&SoldierMotion>, Option<&VehicleMotion>, Has<Downed>)>,
 ) {
     let dt = time.delta_secs();
     intel.tick(dt);
+    // The dead and the downed are no threat (they were counted at the flag they fell at).
+    intel.forget_unless(|enemy| spotted.get(enemy).is_ok_and(|(.., downed)| !downed));
     // What the commander's UAV and scans show, the team knows.
     for spot in spots.read() {
-        if let Ok((soldier, vehicle)) = spotted.get(spot.target)
+        if let Ok((soldier, vehicle, _)) = spotted.get(spot.target)
             && let Some(position) = soldier.map(|s| s.position + Vec3::Y).or(vehicle.map(|v| v.position))
         {
             intel.report(spot.team, spot.target, position);
@@ -564,17 +612,9 @@ pub fn plan(
     for order in strategy.orders.values_mut() {
         order.age += dt;
     }
-    strategy.timer -= dt;
-    if strategy.timer > 0.0 {
-        return;
+    for guard in strategy.guards.values_mut() {
+        guard.age += dt;
     }
-    strategy.timer = PLAN_INTERVAL;
-    if map.areas.is_empty() {
-        strategy.orders.clear();
-        return;
-    }
-    let count = map.areas.len();
-    strategy.orders.retain(|_, order| order.area < count);
     let states: Vec<Option<FlagState>> = map
         .areas
         .iter()
@@ -583,6 +623,28 @@ pub fn plan(
             flags.get(entity).ok().copied()
         })
         .collect();
+    // A flag changed hands: the squads that took it move on (and the ones that lost it
+    // react) now rather than at the next plan.
+    let owners: Vec<Option<Team>> = states.iter().map(|s| s.map(|s| s.owner)).collect();
+    if owners != strategy.owners {
+        if !strategy.owners.is_empty() {
+            strategy.timer = 0.0;
+        }
+        strategy.owners = owners;
+    }
+    strategy.timer -= dt;
+    if strategy.timer > 0.0 {
+        return;
+    }
+    strategy.timer = PLAN_INTERVAL;
+    if map.areas.is_empty() {
+        strategy.orders.clear();
+        strategy.guards.clear();
+        return;
+    }
+    let count = map.areas.len();
+    strategy.orders.retain(|_, order| order.area < count);
+    strategy.guards.retain(|_, guard| guard.area < count);
     let charge_states: Vec<Option<ChargeState>> = (0..map.areas.len())
         .map(|a| map.charge_of(a).and_then(|e| charges.get(e).ok().copied()))
         .collect();
@@ -623,6 +685,19 @@ pub fn plan(
         strategy
             .orders
             .retain(|(order_team, squad), _| *order_team != team || squads.iter().any(|(s, ..)| s == squad));
+        // The orders before this plan: squads whose flag was just taken leave a guard.
+        let previous: HashMap<u8, SquadOrder> = strategy
+            .orders
+            .iter()
+            .filter(|((order_team, _), _)| *order_team == team)
+            .map(|((_, squad), order)| (*squad, *order))
+            .collect();
+        // Flags of ours the enemy is taking right now.
+        let under_attack = |a: usize| {
+            states.get(a).copied().flatten().is_some_and(|s| {
+                s.owner == team && (s.rate < 0.0 || (s.flag != team && s.height < 1.0))
+            })
+        };
 
         let mut load: HashMap<usize, f32> = HashMap::default();
         let weight = |human: bool| if human { 0.5 } else { 1.0 };
@@ -682,7 +757,13 @@ pub fn plan(
         for (squad, position, human) in open {
             let current = strategy.orders.get(&(team, squad)).copied();
             let from = position.or(fallback);
-            let best = objectives.iter().max_by(|a, b| {
+            // A squad that just took its flag moves on (leaving a guard if need be) unless
+            // the enemy is taking it back already.
+            let took = current
+                .filter(|c| c.kind == OrderKind::Attack && !c.commanded)
+                .map(|c| c.area)
+                .filter(|&a| states.get(a).copied().flatten().is_some_and(|s| s.owner == team) && !under_attack(a));
+            let best = objectives.iter().filter(|o| Some(o.area) != took).max_by(|a, b| {
                 let score = |o: &Objective| {
                     let distance = from.map_or(0.0, |p| p.distance(map.areas[o.area].position));
                     let same = current.is_some_and(|c| c.area == o.area && c.kind == o.kind);
@@ -716,6 +797,39 @@ pub fn plan(
                 }
             }
         }
+        // A flag the enemy is taking with nobody sent to it: the nearest bot-led squad that
+        // isn't holding one itself comes back (conquest; the staged modes cover their
+        // defences below).
+        if !mode.staged() {
+            for objective in objectives.iter().filter(|o| o.kind == OrderKind::Defend && under_attack(o.area)) {
+                if load.get(&objective.area).copied().unwrap_or(0.0) > 0.0 {
+                    continue;
+                }
+                let at = map.areas[objective.area].position;
+                let rescuer = squads
+                    .iter()
+                    .filter(|(_, _, human)| !human)
+                    .filter_map(|&(squad, position, _)| {
+                        let order = strategy.orders.get(&(team, squad))?;
+                        let free = !order.commanded && order.age > RESCUE_MIN_AGE && !under_attack(order.area);
+                        let distance = position?.distance(at);
+                        (free && distance < RESCUE_DISTANCE).then_some((squad, distance))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                if let Some((squad, _)) = rescuer {
+                    let order = SquadOrder {
+                        kind: OrderKind::Defend,
+                        area: objective.area,
+                        age: 0.0,
+                        suggestion: false,
+                        commanded: false,
+                        point: None,
+                    };
+                    strategy.orders.insert((team, squad), order);
+                    *load.entry(objective.area).or_default() += 1.0;
+                }
+            }
+        }
         for ((order_team, squad), order) in strategy.orders.iter_mut() {
             if *order_team == team {
                 order.suggestion = squads.iter().any(|(s, _, human)| s == squad && *human);
@@ -723,6 +837,13 @@ pub fn plan(
         }
         if mode.staged() {
             cover_defences(&mut strategy.orders, team, &objectives, &squads, &map);
+        }
+        if mode.kind != game_data::modes::ModeKind::Rush {
+            let needs: Vec<u8> = (0..map.areas.len())
+                .map(|a| guard_need(&map, &states, &locked_areas, team, &intel, a))
+                .collect();
+            let strategy = &mut *strategy;
+            update_guards(&mut strategy.guards, team, &strategy.orders, &previous, &snapshot.squads, &needs, &map);
         }
         strategy.objectives[t] = objectives;
     }
@@ -779,6 +900,113 @@ fn cover_defences(
     }
 }
 
+/// Owners of the flags next to area `a`, looking through areas that aren't flags.
+fn neighbour_owners(map: &StrategicMap, states: &[Option<FlagState>], a: usize) -> Vec<Team> {
+    let owner = |a: usize| states.get(a).copied().flatten().map(|s| s.owner);
+    let mut owners = Vec::new();
+    for &n in &map.areas[a].neighbours {
+        match owner(n) {
+            Some(o) => owners.push(o),
+            None => owners.extend(map.areas[n].neighbours.iter().filter(|&&m| m != a).filter_map(|&m| owner(m))),
+        }
+    }
+    owners
+}
+
+/// How many guards a flag `team` holds needs when the squad that took it moves on: two with
+/// enemies gathering, one with an enemy about or when it is a spawn by the enemy and the
+/// team holds few flags, none behind the lines.
+fn guard_need(
+    map: &StrategicMap,
+    states: &[Option<FlagState>],
+    locked: &[bool],
+    team: Team,
+    intel: &TeamIntel,
+    a: usize,
+) -> u8 {
+    let area = &map.areas[a];
+    let held = states.get(a).copied().flatten().is_some_and(|s| s.owner == team);
+    if !held || area.uncapturable || locked.get(a).copied().unwrap_or(false) {
+        return 0;
+    }
+    if !neighbour_owners(map, states, a).iter().any(|&o| o != team) {
+        return 0;
+    }
+    let threat = intel.enemies_near_since(team, area.position, area.radius + 35.0, FRESH_THREAT);
+    let held_flags = (0..map.areas.len())
+        .filter(|&i| !map.areas[i].uncapturable && states.get(i).copied().flatten().is_some_and(|s| s.owner == team))
+        .count();
+    match threat {
+        t if t as f32 >= DEFEND_THREAT => 2,
+        t if t >= 1 => 1,
+        _ if area.has_spawns && held_flags <= 2 => 1,
+        _ => 0,
+    }
+}
+
+/// Keeps the guards of `team`'s squads up to date: a bot-led squad whose order moved on from
+/// a flag the team holds leaves the members nearest to it there, as many as the flag needs
+/// (`needs`, per area) and never more than leaves two moving on, unless another squad is
+/// sent there or guards it already. Guards go back to their squad once the flag needs none,
+/// the squad is sent back there, they are down, or after [`GUARD_TIME`].
+fn update_guards(
+    guards: &mut HashMap<(Team, u8), Guard>,
+    team: Team,
+    orders: &HashMap<(Team, u8), SquadOrder>,
+    previous: &HashMap<u8, SquadOrder>,
+    squads: &HashMap<(Team, u8), super::squad::SquadInfo>,
+    needs: &[u8],
+    map: &StrategicMap,
+) {
+    guards.retain(|&(guard_team, squad), guard| {
+        if guard_team != team {
+            return true;
+        }
+        let Some(info) = squads.get(&(team, squad)).filter(|s| s.leader_is_bot) else {
+            return false;
+        };
+        guard.members.retain(|m| info.alive.iter().any(|s| s.player == *m) && info.leader != Some(*m));
+        guard.members.truncate(needs.get(guard.area).copied().unwrap_or(0) as usize);
+        let back = orders.get(&(team, squad)).is_none_or(|o| o.area == guard.area);
+        !guard.members.is_empty() && !back && guard.age < GUARD_TIME
+    });
+    let mut keys: Vec<(Team, u8)> = orders.keys().copied().filter(|(t, _)| *t == team).collect();
+    keys.sort_by_key(|(_, squad)| *squad);
+    for key in keys {
+        let order = orders[&key];
+        let Some(before) = previous.get(&key.1) else {
+            continue;
+        };
+        if order.area == before.area || guards.contains_key(&key) || order.suggestion {
+            continue;
+        }
+        let need = needs.get(before.area).copied().unwrap_or(0) as usize;
+        let taken = orders.iter().any(|(k, o)| k.0 == team && *k != key && o.area == before.area && !o.suggestion)
+            || guards.iter().any(|(k, g)| k.0 == team && g.area == before.area);
+        let Some(info) = squads.get(&key).filter(|s| s.leader_is_bot) else {
+            continue;
+        };
+        if need == 0 || taken {
+            continue;
+        }
+        let area = &map.areas[before.area];
+        let mut near: Vec<(Entity, f32)> = info
+            .alive
+            .iter()
+            .filter(|s| info.leader != Some(s.player))
+            .map(|s| (s.player, s.position.xz().distance(area.position.xz())))
+            .filter(|(_, d)| *d < area.radius + 40.0)
+            .collect();
+        near.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let count = need.min(info.alive.len().saturating_sub(2));
+        if count == 0 || near.is_empty() {
+            continue;
+        }
+        let members: Vec<Entity> = near.into_iter().take(count).map(|(m, _)| m).collect();
+        guards.insert(key, Guard { area: before.area, members, age: 0.0 });
+    }
+}
+
 /// A human commander's order as the bots take it: attack or defend the flag it is at, or
 /// hold the point it names.
 fn commanded_order(
@@ -815,16 +1043,6 @@ fn value_areas(
 ) -> (Posture, Vec<Objective>) {
     let owner = |a: usize| states[a].map(|s| s.owner);
     // Neighbours, looking through areas that aren't flags.
-    let neighbour_owners = |a: usize| -> Vec<Team> {
-        let mut owners = Vec::new();
-        for &n in &map.areas[a].neighbours {
-            match owner(n) {
-                Some(o) => owners.push(o),
-                None => owners.extend(map.areas[n].neighbours.iter().filter(|&&m| m != a).filter_map(|&m| owner(m))),
-            }
-        }
-        owners
-    };
     let holds_any = (0..map.areas.len()).any(|a| owner(a) == Some(team));
     let contested = (0..map.areas.len())
         .any(|a| !map.areas[a].uncapturable && owner(a).is_some_and(|o| o != team));
@@ -835,9 +1053,9 @@ fn value_areas(
         let (Some(state), false) = (states[a], area.uncapturable) else {
             continue;
         };
-        let around = neighbour_owners(a);
-        let threat = intel.enemies_near(team, area.position, area.radius + 35.0) as f32;
+        let around = neighbour_owners(map, states, a);
         if state.owner != team {
+            let threat = intel.enemies_near(team, area.position, area.radius + 35.0) as f32;
             let reachable = !holds_any || around.contains(&team);
             let mut value = if state.owner == Team::Spectator { 12.0 } else { 10.0 };
             // Flags behind enemy lines are rarely worth going round them for.
@@ -853,7 +1071,10 @@ fn value_areas(
             objectives.push(Objective { area: a, kind: OrderKind::Attack, value });
         } else {
             // Like BF2's attack strategy, which defends nothing, flags are only worth a
-            // squad while they are being taken or the enemy is gathering next to them.
+            // squad while they are being taken or the enemy is gathering next to them (seen
+            // there lately: the ones who fell taking it are no threat). With fewer enemies
+            // about, the squad that took it leaves a guard ([`Guard`]) and moves on.
+            let threat = intel.enemies_near_since(team, area.position, area.radius + 35.0, FRESH_THREAT) as f32;
             let frontline = around.iter().any(|&o| o != team);
             let under_attack = state.rate < 0.0 || (state.flag != team && state.height < 1.0);
             let exposure = match (posture, frontline) {
@@ -865,7 +1086,11 @@ fn value_areas(
             };
             let pressure = if frontline || under_attack { 1.5 * threat.min(4.0) } else { 0.0 };
             let value = exposure + pressure + if under_attack { 15.0 } else { 0.0 };
-            if value >= 4.0 {
+            let wanted = match posture {
+                Posture::Guard => value >= 4.0,
+                Posture::Attack => under_attack || (frontline && threat >= DEFEND_THREAT),
+            };
+            if wanted {
                 objectives.push(Objective { area: a, kind: OrderKind::Defend, value });
             }
         }
@@ -1037,5 +1262,108 @@ mod tests {
         let (_, objectives) = value_areas(&map, &states, Team::Two, &TeamIntel::default(), false);
         let b = objectives.iter().find(|o| o.area == 1).unwrap();
         assert_eq!((b.kind, b.value), (OrderKind::Attack, 10.0));
+    }
+
+    fn held(owner: Team) -> Option<FlagState> {
+        Some(FlagState::held_by(owner))
+    }
+
+    #[test]
+    fn a_taken_flag_needs_a_squad_only_under_attack() {
+        // Team one just took B (next to the enemy's C) in a fight.
+        let points = [point(0, 0.0, 0.0), point(1, 0.0, 200.0), point(2, 0.0, 400.0)];
+        let mut map = StrategicMap {
+            areas: build_areas(None, &points),
+            ..default()
+        };
+        // Its only flag, and one it spawns at: worth a guard in any case.
+        let states = [held(Team::One), held(Team::One), held(Team::Two)];
+        assert_eq!(guard_need(&map, &states, &[false; 3], Team::One, &TeamIntel::default(), 1), 1);
+        map.areas[1].has_spawns = false;
+        let states = [held(Team::One), held(Team::One), held(Team::Two)];
+        let mut world = World::new();
+        let mut intel = TeamIntel::default();
+        let dead: Vec<Entity> = (0..3).map(|_| world.spawn_empty().id()).collect();
+        for (i, enemy) in dead.iter().enumerate() {
+            intel.report(Team::One, *enemy, Vec3::new(i as f32, 0.0, 210.0));
+        }
+        // Those who fell there are no threat: nothing to defend, B needs no guard.
+        intel.forget_unless(|e| !dead.contains(&e));
+        let (_, objectives) = value_areas(&map, &states, Team::One, &intel, false);
+        assert!(!objectives.iter().any(|o| o.kind == OrderKind::Defend), "{objectives:?}");
+        assert_eq!(guard_need(&map, &states, &[false; 3], Team::One, &intel, 1), 0);
+        // One enemy about: a guard, not a squad.
+        let scout = world.spawn_empty().id();
+        intel.report(Team::One, scout, Vec3::new(0.0, 0.0, 230.0));
+        let (_, objectives) = value_areas(&map, &states, Team::One, &intel, false);
+        assert!(!objectives.iter().any(|o| o.kind == OrderKind::Defend));
+        assert_eq!(guard_need(&map, &states, &[false; 3], Team::One, &intel, 1), 1);
+        // Seen long ago: gone.
+        intel.tick(FRESH_THREAT + 1.0);
+        assert_eq!(guard_need(&map, &states, &[false; 3], Team::One, &intel, 1), 0);
+        // The enemy taking it back: a squad.
+        let mut taken = states;
+        taken[1] = Some(FlagState { owner: Team::One, flag: Team::One, height: 0.6, rate: -0.05 });
+        let (_, objectives) = value_areas(&map, &taken, Team::One, &intel, false);
+        assert!(objectives.iter().any(|o| o.area == 1 && o.kind == OrderKind::Defend && o.value >= 15.0));
+        // A flag behind the lines needs no guard.
+        let states = [held(Team::One), held(Team::One), held(Team::One)];
+        intel.report(Team::One, scout, Vec3::new(0.0, 0.0, 210.0));
+        assert_eq!(guard_need(&map, &states, &[false; 3], Team::One, &intel, 1), 0);
+    }
+
+    #[test]
+    fn a_squad_moving_on_leaves_a_guard() {
+        use super::super::squad::{SoldierInfo, SquadInfo};
+        let points = [point(0, 0.0, 0.0), point(1, 0.0, 200.0), point(2, 0.0, 400.0)];
+        let map = StrategicMap {
+            areas: build_areas(None, &points),
+            ..default()
+        };
+        let mut world = World::new();
+        let players: Vec<Entity> = (0..5).map(|_| world.spawn_empty().id()).collect();
+        let soldier = |player: Entity, z: f32| SoldierInfo {
+            player,
+            position: Vec3::new(0.0, 0.0, z),
+            yaw: 0.0,
+            heading: 0.0,
+            health: 1.0,
+            busy: false,
+        };
+        // The leader and three members at B, one member further off.
+        let alive: Vec<SoldierInfo> = players
+            .iter()
+            .zip([200.0, 205.0, 190.0, 212.0, 330.0])
+            .map(|(p, z)| soldier(*p, z))
+            .collect();
+        let info = SquadInfo {
+            leader: Some(players[0]),
+            leader_is_bot: true,
+            leader_soldier: Some(alive[0]),
+            members: players[1..].to_vec(),
+            alive,
+        };
+        let squads: HashMap<(Team, u8), SquadInfo> = [((Team::One, 1), info)].into_iter().collect();
+        let order = |kind, area| SquadOrder { kind, area, age: 0.0, suggestion: false, commanded: false, point: None };
+        let previous: HashMap<u8, SquadOrder> = [(1, order(OrderKind::Attack, 1))].into_iter().collect();
+        let mut orders: HashMap<(Team, u8), SquadOrder> = [((Team::One, 1), order(OrderKind::Attack, 2))].into_iter().collect();
+        let mut guards = HashMap::default();
+        // B needs one guard: the member closest to the flag stays, not the leader.
+        update_guards(&mut guards, Team::One, &orders, &previous, &squads, &[0, 1, 0], &map);
+        assert_eq!(guards[&(Team::One, 1)].members, [players[1]]);
+        assert_eq!(guards[&(Team::One, 1)].area, 1);
+        // Two with enemies gathering, but never more than leaves two moving on.
+        guards.clear();
+        update_guards(&mut guards, Team::One, &orders, &previous, &squads, &[0, 2, 0], &map);
+        assert_eq!(guards[&(Team::One, 1)].members, [players[1], players[2]]);
+        // Once B needs none, they go back to the squad (so as when the squad is sent back).
+        let previous: HashMap<u8, SquadOrder> = [(1, order(OrderKind::Attack, 2))].into_iter().collect();
+        update_guards(&mut guards, Team::One, &orders, &previous, &squads, &[0, 0, 0], &map);
+        assert!(guards.is_empty());
+        // Another squad sent to B: no guard.
+        let previous: HashMap<u8, SquadOrder> = [(1, order(OrderKind::Attack, 1))].into_iter().collect();
+        orders.insert((Team::One, 2), order(OrderKind::Defend, 1));
+        update_guards(&mut guards, Team::One, &orders, &previous, &squads, &[0, 1, 0], &map);
+        assert!(guards.is_empty());
     }
 }

@@ -12,9 +12,9 @@
         WaitReady,
         // MEC assault: AK-101 with the GP-30 under it, knife in slot 3.
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:2"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         Teleport((-184.0, 157.0, -85.0), 90.0, 0.0),
         // Enough health that the bots can't end the run.
         Hurt(-5000.0),

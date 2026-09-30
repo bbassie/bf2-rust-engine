@@ -36,15 +36,36 @@ const STRIDE: usize = FLOATS * 4;
 const MIN_CAPACITY: usize = 256;
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
+#[bind_group_data(ParticleKey)]
 pub struct ParticleMaterial {
     #[storage(0, read_only)]
     particles: Handle<ShaderBuffer>,
     #[texture(1)]
     #[sampler(2)]
     texture: Handle<Image>,
+    /// First-person effects (the view model's muzzle flash and smoke): drawn in front of the
+    /// world like the view model (`render::viewmodel`), after its transparent things.
+    view_model: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParticleKey {
+    view_model: bool,
+}
+
+impl From<&ParticleMaterial> for ParticleKey {
+    fn from(material: &ParticleMaterial) -> Self {
+        Self {
+            view_model: material.view_model,
+        }
+    }
 }
 
 impl Material for ParticleMaterial {
+    fn depth_bias(&self) -> f32 {
+        if self.view_model { crate::render::materials::VIEW_MODEL_SORT_BIAS } else { 0.0 }
+    }
+
     fn vertex_shader() -> ShaderRef {
         "embedded://client/effects/particles.wgsl".into()
     }
@@ -69,9 +90,15 @@ impl Material for ParticleMaterial {
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        if key.bind_group_data.view_model {
+            descriptor.vertex.shader_defs.push("VIEW_MODEL".into());
+            if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+                depth_stencil.bias.constant = 0;
+            }
+        }
         Ok(())
     }
 }
@@ -212,6 +239,7 @@ pub fn upload(
                     batch.material = Some(materials.add(ParticleMaterial {
                         particles: buffer.clone(),
                         texture: batch.texture.clone(),
+                        view_model: batch.layer == crate::render::viewmodel::VIEW_MODEL_LAYER,
                     }))
                 }
             }

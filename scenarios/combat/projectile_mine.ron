@@ -11,9 +11,9 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:4"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         NearVehicle("usapc_lav25"),
         Weapon(4),
         Wait(1.8),

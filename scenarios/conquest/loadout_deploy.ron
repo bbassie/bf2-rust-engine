@@ -12,7 +12,7 @@
         // Vanilla level: the AIX 2 and sample mods' weapons stay out of the pools.
         ExpectLog("(mods: none)", 5.0),
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:2"),
         Wait(0.5),
         Screenshot("panel_assault"),

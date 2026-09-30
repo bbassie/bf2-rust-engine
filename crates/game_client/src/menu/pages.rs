@@ -628,6 +628,11 @@ fn settings_tab_content(
             });
             row(p, "Invert helicopter pitch", |c| switch(c, Toggle::InvertHeliPitch));
             row(p, "Helicopter A/D: roll instead of yaw", |c| switch(c, Toggle::HeliPedalsRoll));
+            row(p, "Jet mouse sensitivity", |c| slider(c, Slider::JetSensitivity));
+            row(p, "Jet mouse X: yaw instead of roll", |c| {
+                switch(c, Toggle::JetMouseYaw);
+                c.spawn(text("on: A/D roll", 12.0, DIM));
+            });
             row(p, "Raw mouse input", |c| {
                 switch(c, Toggle::MouseRawInput);
                 c.spawn(text("not yet wired to an engine hook", 12.0, DIM));
@@ -659,6 +664,7 @@ fn settings_tab_content(
                 c.spawn(text("not yet wired to an engine hook", 12.0, DIM));
             });
             download::settings_row(p);
+            caches::settings_row(p);
         }
         SettingsTab::Graphics => {
             row(p, "Preset", |c| {

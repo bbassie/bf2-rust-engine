@@ -1,0 +1,105 @@
+// Jumping and mantling on Karkand. BF2's jump (6 m/s up against its world gravity of
+// 14.73 m/s²) peaks at 1.22 m: measured in place (`JumpApex`, expect about 1.17 m with the
+// 60 Hz steps and 0.8 s in the air), and a running jump onto a 1 m crate. Then mantling
+// (a server setting, on by default): jumping right in front of a sandbag wall (1.14 m), a
+// concrete barrier (1.1 m), a dumpster (1.44 m) and a Humvee climbs onto them in about half
+// a second.
+// client --scenario scenarios/movement/jump_mantle.ron --out target/scenarios/move/jump_mantle
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ThirdPerson(true),
+
+        // In place, on the flat square.
+        Teleport((-184.0, 157.0, -85.0), 180.0, -10.0),
+        Wait(1.5),
+        Hold([Jump]),
+        JumpApex("in place", 1.5),
+        Release([Jump]),
+        ExpectLog("in place: apex 1.1", 1.0),
+        Hold([Jump]),
+        Wait(0.4),
+        Screenshot("jump_apex"),
+        Release([Jump]),
+        Wait(1.0),
+
+        // A running jump from 3 m onto a 1 m crate (too far out to mantle when jumping).
+        Teleport((-124.5, 150.6, -161.8), 0.0, -10.0),
+        Wait(1.5),
+        Move(0.0, 1.0),
+        Wait(0.5),
+        Hold([Jump]),
+        Wait(0.05),
+        Release([Jump]),
+        Trace("crate_jump", 0.3),
+        Screenshot("crate_jump"),
+        Trace("crate_jump", 0.6),
+        Move(0.0, 0.0),
+        Wait(0.5),
+        Screenshot("crate_on_top"),
+
+        // Mantling onto a sandbag wall.
+        Teleport((-158.8, 162.2, 261.0), 90.0, -10.0),
+        Wait(1.5),
+        Move(0.0, 1.0),
+        Wait(0.45),
+        Hold([Jump]),
+        Wait(0.05),
+        Release([Jump]),
+        Trace("sandbags", 0.25),
+        Screenshot("sandbags_mantling"),
+        Trace("sandbags", 0.5),
+        Move(0.0, 0.0),
+        Wait(0.3),
+        Screenshot("sandbags_on_top"),
+
+        // A concrete barrier.
+        Teleport((-189.3, 156.6, 49.3), 90.0, -10.0),
+        Wait(1.5),
+        Move(0.0, 1.0),
+        Wait(0.45),
+        Hold([Jump]),
+        Wait(0.05),
+        Release([Jump]),
+        Trace("barrier", 0.25),
+        Screenshot("barrier_mantling"),
+        Trace("barrier", 0.5),
+        Move(0.0, 0.0),
+        Wait(0.3),
+        Screenshot("barrier_on_top"),
+
+        // A 1.44 m dumpster.
+        Teleport((-222.7, 150.1, -213.8), 0.0, -10.0),
+        Wait(1.5),
+        Move(0.0, 1.0),
+        Wait(0.45),
+        Hold([Jump]),
+        Wait(0.05),
+        Release([Jump]),
+        Trace("dumpster", 0.3),
+        Screenshot("dumpster_mantling"),
+        Trace("dumpster", 0.6),
+        Move(0.0, 0.0),
+        Wait(0.3),
+        Screenshot("dumpster_on_top"),
+
+        // A Humvee, from its door.
+        NearVehicle("usjep_hmmwv"),
+        Wait(1.5),
+        Move(0.0, 1.0),
+        Wait(0.2),
+        Hold([Jump]),
+        Wait(0.05),
+        Release([Jump]),
+        Trace("humvee", 0.3),
+        Screenshot("humvee_mantling"),
+        Trace("humvee", 0.6),
+        Move(0.0, 0.0),
+        Wait(0.3),
+        Screenshot("humvee_on_top"),
+        Quit,
+    ],
+)

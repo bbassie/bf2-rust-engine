@@ -48,11 +48,16 @@ pub fn import(
 
     let mut weapon_count = 0;
     let sounds = SoundConverter::new(converter.vfs, out);
+    let huds = crate::vehicle_hud::VehicleHuds::load_weapons(converter);
     for name in &weapons {
         let Some(template) = interp.world.template(name).cloned() else {
             continue;
         };
         let mut desc = weapon_desc(interp, converter, &sounds, &template, out);
+        // Zoomed in, BF2 shows the HUD of the weapon's alternative GUI index.
+        if let Some(index) = template.get_f32("weaponhud.altguiindex").filter(|&i| i > 0.0) {
+            desc.zoom.sight = huds.sight(index as u32);
+        }
         desc.display_name = localization.resolve(&desc.display_name);
         game_data::write_ron(out.join("weapons").join(format!("{name}.ron")), &desc)?;
         weapon_count += 1;
@@ -205,10 +210,12 @@ pub(crate) fn weapon_desc(
         delay: f("zoom.zoomdelay", 0.0),
         fov_delay: f("zoom.changefovdelay", 0.0),
         out_after_fire: f("zoom.zoomoutafterfire", 0.0) != 0.0,
+        // Filled in by `import` from the weapon HUDs (`weaponHud.altGuiIndex`).
+        sight: Vec::new(),
     };
     let mut projectile = projectile_desc(interp, converter, t, projectile_template.as_ref(), mesh_3p.as_deref());
-    if let Some(rope) = rope_desc(interp, t) {
-        rope_projectile(&mut projectile, rope);
+    if let Some(rope) = rope_desc(interp, converter, t) {
+        rope_projectile(converter, &mut projectile, rope);
     }
 
     // Third-person animations were exported per weapon folder by the soldier import.
@@ -519,7 +526,7 @@ fn projectile_desc(
 
 /// BF2 SF's grappling hook throws a `GrapplingHookRope`; the zipline crossbow's shell leaves
 /// a `Zipline` (its `secondaryProjectileTemplate`) where it hits.
-fn rope_desc(interp: &mut Interpreter, weapon: &Template) -> Option<RopeDesc> {
+fn rope_desc(interp: &mut Interpreter, converter: &MeshConverter, weapon: &Template) -> Option<RopeDesc> {
     let template = |interp: &mut Interpreter, method: &str| {
         let name = weapon.get_str(method)?.trim_matches('"').to_string();
         interp.ensure_template(&name);
@@ -531,11 +538,31 @@ fn rope_desc(interp: &mut Interpreter, weapon: &Template) -> Option<RopeDesc> {
     {
         // The template is in the xpack's DummyObjectsXpack.con; its values as defaults.
         let f = |method: &str, default: f32| rope.as_ref().and_then(|t| t.get_f32(method)).unwrap_or(default);
+        // BF2 builds the rope from `ropelink` links (a thin textured cylinder) behind a
+        // `HookLink` (the hook's model), both static objects of the xpack.
+        let link = format!("{ROPE_OBJECTS}/ropelink/meshes/ropelink.staticmesh");
+        let bounds = mesh_bounds(converter, &link);
+        log::debug!("rope link bounds: {bounds:?}");
+        // The link lies along its longest axis: the other two are its thickness.
+        let radius = bounds
+            .map(|(min, max)| {
+                let mut size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+                size.sort_by(f32::total_cmp);
+                0.25 * (size[0] + size[1])
+            })
+            .filter(|r| *r > 0.002 && *r < 0.1)
+            .unwrap_or(0.02);
         return Some(RopeDesc {
             kind: RopeKind::Grapple,
             max_length: f("setmaxropelength", 14.0),
             lifetime: f("timeout", 25.0),
             climb_speed: f("climbingspeed", 2.3),
+            links: f("setnumberoflinks", 26.0).max(2.0) as u32,
+            elasticity: f("elasticity", 0.2),
+            air_friction: f("airfriction", 0.95),
+            awake_time: f("awaketime", 6.0),
+            radius,
+            texture: converter.texture(&format!("{ROPE_OBJECTS}/textures/rope_c.dds")),
         });
     }
     let (_, zipline) = template(interp, "secondaryprojectiletemplate")?;
@@ -545,18 +572,43 @@ fn rope_desc(interp: &mut Interpreter, weapon: &Template) -> Option<RopeDesc> {
         max_length: zipline.get_f32("setmaxziplinelength").unwrap_or(75.0),
         lifetime: zipline.get_f32("timeout").unwrap_or(25.0),
         climb_speed: 0.0,
+        links: 2,
+        elasticity: 0.0,
+        air_friction: 1.0,
+        awake_time: 0.0,
+        radius: 0.01,
+        texture: None,
     })
 }
 
-/// How the rope's projectile flies: BF2 simulates the hook's rope as links thrown from the
-/// hand; here it is a thrown hook that catches on ledges (`minYNormal 0.5`). The zipline
-/// shell sticks wherever it hits.
-fn rope_projectile(projectile: &mut ProjectileDesc, rope: RopeDesc) {
+/// Where the xpack keeps the grappling hook's rope links and hook.
+const ROPE_OBJECTS: &str = "objects/staticobjects/xpak_objects/common";
+
+/// The first geom's full-detail bounds of a mesh.
+fn mesh_bounds(converter: &MeshConverter, path: &str) -> Option<([f32; 3], [f32; 3])> {
+    use bf2_formats::mesh::{MeshKind, VisMesh};
+    let path = bf2_formats::vfs::normalize(path);
+    let data = converter.vfs.read(&path).map_err(|e| log::debug!("{path}: {e}")).ok()?;
+    let mesh = VisMesh::parse(&data, MeshKind::from_path(&path)?).ok()?;
+    let lod = mesh.geoms.first()?.lods.first()?;
+    Some((lod.bounds_min, lod.bounds_max))
+}
+
+/// How the rope's projectile flies: BF2 throws the hook's rope as a chain of links from the
+/// hand (`throwStrength`, `upThrowBoost`); here the hook flies as a projectile that catches
+/// on ledges (`minYNormal 0.5`: it holds on surfaces at most 60° steep) and the links follow
+/// it (drawn by the client). It flies as the xpack's hook model. The zipline shell sticks
+/// wherever it hits.
+fn rope_projectile(converter: &MeshConverter, projectile: &mut ProjectileDesc, rope: RopeDesc) {
     match rope.kind {
         RopeKind::Grapple => {
             projectile.velocity = 20.0;
             projectile.gravity = 1.0;
             projectile.impact = Impact::Stick { max_angle: 60.0 };
+            let hook = format!("{ROPE_OBJECTS}/xp1_grapplinghook/meshes/xp1_grapplinghook.staticmesh");
+            if let Ok(mesh) = converter.convert_mesh(&hook).map_err(|e| log::warn!("grappling hook model: {e:#}")) {
+                projectile.mesh = Some(mesh);
+            }
         }
         RopeKind::Zipline => projectile.impact = Impact::Stick { max_angle: 180.0 },
     }

@@ -309,9 +309,11 @@ pub fn default_tickets(kind: ModeKind, size: u32) -> f32 {
 /// - **Charges** (Rush): at a stage of one flag, one on each side of it across the line of
 ///   attack; at a stage of several, beside two of them about 80 m apart. The server moves them
 ///   onto ground soldiers can walk to ([`ChargeDesc::approximate`]).
-/// - **Spawns** (Rush): the attackers at their start and every stage taken so far, the
-///   defenders at the current stage's flags, the stages behind it and their bases. (The
-///   server closes a flag for spawning while enemies are at it.)
+/// - **Spawns** (Rush): the attackers hold their start and every stage taken so far, the
+///   defenders the current stage's flags, the stages behind it and their bases (their
+///   vehicles spawn there). The server lets each side spawn only at those near the stage's
+///   charges, and closes a flag for spawning while enemies are at it (`game_server`'s
+///   `modes::staged`).
 pub fn generate(source: &GameModeDesc, kind: ModeKind) -> Option<GameModeDesc> {
     if !kind.staged() {
         return None;
@@ -439,7 +441,10 @@ impl Front {
         };
         let start = indices(&|cp| cp.initial_team == attacker);
         let bases = indices(&|cp| cp.uncapturable && cp.initial_team == defender);
-        let mut front = indices(&|cp| !cp.uncapturable && cp.initial_team != attacker);
+        // Not points sharing their id with others (AIX 2's Trident has hundreds of "Aircraft"
+        // points in the air, all "1"): nobody could tell them apart, spawn points included.
+        let unique = |cp: &ControlPointDesc| points.iter().filter(|other| other.id == cp.id).count() == 1;
+        let mut front = indices(&|cp| !cp.uncapturable && cp.initial_team != attacker && unique(cp));
         if front.is_empty() {
             return None;
         }
@@ -890,6 +895,17 @@ mod tests {
         assert!(!rush.stages[0].charges[0].approximate);
         let bt = layouts.game_modes[1].staged.as_ref().unwrap();
         assert_eq!((bt.fuse_seconds, bt.stages[1].control_points.len()), (30.0, 2));
+    }
+
+    #[test]
+    fn points_sharing_an_id_are_left_out() {
+        let mut source = karkand();
+        for x in 0..3 {
+            source.control_points.push(cp("dup", 400.0 + x as f32, -300.0, 1, false));
+        }
+        let front = Front::new(&source, ModeKind::Rush).unwrap();
+        assert!(front.stages.iter().flatten().all(|&i| source.control_points[i].id != "dup"));
+        assert_eq!(front.stages.iter().flatten().count(), 5);
     }
 
     #[test]

@@ -415,10 +415,7 @@ mod tests {
         assert!(grid.cells_near(door.xz(), 1.0).any(|c| c.index >= grid.base_cells));
 
         // Cached and loaded back, it finds the same way.
-        let file = std::env::temp_dir().join(format!("navgrid_patch_{}.bin", std::process::id()));
-        super::super::cache::save(&file, 3, &grid).unwrap();
-        let loaded = super::super::cache::load(&file, 3, grid.params).unwrap();
-        std::fs::remove_file(&file).unwrap();
+        let loaded = super::super::cache::decode(&super::super::cache::encode(&grid), grid.params).unwrap();
         assert_eq!(loaded.patches(), grid.patches());
         assert_eq!(loaded.portals.values().map(Vec::len).sum::<usize>(), grid.portals.values().map(Vec::len).sum::<usize>());
         assert!(loaded.find_path(from, to).unwrap().complete);

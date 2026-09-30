@@ -1,0 +1,40 @@
+// Breakthrough on Strike at Karkand (32): spawns follow the front. The deploy screen of both
+// sides in sectors 1 and 2 (sector 1 taken with `TakeStage`): the defenders spawn at the open
+// sector's flags and the ones just behind, the attackers at the gas station first, then at the
+// flags they took. The server logs each side's spawns with their distance from the sector's
+// flags and checks that each side's nearest one is within 250 m; the deploy screen logs the
+// spawns it offers.
+// client --scenario scenarios/modes/breakthrough_spawns.ron
+(
+    level: "strike_at_karkand",
+    mode: "gpm_breakthrough",
+    size: 32,
+    bots: 0,
+    team: 2,
+    steps: [
+        // From the start: the first sector's check comes while the level loads.
+        ForbidLog("spawn FAR from the objectives"),
+        ForbidLog("have no spawn open"),
+        WaitReady,
+        ExpectLog("front check Sector 1", 10.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s1_attackers"),
+        SetTeam(1),
+        ExpectLog("deploy: spawn options for One (Sector 1)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s1_defenders"),
+        TakeStage,
+        ExpectLog("Breakthrough Sector 2: attackers spawn at", 5.0),
+        ExpectLog("front check Sector 2", 5.0),
+        ExpectLog("deploy: spawn options for One (Sector 2)", 5.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s2_defenders"),
+        SetTeam(2),
+        ExpectLog("deploy: spawn options for Two (Sector 2)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s2_attackers"),
+        Quit,
+    ],
+)

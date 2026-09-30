@@ -26,7 +26,7 @@
         Screenshot("bigmap"),
         ReleaseKey(KeyM),
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Screenshot("deploy"),
         Quit,
     ],

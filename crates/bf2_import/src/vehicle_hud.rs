@@ -29,8 +29,19 @@ struct Node {
 
 impl VehicleHuds {
     pub fn load(converter: &MeshConverter) -> Self {
+        Self::load_dir(converter, SETUP)
+    }
+
+    /// The handheld weapons' HUDs (`menu/hud/hudsetup/weapons/*.con`), by GUI index: what a
+    /// weapon shows while zoomed is its `weaponHud.altGuiIndex`'s (the M4's, SCAR's, P90's
+    /// and AK-74U's red dot `Ingame/CrossHair/AimPoint.tga`, index 53; nothing for most).
+    pub fn load_weapons(converter: &MeshConverter) -> Self {
+        Self::load_dir(converter, "menu/hud/hudsetup/weapons/")
+    }
+
+    fn load_dir(converter: &MeshConverter, setup: &str) -> Self {
         let mut nodes: HashMap<String, Node> = HashMap::new();
-        let mut files: Vec<&str> = converter.vfs.list(SETUP).filter(|p| p.ends_with(".con")).collect();
+        let mut files: Vec<&str> = converter.vfs.list(setup).filter(|p| p.ends_with(".con")).collect();
         files.sort_unstable();
         for file in files {
             let Ok(text) = converter.vfs.read_text(file) else {
@@ -283,6 +294,33 @@ mod tests {
         assert!(!cross.dynamic && (cross.color[0] - 0.9).abs() < 1e-6);
         assert!(nodes["hit"].dynamic);
         assert!(!nodes.contains_key("range"));
+    }
+
+    #[test]
+    fn weapon_alt_hud_keeps_the_red_dot() {
+        // HudElementsM4.con: the crosshair (moved by variables) for GUI index 4, the red dot
+        // for 53 (the weapons' altGuiIndex, shown zoomed in).
+        let mut nodes = HashMap::new();
+        parse(
+            "hudBuilder.createSplitNode IngameHud M4Hud\n\
+             hudBuilder.setNodeLogicShowVariable EQUAL GuiIndex 4\n\
+             hudBuilder.setNodeLogicShowVariable OR GuiIndex 53\n\
+             hudBuilder.createSplitNode M4Hud M4CrossHud\n\
+             hudBuilder.setNodeLogicShowVariable EQUAL GuiIndex 4\n\
+             hudBuilder.createPictureNode M4CrossHud M4CrosshairUp 398 285 8 8\n\
+             hudBuilder.setPictureNodeTexture Ingame/CrossHair/vsp_CrossHair_single.tga\n\
+             hudBuilder.setNodePosVariable 1 CrosshairUpPos\n\
+             hudBuilder.createSplitNode M4Hud M4AltHud\n\
+             hudBuilder.setNodeLogicShowVariable EQUAL GuiIndex 53\n\
+             hudBuilder.createPictureNode M4AltHud M4AltCrosshair 390 288 20 23\n\
+             hudBuilder.setPictureNodeTexture Ingame/CrossHair/AimPoint.tga\n",
+            &mut nodes,
+        );
+        assert_eq!(nodes["m4hud"].gui_indices, vec![4, 53]);
+        assert_eq!(nodes["m4althud"].gui_indices, vec![53]);
+        let dot = &nodes["m4altcrosshair"];
+        assert!(!dot.dynamic && dot.picture.as_ref().unwrap().1 == "ingame/crosshair/aimpoint.tga");
+        assert!(nodes["m4crosshairup"].dynamic);
     }
 
     #[test]

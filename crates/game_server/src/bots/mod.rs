@@ -124,6 +124,8 @@ impl Plugin for BotPlugin {
                 ai::gadgets::forget_flashes,
                 log_stats,
                 ai::stats::track_events,
+                // Bot flow agent: what squads do after a capture.
+                ai::stats::track_flow,
                 ai::stats::log_stats,
             )
                 .chain()
@@ -148,6 +150,8 @@ const SCAN_INTERVAL: f32 = 0.25;
 const DECIDE_INTERVAL: f32 = 0.25;
 /// Beyond this distance from its objective a bot heads for the area's order position.
 const APPROACH_DISTANCE: f32 = 60.0;
+/// Squad leaders wait for members within this distance only, meters.
+const REGROUP_REACH: f32 = 120.0;
 /// How far a grenade may land from friends, meters.
 const GRENADE_SAFETY: f32 = 9.0;
 /// Bots keep this far from teammates while moving, meters.
@@ -223,6 +227,9 @@ pub struct BotStats {
     vehicle_paths: u32,
     vehicle_partial_paths: u32,
     vehicle_failed_paths: u32,
+    /// Times a driver logged giving up on a route search for a while (repeated failures in a
+    /// row): see `bots::vehicle::Ride::route_failures`.
+    vehicle_route_failures: u32,
     vehicle_stuck: u32,
     vehicle_stuck_spots: bevy::platform::collections::HashMap<(i32, i32), u32>,
     vehicle_stuck_samples: bevy::platform::collections::HashMap<(i32, i32), (Vec3, Vec3, String)>,
@@ -1966,6 +1973,14 @@ impl BotBrain {
         if let Some(leader) = human_leader {
             return self.area_near(w, leader.position, me.team);
         }
+        // Bot flow agent: left behind to guard a flag the squad took.
+        if let Some(area) = me
+            .member
+            .and_then(|m| w.strategy.guarding(me.team, m.squad, me.player))
+            .filter(|a| *a < w.map.areas.len())
+        {
+            return Some((OrderKind::Defend, area));
+        }
         key.and_then(|k| w.strategy.orders.get(&k))
             .map(|order| (order.kind, order.area))
             .or_else(|| {
@@ -2026,9 +2041,15 @@ impl BotBrain {
         let position = me.motion.position;
         let squad = me.member.and_then(|m| w.snapshot.squads.get(&(me.team, m.squad)));
         let is_leader = me.member.is_some_and(|m| m.leader);
+        // Guards stay at their flag while the squad moves on (bot flow agent).
+        let guards: &[Entity] = me
+            .member
+            .and_then(|m| w.strategy.guards.get(&(me.team, m.squad)))
+            .map_or(&[], |g| g.members.as_slice());
+        let guard = guards.contains(&me.player);
         // Not a leader flying off in an aircraft (or far away): the objective instead.
         let leader = squad
-            .filter(|_| !is_leader)
+            .filter(|_| !is_leader && !guard)
             .and_then(|s| s.leader_soldier)
             .filter(|l| l.position.y - position.y < 25.0 && l.position.distance(position) < 400.0);
         let human_led = squad.is_some_and(|s| !s.leader_is_bot);
@@ -2055,7 +2076,7 @@ impl BotBrain {
         // Near the fight the squad bounds: one fire team moves while the other covers it.
         let tactic = me
             .member
-            .filter(|_| self.tactical && !human_led)
+            .filter(|_| self.tactical && !human_led && !guard)
             .and_then(|m| w.tactics.squads.get(&(me.team, m.squad)))
             .filter(|t| t.bounding)
             .copied();
@@ -2107,18 +2128,26 @@ impl BotBrain {
         let distance = area.position.distance(position);
 
         // Leaders wait for a squad that fell behind, a while, and gather it before an
-        // assault so it arrives together rather than one by one.
+        // assault so it arrives together rather than one by one. Not for guards, nor for
+        // members far off (just spawned at a base, or riding elsewhere): they won't catch
+        // up by waiting, and spawn on the leader when they die (bot flow agent).
+        let waited: Vec<&squad::SoldierInfo> = squad.map_or(Vec::new(), |squad| {
+            squad
+                .alive
+                .iter()
+                .filter(|m| m.player != me.player && !guards.contains(&m.player))
+                .filter(|m| m.position.distance(position) < REGROUP_REACH)
+                .collect()
+        });
         if is_leader
             && tactic.is_none()
             && let Some(squad) = squad
-            && let Some(spread) = squad.spread()
+            && squad.leader_soldier.is_some()
+            && !waited.is_empty()
         {
-            let others = squad.alive.len().saturating_sub(1);
-            let close = squad
-                .alive
-                .iter()
-                .filter(|m| m.player != me.player && m.position.distance(position) < 25.0)
-                .count();
+            let spread = waited.iter().map(|m| m.position.distance(position)).sum::<f32>() / waited.len() as f32;
+            let others = waited.len();
+            let close = waited.iter().filter(|m| m.position.distance(position) < 25.0).count();
             let assault = order.is_some_and(|(k, _)| k == OrderKind::Attack)
                 && distance < 2.0 * APPROACH_DISTANCE
                 && self.target.is_none();
@@ -2126,12 +2155,9 @@ impl BotBrain {
             if assault && !gathering {
                 self.staged = true;
             }
-            if spread < 15.0 && !gathering {
-                self.regroup = 0.0;
-            } else if distance > APPROACH_DISTANCE && (gathering || (spread > 30.0 && self.regroup < 10.0)) {
+            if distance > APPROACH_DISTANCE && (gathering || (spread > 30.0 && self.regroup < 10.0)) {
                 self.regroup += dt;
-                let others: Vec<Vec3> =
-                    squad.alive.iter().filter(|m| m.player != me.player).map(|m| m.position).collect();
+                let others: Vec<Vec3> = waited.iter().map(|m| m.position).collect();
                 if !others.is_empty() {
                     let center = others.iter().sum::<Vec3>() / others.len() as f32;
                     intent.look = Look::At(center + Vec3::Y * 1.5);
@@ -2139,6 +2165,10 @@ impl BotBrain {
                 intent.buttons |= Buttons::CROUCH;
                 return;
             }
+            // The time to wait comes back slowly on the move (it used to come back whenever
+            // the squad closed up, so a squad in a fight, members in and out of cover, kept
+            // its leader waiting at the flag it had just taken: bot flow agent).
+            self.regroup = (self.regroup - 0.25 * dt).max(0.0);
         }
 
         if distance > APPROACH_DISTANCE {
@@ -3223,8 +3253,8 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
         }
         info!(
             "bots in vehicles: {} seats taken, {} left; {:.2} km driven in {:.0} s at the wheel ({:.1} m/s); \
-             {} vehicle stuck events ({:.1} per vehicle-minute, most at {}); {} vehicle paths ({} partial, {} failed); \
-             {} takeoffs, {} crashes; seated bots {:.3} ms per tick ({})",
+             {} vehicle stuck events ({:.1} per vehicle-minute, most at {}); {} vehicle paths ({} partial, {} failed, \
+             {} gave up on a route for a while); {} takeoffs, {} crashes; seated bots {:.3} ms per tick ({})",
             stats.vehicle_entries,
             stats.vehicle_exits,
             stats.driven / 1000.0,
@@ -3236,6 +3266,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.vehicle_paths,
             stats.vehicle_partial_paths,
             stats.vehicle_failed_paths,
+            stats.vehicle_route_failures,
             stats.flights,
             stats.crashes,
             stats.seated_ms / stats.ticks.max(1) as f32,

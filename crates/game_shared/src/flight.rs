@@ -74,7 +74,7 @@ const COLLECTIVE_RESPONSE: f32 = 1.5;
 const HOVER_HEIGHT: f32 = 0.6;
 /// Jump jets start hovering below the first airspeed (m/s) and fly as jets again above the
 /// second.
-const VTOL_SPEEDS: [f32; 2] = [35.0, 50.0];
+pub const VTOL_SPEEDS: [f32; 2] = [35.0, 50.0];
 /// Near the ground the collective sinks at most this fast (m/s), plus this much per meter of
 /// height, so a helicopter held down touches down gently instead of bouncing off its skids.
 const LANDING_SINK: f32 = 1.5;
@@ -83,10 +83,12 @@ const LANDING_SINK_PER_METER: f32 = 0.35;
 const GROUNDED_LIFT: f32 = 0.5;
 
 /// Jets' pitch, yaw and roll rates at full stick and rudder at the corner speed, radians per
-/// second (48°/s, 29°/s, 170°/s: a loop in about 8 s, a roll in about 2 s).
-pub const JET_RATES: Vec3 = Vec3::new(0.84, 0.5, 2.97);
+/// second (57°/s, 29°/s, 170°/s: a loop in about 7 s, a roll in about 2 s). BF2's raw wings
+/// pitch its jets at 40-55°/s at the corner speed and 45-80°/s faster (`tests/flight.rs`,
+/// `jet_mouse`, measures them).
+pub const JET_RATES: Vec3 = Vec3::new(1.0, 0.5, 2.97);
 /// How quickly a jet reaches the rates it's asked for, 1/s (pitch, yaw, roll).
-const JET_RESPONSE: Vec3 = Vec3::new(6.0, 4.0, 10.0);
+const JET_RESPONSE: Vec3 = Vec3::new(9.0, 4.0, 10.0);
 /// Jets' corner speed (the best turn rate) as a share of their engines' top speed, and the
 /// stall speed as a share of the corner speed.
 const JET_CORNER_SHARE: f32 = 0.7;
@@ -182,11 +184,14 @@ fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
 
 /// Share of [`JET_RATES`] (pitch, yaw, roll) a jet gets at an airspeed: control surfaces need
 /// airflow, the turn rate peaks at the corner speed and falls off above it (the load limit).
+/// The pitch rate stays near BF2's at every speed: about 32°/s just above the stall, 42°/s at
+/// 60 m/s, 43°/s at full throttle, 34°/s with the afterburner (where the load limit holds the
+/// flight path to about 30°/s anyway).
 pub fn jet_authority(envelope: &JetEnvelope, airspeed: f32) -> Vec3 {
     let JetEnvelope { corner, stall } = *envelope;
     let airflow = (airspeed / stall).clamp(0.0, 1.0).powi(2);
     let fast = if airspeed > corner { corner / airspeed } else { 1.0 };
-    let pitch = (0.35 + 0.65 * smoothstep(stall, corner, airspeed)) * fast.powf(1.2);
+    let pitch = (0.5 + 0.5 * smoothstep(stall, corner, airspeed)) * fast.powf(0.8);
     let roll = (0.45 + 0.55 * smoothstep(stall, corner * 0.75, airspeed)) * fast.sqrt().max(0.75);
     let yaw = 0.5 + 0.5 * smoothstep(stall, corner * 0.6, airspeed);
     Vec3::new(pitch, yaw, roll) * airflow
@@ -210,6 +215,58 @@ pub fn jet_stall(desc: &game_data::VehicleDesc, body: &BodyState) -> f32 {
 /// Whether a jet is in the air for [`jet_stall`] (not rolling on its wheels).
 pub fn jet_airborne(altitude: f32) -> bool {
     altitude > JET_AIRBORNE
+}
+
+/// A jet's pitch, yaw and roll rates at full stick and rudder at an airspeed (radians per
+/// second, before a stall takes its share).
+pub fn jet_full_rates(desc: &game_data::VehicleDesc, airspeed: f32) -> Vec3 {
+    JET_RATES * jet_authority(&JetEnvelope::of(desc), airspeed)
+}
+
+/// Mouse flying for jets, BF3/BF4-style: the mouse turns the nose the way it turns the view on
+/// foot. Each count asks for [`JET_MOUSE_GAIN`] radians of turn (pitch, yaw, roll; times the
+/// jet mouse sensitivity) whatever the airspeed, which the jet flies off at up to its rates
+/// ([`jet_full_rates`]), catching up with the mouse in about 1/[`JET_MOUSE_FOLLOW`] s. When
+/// the mouse stops the turn stops and the fly-by-wire holds the attitude: a climb is one
+/// mouse movement, not a spring to hold against (the helicopters' mouse stick centres itself
+/// in 1/8 s, so a jet's nose only kept coming up while the mouse kept moving), and a quick
+/// movement isn't cut off at full stick: up to [`JET_MOUSE_BACKLOG`] seconds of the jet's
+/// full rate wait to be flown (moving the mouse faster than the jet turns, that much turn
+/// follows after the mouse stops; more is dropped).
+pub const JET_MOUSE_GAIN: Vec3 = Vec3::new(0.0035, 0.0035, 0.007);
+pub const JET_MOUSE_FOLLOW: f32 = 15.0;
+pub const JET_MOUSE_BACKLOG: f32 = 0.3;
+/// The mouse is flown off as if the jet had at least this share of [`JET_RATES`] (parked or
+/// slow, the rates are near zero and the backlog would build up for the take-off).
+const JET_MOUSE_MIN_RATES: f32 = 0.3;
+
+/// The turn the mouse has asked a jet for and it hasn't flown yet (see [`JET_MOUSE_GAIN`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JetMouse {
+    /// Radians: pitch up, yaw right, roll right.
+    pub owed: Vec3,
+}
+
+impl JetMouse {
+    /// Adds this frame's mouse movement (counts times the sensitivity: up, right for the
+    /// rudder, right for the roll) and returns the stick share that flies it off (pitch up,
+    /// rudder right, roll right; -1..1 in the input frame's steps), for a jet that turns at
+    /// `rates` (pitch, yaw, roll, radians per second) at full stick. `limit_pitch` is what the
+    /// fly-by-wire's angle of attack limit leaves of a pitch stick ([`limit_pitch`]), so a
+    /// pull or push it holds back is flown once it allows.
+    pub fn update(&mut self, counts: Vec3, rates: Vec3, dt: f32, limit_pitch: impl Fn(f32) -> f32) -> Vec3 {
+        let rates = rates.max(JET_RATES * JET_MOUSE_MIN_RATES);
+        let backlog = rates * JET_MOUSE_BACKLOG;
+        self.owed = (self.owed + counts * JET_MOUSE_GAIN).clamp(-backlog, backlog);
+        // Quantised like `InputFrame::set_stick`, so what's taken off is what the jet gets.
+        let stick = (self.owed * JET_MOUSE_FOLLOW / rates).clamp(Vec3::NEG_ONE, Vec3::ONE);
+        let stick = (stick * 127.0).round() / 127.0;
+        let flown = Vec3::new(limit_pitch(stick.x), stick.y, stick.z);
+        let left = self.owed - flown * rates * dt;
+        // Too little left to move the stick a step (or flown past): done.
+        self.owed = Vec3::select(stick.cmpeq(Vec3::ZERO) | (left * self.owed).cmplt(Vec3::ZERO), Vec3::ZERO, left);
+        stick
+    }
 }
 
 /// A rigid body's motion in world space.
@@ -708,6 +765,38 @@ mod tests {
         }
         // No airflow, no control.
         assert_eq!(jet_authority(&envelope, 0.0), Vec3::ZERO);
+    }
+
+    #[test]
+    fn jet_mouse_flies_what_the_mouse_moved() {
+        // 100 counts up spread over 0.2 s, at rates the jet can follow: all of it is flown
+        // (0.35 rad), and the stick is back in the middle soon after the mouse stops.
+        let rates = JET_RATES;
+        let dt = 1.0 / 60.0;
+        let mut mouse = JetMouse::default();
+        let mut turned = 0.0;
+        let mut centred_after = None;
+        for tick in 0..60 {
+            let counts = if tick < 12 { 100.0 / 12.0 } else { 0.0 };
+            let stick = mouse.update(Vec3::new(counts, 0.0, 0.0), rates, dt, |p| p);
+            turned += stick.x * rates.x * dt;
+            if tick >= 12 && stick.x == 0.0 && centred_after.is_none() {
+                centred_after = Some((tick - 12) as f32 * dt);
+            }
+        }
+        let asked = 100.0 * JET_MOUSE_GAIN.x;
+        assert!((turned - asked).abs() < asked * 0.03, "{turned} of {asked}");
+        assert!(centred_after.is_some_and(|t| t < 0.5), "{centred_after:?}");
+        // Much faster than the jet turns, only the backlog is kept.
+        let mut mouse = JetMouse::default();
+        mouse.update(Vec3::new(10_000.0, 0.0, 0.0), rates, dt, |p| p);
+        assert!(mouse.owed.x <= rates.x * JET_MOUSE_BACKLOG + 1e-4);
+        // Held back by the angle of attack limit, it waits to be flown.
+        let mut mouse = JetMouse::default();
+        mouse.update(Vec3::new(50.0, 0.0, 0.0), rates, dt, |_| 0.0);
+        let owed = mouse.owed.x;
+        mouse.update(Vec3::ZERO, rates, dt, |_| 0.0);
+        assert_eq!(mouse.owed.x, owed);
     }
 }
 

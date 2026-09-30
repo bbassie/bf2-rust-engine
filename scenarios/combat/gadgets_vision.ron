@@ -12,6 +12,7 @@
         Screenshot("plain"),
         Wait(0.1),
         Key(KeyL),
+        ExpectLog("night vision on", 3.0),
         Wait(0.6),
         Screenshot("night_vision"),
         Wait(0.1),

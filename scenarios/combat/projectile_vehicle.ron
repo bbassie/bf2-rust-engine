@@ -12,9 +12,9 @@
     steps: [
         WaitReady,
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:0"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         NearVehicle("usapc_lav25"),
         Weapon(2),
         Wait(1.5),
@@ -43,9 +43,9 @@
         Release([Fire]),
         Wait(4.0),
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:6"),
-        Wait(16.0),
+        WaitSpawned(20.0),
         // Point blank into the hull (the blast gets us too).
         NearVehicle("usapc_lav25"),
         Weapon(0),

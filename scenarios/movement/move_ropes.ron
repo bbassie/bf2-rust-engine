@@ -33,7 +33,7 @@
 
         // Spec ops: the zipline crossbow is its 9th weapon too.
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:0"),
         WaitReady,
         Teleport((99.0, 106.0, 165.4), 180.0, -12.0),

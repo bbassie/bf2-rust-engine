@@ -334,7 +334,17 @@ impl EffectLibrary {
 pub(crate) fn load_library(mut commands: Commands, paths: Res<GamePaths>, mut meshes: ResMut<Assets<Mesh>>) {
     let dir = paths.find("effects/impacts.ron").parent().map_or_else(|| paths.imported.join("effects"), |d| d.to_path_buf());
     let impacts: ImpactTable = game_data::read_ron(dir.join("impacts.ron")).unwrap_or_default();
-    let weapons: WeaponEffectTable = game_data::read_ron(dir.join("weapons.ron")).unwrap_or_default();
+    // Weapons from every root, the first (highest priority) mod's entry winning: a mod's table
+    // only has its own kits' weapons, and a vanilla level played with the mod installed (the
+    // Special Forces' Leviathan with AIX 2) still has vanilla kits, their night vision goggles
+    // and gas masks included.
+    let mut weapons = WeaponEffectTable::default();
+    for root in paths.roots() {
+        let table: WeaponEffectTable = game_data::read_ron(root.join("effects/weapons.ron")).unwrap_or_default();
+        for (name, effects) in table.weapons {
+            weapons.weapons.entry(name).or_insert(effects);
+        }
+    }
     let decal_table: DecalTable = game_data::read_ron(dir.join("decals.ron")).unwrap_or_default();
     commands.insert_resource(decals::Decals::new(decal_table, &mut meshes));
     if impacts.effects.is_empty() {

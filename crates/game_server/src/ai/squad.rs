@@ -328,6 +328,8 @@ pub fn coordinate(
         let axis = (objective - leader.position).with_y(0.0).normalize_or(Vec3::NEG_Z);
         let start = !tactic.bounding;
         tactic.phase_time += dt;
+        // Guards left at a flag don't bound with the squad.
+        let guards = strategy.guards.get(&key).map_or(&[][..], |g| g.members.as_slice());
         let done = !start
             && match tactic.moving {
                 0 => leader.position.distance(tactic.anchor) > BOUND_DISTANCE,
@@ -335,7 +337,7 @@ pub fn coordinate(
                     .members
                     .iter()
                     .enumerate()
-                    .filter(|(slot, _)| fire_team(Some(*slot)) == 1)
+                    .filter(|(slot, player)| fire_team(Some(*slot)) == 1 && !guards.contains(player))
                     .filter_map(|(slot, player)| squad.alive.iter().find(|s| s.player == *player).map(|s| (slot, s)))
                     .all(|(slot, s)| s.position.distance(bound_slot(tactic, tactic.anchor, slot)) < 5.0),
             };

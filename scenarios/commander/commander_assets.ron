@@ -15,9 +15,9 @@
         WaitReady,
         Commander(Apply),
         Kill,
-        Wait(1.0),
+        WaitDeployScreen(3.0),
         Click("kit:4"),
-        Wait(11.0),
+        WaitSpawned(20.0),
         // The guns at rest, from beside the first one (the second is behind us).
         Teleport((-165.0, 163.0, 118.0), -100.0, 8.0),
         Wait(1.5),

@@ -1,0 +1,65 @@
+// Rush on Leviathan (16): spawns follow the front, and the charges stand on dry ground. The
+// deploy screen of both sides at stages 1, 2 and 4 (stages taken with `TakeStage`), and both
+// charges of stage 2 at the Base Power Station up close (one of them used to end up on the
+// seabed beside the pier, 4 m under water). The server logs each side's spawns with their
+// distance from the charges and checks that each side's nearest one is within 250 m (the
+// attackers' from stage 2 on); the deploy screen logs the spawns it offers.
+// client --scenario scenarios/modes/rush_spawns_leviathan.ron
+(
+    level: "leviathan",
+    mode: "gpm_rush",
+    size: 16,
+    bots: 0,
+    team: 1,
+    steps: [
+        // From the start: the first stage's check comes while the level loads.
+        ForbidLog("spawn FAR from the objectives"),
+        ForbidLog("have no spawn open"),
+        ForbidLog("no walkable ground near"),
+        WaitReady,
+        ExpectLog("front check Stage 1", 10.0),
+        ExpectLog("charges placed on walkable ground", 30.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s1_attackers"),
+        SetTeam(2),
+        ExpectLog("deploy: spawn options for Two (Stage 1)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s1_defenders"),
+        TakeStage,
+        ExpectLog("Rush Stage 2: attackers spawn at", 5.0),
+        ExpectLog("front check Stage 2", 5.0),
+        ExpectLog("deploy: spawn options for Two (Stage 2)", 5.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s2_defenders"),
+        SetTeam(1),
+        ExpectLog("deploy: spawn options for One (Stage 2)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s2_attackers"),
+        // Back on our feet for the stage's charges.
+        WaitSpawned(15.0),
+        NearCharge("A"),
+        Wait(1.0),
+        ThirdPerson(true),
+        Wait(1.5),
+        Screenshot("s2_charge_a"),
+        NearCharge("B"),
+        Wait(2.0),
+        Screenshot("s2_charge_b"),
+        ThirdPerson(false),
+        TakeStage,
+        ExpectLog("front check Stage 3", 5.0),
+        TakeStage,
+        ExpectLog("front check Stage 4", 5.0),
+        ExpectLog("deploy: spawn options for One (Stage 4)", 5.0),
+        Kill,
+        WaitDeployScreen(3.0),
+        Screenshot("s4_attackers"),
+        SetTeam(2),
+        ExpectLog("deploy: spawn options for Two (Stage 4)", 5.0),
+        WaitDeployScreen(3.0),
+        Screenshot("s4_defenders"),
+        Quit,
+    ],
+)
