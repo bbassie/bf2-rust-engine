@@ -382,6 +382,12 @@ struct SoldierModels {
     lods: HashMap<String, BodyLods>,
     /// Weapon upper-body animation sets by path.
     weapon_sets: HashMap<String, Handle<Gltf>>,
+    /// Third-person weapon meshes by path, held onto (strong handles) from the moment a
+    /// soldier's loadout is known so switching to a weapon for the first time doesn't leave it
+    /// invisible while its `.glb` loads (see `animate`'s loadout-changed preload and
+    /// `attach_weapons`, which looks a weapon's mesh up here before falling back to a fresh
+    /// load).
+    weapon_meshes: HashMap<String, Handle<Gltf>>,
     /// One animation graph per soldier name (all clips are baked into every body's own glb,
     /// so there's no sharing to be had between two different bodies).
     graphs: HashMap<String, ModelAnimations>,
@@ -761,11 +767,25 @@ fn body_animations<'a>(
     Some(animations)
 }
 
-/// Starts loading a weapon's upper-body set, so switching to the weapon animates at once.
+/// Starts loading a weapon's `.glb` (an upper-body animation set or a mesh) if it isn't
+/// already, keeping the strong handle in `sets` so the load isn't dropped and restarted before
+/// something else claims a handle to it.
 fn preload_set(sets: &mut HashMap<String, Handle<Gltf>>, set: &str, asset_server: &AssetServer) {
     if !sets.contains_key(set) {
         sets.insert(set.to_string(), asset_server.load(format!("imported://{set}")));
     }
+}
+
+/// A weapon mesh's handle: the one already preloaded on the loadout in `models.weapon_meshes`
+/// (the common case, since `animate` preloads every weapon of a soldier's loadout as soon as
+/// it's known), or a fresh load as a fallback for a weapon that wasn't in a loadout we saw
+/// (e.g. picked up).
+fn weapon_mesh_handle(models: &SoldierModels, path: &str, asset_server: &AssetServer) -> Handle<Gltf> {
+    models
+        .weapon_meshes
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| asset_server.load(format!("imported://{path}")))
 }
 
 fn add_clip(graph: &mut AnimationGraph, handle: &Handle<AnimationClip>, clips: &Assets<AnimationClip>) -> Clip {
@@ -994,14 +1014,14 @@ fn attach_weapons(
                     commands.entity(part).try_despawn();
                 }
                 held.name = name;
-                held.gltf = weapon.and_then(|w| w.mesh_3p.as_ref()).map(|p| asset_server.load(format!("imported://{p}")));
+                held.gltf = weapon.and_then(|w| w.mesh_3p.as_deref()).map(|p| weapon_mesh_handle(&models, p, &asset_server));
                 held.spawned = false;
                 held
             }
             None => {
                 commands.entity(entity).insert(HeldWeapon {
                     name,
-                    gltf: weapon.and_then(|w| w.mesh_3p.as_ref()).map(|p| asset_server.load(format!("imported://{p}"))),
+                    gltf: weapon.and_then(|w| w.mesh_3p.as_deref()).map(|p| weapon_mesh_handle(&models, p, &asset_server)),
                     parts: Vec::new(),
                     spawned: false,
                 });
@@ -1259,6 +1279,20 @@ impl SoldierAnimator {
             }
             self.legs.update(player, dt);
             self.upper.begin();
+            if render.parachute {
+                // `3p_parachute` (BF2's own animation, played the same single way here) only
+                // has tracks for the hips and legs, none for the spine/collar/arm bones: BF2
+                // leaves the arms to whatever the current weapon's own upper-body pose is
+                // doing, rather than a dedicated "hands on the risers" clip. Keep that upper
+                // layer running (its `stand` clip: arms holding the weapon in front of the
+                // body) instead of fading it out like a real vehicle seat, whose own clip
+                // covers the arms too (hands on the wheel/gun); without this the arm bones
+                // have no active clip left at all and just sit at the skeleton's rest pose,
+                // stretched flat out to the sides.
+                if let Some(&clip) = animations.upper.get(cues.set).and_then(|u| u.get("stand")) {
+                    self.upper.play(player, clip, Play::looping(1.0));
+                }
+            }
             self.upper.update(player, dt);
             self.set.clear();
             self.hand = None;
@@ -1574,8 +1608,12 @@ fn animate(
         let set = weapon.and_then(|w| w.animations_3p.as_deref()).unwrap_or(DEFAULT_WEAPON_ANIMATIONS);
         if animator.graph.is_none() || loadout_changed {
             for name in loadout.map_or(&[][..], |l| &l.weapons) {
-                if let Some(set) = armory.weapon(name).and_then(|w| w.animations_3p.as_deref()) {
+                let Some(weapon) = armory.weapon(name) else { continue };
+                if let Some(set) = weapon.animations_3p.as_deref() {
                     preload_set(&mut models.weapon_sets, set, &asset_server);
+                }
+                if let Some(mesh) = weapon.mesh_3p.as_deref() {
+                    preload_set(&mut models.weapon_meshes, mesh, &asset_server);
                 }
             }
         }

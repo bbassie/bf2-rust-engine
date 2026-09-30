@@ -106,6 +106,7 @@ impl Plugin for ViewModelPlugin {
                 (
                     load_arms.run_if(resource_exists_and_changed::<LoadedLevel>),
                     attach_arms,
+                    preload_weapon_meshes,
                     attach_weapon,
                     animate_view_model,
                 )
@@ -132,6 +133,12 @@ struct ViewModelAssets {
     /// Weapon first-person animation sets by path.
     sets: HashMap<String, Handle<Gltf>>,
     graphs: HashMap<String, ViewAnimations>,
+    /// First-person weapon meshes by path, held onto (strong handles) from the moment the
+    /// local player's loadout is known so switching to a weapon for the first time (e.g. the
+    /// M203 launcher) doesn't leave it invisible for a moment while its `.glb` loads. Preloaded
+    /// by `preload_weapon_meshes`; `attach_weapon` looks a weapon's mesh up here before falling
+    /// back to a fresh load.
+    weapon_meshes: HashMap<String, Handle<Gltf>>,
 }
 
 #[derive(Clone)]
@@ -362,12 +369,69 @@ fn held<'a>(weapon: &'a game_data::WeaponDesc, detonator: bool) -> (String, Opti
     }
 }
 
+/// Starts loading every weapon's first-person mesh and animation set (and its detonator's mesh,
+/// for C4) in the local player's loadout as soon as it's known, so `attach_weapon` and
+/// `view_animations` find a switch's assets already loading (or loaded) instead of only
+/// starting the load the moment the player switches to it. Without this, the weapon mesh (and,
+/// until its own animation set loaded, its bones' pose) is missing for about a second after
+/// every first switch to it (e.g. the M203 launcher). Runs every frame rather than gating on
+/// `Changed<Loadout>`: `LocalSoldier` is tagged onto the soldier entity by a later, reactive
+/// system (`net::tag_local_entities`) than the one that sets `Loadout`, so a change-frame filter
+/// combined with `With<LocalSoldier>` can miss the one frame both are true. The map lookups
+/// below are cheap (a handful of weapons) and no-ops once everything is cached.
+fn preload_weapon_meshes(
+    armory: Res<Armory>,
+    asset_server: Res<AssetServer>,
+    mut assets: ResMut<ViewModelAssets>,
+    soldier: Query<&Loadout, With<LocalSoldier>>,
+) {
+    let Ok(loadout) = soldier.single() else {
+        return;
+    };
+    for name in &loadout.weapons {
+        let Some(weapon) = armory.weapon(name) else { continue };
+        for mesh in weapon
+            .mesh_1p
+            .as_deref()
+            .into_iter()
+            .chain(weapon.detonator.as_ref().and_then(|d| d.mesh_1p.as_deref()))
+        {
+            preload(&mut assets.weapon_meshes, mesh, &asset_server);
+        }
+        if let Some(set) = weapon.animations_1p.as_deref() {
+            preload(&mut assets.sets, set, &asset_server);
+        }
+    }
+}
+
+/// Starts loading a `.glb` (a weapon mesh or animation set) if it isn't already, keeping the
+/// strong handle in `map` so the load isn't dropped and restarted before something else claims
+/// a handle to it.
+fn preload(map: &mut HashMap<String, Handle<Gltf>>, path: &str, asset_server: &AssetServer) {
+    if !map.contains_key(path) {
+        map.insert(path.to_string(), asset_server.load(format!("imported://{path}")));
+    }
+}
+
+/// A weapon mesh's handle: the one already preloaded on the loadout in `assets.weapon_meshes`
+/// (the common case, since `preload_weapon_meshes` preloads every weapon of the local player's
+/// loadout as soon as it's known), or a fresh load as a fallback for a weapon that wasn't in a
+/// loadout we saw.
+fn weapon_mesh_handle(assets: &ViewModelAssets, path: &str, asset_server: &AssetServer) -> Handle<Gltf> {
+    assets
+        .weapon_meshes
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| asset_server.load(format!("imported://{path}")))
+}
+
 /// Puts the active weapon's first-person parts on the arms' weapon bones.
 #[allow(clippy::type_complexity)]
 fn attach_weapon(
     mut commands: Commands,
     armory: Res<Armory>,
     asset_server: Res<AssetServer>,
+    assets: Res<ViewModelAssets>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
     mut materials: Bf2Materials,
@@ -388,7 +452,7 @@ fn attach_weapon(
         }
         state.weapon = held;
         state.parts_ready = false;
-        state.weapon_gltf = mesh_1p.map(|path| asset_server.load(format!("imported://{path}")));
+        state.weapon_gltf = mesh_1p.map(|path| weapon_mesh_handle(&assets, path, &asset_server));
     }
     if state.parts_ready {
         return;

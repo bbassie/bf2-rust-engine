@@ -1,0 +1,53 @@
+// Switches to the Assault kit's M203 launcher (secondary fire) and screenshots within 2 frames
+// (about 33 ms), first then third person. Regression check for weapon meshes not being
+// preloaded on a loadout change: before the fix, `attach_weapon` / `attach_weapons` only
+// started loading a weapon's `.glb` the moment the player switched to it (`Weapon(1)`), no
+// matter how long the loadout had already been known, so the model was invisible (bare hands,
+// or nothing in third person) for about a second after every switch, not just the first.
+// `render::soldiers::animate` (third person) and `render::viewmodel::preload_weapon_meshes`
+// (first person) now preload every loadout weapon's mesh as soon as the loadout is known, so
+// even a switch this soon after the request should already show the launcher. Uses only 2
+// frames of margin where scenarios/animation/m203.ron uses 4, to catch a shorter pop-in too.
+// client --scenario scenarios/animation/weapon_preload.ron --out target/scenarios/weapon_preload
+(
+    level: "strike_at_karkand",
+    bots: 0,
+    team: 2,
+    steps: [
+        WaitReady,
+        Kill,
+        Wait(1.0),
+        Click("kit:2"),
+        Wait(16.0),
+        Teleport((-184.0, 157.0, -85.0), 180.0, 0.0),
+        Wait(0.2),
+        Screenshot("00_1p_rifle"),
+        // Switch to the launcher and screenshot through the transition at short, then longer,
+        // delays: with the mesh preloaded from spawn there should be no frame in between where
+        // the new weapon is missing or bare hands (only the deploy animation moving in).
+        Weapon(1),
+        Frames(4),
+        Screenshot("01_1p_switch_4frames"),
+        Frames(8),
+        Screenshot("02_1p_switch_12frames"),
+        Wait(0.2),
+        Screenshot("03_1p_switch_0.2s"),
+        Wait(0.8),
+        Screenshot("04_1p_settled"),
+        Weapon(0),
+        Wait(0.5),
+        ThirdPerson(true),
+        Wait(0.5),
+        Screenshot("05_3p_rifle"),
+        Weapon(1),
+        Frames(4),
+        Screenshot("06_3p_switch_4frames"),
+        Frames(8),
+        Screenshot("07_3p_switch_12frames"),
+        Wait(0.2),
+        Screenshot("08_3p_switch_0.2s"),
+        Wait(0.8),
+        Screenshot("09_3p_settled"),
+        Quit,
+    ],
+)

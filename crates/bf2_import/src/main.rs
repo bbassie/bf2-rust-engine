@@ -90,7 +90,9 @@ enum Command {
     },
     /// Import soldier bodies (skinned mesh, skeleton, animations). Also done by `level`.
     Soldiers {
-        /// Only this installed BF2 mod's soldiers (default: every installed mod's).
+        /// Only this installed BF2 mod's soldiers (default: the base game, `xpack` merged over
+        /// `bf2` the way it's mounted in-game; other installed mods, e.g. `AIX2`, are never
+        /// imported unless named here).
         #[arg(long = "bf2-mod")]
         bf2_mod: Option<String>,
     },
@@ -170,7 +172,8 @@ fn main() -> Result<()> {
             }
             std::fs::create_dir_all(&cli.out)?;
             write_readme(&cli.out)?;
-            import_soldiers(&install, &cli.out, &mods);
+            let soldier_mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| default_soldier_mods(&install));
+            import_soldiers(&install, &cli.out, &soldier_mods);
             let localization = Localization::load(&install, "english");
             log::info!("{} localized strings", localization.len());
             let mod_title = mod_title.as_deref().or(namespace.as_deref());
@@ -204,7 +207,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Soldiers { bf2_mod } => {
-            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| install.mods());
+            let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| default_soldier_mods(&install));
             import_soldiers(&install, &cli.out, &mods)
         }
         Command::Ai { names, all, bf2_mod } => {
@@ -266,6 +269,25 @@ fn find_level(install: &Bf2Install, name: &str, bf2_mod: Option<&str>) -> Result
         Some(m) => install.find_level_in(name, &[m.to_string()]),
         None => install.find_level(name),
     }
+}
+
+/// The mod(s) to import soldiers from when `--bf2-mod` wasn't given: the base game only, and
+/// just `xpack` when it's installed rather than both `bf2` and `xpack` separately, since
+/// mounting `xpack` already pulls in `bf2`'s own archives (`Bf2Install::mount_mod`) the same
+/// way the game does. Importing `bf2` and `xpack` as two separate passes (as plain
+/// `install.mods()` would, alongside every other installed mod) mounts `bf2` alone first, which
+/// is missing Special Forces-only content such as the rope/zipline clips
+/// (`soldiers::ROPE_ANIMATIONS`); `soldiers::import_all`'s dedup by body name then keeps that
+/// incomplete `bf2` pass and skips the fuller one `xpack` would have produced. Other installed
+/// mods (e.g. `AIX2`) are never imported by default, matching `level`'s refusal to import a
+/// non-base mod's level without `--namespace`.
+fn default_soldier_mods(install: &Bf2Install) -> Vec<String> {
+    let mut mods = install.mods();
+    mods.retain(|m| Bf2Install::is_base_mod(m));
+    if mods.iter().any(|m| m.eq_ignore_ascii_case("xpack")) {
+        mods.retain(|m| m.eq_ignore_ascii_case("xpack"));
+    }
+    mods
 }
 
 fn import_soldiers(install: &Bf2Install, out: &std::path::Path, mods: &[String]) {

@@ -831,11 +831,27 @@ fn settings_tab_content(
     }
 }
 
+/// Width of a key/gamepad binding button's column, wide enough for the longest label these
+/// buttons ever show ("D-Pad Right", "Right Shift"). Fixed (not `min_width`) so every row's
+/// three key columns line up exactly under each other regardless of that row's own label text.
+const BINDING_COLUMN_WIDTH: f32 = 108.0;
+/// Width of the trailing gamepad-clear-button column, always reserved (left empty when the
+/// action has no gamepad binding to clear) so its presence never shifts the key columns of one
+/// row relative to another.
+const CLEAR_COLUMN_WIDTH: f32 = 28.0;
+
 fn binding_row(p: &mut ChildSpawnerCommands, action: Action, settings: &Settings) {
     let conflicts = settings.conflicts(action);
+    let has_gamepad = settings.bindings(action).gamepad.is_some();
+    // Fixed-width columns throughout (label, three bindings, clear), joined with a plain gap
+    // instead of `JustifyContent::SpaceBetween`: `SpaceBetween` divides a row's free space by
+    // however many children it happens to have, so a row with the clear button, or with a
+    // trailing "also used by" conflict note, squeezed its earlier columns tighter than a row
+    // without one, and the key buttons no longer lined up between rows (see
+    // scenarios/menu/pause_settings.ron's controls screenshots).
     p.spawn(Node {
         align_items: AlignItems::Center,
-        justify_content: JustifyContent::SpaceBetween,
+        column_gap: px(16),
         min_height: px(28),
         ..default()
     })
@@ -855,9 +871,17 @@ fn binding_row(p: &mut ChildSpawnerCommands, action: Action, settings: &Settings
             Value::Binding(action, BindSlot::Secondary),
         );
         binding_button(row, MenuButton::RebindGamepad(action), Value::GamepadBinding(action));
-        if settings.bindings(action).gamepad.is_some() {
-            button(row, MenuButton::ClearGamepad(action), Look::Plain, "x");
-        }
+        row.spawn(Node {
+            width: px(CLEAR_COLUMN_WIDTH),
+            flex_shrink: 0.0,
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_children(|c| {
+            if has_gamepad {
+                button(c, MenuButton::ClearGamepad(action), Look::Plain, "x");
+            }
+        });
         if !conflicts.is_empty() {
             let names: Vec<String> = conflicts.iter().map(|a| a.label()).collect();
             row.spawn(text(format!("also used by {}", names.join(", ")), 11.0, ENEMY));
@@ -872,7 +896,8 @@ fn binding_button(p: &mut ChildSpawnerCommands, action: MenuButton, value: Value
         Look::Plain,
         Button,
         Node {
-            min_width: px(96),
+            width: px(BINDING_COLUMN_WIDTH),
+            flex_shrink: 0.0,
             padding: UiRect::axes(px(10), px(5)),
             justify_content: JustifyContent::Center,
             border_radius: BorderRadius::all(px(6)),
