@@ -415,11 +415,17 @@ impl Senses<'_, '_> {
 pub(super) fn swim_clear(w: &Senses, from: Vec3, to: Vec3, water: f32) -> bool {
     let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
     // The body above a shallow bottom it may be making for (a well deck's floor is 0.4 m under
-    // the water), and the head.
+    // the water), and the head. Stop the ray a little short of `to`: a shore or a ladder's
+    // foot often rises in a step or a sill right at the destination (the actual swim and climb
+    // moves already step up to 0.6 m of that), and the ray would otherwise call the whole
+    // approach blocked by the very step it's trying to reach.
     [-0.2, 0.3].into_iter().all(|height| {
         let a = Vec3::new(from.x, water + height, from.z);
         let d = Vec3::new(to.x, water + height, to.z) - a;
-        Dir3::new(d).map_or(true, |dir| w.spatial.cast_ray(a, dir, d.length(), true, &filter).is_none())
+        Dir3::new(d).map_or(true, |dir| {
+            let length = (d.length() - 1.0).max(0.0);
+            length <= 0.0 || w.spatial.cast_ray(a, dir, length, true, &filter).is_none()
+        })
     })
 }
 

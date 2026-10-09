@@ -1,0 +1,30 @@
+// The xpack jet ski on Leviathan's water: floating at rest, then full throttle. Its water-jet
+// thruster used to sit above the floaters' draft line (game_shared::flight), so the throttle
+// never did anything; the report traces speed to check it actually gets going.
+// client --scenario scenarios/vehicles/vehicle2_jetski.ron --out target/scenarios/vehicle2/jetski
+(
+    level: "leviathan",
+    size: 32,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        Wait(3.0),
+        NearVehicle("xpak_jetski"),
+        Wait(0.5),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        ThirdPerson(true),
+        VehicleTrace("afloat", 2.0),
+        Screenshot("01_afloat"),
+        Move(0.0, 1.0),
+        VehicleTrace("throttle", 6.0),
+        Screenshot("02_speed"),
+        VehicleInfo("full throttle"),
+        Move(0.0, 0.0),
+        VehicleTrace("coast", 2.0),
+        Quit,
+    ],
+)

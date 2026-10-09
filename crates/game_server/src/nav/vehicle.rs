@@ -793,7 +793,24 @@ impl VehicleNavGrid {
     fn locate_vehicle(&self, p: Vec3) -> Option<CellRef> {
         // The hull origin is somewhere above the ground.
         let feet = p - Vec3::Y * 1.0;
-        [3.0, 8.0, 30.0, 80.0].into_iter().find_map(|radius| self.land.locate(feet, radius, None))
+        [3.0, 8.0, 30.0, 80.0]
+            .into_iter()
+            .find_map(|radius| self.land.locate(feet, radius, None))
+            // `locate` only takes cells within 3 m below or 1 m above `feet` (right for a
+            // soldier standing on them, who the band is meant for): a vehicle spawner authored
+            // a few meters above or below the grid's idea of the ground right under it (a
+            // raised dock, a parked pad cut slightly into a slope) falls outside that band at
+            // every radius and never finds anything, however far out. Pier and pad spawners
+            // kept logging "found no route" for it; one more, wider look with no height limit
+            // at all gets them going.
+            .or_else(|| {
+                self.land
+                    .cells_near(feet.xz(), 80.0)
+                    .min_by(|a, b| {
+                        let d = |c: &CellRef| self.land.position(*c).distance_squared(feet);
+                        d(a).total_cmp(&d(b))
+                    })
+            })
     }
 
     /// The nearest point of the land grid to `p`, regardless of what can drive there: where a

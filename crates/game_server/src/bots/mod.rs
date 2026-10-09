@@ -2567,8 +2567,13 @@ impl BotBrain {
             let (target, j, step) = match (w.nav.as_deref(), self.direct) {
                 (Some(nav), false) => match self.follow_path(nav, w.obstacles.as_deref(), goal.position, goal.tolerance, me.motion, dt, stats) {
                     Steer::Toward { target, jump, ladder } => (target, jump, ladder),
-                    // At the path's end: on to the goal if it's in walking reach, otherwise here.
-                    Steer::Arrived if self.path_done == Some(false) => (position, false, None),
+                    // At the path's end: walk the last stretch towards the goal even when the
+                    // line to it didn't test as cleanly walkable (an interaction point like a
+                    // Rush charge is often placed right at a doorway or wall where the straight
+                    // line check is too strict by a hair; collision still stops the bot at any
+                    // real obstacle, and the normal stuck recovery takes over if it truly can't
+                    // get closer). Freezing in place here left bots standing just out of use
+                    // range forever.
                     Steer::Arrived => (goal.position, false, None),
                     Steer::Stranded => {
                         stats.stranded += 1;

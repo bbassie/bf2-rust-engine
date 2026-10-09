@@ -681,8 +681,19 @@ pub fn flight_forces(
     }
     for thruster in &desc.thrusters {
         let point = body.position + rotation * Vec3::from(thruster.position);
-        if thruster.water && around.water.is_none_or(|water| point.y > water - 0.1) {
-            continue;
+        if thruster.water {
+            // A water jet mounts wherever the hull shape puts it (BF2's data; on a shallow
+            // jet ski it sits above the floaters' draft line), so judge wet/dry by the hull's
+            // own floaters rather than the nozzle's exact height. Vehicles with no floaters
+            // (shouldn't normally have a water thruster) fall back to the point's own depth.
+            let afloat = if desc.floaters.is_empty() {
+                around.water.is_some_and(|water| point.y <= water - 0.1)
+            } else {
+                in_water > 0.0
+            };
+            if !afloat {
+                continue;
+            }
         }
         let direction = rotation * Vec3::from(thruster.direction);
         let along = body.velocity.dot(direction);
