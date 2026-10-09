@@ -264,8 +264,16 @@ impl Handshake<'_, '_> {
     }
 }
 
-fn client_connected(add: On<Add, ConnectedClient>, mut commands: Commands, time: Res<Time<Real>>) {
-    commands.entity(add.entity).insert(Joining::new(time.elapsed_secs(), false));
+fn client_connected(
+    add: On<Add, ConnectedClient>,
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    links: Query<(), With<crate::transport::LinkClient>>,
+) {
+    // The client of this process (`embedded`) is let in without a handshake.
+    if !links.contains(add.entity) {
+        commands.entity(add.entity).insert(Joining::new(time.elapsed_secs(), false));
+    }
 }
 
 /// Lets `client` in if its content and account are both fine.

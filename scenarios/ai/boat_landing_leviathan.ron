@@ -1,0 +1,35 @@
+// A boat squad lands on Leviathan (Rush, 32) (crates/game_server/src/bots/vehicle.rs): the
+// attackers start on the MEC Strike Point's island, so their bots cross the channel by boat.
+// Their RIB's driver sails to a landing by a beach that walking connects to the stage's charge
+// ("boat landing for ..."), not the water nearest the charge (under a quay or in a slip
+// between the piers), everyone gets out there ("got out of boat_rib (dropped off)") and goes
+// inland. The camera chases the RIB on the way and at the landing. Fails if nobody takes the
+// RIB or nobody is landed in time.
+// client --scenario scenarios/ai/boat_landing_leviathan.ron
+(
+    level: "leviathan",
+    mode: "gpm_rush",
+    size: 32,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ExpectLog("got into boat_rib (boat) seat 0 to Drive", 120.0),
+        ExpectLog("boat landing for", 12.0),
+        Wait(4.0),
+        ChaseDriven("boat_rib", 20.0, 7.0),
+        Screenshot("rib_off"),
+        Wait(15.0),
+        ChaseDriven("boat_rib", 20.0, 7.0),
+        Screenshot("rib_crossing"),
+        ExpectLog("got out of boat_rib (dropped off)", 90.0),
+        ChaseDriven("boat_rib", 16.0, 6.0),
+        Screenshot("rib_landed"),
+        Wait(10.0),
+        ChaseDriven("boat_rib", 26.0, 12.0),
+        Screenshot("rib_inland"),
+        LogVehicles("after the landing"),
+        Quit,
+    ],
+)

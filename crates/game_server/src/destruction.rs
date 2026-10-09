@@ -201,7 +201,7 @@ fn damage_statics(
                 radius: blast.radius,
                 material: blast.material,
                 attacker: Attacker {
-                    weapon: "explosion".into(),
+                    weapon: "Explosion".into(),
                     ..attacker.clone()
                 },
                 cone: None,

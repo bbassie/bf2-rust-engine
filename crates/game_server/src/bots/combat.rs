@@ -986,6 +986,7 @@ impl BotBrain {
     /// Per-minute idle diagnostics: what it is doing (and why, when carrying out its order).
     pub(super) fn idle_reason(&self) -> &'static str {
         match self.activity {
+            Activity::Objective if self.awaiting_ride => "waiting for a ride",
             Activity::Objective if self.stranded > 0.0 => "stranded",
             Activity::Objective if self.overwatch.is_some() => "overwatch",
             Activity::Objective if self.regroup > 0.0 && self.goal.is_none() => "waiting for squad",

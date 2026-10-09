@@ -235,8 +235,16 @@ fn track_time(
     }
 }
 
-/// `usrif_m16a2` -> `M16A2`, like the kill feed.
+/// `usrif_m16a2` -> `M16A2`, like the kill feed. Attacker weapon strings are mostly already
+/// resolved display names (`WeaponDesc::label`, e.g. "Artillery"); those pass through
+/// unchanged (see `game_client::combat::weapon_display_name`, which this mirrors).
 fn weapon_label(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    if name.chars().any(|c| c.is_ascii_uppercase()) || name.contains(' ') || name.contains('-') {
+        return name.replace('_', " ");
+    }
     let name = name.trim_start_matches("KILLMESSAGE_WEAPON_");
     let name = match name.split_once('_') {
         Some((prefix, rest)) if prefix.len() <= 6 && !rest.is_empty() => rest,

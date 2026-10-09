@@ -86,6 +86,7 @@ impl Plugin for ProtocolPlugin {
             .add_server_message::<crate::commander::ScanReport>(Channel::Unordered)
             .add_mapped_server_message::<crate::radio::RadioMessage>(Channel::Ordered)
             .add_mapped_server_message::<crate::revive::ReplenishNotice>(Channel::Unordered)
+            .add_server_message::<OutOfBoundsWarning>(Channel::Unreliable)
             // Game modes beyond conquest (`crate::modes`).
             .replicate::<crate::modes::ModeState>()
             .replicate::<crate::modes::ChargeTimes>()
@@ -234,4 +235,13 @@ pub struct KillFeed {
     pub victim: Entity,
     pub weapon: String,
     pub headshot: bool,
+}
+
+/// Server -> a player outside the combat area that applies to them (on foot, or in a
+/// vehicle): `Some(seconds)` while the countdown runs, sent again whenever it changes;
+/// `None` once they're back inside, cancelling it (BF2's out-of-bounds warning, see
+/// `game_server::out_of_bounds`).
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct OutOfBoundsWarning {
+    pub seconds_left: Option<f32>,
 }

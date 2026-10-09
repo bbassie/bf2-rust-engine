@@ -1,0 +1,38 @@
+// BF2's out-of-bounds warning and countdown (game_server::out_of_bounds): walking past
+// Karkand's combat area (the US base's land/soldiers' area, a ~340x640 m polygon west of the
+// Hotel) warns us and counts down; walking back in time cancels it; staying out kills us.
+// client --scenario scenarios/conquest/out_of_bounds.ron --out target/scenarios/out_of_bounds
+(
+    level: "strike_at_karkand",
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        WaitSpawned(20.0),
+        // Inside the combat area (the Hotel, same spot `conquest/capture.ron` uses).
+        Teleport((-180.0, 157.0, -93.0), 0.0, 0.0),
+        ThirdPerson(false),
+        Wait(1.0),
+        Screenshot("inside"),
+        ForbidLog("died: out of bounds"),
+        // Out past the area's eastern edge (max x about -74): warned, and the HUD shows it.
+        Teleport((-40.0, 157.0, -93.0), 0.0, 0.0),
+        ExpectLog("is out of bounds, 10 s to return", 2.0),
+        Wait(0.5),
+        Screenshot("warning"),
+        // Back inside well before the countdown ends: cancels it.
+        Teleport((-180.0, 157.0, -93.0), 0.0, 0.0),
+        ExpectLog("returned to the battlefield", 2.0),
+        Wait(0.5),
+        Screenshot("cancelled"),
+        AllowLog("died: out of bounds"),
+        // Out again, and left there this time: dies when the countdown runs out.
+        Teleport((-40.0, 157.0, -93.0), 0.0, 0.0),
+        ExpectLog("is out of bounds, 10 s to return", 2.0),
+        Screenshot("warning_again"),
+        ExpectLog("died: out of bounds", 11.0),
+        Wait(0.5),
+        Screenshot("dead"),
+        Quit,
+    ],
+)

@@ -14,6 +14,8 @@
 //!     // Aim and reaction 0..1; default: the difficulty's (Normal 0.5).
 //!     bot_skill: 0.5,
 //!     friendly_fire: false,
+//!     // BF2's out-of-bounds warning and countdown outside the combat areas (default on).
+//!     out_of_bounds: true,
 //!     // Jumping into a ledge up to about 1.6 m high climbs onto it (not in BF2; default on).
 //!     mantle: true,
 //!     respawn_time: 10.0,
@@ -107,6 +109,9 @@ pub struct ServerConfig {
     /// `Easy`, `Normal`, `Hard` or `Expert`. Also sets `bot_skill` unless that is given.
     pub bot_difficulty: Option<crate::ai::skill::BotDifficulty>,
     pub friendly_fire: bool,
+    /// BF2's out-of-bounds warning and countdown outside the level's combat areas (default
+    /// on; levels without combat areas are unaffected either way).
+    pub out_of_bounds: bool,
     /// Climbing onto ledges by jumping into them (`game_shared::soldier::SoldierTuning::mantle`).
     pub mantle: bool,
     /// Seconds between death and respawn.
@@ -170,6 +175,7 @@ impl Default for ServerConfig {
             bot_skill: None,
             bot_difficulty: None,
             friendly_fire: settings.friendly_fire,
+            out_of_bounds: settings.out_of_bounds,
             mantle: settings.mantle,
             respawn_time: settings.respawn_seconds,
             ticket_ratio: settings.ticket_ratio,
@@ -251,6 +257,7 @@ impl ServerConfig {
             local_team: 1,
             respawn_seconds: self.respawn_time.max(0.0),
             friendly_fire: self.friendly_fire,
+            out_of_bounds: self.out_of_bounds,
             mantle: self.mantle,
             bot_skill: self
                 .bot_skill

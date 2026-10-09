@@ -237,7 +237,7 @@ impl Live {
         Attacker {
             player: Some(self.shooter_player),
             soldier: Some(self.shooter),
-            weapon: Arc::from(self.weapon.name.as_str()),
+            weapon: Arc::from(self.weapon.label()),
         }
     }
 }
@@ -510,7 +510,7 @@ fn fire_weapons(
         let attacker = Attacker {
             player: Some(player),
             soldier: Some(soldier),
-            weapon: Arc::from(weapon.name.as_str()),
+            weapon: Arc::from(weapon.label()),
         };
         let eye = motion.eye_position();
         let view = motion.view_rotation();

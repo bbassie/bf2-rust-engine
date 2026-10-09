@@ -47,3 +47,5 @@ tiny_http = "0.12"
 game_auth.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 serde_json = "1"
+# The in-memory link to the client of the same process (`embedded`, `transport`).
+crossbeam-channel = "0.5"

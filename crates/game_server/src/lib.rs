@@ -46,6 +46,7 @@ pub mod content;
 pub mod coop;
 pub mod discovery;
 pub mod dummy;
+pub mod embedded;
 pub mod gear;
 pub mod join;
 pub mod limits;
@@ -58,8 +59,10 @@ pub mod profile;
 pub mod soak;
 pub mod stats;
 pub mod squads;
+pub mod transport;
 pub mod destruction;
 pub mod nav;
+pub mod out_of_bounds;
 pub mod roadkill;
 pub mod vehicles;
 pub mod voice;
@@ -87,6 +90,9 @@ pub struct ServerSettings {
     pub respawn_seconds: f32,
     /// Whether bullets hurt teammates.
     pub friendly_fire: bool,
+    /// BF2's out-of-bounds warning and countdown outside the level's combat areas (see
+    /// [`out_of_bounds`]). Levels without combat areas are unaffected either way.
+    pub out_of_bounds: bool,
     /// Soldiers climb onto ledges by jumping into them (not in BF2; see
     /// `game_shared::soldier::SoldierTuning::mantle`).
     pub mantle: bool,
@@ -138,6 +144,7 @@ impl Default for ServerSettings {
             local_team: 1,
             respawn_seconds: 10.0,
             friendly_fire: false,
+            out_of_bounds: true,
             mantle: true,
             bot_skill: 0.5,
             bot_difficulty: ai::skill::BotDifficulty::Normal,
@@ -170,6 +177,7 @@ impl Plugin for GameServerPlugin {
         app.insert_resource(self.settings.clone().unwrap_or_default())
             .add_plugins((bots::BotPlugin, combat::CombatPlugin, modes::ModesPlugin, nav::NavPlugin, squads::SquadPlugin, vehicles::VehiclesPlugin))
             .add_plugins((destruction::DestructionPlugin, roadkill::RoadkillPlugin, abilities::AbilitiesPlugin, gear::GearPlugin))
+            .add_plugins(out_of_bounds::OutOfBoundsPlugin)
             .add_plugins((
                 admin::AdminPlugin,
                 chat::ChatPlugin,
@@ -467,26 +475,31 @@ pub fn stop_server(world: &mut World) {
 fn create_client_player(
     add: On<Add, AuthorizedClient>,
     mut commands: Commands,
-    clients: Query<(&NetworkId, Option<&join::ClientAccount>)>,
+    clients: Query<(&NetworkId, Option<&join::ClientAccount>, Option<&embedded::LinkPlayer>)>,
     teams: Query<&Team, With<Player>>,
     settings: Res<ServerSettings>,
 ) {
-    let Ok((network_id, account)) = clients.get(add.entity) else {
+    let Ok((network_id, account, link)) = clients.get(add.entity) else {
         return;
     };
-    // Co-op: all humans on one team.
-    let team = if coop::is_coop(&settings.mode) {
+    // Co-op: all humans on one team. The player of this process (`embedded`) chose his.
+    let team = if let Some(link) = link {
+        link.team
+    } else if coop::is_coop(&settings.mode) {
         coop::human_team(&settings)
     } else {
         balanced_team(teams.iter())
     };
+    let name = match (account, link) {
+        // A verified account's name (see `accounts`), else the hello's.
+        (Some(account), _) => account.0.name.clone(),
+        (None, Some(embedded::LinkPlayer { name: Some(name), .. })) => name.clone(),
+        (None, Some(_)) => "Spectator".into(),
+        (None, None) => format!("Player {}", network_id.get() % 10_000),
+    };
     let player = commands
         .spawn((
-            Player {
-                // A verified account's name (see `accounts`), else the hello's.
-                name: account.map_or_else(|| format!("Player {}", network_id.get() % 10_000), |a| a.0.name.clone()),
-                is_bot: false,
-            },
+            Player { name, is_bot: false },
             PlayerNetId(network_id.get()),
             team,
             InputBuffer::default(),
@@ -574,6 +587,7 @@ fn receive_hello(
     settings: Res<ServerSettings>,
     mut players: Query<(Entity, &mut Player, Has<game_shared::join::AccountBadge>, Has<Greeted>)>,
     mut lines: MessageWriter<ToClients<ChatLine>>,
+    links: Query<(), With<transport::LinkClient>>,
 ) {
     // Greeted in this pass (the marker is inserted later).
     let mut greeted = Vec::new();
@@ -613,6 +627,10 @@ fn receive_hello(
             targets: SendTargets::AllExcept(hello.client_id),
             message: ChatLine::server(format!("{name} joined the game")),
         });
+        // Not the player of this process (`embedded`): he runs the server.
+        if matches!(hello.client_id, ClientId::Client(client) if links.contains(client)) {
+            continue;
+        }
         let greeting = std::iter::once(format!("Welcome to {}, {name}!", settings.name))
             .chain(settings.admin.motd.lines().map(str::to_string));
         for line in greeting {

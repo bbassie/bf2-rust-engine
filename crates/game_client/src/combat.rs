@@ -711,6 +711,9 @@ fn receive_kills(
         let line = match &kill.killer_name {
             Some(killer) if *killer != victim => format!("{killer}  [{weapon}{headshot}]  {victim}"),
             Some(_) => format!("[{weapon}]  {victim}"),
+            // No killer entity (falls, out of bounds, a static object's blast): still name
+            // the cause when there is one.
+            None if !kill.weapon.is_empty() => format!("{victim}  [{weapon}]"),
             None => format!("{victim} is down"),
         };
         feedback.kills.push_back((line, time.elapsed_secs_f64()));
@@ -723,8 +726,19 @@ fn receive_kills(
     }
 }
 
-/// `usrif_m16a2` / `KILLMESSAGE_WEAPON_m16a2` → `M16A2`.
+/// `usrif_m16a2` / `KILLMESSAGE_WEAPON_m16a2` → `M16A2`. The server now sends resolved
+/// display names for almost everything (`WeaponDesc::label`, e.g. "Artillery", "Out of
+/// Bounds"); those already read well and pass through unchanged (just underscores to
+/// spaces, no case change) rather than being mangled by the legacy heuristic below, which
+/// stays as a fallback for the few raw template names left (see `game_server::stats` for the
+/// server-side mirror of this split).
 pub fn weapon_display_name(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    if name.chars().any(|c| c.is_ascii_uppercase()) || name.contains(' ') || name.contains('-') {
+        return name.replace('_', " ");
+    }
     let name = name.trim_start_matches("KILLMESSAGE_WEAPON_");
     let name = match name.split_once('_') {
         Some((prefix, rest)) if prefix.len() <= 6 && !rest.is_empty() => rest,

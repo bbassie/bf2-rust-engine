@@ -556,6 +556,21 @@ fn remote_kind(world: &World, root: &Template) -> Option<RemoteKind> {
         .then_some(RemoteKind::Artillery)
 }
 
+/// A handful of stationary "vehicles" (towed artillery, the UAV trailer) have no
+/// `vehicleHud.hudName` at all in retail BF2: they aren't spawned or shown in a vehicle list,
+/// just placed on a level. Their own mounted weapon usually has a proper kill-feed name
+/// already ("Artillery"), but give the vehicle itself a readable one too, matching the
+/// vocabulary docs/formats/levels-terrain-scripts.md uses for them ("D-30/M198 artillery",
+/// "UAV trailer / radar").
+fn stationary_display_name(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "ars_d30" => Some("D-30 Howitzer"),
+        "usart_lw155" => Some("M198 Howitzer"),
+        "uav_pred" => Some("UAV Trailer"),
+        _ => None,
+    }
+}
+
 fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<(VehicleDesc, Option<Drivetrain>)> {
     let world = &interp.world;
     let root = world.template(name)?;
@@ -884,7 +899,7 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         display_name: root
             .get_str("vehiclehud.hudname")
             .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|| name.to_string()),
+            .unwrap_or_else(|| stationary_display_name(name).unwrap_or(name).to_string()),
         category,
         rigged: true,
         drive,
@@ -1622,6 +1637,13 @@ fn weapon_descs(
         let sounds = crate::sounds::SoundConverter::new(converter.vfs, out);
         let mut weapon = weapons::weapon_desc(interp, converter, &sounds, &t, out);
         weapon.display_name = localization.resolve(&weapon.display_name);
+        // No HUD name of its own (most secondary mounts: flare/smoke/bomb launchers, main
+        // gun barrels): BF2's kill messages for these just name the vehicle (e.g. "Killed by
+        // Abrams"), so fall back to its already-resolved name rather than the raw part
+        // template (`tnk_c2_barrel`, `apc_btr90__barrel`, ...).
+        if weapon.display_name.is_empty() || weapon.display_name == weapon.name {
+            weapon.display_name = desc.display_name.clone();
+        }
         let countermeasure = countermeasure.then(|| countermeasure_desc(&t, &mut weapon));
         // Horns are "guns" firing harmless projectiles for their sound; ammo belts that only
         // animate don't fire at all (velocity 0, unlike bombs, which drop).

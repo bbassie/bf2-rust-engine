@@ -349,6 +349,9 @@ pub struct VehicleClaims {
     /// Transport helicopters landed at their drop-off: everyone but the pilot gets out
     /// (until when, seconds of [`Self::clock`]; the pilot renews it every tick).
     drop_offs: HashMap<Entity, f32>,
+    /// Vehicles a bot gave up on as stuck without getting anywhere (a boat aground at its
+    /// spawn): left alone by every bot until when (seconds of [`Self::clock`]).
+    shunned: HashMap<Entity, f32>,
     clock: f32,
 }
 
@@ -364,6 +367,16 @@ impl VehicleClaims {
             !list.is_empty()
         });
         self.drop_offs.retain(|_, until| *until > clock);
+        self.shunned.retain(|_, until| *until > clock);
+    }
+
+    /// A driver got nowhere in this vehicle: nobody takes it for a while.
+    pub fn shun(&mut self, vehicle: Entity, seconds: f32) {
+        self.shunned.insert(vehicle, self.clock + seconds);
+    }
+
+    pub fn shunned(&self, vehicle: Entity) -> bool {
+        self.shunned.contains_key(&vehicle)
     }
 
     /// A transport's pilot has landed where his passengers get out (renewed every tick).
@@ -408,6 +421,11 @@ impl VehicleClaims {
     /// Bots on their way into a vehicle.
     pub fn pending(&self, vehicle: Entity) -> usize {
         self.claims.get(&vehicle).map_or(0, |l| l.len())
+    }
+
+    /// The bots (players) on their way into a vehicle.
+    pub fn claimants(&self, vehicle: Entity) -> impl Iterator<Item = Entity> + '_ {
+        self.claims.get(&vehicle).into_iter().flatten().map(|(p, ..)| *p)
     }
 
     /// A player put this bot (player) out of `vehicle` to take its seat.

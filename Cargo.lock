@@ -3449,6 +3449,7 @@ dependencies = [
  "bevy_replicon_renet",
  "bytemuck",
  "clap",
+ "crossbeam-channel",
  "fastrand",
  "flate2",
  "game_auth",

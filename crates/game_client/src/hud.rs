@@ -337,7 +337,8 @@ fn spawn_hud(mut commands: Commands) {
 fn update_status(
     diagnostics: Res<DiagnosticsStore>,
     client: Res<State<ClientState>>,
-    server: Res<State<ServerState>>,
+    // Our own server runs on its own thread (`local_server`): we are connected to it.
+    local: Option<Res<crate::local_server::LocalServer>>,
     level: Option<Res<LoadedLevel>>,
     prediction: Res<PredictionStats>,
     client_stats: Res<ClientStats>,
@@ -358,10 +359,10 @@ fn update_status(
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
         .unwrap_or_default();
-    let mode = match (client.get(), server.get()) {
-        (ClientState::Connected, _) => "online",
+    let mode = match (client.get(), local.is_some()) {
+        (ClientState::Connected, true) => "hosting",
+        (ClientState::Connected, false) => "online",
         (ClientState::Connecting, _) => "connecting...",
-        (_, ServerState::Running) => "hosting",
         _ => "offline",
     };
     let level = level

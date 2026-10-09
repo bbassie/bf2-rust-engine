@@ -98,7 +98,9 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for ProfileLayer {
             (_, Some(name)) => short_name(&name),
             (_, None) => return,
         };
-        let Some(slot) = intern(format!("{kind}{name}")) else {
+        // The client's own server runs on a thread of its own (`embedded`): its spans apart.
+        let thread = if std::thread::current().name() == Some("Server") { "srv " } else { "" };
+        let Some(slot) = intern(format!("{thread}{kind}{name}")) else {
             return;
         };
         if let Some(span) = ctx.span(id) {

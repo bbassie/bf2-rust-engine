@@ -19,7 +19,7 @@ use std::{
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
 use bevy_replicon_renet::RepliconRenetPlugins;
 use clap::Parser;
-use game_server::{GameServerPlugin, ServerSettings};
+use game_server::ServerSettings;
 use game_shared::{SharedPlugin, config::GamePaths};
 use menu::Screen;
 use net::MatchSetup;
@@ -69,12 +69,14 @@ mod hud;
 mod join;
 mod loadout;
 mod local_input;
+mod local_server;
 // --- Map style (tactical minimap and maps) ---
 mod map_background;
 mod map_icons;
 mod map_markers;
 mod map_shapes;
 mod objective_bar;
+mod out_of_bounds;
 // --- end map style ---
 mod menu;
 mod minimap;
@@ -318,6 +320,11 @@ fn main() -> AppExit {
             .set(ImagePlugin {
                 default_sampler: render::materials::default_sampler(),
             })
+            // --- Frame time experiments (`BF2_PERF_EXP=cpubatch`: mesh uniforms built on the CPU) ---
+            .set(bevy::pbr::PbrPlugin {
+                use_gpu_instance_buffer_builder: !perf_experiment("cpubatch"),
+                ..default()
+            })
             // Captures log lines for scenario assertions (`ExpectLog`, `ForbidLog`).
             .set(bevy::log::LogPlugin {
                 custom_layer: scenario::log_capture_layer,
@@ -355,6 +362,7 @@ fn main() -> AppExit {
         chat::ChatPlugin,
         summary::SummaryPlugin,
         wounded::WoundedPlugin,
+        out_of_bounds::OutOfBoundsPlugin,
         nametags::NameTagsPlugin,
         radio::RadioPlugin,
         map_markers::MapMarkersPlugin,
@@ -370,8 +378,8 @@ fn main() -> AppExit {
     // Weapons: the weapon list, the melee and grenade keys, loadouts on the deploy screen.
     .add_plugins((weapon_list::WeaponListPlugin, quick_actions::QuickActionsPlugin, loadout::LoadoutPlugin))
     .add_plugins((
-        // Idle until a match starts (see `net::start_match`).
-        GameServerPlugin { settings: None },
+        // Singleplayer and hosting run the server on a thread of its own (`local_server`).
+        local_server::LocalServerPlugin,
         settings::SettingsPlugin,
         content::ContentPlugin,
         // Optional accounts and the join handshake (see `account`, `join`).
@@ -413,7 +421,19 @@ fn main() -> AppExit {
     app.insert_resource(camera::ThirdPerson(cli.third_person));
     app.insert_resource(cli);
     single_threaded_schedules(&mut app);
+    // --- Frame time ---
+    // The client's physics only places colliders for its queries (prediction, the camera, hit
+    // checks): it has no dynamic bodies (the server simulates), so one solver substep is plenty
+    // where six only cost time every tick. `BF2_PERF_EXP=substeps` keeps avian's default.
+    if !perf_experiment("substeps") {
+        app.insert_resource(avian3d::prelude::SubstepCount(1));
+    }
     app.run()
+}
+
+/// Whether `BF2_PERF_EXP` names this frame time experiment (comma separated).
+pub(crate) fn perf_experiment(name: &str) -> bool {
+    std::env::var("BF2_PERF_EXP").is_ok_and(|e| e.split(',').any(|x| x.trim() == name))
 }
 
 /// Runs the main world's schedules (the frame's and the fixed tick's: the server's game rules

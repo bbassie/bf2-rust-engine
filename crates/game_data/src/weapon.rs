@@ -145,6 +145,12 @@ impl WeaponDesc {
             && self.projectile.trigger.is_none()
             && self.replenish.is_none()
     }
+
+    /// A name fit to show (the kill feed, HUD): the resolved `display_name`, else the raw
+    /// template name for the handful without one (see `bf2_import::weapons`).
+    pub fn label(&self) -> &str {
+        if self.display_name.is_empty() { &self.name } else { &self.display_name }
+    }
 }
 
 /// Healing, resupplying, repairing and reviving (BF2 `ReplenishingAmmoComp` on the weapon,

@@ -242,6 +242,13 @@ pub struct BotStats {
     /// ones "moving" (a goal, but they didn't get anywhere): where, to where, how.
     idle_by: bevy::platform::collections::HashMap<&'static str, u32>,
     idle_samples: Vec<String>,
+    /// (vehicles) Of those, the ones on or around an aircraft carrier.
+    idle_on_carriers: u32,
+    /// (vehicles) Bots cut off from their objective that got a ride (`objective`).
+    cut_off_rides: u32,
+    /// (vehicles) Seated bots (not at stationary weapons) whose vehicle moved under 2 m in
+    /// 30 s, by what the bot was doing (see `bots::vehicle::Ride::doing`).
+    seated_idle_by: bevy::platform::collections::HashMap<&'static str, u32>,
 }
 
 /// A finished path request.
@@ -486,6 +493,9 @@ pub struct BotBrain {
     idle_timer: f32,
     /// Swimming: the shore it heads for to get out, and seconds before it looks again.
     swim_exit: Option<Vec3>,
+    /// (vehicles) Where to swim to first for `swim_exit` when that is the top of a ladder out
+    /// of the water (a carrier's): its foot.
+    swim_via: Option<Vec3>,
     swim_exit_timer: f32,
     /// Seconds swimming without getting anywhere, and shores that didn't work out.
     swim_stall: f32,
@@ -509,6 +519,14 @@ pub struct BotBrain {
     aim_distance: f32,
     /// The walkable region it is in (see [`walk_region`]), and where that was found out.
     region: Option<u16>,
+    /// (vehicles) Cut off from its objective, waiting for a boat or helicopter to take it
+    /// there (see `objective`), and seconds it waited for one where it could swim instead.
+    awaiting_ride: bool,
+    ride_wait: f32,
+    /// Seconds to the next look for a ride, where it is, and whether only a swim gets there.
+    ride_check: f32,
+    ride_spot: Option<Vec3>,
+    ride_swim: bool,
     region_at: Vec3,
     /// A goal it kept getting stuck on the way to, avoided for the seconds left.
     bad_goal: Option<(Vec3, f32)>,
@@ -629,6 +647,7 @@ impl Default for BotBrain {
             idle_anchor: Vec3::ZERO,
             idle_timer: 30.0,
             swim_exit: None,
+            swim_via: None,
             swim_exit_timer: 0.0,
             swim_stall: 0.0,
             failed_exits: Vec::new(),
@@ -641,6 +660,11 @@ impl Default for BotBrain {
             prev_state: 12,
             aim_distance: 0.0,
             region: None,
+            awaiting_ride: false,
+            ride_wait: 0.0,
+            ride_check: 0.0,
+            ride_spot: None,
+            ride_swim: false,
             region_at: Vec3::ZERO,
             bad_goal: None,
             lost_aim: None,
@@ -876,6 +900,8 @@ impl BotBrain {
     fn new_life(&mut self, w: &Senses, me: &Me) {
         self.soldier = Some(me.soldier);
         self.stranded = 0.0;
+        self.awaiting_ride = false;
+        self.ride_wait = 0.0;
         self.primary = me.inventory.map_or(0, |i| i.active);
         self.paddles = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::Paddles));
         self.medic_bag = me.loadout.and_then(|l| gadget(l, &w.armory, Gadget::MedicBag));
@@ -1073,11 +1099,13 @@ impl BotBrain {
         if self.idle_timer <= 0.0 {
             self.idle_timer = 30.0;
             if flat(me.motion.position - self.idle_anchor).length() < 2.0 {
-                let reason = self.idle_reason();
+                // (vehicles) In the water and going nowhere: a bot that can't find its way out.
+                let reason = if me.motion.swimming { "swimming in place" } else { self.idle_reason() };
                 *stats.idle_by.entry(reason).or_default() += 1;
-                if reason == "moving" && stats.idle_samples.len() < 4 {
+                stats.idle_on_carriers += u32::from(near_carrier(&w.level, me.motion.position));
+                if matches!(reason, "moving" | "swimming in place") && stats.idle_samples.len() < 4 {
                     stats.idle_samples.push(format!(
-                        "{} at {:.0} for {} ({}, {} waypoints left, {:.0} stuck strikes)",
+                        "{} at {:.0} for {} ({}, {} waypoints left, next {}, {:.0} stuck strikes{}{}, {})",
                         w.name(me.player),
                         me.motion.position,
                         self.goal.map_or("-".into(), |g| format!("{g:.0}")),
@@ -1088,7 +1116,14 @@ impl BotBrain {
                             None => "no path",
                         },
                         self.path.as_ref().map_or(0, |p| p.waypoints.len().saturating_sub(self.waypoint)),
+                        self.path
+                            .as_ref()
+                            .and_then(|p| p.waypoints.get(self.waypoint))
+                            .map_or("-".into(), |w| format!("{:.0}", w.position)),
                         self.stuck_strikes,
+                        if me.motion.swimming { ", swimming" } else { "" },
+                        if self.swim_exit.is_some() { ", for the shore" } else { "" },
+                        self.idle_reason(),
                     ));
                 }
             }
@@ -2039,6 +2074,7 @@ impl BotBrain {
     /// objective and take a spot of its own there.
     fn objective(&mut self, w: &Senses, me: &Me, intent: &mut Intent, dt: f32) {
         let position = me.motion.position;
+        self.awaiting_ride = false;
         let squad = me.member.and_then(|m| w.snapshot.squads.get(&(me.team, m.squad)));
         let is_leader = me.member.is_some_and(|m| m.leader);
         // Guards stay at their flag while the squad moves on (bot flow agent).
@@ -2126,6 +2162,42 @@ impl BotBrain {
             return;
         };
         let distance = area.position.distance(position);
+
+        // (vehicles) Cut off from the objective (a carrier, an island): walking towards it only
+        // gets to the edge, or into the water (bots fell into a carrier's flooded well deck and
+        // swam there for the rest of the round). Wait for a ride instead, by the nearest boat
+        // or helicopter it could take (`vehicle_options` puts it aboard).
+        let goal_region = w.map.walk_regions.get(area_index).copied().flatten();
+        let cut_off = goal_region.is_some() && self.region.is_some() && goal_region != self.region;
+        // Only by a long swim (an island the grid joins to the objective along the bottom):
+        // a ride close by is worth a wait, for a while; then it swims.
+        // Looked at once a second: the vehicles and the grid around their doors.
+        self.ride_check -= dt;
+        if self.ride_check <= 0.0 {
+            self.ride_check = 1.0;
+            let swim_needed =
+                !cut_off && self.ride_wait < RIDE_WAIT && vehicle::swim_distance(w, position, area.position) > vehicle::SWIM_CROSSING;
+            self.ride_spot = (cut_off || swim_needed).then(|| vehicle::ride_point(w, me, self.region)).flatten();
+            self.ride_swim = swim_needed;
+        }
+        let ride = self.ride_spot;
+        let swim = !cut_off && self.ride_swim && self.ride_wait < RIDE_WAIT && ride.is_some_and(|at| flat(at - position).length() < 80.0);
+        self.awaiting_ride = cut_off || swim;
+        if swim {
+            self.ride_wait += dt;
+        }
+        if self.awaiting_ride {
+            if let Some(at) = ride
+                && (flat(at - position).length() > 6.0 || me.motion.swimming)
+            {
+                intent.goal = Some(Goal {
+                    position: at,
+                    tolerance: 3.0,
+                    sprint: flat(at - position).length() > 20.0,
+                });
+            }
+            return;
+        }
 
         // Leaders wait for a squad that fell behind, a while, and gather it before an
         // assault so it arrives together rather than one by one. Not for guards, nor for
@@ -2404,6 +2476,7 @@ impl BotBrain {
         let mut swim_to = None;
         if !me.motion.swimming {
             self.swim_exit = None;
+            self.swim_via = None;
             self.swim_stall = 0.0;
             self.failed_exits.clear();
         } else if !matches!(self.activity, Activity::Mount { .. }) {
@@ -2420,7 +2493,9 @@ impl BotBrain {
                 self.swim_exit_timer = 20.0;
                 self.swim_stall = 0.0;
                 let water = w.level.desc.water.as_ref().map(|w| w.height);
-                self.swim_exit = w.nav().and_then(|nav| nearest_shore(nav, w.blocked(), water, position, &self.failed_exits));
+                let exit = w.nav().and_then(|nav| nearest_shore(nav, w.blocked(), water, position, &self.failed_exits));
+                self.swim_exit = exit.map(|(at, _)| at);
+                self.swim_via = exit.and_then(|(_, via)| via);
                 if self.swim_exit.is_some() {
                     self.stranded = 0.0;
                 }
@@ -2431,7 +2506,12 @@ impl BotBrain {
                     tolerance: 2.0,
                     sprint: true,
                 });
-                swim_to = Some(exit);
+                swim_to = match self.swim_via {
+                    // Straight to the ladder's foot, then up it by the path.
+                    Some(foot) if flat(foot - position).length() > 1.5 => Some(foot),
+                    Some(_) => None,
+                    None => Some(exit),
+                };
             }
         }
         if let Some((at, left)) = &mut self.bad_goal {
@@ -2839,7 +2919,11 @@ impl BotBrain {
         let path_height = previous.y + (waypoint.position.y - previous.y) * t;
         // Long straight stretches may cross humps.
         let height_tolerance = 1.5 + 0.05 * flat(waypoint.position - previous).length();
-        if off_path > 3.0 || (position.y - path_height).abs() > height_tolerance {
+        // (vehicles) Swimmers float above a path along the bottom: only their way across
+        // counts (in a carrier's flooded well deck the height test asked for a new path every
+        // half second, and the bot never swam to the ladder out).
+        let off_height = !motion.swimming && (position.y - path_height).abs() > height_tolerance;
+        if off_path > 3.0 || off_height {
             self.repath = true;
         }
         // Not getting any closer to the waypoint (sliding along a wall, say): same.
@@ -3191,7 +3275,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
              flanking; {:.0} s stuck of {:.0} bot-seconds moving, \
              {:.1} m/s, {} bots); {} paths ({} partial, {} failed, {} for lack of progress), \
              {:.1} ms avg, {:.1} ms max; {} ladders climbed, {} goals out of reach; thinking {:.2} ms per tick, {:.1} ms max; \
-             stuck most at {}; {} stuck events near carriers; {} cells and {} driving spots learned to avoid; idle bots on foot (30 s checks): {}",
+             stuck most at {}; {} stuck events near carriers; {} cells and {} driving spots learned to avoid; {} idle on carriers; idle bots on foot (30 s checks): {}",
             stats.stuck_events,
             stats.stuck_by_activity[0],
             stats.stuck_by_activity[1],
@@ -3214,6 +3298,7 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             stats.stuck_near_carriers,
             stuck_cells.learned(),
             stuck_cells.vehicle_learned(),
+            stats.idle_on_carriers,
             {
                 let mut by: Vec<_> = stats.idle_by.iter().collect();
                 by.sort_by(|a, b| b.1.cmp(a.1));
@@ -3252,10 +3337,11 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
             }
         }
         info!(
-            "bots in vehicles: {} seats taken, {} left; {:.2} km driven in {:.0} s at the wheel ({:.1} m/s); \
+            "bots in vehicles: {} seats taken ({} by bots cut off), {} left; {:.2} km driven in {:.0} s at the wheel ({:.1} m/s); \
              {} vehicle stuck events ({:.1} per vehicle-minute, most at {}); {} vehicle paths ({} partial, {} failed, \
-             {} gave up on a route for a while); {} takeoffs, {} crashes; seated bots {:.3} ms per tick ({})",
+             {} gave up on a route for a while); {} takeoffs, {} crashes; seated bots {:.3} ms per tick ({});              idle seated (30 s checks): {}",
             stats.vehicle_entries,
+            stats.cut_off_rides,
             stats.vehicle_exits,
             stats.driven / 1000.0,
             stats.driving_seconds,
@@ -3279,12 +3365,24 @@ fn log_stats(time: Res<Time>, mut stats: ResMut<BotStats>, bots: Query<(), With<
                     .collect::<Vec<_>>()
                     .join(", ")
             },
+            {
+                let mut by: Vec<_> = stats.seated_idle_by.iter().collect();
+                by.sort_by(|a, b| b.1.cmp(a.1));
+                if by.is_empty() {
+                    "none".to_string()
+                } else {
+                    by.iter().map(|(reason, n)| format!("{n} {reason}")).collect::<Vec<_>>().join(", ")
+                }
+            },
         );
     }
     *stats = BotStats::default();
 }
 
 /// The three 10 m squares with the most stuck events, as `x z (count)`.
+/// (vehicles) Seconds a bot waits for a boat where it could swim to its objective instead.
+const RIDE_WAIT: f32 = 45.0;
+
 /// How far from an aircraft carrier's statics stuck events count as near it, meters.
 const CARRIER_REACH: f32 = 150.0;
 
@@ -3339,10 +3437,23 @@ const SHORE_DEPTH: f32 = 0.25;
 
 /// The nearest place a swimmer at `from` can walk out of the water: a cell of the grid
 /// within wading depth of the surface (or above it), connected to the bottom it swims over
-/// (any, out at sea), not one bots learned to avoid. Looks up to 160 m out.
-fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>, from: Vec3, failed: &[Vec3]) -> Option<Vec3> {
+/// (any, out at sea), not one bots learned to avoid; or (vehicles) the top of a ladder whose
+/// foot is in the water (a carrier's, out of its well deck or the sea), with that foot to
+/// swim to first. Looks up to 160 m out.
+fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>, from: Vec3, failed: &[Vec3]) -> Option<(Vec3, Option<Vec3>)> {
     let water = water?;
     let region = nav.locate(from, 4.0, None).map(|c| nav.cell(c).region);
+    let ladder = nav
+        .ladders()
+        .iter()
+        .filter(|l| {
+            (-1.0..3.0).contains(&(water - l.foot.y))
+                && l.foot.xz().distance(from.xz()) < 60.0
+                && region.is_none_or(|r| r == nav.cell(l.bottom).region)
+        })
+        .map(|l| (nav.position(l.top), l.foot))
+        .filter(|(top, _)| failed.iter().all(|f| f.distance(*top) > 2.0))
+        .min_by(|a, b| a.1.xz().distance_squared(from.xz()).total_cmp(&b.1.xz().distance_squared(from.xz())));
     for radius in [15.0, 40.0, 80.0, 160.0] {
         let best = nav
             .cells_near(from.xz(), radius)
@@ -3357,11 +3468,15 @@ fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>
             .map(|c| nav.position(c))
             .filter(|p| failed.iter().all(|f| f.distance(*p) > 8.0))
             .min_by(|a, b| a.xz().distance_squared(from.xz()).total_cmp(&b.xz().distance_squared(from.xz())));
-        if best.is_some() {
-            return best;
+        if let Some(best) = best {
+            // A ladder closer than the shore goes first.
+            return Some(match ladder {
+                Some((top, foot)) if foot.xz().distance(from.xz()) < best.xz().distance(from.xz()) => (top, Some(foot)),
+                _ => (best, None),
+            });
         }
     }
-    None
+    ladder.map(|(top, foot)| (top, Some(foot)))
 }
 
 /// Whether a soldier's main weapons are down to their last magazine.

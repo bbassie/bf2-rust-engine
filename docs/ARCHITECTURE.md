@@ -549,7 +549,12 @@ big map the nearest cell may be behind a thin wall, in a closed room of a house)
 paths, spots, cover and bounds start there (`NavGrid::find_path_from`). A swimmer only finds
 its feet where the bottom is within wading depth (0.4 m) of the surface, so a bot swimming
 without getting anywhere (against a hull or a quay) swims straight for the nearest shore
-shallower than that, and another one if that fails too.
+shallower than that, and another one if that fails too. Swimmers follow paths along the
+bottom by where they go, not their height above it (a carrier's flooded well deck: out by its
+ladders). A bot whose objective walking can't reach (its region isn't the objective's: a
+carrier, an island) doesn't walk towards it (that only led to the deck's edge or into the
+water): it waits for a ride by the nearest boat or transport helicopter of its side whose door
+it can walk to (`bots::vehicle::ride_point`), and takes it (see "Bots in vehicles").
 
 **Infantry tactics** (`bots::combat`, `ai::cover`, `ai::awareness`, `ai::squad`) sit on top
 of the utility behaviours:
@@ -614,9 +619,14 @@ use button, the seat keys and ordinary `InputFrame`s like players:
 - *Getting in* is a utility option like the others: squad leaders and lone bots take a
   transport, APC or tank near them when their objective is far (tanks when attacking), squad
   members get into their leader's vehicle, bots join a teammate's vehicle as gunners and man
-  stationary weapons when enemies are about, and bots cut off from their objective (a carrier)
-  take any boat or aircraft that gets them off. Seats they walk to are claimed, so they don't
-  all run for one jeep; drivers wait for claimed riders. A vehicle's role (transport, APC,
+  stationary weapons when enemies are about, and bots cut off from their objective (a carrier,
+  an island) wait by and take any boat or aircraft that gets them off, and land vehicles only
+  if their class's connected area reaches the objective (`VehicleNavGrid::reaches`: an
+  island's jeeps don't, an amphibious APC does). Squad members only go for their leader's
+  vehicle within 40 m and not at their own objective. Seats they walk to are claimed, so they
+  don't all run for one jeep; drivers wait for claimed riders within 30 m, 7 s at most
+  (helicopter pilots 10 s), and leave with whoever made it ("drives off in ... after N s, K of
+  M seats taken"). A vehicle's role (transport, APC,
   tank, AA, boat, transport or attack helicopter, jet, stationary) and its guns' kinds follow
   from its data.
 - *Driving* follows a path on the vehicle grid with pure pursuit (steering for a point ahead,
@@ -624,7 +634,11 @@ use button, the seat keys and ordinary `InputFrame`s like players:
   and teammates in the way, backs out of dead ends (a target inside the turning circle, no
   progress, stuck) and gives up after repeated failures. Transports stop short of the flag and
   everyone gets out; tanks and APCs hold an open spot by the flag (never indoors) and stop or
-  slow down to fight. Boats sail the water grid to the shore nearest the objective.
+  slow down to fight. Boats land their riders by a beach: walkable ground at the water's edge
+  (not a quay wall too high to climb out at) in the objective's walkable region, next to water
+  of the boat's own connected stretch (`WaterGrid::region_at`, `landing_near`), the walk from
+  it counting more than the boat's trip; everyone aboard gets out there
+  (`VehicleClaims::drop_off`) and doesn't take the boat back.
 - *Gunners* (and tank drivers) aim through their view with lead for the round's flight time
   and drop, main guns and missiles at vehicles and groups, machine guns at soldiers, and fire
   once the turret, which turns at its own speed, is on target; heat seekers wait for a lock.
@@ -637,6 +651,10 @@ use button, the seat keys and ordinary `InputFrame`s like players:
   (aircraft: again only on the ground or high enough). A transport helicopter's pilot, landed
   at the drop-off, tells everyone aboard to get out (`VehicleClaims::drop_off`), whatever their
   own objective, and waits up to 8 s for them before he flies back.
+- *Statistics*: the per-minute `bots in vehicles` line also counts seats taken by bots cut off,
+  and seated bots whose vehicle went under 2 m in 30 s by what they were doing ("idle seated":
+  waiting for riders, at its goal, no route, backing up, waiting at base, ...); the `bots:`
+  line counts bots idle on carriers, waiting for a ride and swimming in place.
 
 The **vehicle grid** is built like the infantry grid, but only from what actually blocks a
 vehicle (terrain and BF2's vehicle-type collision, `GameLayer::VehicleGround`): small plants

@@ -638,7 +638,7 @@ fn handle_commands(
                 let attacker = Attacker {
                     player: Some(player),
                     soldier: None,
-                    weapon: "artillery".into(),
+                    weapon: "Artillery".into(),
                 };
                 let line = match asset {
                     Asset::Artillery => {

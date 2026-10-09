@@ -1,0 +1,41 @@
+// BF2's out-of-bounds countdown for a vehicle and its crew: entering the HMMWV at Karkand's
+// Gas Station, then placing it just past the combat area's edge (at the Gas Station's own
+// latitude the playable strip is only x -235.8..-84.3, so a few meters east of the fence is
+// already outside) warns the driver, then wrecks the vehicle and kills everyone aboard once
+// the countdown runs out. See `out_of_bounds_vehicle_cancel.ron` for returning in time.
+// `PlaceVehicle` moves the vehicle we're seated in directly (listen-server only, like this
+// scenario runner) rather than driving it out over Karkand's real roads, which run into the
+// Gas Station's own perimeter wall long before the combat area's edge; one placement only
+// (not a there-and-back), since each one jolts the vehicle for some real crash damage (BF2
+// gives no "telefrag" immunity), which would otherwise stack up and destroy it itself before
+// the 10 s countdown does.
+// client --scenario scenarios/conquest/out_of_bounds_vehicle.ron --out target/scenarios/out_of_bounds_vehicle
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        WaitSpawned(20.0),
+        NearVehicle("usjep_hmmwv"),
+        ThirdPerson(true),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        VehicleInfo("boarded"),
+        Screenshot("boarded"),
+        // A few meters past the combat area's edge at this latitude (-84.3), beyond the
+        // margin (20 m) bots' nav grids (and so this check) also allow.
+        PlaceVehicle((-50.0, 167.0, 283.0), 90.0, 0.0),
+        ExpectLog("is out of bounds, 10 s to return", 2.0),
+        Wait(0.5),
+        Screenshot("warning"),
+        ExpectLog("vehicle destroyed: out of bounds, 1 aboard", 11.0),
+        ExpectLog("died: out of bounds", 2.0),
+        Wait(0.5),
+        Screenshot("destroyed"),
+        Quit,
+    ],
+)

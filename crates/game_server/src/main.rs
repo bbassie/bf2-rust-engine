@@ -13,15 +13,12 @@ use std::{path::PathBuf, time::Duration};
 
 use bevy::{
     app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin},
-    ecs::schedule::{Schedules, SingleThreadedExecutor},
     log::LogPlugin,
     prelude::*,
-    state::app::StatesPlugin,
 };
-use bevy_replicon_renet::RepliconRenetPlugins;
 use clap::{Parser, Subcommand};
 use game_server::{GameServerPlugin, admin::rcon, server_config::ServerConfig};
-use game_shared::{SharedPlugin, TICK_HZ, config::GamePaths, content::ContentMode};
+use game_shared::{TICK_HZ, config::GamePaths, content::ContentMode};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Dedicated server", args_conflicts_with_subcommands = true)]
@@ -80,6 +77,10 @@ struct Cli {
     /// Bullets hurt teammates.
     #[arg(long)]
     friendly_fire: bool,
+    /// No out-of-bounds warning and countdown outside the level's combat areas (on by
+    /// default, like BF2).
+    #[arg(long)]
+    no_out_of_bounds: bool,
     /// BF2's kits exactly as they are: no picking weapons from each class's pool.
     #[arg(long)]
     classic_kits: bool,
@@ -338,37 +339,26 @@ fn main() -> AppExit {
     settings.accounts.ranked |= cli.ranked;
     settings.public |= cli.public;
     settings.friendly_fire |= cli.friendly_fire;
+    settings.out_of_bounds &= !cli.no_out_of_bounds;
     settings.loadouts.arsenal &= !cli.classic_kits;
     settings.mantle &= !cli.no_mantle;
     settings.loadouts.faction_locked |= cli.faction_locked_weapons;
 
     let paths = GamePaths::resolve_with_mods(cli.imported, cli.mods);
     let mut app = App::new();
-    // Explicit plugin list rather than DefaultPlugins, so the server stays headless even
-    // when a workspace build unifies rendering features into Bevy.
     app.add_plugins((
-        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-            1.0 / (TICK_HZ * 2.0),
-        ))),
+        ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / (TICK_HZ * 2.0))),
         LogPlugin {
             custom_layer: if cli.profile_ticks { game_server::profile::layer } else { |_| None },
             ..default()
         },
         TerminalCtrlCHandlerPlugin,
-        StatesPlugin,
-        TransformPlugin,
-        AssetPlugin::default(),
-    ))
-    // Physics may expect mesh assets depending on unified features; they are CPU-only here.
-    .init_asset::<Mesh>()
-    .insert_resource(paths.clone())
-    .add_plugins((
-        SharedPlugin,
-        RepliconRenetPlugins,
-        GameServerPlugin {
-            settings: Some(settings),
-        },
     ));
+    // The same headless plugins as the client's embedded server (`game_server::embedded`).
+    game_server::embedded::add_headless_plugins(&mut app, paths.clone(), None);
+    app.add_plugins(GameServerPlugin {
+        settings: Some(settings),
+    });
     game_shared::cache::housekeeping(cache.clone(), &paths);
     if let Some(cache) = cache {
         app.insert_resource(cache);
@@ -387,10 +377,7 @@ fn main() -> AppExit {
     // frames 2.7 -> 1.3 ms). Systems with real work split it themselves (`par_iter`), and
     // avian runs its own schedules single-threaded for the same reason.
     if !cli.parallel_schedules {
-        let mut schedules = app.world_mut().resource_mut::<Schedules>();
-        for (_, schedule) in schedules.iter_mut() {
-            schedule.set_executor(SingleThreadedExecutor::new());
-        }
+        game_server::embedded::single_threaded_schedules(&mut app);
     }
     app.run()
 }

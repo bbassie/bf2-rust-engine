@@ -1,0 +1,42 @@
+// Bots leave the US carrier on Dalian Plant (64) (crates/game_server/src/bots): the US team
+// holds only the carrier, so walking gets its bots nowhere. Cut off from their objective they
+// wait for a ride by the nearest transport helicopter or RIB ("waiting for a ride" in the
+// `bots:` idle line) instead of walking to the deck's edge or into the flooded well deck,
+// where they used to swim in place for the rest of the round; the helicopters and boats take
+// them ashore ("(cut off: a ride)" when one gets in). Fails if a bot swims in place for 30 s,
+// or nobody cut off gets a ride, or no transport helicopter drops anyone off. The camera
+// looks at the stern (the well deck and its walkways), the flight deck, and chases a UH-60.
+// client --scenario scenarios/ai/carrier_leave_dalian.ron
+(
+    level: "dalian_plant",
+    size: 64,
+    bots: 32,
+    spectate: true,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        ForbidLog("swimming in place"),
+        WaitBotsDeployed(28, 30.0),
+        // The stern: the spawns on the walkways either side of the well deck, looking aft.
+        Camera((776.0, 148.5, 2.0), 180.0, -12.0),
+        Wait(6.0),
+        Screenshot("stern_6s"),
+        Camera((786.0, 235.0, 10.0), 0.0, -89.0),
+        Screenshot("deck_6s"),
+        ExpectLog("(cut off: a ride)", 40.0),
+        ExpectLog("takes off in usthe_uh60", 40.0),
+        ChaseDriven("usthe_uh60", 25.0, 8.0),
+        Screenshot("uh60_off"),
+        ExpectLog("got out of usthe_uh60 (dropped off)", 90.0),
+        ChaseDriven("usthe_uh60", 18.0, 5.0),
+        Screenshot("uh60_dropoff"),
+        // A minute and a half in: nobody left in the well deck's water.
+        Camera((776.0, 148.5, 2.0), 180.0, -12.0),
+        Wait(20.0),
+        Screenshot("stern_late"),
+        LogVehicles("late"),
+        // Past two `bots:` idle checks.
+        Wait(30.0),
+        Quit,
+    ],
+)

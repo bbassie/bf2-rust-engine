@@ -1,0 +1,37 @@
+// The out-of-bounds countdown for a vehicle, cancelled: back inside well before the 10 s
+// countdown ends, the HMMWV and its crew are untouched. See `out_of_bounds_vehicle.ron` for
+// staying out and dying, and why this uses `PlaceVehicle` rather than driving out for real.
+// client --scenario scenarios/conquest/out_of_bounds_vehicle_cancel.ron --out target/scenarios/out_of_bounds_vehicle_cancel
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 2,
+    bots: 0,
+    steps: [
+        WaitReady,
+        WaitSpawned(20.0),
+        NearVehicle("usjep_hmmwv"),
+        ThirdPerson(true),
+        Hold([Use]),
+        Wait(0.2),
+        Release([Use]),
+        Wait(0.5),
+        Screenshot("boarded"),
+        ForbidLog("died: out of bounds"),
+        ForbidLog("vehicle destroyed"),
+        PlaceVehicle((-50.0, 167.0, 283.0), 90.0, 0.0),
+        ExpectLog("is out of bounds, 10 s to return", 2.0),
+        Wait(1.0),
+        Screenshot("warning"),
+        // Back inside with half the countdown still to go: cancels it.
+        PlaceVehicle((-133.5, 162.3, 283.2), 90.0, 0.0),
+        ExpectLog("returned to the battlefield", 2.0),
+        Wait(0.5),
+        Screenshot("cancelled"),
+        // Long enough that a missed cancellation would have killed it by now.
+        Wait(10.0),
+        VehicleInfo("still alive"),
+        Screenshot("survived"),
+        Quit,
+    ],
+)

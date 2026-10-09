@@ -379,7 +379,10 @@ fn log_stats(
     let changed: Vec<String> = changed
         .iter()
         .take(6)
-        .map(|(e, n, t)| format!("{e:?}: nodes {:.1}, texts {:.1}", *n as f32 / ui_frames, *t as f32 / ui_frames))
+        .map(|(e, n, t)| {
+            let sample = changes.samples.get(e).map_or("", String::as_str);
+            format!("{e:?} ({sample}): nodes {:.1}, texts {:.1}", *n as f32 / ui_frames, *t as f32 / ui_frames)
+        })
         .collect();
     info!(
         "perf stats: UI: {ui_total} nodes ({ui_texts} texts) under {ui_roots} roots; changed per frame by root: {}",
@@ -661,6 +664,8 @@ struct UiChanges {
     frames: u32,
     nodes: HashMap<Entity, u32>,
     texts: HashMap<Entity, u32>,
+    /// By root: the nearest name above the last node seen changing, and how far up it is.
+    samples: HashMap<Entity, String>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -669,6 +674,7 @@ fn count_ui_changes(
     nodes: Query<Entity, Changed<Node>>,
     texts: Query<Entity, Or<(Changed<Text>, Changed<TextSpan>, Changed<TextFont>)>>,
     parents: Query<&ChildOf>,
+    names: Query<&Name>,
 ) {
     let root = |mut e: Entity| {
         while let Ok(parent) = parents.get(e) {
@@ -676,9 +682,23 @@ fn count_ui_changes(
         }
         e
     };
+    let named = |mut e: Entity| {
+        for up in 0.. {
+            if let Ok(name) = names.get(e) {
+                return format!("{name} +{up}");
+            }
+            match parents.get(e) {
+                Ok(parent) => e = parent.parent(),
+                Err(_) => break,
+            }
+        }
+        "unnamed".to_string()
+    };
     changes.frames += 1;
     for entity in &nodes {
-        *changes.nodes.entry(root(entity)).or_default() += 1;
+        let root = root(entity);
+        *changes.nodes.entry(root).or_default() += 1;
+        changes.samples.insert(root, named(entity));
     }
     for entity in &texts {
         *changes.texts.entry(root(entity)).or_default() += 1;

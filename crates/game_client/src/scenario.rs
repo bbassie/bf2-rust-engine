@@ -85,6 +85,7 @@ use game_shared::{
     soldier::{Health, Soldier, SoldierMotion},
     vehicle::{Seated, Vehicle, VehicleData, VehicleHealth},
 };
+use game_server::embedded::{crossbeam_channel::Receiver, link_player, link_soldier};
 use serde::Deserialize;
 
 use crate::{
@@ -670,8 +671,11 @@ struct Runner {
     /// `NoHang`: our soldier's last position, how long he has hung in the air so far and
     /// the longest hang (seconds).
     hang: Option<(Vec3, f32, f32)>,
-    /// The bot `ChaseBot` follows (a player entity).
+    /// The bot `ChaseBot` follows (a player entity of the server's world).
     chased: Option<Entity>,
+    /// `ChaseBot`: the server's answer on the bot, pending, and the last one.
+    chase_answer: Option<Receiver<Option<ChaseView>>>,
+    chase_view: Option<ChaseView>,
     /// Text of the last `Type` step, typed the next frame.
     typed: String,
     /// Captured log lines before this index are done with for `ExpectLog`.
@@ -728,7 +732,7 @@ struct Vehicles<'w, 's> {
     spatial: avian3d::prelude::SpatialQuery<'w, 's>,
     states: Query<'w, 's, &'static game_shared::vehicle::VehicleState>,
     prediction: Res<'w, crate::vehicle_prediction::VehiclePredictionStats>,
-    health: Query<'w, 's, (&'static VehicleView, &'static mut VehicleHealth)>,
+    health: Query<'w, 's, (Entity, &'static VehicleView, &'static VehicleHealth)>,
     /// The camera as last placed, for `RateResponse`.
     camera: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
     /// The pilot's stick and free look, for `VehicleLook`.
@@ -798,29 +802,202 @@ struct Soldiers<'w, 's> {
     spatial: avian3d::prelude::SpatialQuery<'w, 's>,
     /// Grappling ropes and ziplines, for `ViewRope`.
     ropes: Query<'w, 's, (Entity, &'static game_shared::rope::Rope)>,
-    /// Bots of an in-process server, for `ChaseBot`.
+    /// Players, whether bots, their squads and teams, for `WaitBotsDeployed`, `SeatBot` and
+    /// `SeatSquad`.
     bots: Query<
         'w,
         's,
         (
-            Entity,
-            &'static game_server::bots::BotBrain,
             &'static game_shared::protocol::Player,
-            Option<&'static game_server::Controls>,
             Option<&'static game_shared::squad::SquadMember>,
             &'static Team,
         ),
     >,
-    squad_tactics: Option<Res<'w, game_server::ai::squad::SquadTactics>>,
-    /// Who sits where and soldiers' hitboxes, for `SeatBot` and `LogSeats`.
+    /// Who controls each soldier, seated or not.
+    owners: Query<'w, 's, &'static ControlledBy, With<Soldier>>,
+    /// Our own server, for the steps that change its world.
+    server: ServerSide<'w>,
+    /// Who sits where, for `SeatBot` and `LogSeats`.
     crews: Query<'w, 's, (&'static Seated, &'static ControlledBy)>,
     players: Query<'w, 's, &'static game_shared::protocol::Player>,
-    hitboxes: Query<'w, 's, &'static game_shared::soldier::Hitbox>,
     /// Rush's charges and the mode, for `NearCharge`.
     charges: Query<'w, 's, &'static game_shared::modes::Charge>,
     modes: Query<'w, 's, &'static game_shared::modes::ModeState>,
     /// Whether our soldier is critically wounded, for `WaitSpawned`.
     downed: Query<'w, 's, (), (With<LocalSoldier>, With<Downed>)>,
+}
+
+/// Our own server (singleplayer, hosting; `local_server`), for the steps that change its
+/// world: they send it closures, run on its thread before its next update, so what they do
+/// shows here a frame or two later, replicated like everything else.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ServerSide<'w> {
+    server: Option<Res<'w, crate::local_server::LocalServer>>,
+    map: Res<'w, bevy_replicon::shared::server_entity_map::ServerEntityMap>,
+}
+
+impl ServerSide<'_> {
+    /// Runs `task` on the server's world; connected to another server, warns instead.
+    fn run(&self, step: &str, task: impl FnOnce(&mut World) + Send + 'static) {
+        match &self.server {
+            Some(server) => server.run(task),
+            None => warn!("scenario: {step} needs our own server (singleplayer or hosting)"),
+        }
+    }
+
+    fn query<R: Send + 'static>(&self, task: impl FnOnce(&mut World) -> R + Send + 'static) -> Option<Receiver<R>> {
+        self.server.as_ref().map(|server| server.query(task))
+    }
+
+    /// The server's entity for one of ours.
+    fn entity(&self, ours: Entity) -> Option<Entity> {
+        self.map.to_server().get(&ours).copied()
+    }
+}
+
+/// Changes our soldier's movement state on the server.
+fn move_us(world: &mut World, change: impl FnOnce(&mut SoldierMotion)) {
+    match link_soldier(world).and_then(|soldier| world.get_mut::<SoldierMotion>(soldier)) {
+        Some(mut motion) => change(&mut motion),
+        None => warn!("scenario: our soldier is gone on the server"),
+    }
+}
+
+/// Puts our soldier's feet at `position`, standing still, on the server.
+fn place_us(server: &ServerSide, step: &str, position: Vec3) {
+    server.run(step, move |world| {
+        move_us(world, |motion| {
+            motion.position = position;
+            motion.velocity = Vec3::ZERO;
+            motion.mantle = 0.0;
+        })
+    });
+}
+
+/// Changes our soldier's health on the server.
+fn hurt_us(server: &ServerSide, step: &str, change: impl FnOnce(&mut Health) + Send + 'static) {
+    server.run(step, move |world| {
+        match link_soldier(world).and_then(|soldier| world.get_mut::<Health>(soldier)) {
+            Some(mut health) => change(&mut health),
+            None => warn!("scenario: our soldier is gone on the server"),
+        }
+    });
+}
+
+/// Changes another soldier (ours: `soldier`) on the server.
+fn move_soldier(server: &ServerSide, step: &str, soldier: Entity, change: impl FnOnce(&mut SoldierMotion, &mut Health) + Send + 'static) {
+    let Some(theirs) = server.entity(soldier) else {
+        warn!("scenario: {step}: {soldier} isn't the server's");
+        return;
+    };
+    server.run(step, move |world| {
+        let mut entity = world.entity_mut(theirs);
+        let (Some(mut motion), Some(mut health)) = (entity.get::<SoldierMotion>().copied(), entity.get::<Health>().cloned()) else {
+            warn!("scenario: soldier {theirs} is gone on the server");
+            return;
+        };
+        change(&mut motion, &mut health);
+        entity.insert((motion, health));
+    });
+}
+
+/// Changes a vehicle (ours: `vehicle`) on the server.
+fn on_vehicle(server: &ServerSide, step: &str, vehicle: Entity, change: impl FnOnce(&mut EntityWorldMut) + Send + 'static) {
+    let Some(theirs) = server.entity(vehicle) else {
+        warn!("scenario: {step}: {vehicle} isn't the server's");
+        return;
+    };
+    server.run(step, move |world| match world.get_entity_mut(theirs) {
+        Ok(mut entity) => change(&mut entity),
+        Err(_) => warn!("scenario: vehicle {theirs} is gone on the server"),
+    });
+}
+
+/// Seats bots (our soldier entities) in a vehicle on the server, as getting in would.
+fn seat_bots(server: &ServerSide, step: &str, vehicle: Entity, seats: Vec<(Entity, u8, bool)>) {
+    let Some(vehicle) = server.entity(vehicle) else {
+        warn!("scenario: {step}: {vehicle} isn't the server's");
+        return;
+    };
+    let seats: Vec<(Entity, u8, bool)> = seats
+        .into_iter()
+        .filter_map(|(bot, seat, open)| Some((server.entity(bot)?, seat, open)))
+        .collect();
+    server.run(step, move |world| {
+        for (bot, seat, open) in seats {
+            let Some(hitbox) = world.get::<game_shared::soldier::Hitbox>(bot).cloned() else {
+                continue;
+            };
+            let mut commands = world.commands();
+            game_server::vehicles::seat_soldier(&mut commands, bot, &hitbox, vehicle, seat, open);
+        }
+        world.flush();
+    });
+}
+
+/// What `ChaseBot` shows of the bot it follows, from the server.
+#[derive(Clone, Debug)]
+struct ChaseView {
+    player: Entity,
+    name: String,
+    motion: SoldierMotion,
+    doing: String,
+    target: bool,
+    suppression: f32,
+    cover: Option<bool>,
+}
+
+/// On the server: the bot that best matches a `ChaseBot` filter (see `Step::ChaseBot`).
+fn chase_pick(world: &mut World, what: &str) -> Option<Entity> {
+    use game_server::{Controls, bots::BotBrain};
+    use game_shared::{protocol::Player, squad::SquadMember};
+    let mut query = world.query::<(Entity, &BotBrain, &Player, Option<&Controls>, Option<&SquadMember>, &Team)>();
+    let bots: Vec<_> = query
+        .iter(world)
+        .map(|(player, brain, info, controls, member, team)| {
+            (player, brain.fighting_from_cover(), brain.combat_state(), info.name.clone(), controls.map(|c| c.0), member.copied(), *team)
+        })
+        .collect();
+    let position = |soldier: Option<Entity>| soldier.and_then(|s| world.get::<SoldierMotion>(s)).map(|m| m.position);
+    let bounding = |team: Team, squad: u8| {
+        world
+            .get_resource::<game_server::ai::squad::SquadTactics>()
+            .and_then(|t| t.squads.get(&(team, squad)))
+            .is_some_and(|t| t.bounding)
+    };
+    bots.iter()
+        .filter_map(|(player, cover, combat, name, soldier, member, team)| {
+            let at = position(*soldier)?;
+            let score = match what {
+                "cover" => cover.map(|up| if up { 2.0 } else { 1.0 }),
+                "fight" => combat.0.then_some(1.0 + combat.1),
+                "squad" => {
+                    let member = member.filter(|m| m.leader)?;
+                    // Squad members near the leader.
+                    let near = bots
+                        .iter()
+                        .filter(|b| b.0 != *player && b.6 == *team && b.5.is_some_and(|m| m.squad == member.squad))
+                        .filter(|b| position(b.4).is_some_and(|p| p.distance(at) < 35.0))
+                        .count();
+                    (near >= 2).then_some(near as f32 + if bounding(*team, member.squad) { 10.0 } else { 0.0 })
+                }
+                filter => name.contains(filter).then_some(1.0),
+            };
+            Some((score?, *player))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, player)| player)
+}
+
+/// On the server: what a bot (a player entity) is doing, where.
+fn chase_view(world: &mut World, player: Entity) -> Option<ChaseView> {
+    let brain = world.get::<game_server::bots::BotBrain>(player)?;
+    let (target, suppression) = brain.combat_state();
+    let (doing, cover) = (brain.doing().to_string(), brain.fighting_from_cover());
+    let name = world.get::<game_shared::protocol::Player>(player)?.name.clone();
+    let soldier = world.get::<game_server::Controls>(player)?.0;
+    let motion = *world.get::<SoldierMotion>(soldier)?;
+    Some(ChaseView { player, name, motion, doing, target, suppression, cover })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -893,9 +1070,10 @@ fn take_stage(world: &mut World) {
     info!("scenario: taking {} ({taken} objectives handed to the attackers)", mode.stage_label());
 }
 
-/// `SetTeam`: we play for `team` from now on, out of our squad and with no spawn picked.
+/// `SetTeam`, on the server: we play for `team` from now on, out of our squad and with no
+/// spawn picked.
 fn set_team(world: &mut World, team: Team) {
-    let Some(player) = world.query_filtered::<Entity, With<LocalPlayer>>().iter(world).next() else {
+    let Some(player) = link_player(world) else {
         warn!("scenario: no local player to move to {team:?}");
         return;
     };
@@ -924,13 +1102,12 @@ fn run_scenario(
     player: PlayerControls,
     mut vehicles: Vehicles,
     soldiers: Soldiers,
-    (prediction, rendered, diagnostics, mut was_swimming, mut hitreg, mut dummies): (
+    (prediction, rendered, diagnostics, mut was_swimming, mut hitreg): (
         Res<crate::prediction::PredictionStats>,
         Query<&crate::prediction::SoldierRender, With<LocalSoldier>>,
         Res<bevy::diagnostic::DiagnosticsStore>,
         Local<bool>,
         ResMut<crate::hitreg::HitregTask>,
-        Option<ResMut<game_server::dummy::DummyControl>>,
     ),
     mut spectator: Query<&mut Spectator>,
     camera: Query<Entity, With<PlayerCamera>>,
@@ -961,19 +1138,19 @@ fn run_scenario(
         fields,
     } = player;
     let Soldiers {
-        local: mut soldier,
+        local: soldier,
         local_inventory,
-        mut others,
+        others,
         teams,
         local_team,
         drawn,
         spatial,
         ropes,
         bots,
-        squad_tactics,
+        owners,
+        server,
         crews,
         players,
-        hitboxes,
         charges,
         modes,
         downed,
@@ -1083,10 +1260,8 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Teleport(position, yaw, pitch) => {
-                if let Ok((mut motion, _)) = soldier.single_mut() {
-                    motion.position = Vec3::from(*position);
-                    motion.velocity = Vec3::ZERO;
-                    motion.mantle = 0.0;
+                if soldier.single().is_ok() {
+                    place_us(&server, "Teleport", Vec3::from(*position));
                 } else {
                     warn!("scenario: no soldier to teleport");
                 }
@@ -1142,8 +1317,8 @@ fn run_scenario(
                         let d = |v: &VehicleView| v.transform.translation.distance(origin);
                         d(a.1).total_cmp(&d(b.1))
                     });
-                match (nearest, soldier.single_mut()) {
-                    (Some((_, view, data)), Ok((mut motion, _))) => {
+                match (nearest, soldier.single()) {
+                    (Some((_, view, data)), Ok(_)) => {
                         let desc = &data.0.desc;
                         // Beside the door, outside the hull, within reach of the entry point.
                         let local = match desc.entry_points.first() {
@@ -1154,8 +1329,7 @@ fn run_scenario(
                             None => Vec3::new(desc.physics.bounds[0][0] - 0.8, 0.0, 0.0),
                         };
                         let target = view.transform.transform_point(local);
-                        motion.position = target;
-                        motion.velocity = Vec3::ZERO;
+                        place_us(&server, "NearVehicle", target);
                         let to = view.transform.translation - target;
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = -0.2;
@@ -1167,12 +1341,11 @@ fn run_scenario(
             Step::NearCharge(name) => {
                 let stage = modes.iter().next().map(|m| m.stage);
                 let charge = charges.iter().find(|c| Some(c.stage) == stage && c.name == *name);
-                match (charge, soldier.single_mut()) {
-                    (Some(charge), Ok((mut motion, _))) => {
+                match (charge, soldier.single()) {
+                    (Some(charge), Ok(_)) => {
                         let front = Quat::from_rotation_y(charge.yaw) * Vec3::NEG_Z;
                         let target = charge.position + front * 1.4 + Vec3::Y * 0.1;
-                        motion.position = target;
-                        motion.velocity = Vec3::ZERO;
+                        place_us(&server, "NearCharge", target);
                         let to = charge.position + Vec3::Y * 0.6 - (target + Vec3::Y * 1.6);
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = (to.y / to.length().max(0.01)).asin();
@@ -1220,7 +1393,11 @@ fn run_scenario(
                 }
             }
             Step::WaitBotsDeployed(count, seconds) => {
-                let deployed = bots.iter().filter(|(.., controls, _, _)| controls.is_some()).count() as u32;
+                // Bots with a soldier (replicated: works on any server).
+                let deployed = owners
+                    .iter()
+                    .filter(|owner| bots.get(owner.0).is_ok_and(|(player, ..)| player.is_bot))
+                    .count() as u32;
                 if deployed >= *count {
                     Progress::Done
                 } else if elapsed > *seconds {
@@ -1251,12 +1428,11 @@ fn run_scenario(
                         da.0.cmp(&db.0).then(da.1.total_cmp(&db.1))
                     })
                     .and_then(|(e, ..)| vehicles.vehicles.get(e).ok());
-                match (nearest, soldier.single_mut()) {
-                    (Some((_, view, data)), Ok((mut motion, _))) => {
+                match (nearest, soldier.single()) {
+                    (Some((_, view, data)), Ok(_)) => {
                         let front = data.0.desc.physics.bounds[0][2];
                         let target = view.transform.transform_point(Vec3::new(0.0, 0.5, front - distance));
-                        motion.position = target;
-                        motion.velocity = Vec3::ZERO;
+                        place_us(&server, "InFrontOf", target);
                         let to = view.transform.translation - target;
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = -0.1;
@@ -1330,14 +1506,13 @@ fn run_scenario(
                     let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
                     let my_team = local_team.single().ok().copied();
                     // Bots of our team on foot and alive: soldier, name, squad, leads it.
-                    let on_foot: Vec<(Entity, String, u8, bool)> = bots
+                    let on_foot: Vec<(Entity, String, u8, bool)> = others
                         .iter()
-                        .filter(|(.., team)| Some(**team) == my_team)
-                        .filter_map(|(_, _, player, controls, member, _)| {
-                            let soldier = controls?.0;
-                            let member = member?;
-                            let (.., health) = others.get(soldier).ok()?;
-                            (health.current > 0.0).then(|| (soldier, player.name.clone(), member.squad, member.leader))
+                        .filter(|(.., health)| health.current > 0.0)
+                        .filter_map(|(soldier, owner, ..)| {
+                            let (player, member, team) = bots.get(owner.0).ok()?;
+                            let member = member.filter(|_| player.is_bot && Some(*team) == my_team)?;
+                            Some((soldier, player.name.clone(), member.squad, member.leader))
                         })
                         .collect();
                     // The squad with the most members on foot, led by one of them.
@@ -1354,17 +1529,18 @@ fn run_scenario(
                             // The leader first.
                             let mut members: Vec<&(Entity, String, u8, bool)> = on_foot.iter().filter(|m| m.2 == squad).collect();
                             members.sort_by_key(|m| !m.3);
+                            let mut seats = Vec::new();
                             for (bot, name, _, leader) in members {
                                 let Some(seat) = free.next() else { break };
-                                let Ok(hitbox) = hitboxes.get(*bot) else { continue };
                                 let open = data.0.desc.seats[seat as usize].open;
-                                game_server::vehicles::seat_soldier(&mut commands, *bot, hitbox, vehicle, seat, open);
+                                seats.push((*bot, seat, open));
                                 info!(
                                     "scenario: seated {name}{} of squad {squad} in {template} seat {}",
                                     if *leader { " (leader)" } else { "" },
                                     seat + 1
                                 );
                             }
+                            seat_bots(&server, "SeatSquad", vehicle, seats);
                         }
                         _ => warn!("scenario: no {template} or no bot squad on foot to seat"),
                     }
@@ -1389,27 +1565,28 @@ fn run_scenario(
                                 _ => Vec::new(),
                             };
                             let at = view.transform.translation;
-                            let mut candidates: Vec<(Entity, String, f32)> = bots
+                            let mut candidates: Vec<(Entity, String, f32)> = others
                                 .iter()
-                                .filter(|(.., team)| Some(**team) == my_team)
-                                .filter_map(|(_, _, player, controls, ..)| {
-                                    let soldier = controls?.0;
-                                    let (_, _, motion, health) = others.get(soldier).ok()?;
-                                    (health.current > 0.0).then(|| (soldier, player.name.clone(), motion.position.distance(at)))
+                                .filter(|(.., health)| health.current > 0.0)
+                                .filter_map(|(soldier, owner, motion, _)| {
+                                    let (player, _, team) = bots.get(owner.0).ok()?;
+                                    (player.is_bot && Some(*team) == my_team)
+                                        .then(|| (soldier, player.name.clone(), motion.position.distance(at)))
                                 })
                                 .collect();
                             // Nearest last, to pop.
                             candidates.sort_by(|a, b| b.2.total_cmp(&a.2));
+                            let mut seats = Vec::new();
                             for seat in wanted {
                                 let Some((bot, name, _)) = candidates.pop() else {
                                     warn!("scenario: no teammate bot on foot for {template} seat {}", seat + 1);
                                     break;
                                 };
-                                let Ok(hitbox) = hitboxes.get(bot) else { continue };
                                 let open = data.0.desc.seats[seat as usize].open;
-                                game_server::vehicles::seat_soldier(&mut commands, bot, hitbox, vehicle, seat, open);
+                                seats.push((bot, seat, open));
                                 info!("scenario: seated {name} in {template} seat {}", seat + 1);
                             }
+                            seat_bots(&server, "SeatBot", vehicle, seats);
                         }
                         None => warn!("scenario: no {template} to seat bots in"),
                     }
@@ -1422,9 +1599,11 @@ fn run_scenario(
                     Some((vehicle, motion)) => {
                         use avian3d::prelude::{AngularVelocity, LinearVelocity, Position};
                         let position = motion.position + Vec3::Y * *meters;
-                        commands.entity(vehicle).insert((Position(position), LinearVelocity(Vec3::ZERO), AngularVelocity(Vec3::ZERO)));
-                        // Not a crash.
-                        commands.entity(vehicle).remove::<game_server::vehicles::LastVelocity>();
+                        on_vehicle(&server, "LiftVehicle", vehicle, move |vehicle| {
+                            vehicle.insert((Position(position), LinearVelocity(Vec3::ZERO), AngularVelocity(Vec3::ZERO)));
+                            // Not a crash.
+                            vehicle.remove::<game_server::vehicles::LastVelocity>();
+                        });
                         info!("scenario: lifted {template} to {position:.1}");
                     }
                     None => warn!("scenario: no {template} to lift"),
@@ -1512,7 +1691,7 @@ fn run_scenario(
                         continue;
                     }
                     let p = view.transform.translation;
-                    let hp = vehicles.health.get(entity).map_or(f32::NAN, |(_, h)| h.current);
+                    let hp = vehicles.health.get(entity).map_or(f32::NAN, |(.., h)| h.current);
                     lines.push(format!(
                         "{} at ({:.1}, {:.1}, {:.1}) heading {:.0}, {:.1} km/h, {hp:.0} hp, {riders} aboard",
                         vehicle.template,
@@ -1565,73 +1744,51 @@ fn run_scenario(
                 Progress::Done
             }
             Step::ChaseBot(what, seconds, distance, height) => {
-                let motion_of = |player: Entity| {
-                    bots.get(player)
-                        .ok()
-                        .and_then(|(_, _, _, controls, ..)| controls)
-                        .and_then(|c| others.get(c.0).ok())
-                        .map(|(_, _, motion, _)| *motion)
-                };
+                // The bots' minds are the server's: it answers a frame or two later.
+                let answer = runner.chase_answer.as_ref().and_then(|rx| rx.try_recv().ok());
+                if answer.is_some() {
+                    runner.chase_answer = None;
+                }
                 let mut just_chosen = false;
                 if runner.frames == 0 {
-                    // Squad members near a leader.
-                    let squad_near = |leader: Entity, team: Team, squad: u8| {
-                        let Some(at) = motion_of(leader).map(|m| m.position) else { return 0 };
-                        bots.iter()
-                            .filter(|(p, _, _, _, m, t)| *p != leader && **t == team && m.is_some_and(|m| m.squad == squad))
-                            .filter(|(p, ..)| motion_of(*p).is_some_and(|m| m.position.distance(at) < 35.0))
-                            .count()
-                    };
-                    let score = |(player, brain, info, _, member, team): (
-                        Entity,
-                        &game_server::bots::BotBrain,
-                        &game_shared::protocol::Player,
-                        Option<&game_server::Controls>,
-                        Option<&game_shared::squad::SquadMember>,
-                        &Team,
-                    )|
-                     -> Option<f32> {
-                        motion_of(player)?;
-                        match what.as_str() {
-                            "cover" => brain.fighting_from_cover().map(|up| if up { 2.0 } else { 1.0 }),
-                            "fight" => brain.combat_state().0.then_some(1.0 + brain.combat_state().1),
-                            "squad" => {
-                                let member = member.filter(|m| m.leader)?;
-                                let bounding = squad_tactics
-                                    .as_ref()
-                                    .and_then(|t| t.squads.get(&(*team, member.squad)))
-                                    .is_some_and(|t| t.bounding);
-                                let near = squad_near(player, *team, member.squad);
-                                (near >= 2).then_some(near as f32 + if bounding { 10.0 } else { 0.0 })
-                            }
-                            name => info.name.contains(name).then_some(1.0),
-                        }
-                    };
-                    runner.chased = bots
-                        .iter()
-                        .filter_map(|b| score(b).map(|s| (s, b.0)))
-                        .max_by(|a, b| a.0.total_cmp(&b.0))
-                        .map(|(_, p)| p);
-                    match runner.chased.and_then(|p| bots.get(p).ok()) {
-                        Some((_, brain, info, ..)) => {
-                            let line = format!("chase bot {} ({what}: {}) after {elapsed:.1} s", info.name, brain.doing());
+                    match answer {
+                        Some(Some(view)) => {
+                            let line = format!("chase bot {} ({what}: {}) after {elapsed:.1} s", view.name, view.doing);
                             info!("scenario: {line}");
                             writeln!(runner.report, "{line}").ok();
+                            runner.chased = Some(view.player);
+                            runner.chase_view = Some(view);
                             runner.frames = 1;
                             runner.samples.clear();
                             runner.step_started = Some(now);
                             just_chosen = true;
                         }
-                        None if elapsed > 60.0 => {
-                            warn!("scenario: no bot matching `{what}` to chase ({} bots)", bots.iter().count());
+                        Some(None) if elapsed > 60.0 => {
+                            warn!("scenario: no bot matching `{what}` to chase");
+                            runner.chased = None;
                             runner.frames = 1;
                         }
-                        None => {}
+                        _ => {}
                     }
+                    if runner.frames == 0 && runner.chase_answer.is_none() {
+                        let what = what.clone();
+                        runner.chase_answer = server.query(move |world| {
+                            let player = chase_pick(world, &what)?;
+                            chase_view(world, player)
+                        });
+                        if runner.chase_answer.is_none() {
+                            warn!("scenario: ChaseBot needs our own server (singleplayer or hosting)");
+                            runner.chased = None;
+                            runner.frames = 1;
+                        }
+                    }
+                } else if let Some(Some(view)) = answer {
+                    runner.chase_view = Some(view);
                 }
-                if let (Some(player), Ok(mut camera)) = (runner.chased, spectator.single_mut())
-                    && let Some(motion) = motion_of(player)
+                if let (Some(player), Ok(mut camera)) = (runner.chased.filter(|_| runner.frames > 0), spectator.single_mut())
+                    && let Some(view) = runner.chase_view.clone()
                 {
+                    let motion = view.motion;
                     let forward = Quat::from_rotation_y(motion.yaw) * Vec3::NEG_Z;
                     let target = motion.position + Vec3::Y * 1.0;
                     let wanted = motion.position - forward * *distance + Vec3::Y * *height;
@@ -1641,34 +1798,39 @@ fn run_scenario(
                     look.yaw = (-to.x).atan2(-to.z);
                     look.pitch = to.y.atan2(to.with_y(0.0).length());
                     // What he does, every second.
-                    if !just_chosen
-                        && elapsed >= runner.samples.len() as f32
-                        && let Ok((_, brain, info, ..)) = bots.get(player)
-                    {
+                    if !just_chosen && elapsed >= runner.samples.len() as f32 {
                         runner.samples.push(elapsed);
-                        let (target, suppression) = brain.combat_state();
                         let line = format!(
-                            "chase {:.0}s: {} at ({:.0}, {:.0}, {:.0}) {} ({:?}{}{}, suppression {suppression:.2})",
+                            "chase {:.0}s: {} at ({:.0}, {:.0}, {:.0}) {} ({:?}{}{}, suppression {:.2})",
                             elapsed,
-                            info.name,
+                            view.name,
                             motion.position.x,
                             motion.position.y,
                             motion.position.z,
-                            brain.doing(),
+                            view.doing,
                             motion.stance,
-                            if target { ", enemy in sight" } else { "" },
-                            match brain.fighting_from_cover() {
+                            if view.target { ", enemy in sight" } else { "" },
+                            match view.cover {
                                 Some(true) => ", up from cover",
                                 Some(false) => ", down in cover",
                                 None => "",
                             },
+                            view.suppression,
                         );
                         info!("scenario: {line}");
                         writeln!(runner.report, "{line}").ok();
                     }
+                    if runner.chase_answer.is_none() {
+                        runner.chase_answer = server.query(move |world| chase_view(world, player));
+                    }
                     runner.frames += 1;
                 }
-                done_if(!just_chosen && runner.frames > 0 && (runner.chased.is_none() || elapsed >= *seconds))
+                let done = !just_chosen && runner.frames > 0 && (runner.chased.is_none() || elapsed >= *seconds);
+                if done {
+                    runner.chase_answer = None;
+                    runner.chase_view = None;
+                }
+                done_if(done)
             }
             Step::VehicleTrace(label, seconds) => {
                 let due = runner.frames == 0 || elapsed >= runner.frames as f32 * 0.25;
@@ -1819,14 +1981,17 @@ fn run_scenario(
                     Ok(seated) => {
                         use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
                         let rotation = Quat::from_rotation_y(heading.to_radians());
-                        commands.entity(seated.vehicle).insert((
-                            Position(Vec3::from(*position)),
-                            Rotation(rotation),
-                            LinearVelocity(rotation * Vec3::NEG_Z * *speed),
-                            AngularVelocity(Vec3::ZERO),
-                        ));
-                        // Not a crash.
-                        commands.entity(seated.vehicle).remove::<game_server::vehicles::LastVelocity>();
+                        let (position, speed) = (Vec3::from(*position), *speed);
+                        on_vehicle(&server, "PlaceVehicle", seated.vehicle, move |vehicle| {
+                            vehicle.insert((
+                                Position(position),
+                                Rotation(rotation),
+                                LinearVelocity(rotation * Vec3::NEG_Z * speed),
+                                AngularVelocity(Vec3::ZERO),
+                            ));
+                            // Not a crash.
+                            vehicle.remove::<game_server::vehicles::LastVelocity>();
+                        });
                     }
                     Err(_) => warn!("scenario: not in a vehicle to place"),
                 }
@@ -2053,33 +2218,32 @@ fn run_scenario(
             }
             Step::Kill => {
                 // Beyond what a medic can bring back.
-                for (_, mut health) in &mut soldier {
-                    health.current = -1000.0;
-                }
+                hurt_us(&server, "Kill", |health| health.current = -1000.0);
                 Progress::Done
             }
             Step::TakeStage => {
-                commands.queue(take_stage);
+                server.run("TakeStage", take_stage);
                 Progress::Done
             }
             Step::SetTeam(team) => {
                 let team = game_shared::conquest::team_from_id(*team);
-                for (_, mut health) in &mut soldier {
-                    health.current = -1000.0;
-                }
-                commands.queue(move |world: &mut World| set_team(world, team));
+                server.run("SetTeam", move |world| {
+                    if let Some(soldier) = link_soldier(world)
+                        && let Some(mut health) = world.get_mut::<Health>(soldier)
+                    {
+                        health.current = -1000.0;
+                    }
+                    set_team(world, team);
+                });
                 Progress::Done
             }
             Step::Down => {
-                for (_, mut health) in &mut soldier {
-                    health.current = 0.0;
-                }
+                hurt_us(&server, "Down", |health| health.current = 0.0);
                 Progress::Done
             }
             Step::Hurt(amount) => {
-                for (_, mut health) in &mut soldier {
-                    health.current = (health.current - amount).max(1.0);
-                }
+                let amount = *amount;
+                hurt_us(&server, "Hurt", move |health| health.current = (health.current - amount).max(1.0));
                 Progress::Done
             }
             Step::SummonEnemy(distance) => {
@@ -2092,7 +2256,7 @@ fn run_scenario(
                         // The nearest living enemy (a body down and bleeding out is no use
                         // as a target); failing that, the nearest at all.
                         let nearest = others
-                            .iter_mut()
+                            .iter()
                             .filter(|(_, owner, ..)| {
                                 let other = teams.get(owner.0).ok().copied();
                                 other != team && other.is_some_and(|t| t != Team::Spectator)
@@ -2103,10 +2267,13 @@ fn run_scenario(
                                     .unwrap_or(std::cmp::Ordering::Equal)
                             });
                         match nearest {
-                            Some((entity, _, mut motion, _)) => {
-                                motion.position = spot + Vec3::Y * 0.5;
-                                motion.velocity = Vec3::ZERO;
-                                motion.yaw = look.yaw;
+                            Some((entity, ..)) => {
+                                let yaw = look.yaw;
+                                move_soldier(&server, "SummonEnemy", entity, move |motion, _| {
+                                    motion.position = spot + Vec3::Y * 0.5;
+                                    motion.velocity = Vec3::ZERO;
+                                    motion.yaw = yaw;
+                                });
                                 info!("scenario: summoned enemy {entity} to {spot:.1}");
                             }
                             None => warn!("scenario: no enemy to summon"),
@@ -2161,15 +2328,18 @@ fn run_scenario(
                         let any_teammate =
                             others.iter().any(|(_, owner, ..)| teams.get(owner.0).ok().copied() == team);
                         let nearest = others
-                            .iter_mut()
+                            .iter()
                             .filter(|(_, owner, ..)| !any_teammate || teams.get(owner.0).ok().copied() == team)
                             .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)));
                         match nearest {
-                            Some((entity, _, mut motion, mut soldier_health)) => {
-                                motion.position = spot + Vec3::Y * 0.1;
-                                motion.velocity = Vec3::ZERO;
-                                motion.yaw = look.yaw + std::f32::consts::PI;
-                                soldier_health.current = *health;
+                            Some((entity, ..)) => {
+                                let (yaw, health) = (look.yaw, *health);
+                                move_soldier(&server, "Summon", entity, move |motion, soldier_health| {
+                                    motion.position = spot + Vec3::Y * 0.1;
+                                    motion.velocity = Vec3::ZERO;
+                                    motion.yaw = yaw + std::f32::consts::PI;
+                                    soldier_health.current = health;
+                                });
                                 info!("scenario: summoned {entity} to {spot:.1} with {health} health");
                             }
                             None => warn!("scenario: no teammate to summon"),
@@ -2180,16 +2350,21 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Parachute(height) => {
-                match soldier.single_mut() {
-                    Ok((mut motion, _)) => {
-                        motion.position.y += *height;
-                        motion.velocity = Vec3::ZERO;
-                        motion.grounded = false;
-                        motion.climbing = false;
-                        motion.riding = false;
-                        motion.swimming = false;
-                        motion.parachute = true;
-                        info!("scenario: parachute opened at {:.1}", motion.position);
+                match soldier.single() {
+                    Ok((motion, _)) => {
+                        let height = *height;
+                        server.run("Parachute", move |world| {
+                            move_us(world, |motion| {
+                                motion.position.y += height;
+                                motion.velocity = Vec3::ZERO;
+                                motion.grounded = false;
+                                motion.climbing = false;
+                                motion.riding = false;
+                                motion.swimming = false;
+                                motion.parachute = true;
+                            })
+                        });
+                        info!("scenario: parachute opened at {:.1}", motion.position + Vec3::Y * height);
                     }
                     Err(_) => warn!("scenario: no soldier to open a parachute"),
                 }
@@ -2205,20 +2380,22 @@ fn run_scenario(
                         let any_teammate =
                             others.iter().any(|(_, owner, ..)| teams.get(owner.0).ok().copied() == team);
                         let nearest = others
-                            .iter_mut()
+                            .iter()
                             .filter(|(_, owner, ..)| !any_teammate || teams.get(owner.0).ok().copied() == team)
                             .min_by(|a, b| a.2.position.distance(origin).total_cmp(&b.2.position.distance(origin)));
                         match nearest {
-                            Some((entity, _, mut motion, _)) => {
-                                motion.position = spot;
+                            Some((entity, ..)) => {
                                 let heading = look.yaw + turn.to_radians();
-                                motion.velocity = Quat::from_rotation_y(heading) * Vec3::new(0.0, -4.5, -8.0);
-                                motion.yaw = heading;
-                                motion.grounded = false;
-                                motion.climbing = false;
-                                motion.riding = false;
-                                motion.swimming = false;
-                                motion.parachute = true;
+                                move_soldier(&server, "SummonParachute", entity, move |motion, _| {
+                                    motion.position = spot;
+                                    motion.velocity = Quat::from_rotation_y(heading) * Vec3::new(0.0, -4.5, -8.0);
+                                    motion.yaw = heading;
+                                    motion.grounded = false;
+                                    motion.climbing = false;
+                                    motion.riding = false;
+                                    motion.swimming = false;
+                                    motion.parachute = true;
+                                });
                                 info!("scenario: {entity} parachuting at {spot:.1}");
                             }
                             None => warn!("scenario: no soldier to put under a parachute"),
@@ -2232,15 +2409,20 @@ fn run_scenario(
                 let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
                 let nearest = vehicles
                     .health
-                    .iter_mut()
+                    .iter()
                     .min_by(|a, b| {
                         let d = |v: &VehicleView| v.transform.translation.distance(origin);
-                        d(a.0).total_cmp(&d(b.0))
+                        d(a.1).total_cmp(&d(b.1))
                     });
                 match nearest {
-                    Some((_, mut health)) => {
-                        health.current = (health.current - amount).max(1.0);
-                        info!("scenario: vehicle down to {:.0}/{:.0}", health.current, health.max);
+                    Some((vehicle, _, health)) => {
+                        let current = (health.current - amount).max(1.0);
+                        on_vehicle(&server, "DamageVehicle", vehicle, move |vehicle| {
+                            if let Some(mut health) = vehicle.get_mut::<VehicleHealth>() {
+                                health.current = current;
+                            }
+                        });
+                        info!("scenario: vehicle down to {:.0}/{:.0}", current, health.max);
                     }
                     None => warn!("scenario: no vehicle to damage"),
                 }
@@ -2248,14 +2430,19 @@ fn run_scenario(
             }
             Step::DamageVehicleAt(point, amount) => {
                 let origin = Vec3::from(*point);
-                let nearest = vehicles.health.iter_mut().min_by(|a, b| {
+                let nearest = vehicles.health.iter().min_by(|a, b| {
                     let d = |v: &VehicleView| v.transform.translation.distance(origin);
-                    d(a.0).total_cmp(&d(b.0))
+                    d(a.1).total_cmp(&d(b.1))
                 });
                 match nearest {
-                    Some((_, mut health)) if health.current > 0.0 => {
-                        health.current = (health.current - amount).max(0.0);
-                        info!("scenario: vehicle down to {:.0}/{:.0}", health.current, health.max);
+                    Some((vehicle, _, health)) if health.current > 0.0 => {
+                        let current = (health.current - amount).max(0.0);
+                        on_vehicle(&server, "DamageVehicleAt", vehicle, move |vehicle| {
+                            if let Some(mut health) = vehicle.get_mut::<VehicleHealth>() {
+                                health.current = current;
+                            }
+                        });
+                        info!("scenario: vehicle down to {:.0}/{:.0}", current, health.max);
                     }
                     Some(_) => warn!("scenario: that vehicle is a wreck already"),
                     None => warn!("scenario: no vehicle to damage"),
@@ -2278,9 +2465,9 @@ fn run_scenario(
                     .iter()
                     .min_by(|a, b| {
                         let d = |v: &VehicleView| v.transform.translation.distance(origin);
-                        d(a.0).total_cmp(&d(b.0))
+                        d(a.1).total_cmp(&d(b.1))
                     })
-                    .map_or(-1.0, |(_, h)| h.current);
+                    .map_or(-1.0, |(.., h)| h.current);
                 let line = format!("{name}: health {own:.1}, ammo {ammo}, teammate {mate:.1}, vehicle {vehicle:.1}");
                 info!("scenario: {line}");
                 writeln!(runner.report, "{line}").ok();
@@ -2395,15 +2582,13 @@ fn run_scenario(
                     .filter(|(_, r)| r.kind == game_data::RopeKind::Grapple)
                     .max_by_key(|(e, _)| e.index_u32())
                     .map(|(_, r)| *r);
-                match (rope, soldier.single_mut()) {
-                    (Some(rope), Ok((mut motion, _))) => {
+                match (rope, soldier.single()) {
+                    (Some(rope), Ok(_)) => {
                         let out = Quat::from_rotation_y(angle.to_radians()) * rope.out();
                         let feet = rope.end + out * (*distance + game_shared::rope::OFF_WALL) + Vec3::Y * 0.3;
                         let middle = (rope.top + rope.end) * 0.5 + Vec3::Y * 1.0;
                         let to = middle - (feet + Vec3::Y * 1.65);
-                        motion.position = feet;
-                        motion.velocity = Vec3::ZERO;
-                        motion.mantle = 0.0;
+                        place_us(&server, "ViewRope", feet);
                         let yaw = (-to.x).atan2(-to.z).to_degrees();
                         let pitch = to.y.atan2(Vec2::new(to.x, to.z).length()).to_degrees().min(45.0);
                         set_look(&mut look, yaw, pitch);
@@ -2423,18 +2608,24 @@ fn run_scenario(
                 if let Some(rope) = newest {
                     let along = Vec3::Y.cross(rope.out());
                     let mut strung = 0;
+                    let mut extras = Vec::new();
                     for i in 1..=*count as i32 {
                         let side = if i % 2 == 0 { -1.0 } else { 1.0 } * ((i + 1) / 2) as f32 * 1.5;
                         let hook = rope.anchor - rope.out() * 0.5 + along * side + Vec3::Y * 0.05;
                         if let Some(extra) = game_shared::rope::grapple(&spatial, hook, hook + rope.out() * 12.0, rope.length) {
-                            commands.spawn((
-                                game_shared::rope::Rope { links: rope.links, ..extra },
-                                game_shared::rope::RopeLife { owner: Entity::PLACEHOLDER, remaining: 60.0 },
-                                bevy_replicon::prelude::Replicated,
-                            ));
+                            extras.push(game_shared::rope::Rope { links: rope.links, ..extra });
                             strung += 1;
                         }
                     }
+                    server.run("ExtraRopes", move |world| {
+                        for rope in extras {
+                            world.spawn((
+                                rope,
+                                game_shared::rope::RopeLife { owner: Entity::PLACEHOLDER, remaining: 60.0 },
+                                bevy_replicon::prelude::Replicated,
+                            ));
+                        }
+                    });
                     info!("scenario: strung {strung} more ropes");
                 } else {
                     warn!("scenario: no grappling rope to string more beside");
@@ -2504,10 +2695,11 @@ fn run_scenario(
                 Progress::Done
             }
             Step::Dummy(pose) => {
-                match dummies.as_mut() {
-                    Some(control) => control.pose = (!pose.is_empty()).then(|| pose.clone()),
+                let pose = (!pose.is_empty()).then(|| pose.clone());
+                server.run("Dummy", move |world| match world.get_resource_mut::<game_server::dummy::DummyControl>() {
+                    Some(mut control) => control.pose = pose,
                     None => warn!("scenario: no server to make dummies on"),
-                }
+                });
                 Progress::Done
             }
             Step::HitGeometry(label, seconds) => match (elapsed == 0.0, &hitreg.request) {

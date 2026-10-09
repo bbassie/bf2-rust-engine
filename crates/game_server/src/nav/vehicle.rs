@@ -145,6 +145,9 @@ pub struct WaterGrid {
     blocked: Vec<bool>,
     /// Cells to the nearest cell a 1 m draft can't float in, capped at 255.
     shore: Vec<u8>,
+    /// Connected stretch of water per cell for a 1 m draft ([`NO_REGION`] where it doesn't
+    /// float): a boat only gets to landings in its own (not across a spit of land).
+    regions: Vec<u16>,
 }
 
 /// The highest point of the terrain and statics per [`AIR_CELL`] cell.
@@ -168,6 +171,11 @@ pub struct VehicleNavGrid {
     /// Cell costs and connected areas per kind of vehicle (see [`Self::class_costs`]), made
     /// when first needed.
     classes: std::sync::Mutex<HashMap<(NavClass, u16, u16), Arc<ClassCosts>>>,
+}
+
+/// Which [`ClassCosts`] a kind of vehicle uses.
+fn class_key(spec: &DriveSpec) -> (NavClass, u16, u16) {
+    (spec.class, (spec.half_width * 10.0).round() as u16, (spec.depth * 10.0).round() as u16)
 }
 
 /// What a kind of vehicle (a [`DriveSpec`]) makes of every land cell.
@@ -339,8 +347,10 @@ fn build_water(geometry: &LevelGeometry, surface: f32, boats: Option<&PlayArea>)
         depths,
         blocked,
         shore: Vec::new(),
+        regions: Vec::new(),
     };
     grid.shore = distance_field(width, depth, |i| grid.navigable_index(i, 1.0));
+    grid.regions = grid.label_regions(1.0);
     grid.depths.iter().any(|d| *d > 1.0).then_some(grid)
 }
 
@@ -431,6 +441,66 @@ impl WaterGrid {
 
     fn navigable_index(&self, i: usize, draft: f32) -> bool {
         !self.blocked[i] && self.depths[i] >= draft
+    }
+
+    /// Connected stretches of water a boat with this draft sails between (8-connected, like
+    /// [`Self::find_path`]).
+    fn label_regions(&self, draft: f32) -> Vec<u16> {
+        let count = (self.width * self.depth) as usize;
+        let mut regions = vec![NO_REGION; count];
+        let mut next = 0u16;
+        let mut stack = Vec::new();
+        for seed in 0..count {
+            if regions[seed] != NO_REGION || !self.navigable_index(seed, draft) {
+                continue;
+            }
+            regions[seed] = next;
+            stack.push(seed);
+            while let Some(i) = stack.pop() {
+                let (x, z) = ((i as u32 % self.width) as i64, (i as u32 / self.width) as i64);
+                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                    let (nx, nz) = (x + dx, z + dz);
+                    if nx < 0 || nz < 0 || nx >= self.width as i64 || nz >= self.depth as i64 {
+                        continue;
+                    }
+                    let j = (nz as u32 * self.width + nx as u32) as usize;
+                    if regions[j] == NO_REGION && self.navigable_index(j, draft) {
+                        regions[j] = next;
+                        stack.push(j);
+                    }
+                }
+            }
+            next = next.saturating_add(1).min(NO_REGION - 1);
+        }
+        regions
+    }
+
+    /// The stretch of water a boat at `p` is in (the nearest navigable cell's, within 60 m:
+    /// where [`Self::find_path`] starts from).
+    pub fn region_at(&self, p: Vec3, draft: f32) -> Option<u16> {
+        self.nearest(p, 60.0, draft).map(|i| self.regions[i]).filter(|r| *r != NO_REGION)
+    }
+
+    /// Where a boat in stretch `region` comes closest to `p` (within `radius`), right by the
+    /// shore if it can: the water cell to land riders at for a beach at `p`.
+    pub fn landing_near(&self, p: Vec3, radius: f32, draft: f32, region: u16) -> Option<Vec3> {
+        let r = (radius / WATER_CELL).ceil() as i64;
+        let c = ((p.xz() - self.origin) / WATER_CELL).floor();
+        let (cx, cz) = (c.x as i64, c.y as i64);
+        let mut best: Option<(f32, usize)> = None;
+        for z in (cz - r).max(0)..=(cz + r).min(self.depth as i64 - 1) {
+            for x in (cx - r).max(0)..=(cx + r).min(self.width as i64 - 1) {
+                let i = (z as u32 * self.width + x as u32) as usize;
+                if self.regions[i] != region || !self.navigable_index(i, draft) {
+                    continue;
+                }
+                let d = self.position(i).xz().distance(p.xz());
+                if d <= radius && best.is_none_or(|(b, _)| d < b) {
+                    best = Some((d, i));
+                }
+            }
+        }
+        best.map(|(_, i)| self.position(i))
     }
 
     /// Whether a boat with this draft floats at `p`.
@@ -736,7 +806,7 @@ impl VehicleNavGrid {
     /// [`NO_REGION`]. Made once per kind of vehicle (a few hundred ms), then path requests
     /// only snap to goals they can reach and read costs from a byte per cell.
     fn class_costs(&self, spec: &DriveSpec) -> Arc<ClassCosts> {
-        let key = (spec.class, (spec.half_width * 10.0).round() as u16, (spec.depth * 10.0).round() as u16);
+        let key = class_key(spec);
         if let Some(costs) = self.classes.lock().unwrap().get(&key) {
             return costs.clone();
         }
@@ -801,6 +871,25 @@ impl VehicleNavGrid {
         let costs = Arc::new(ClassCosts { factors, regions });
         self.classes.lock().unwrap().insert(key, costs.clone());
         costs
+    }
+
+    /// Whether a land vehicle of this kind at `from` can drive to within `radius` of `to` (an
+    /// island's jeeps can't get to the mainland; an amphibious APC can). `None` while that's not
+    /// known: the class's areas are made with its first path (see [`Self::class_costs`]), not
+    /// here on the bots' thread.
+    pub fn reaches(&self, spec: &DriveSpec, from: Vec3, to: Vec3, radius: f32) -> Option<bool> {
+        if spec.class == NavClass::Boat {
+            return None;
+        }
+        let costs = self.classes.lock().unwrap().get(&class_key(spec)).cloned()?;
+        let feet = from - Vec3::Y;
+        let region = self
+            .land
+            .cells_near(feet.xz(), 6.0)
+            .filter(|c| (self.land.position(*c).y - feet.y).abs() < 3.0)
+            .map(|c| costs.regions[c.index as usize])
+            .find(|r| *r != NO_REGION)?;
+        Some(self.land.cells_near(to.xz(), radius).any(|c| costs.regions[c.index as usize] == region))
     }
 
     /// A cell's cost factor from the class costs, `None` where it can't go or an obstacle is.
@@ -1311,6 +1400,40 @@ mod tests {
         assert!(!water.navigable(Vec3::new(30.0, 0.0, 0.0), 1.0));
         let sail = nav.find_path(&boat, Vec3::new(0.0, 0.0, -50.0), Vec3::new(0.0, 0.0, 30.0), 5.0, &[]).unwrap();
         assert!(sail.complete, "{sail:?}");
+    }
+
+    #[test]
+    fn knows_which_kinds_reach_across_water() {
+        // A lake 3 m deep from x = -10 to 10 across the whole level: jeeps can't cross it,
+        // amphibians swim. Unknown until a path for the kind was planned.
+        let height = |x: f32, _z: f32| ((x.abs() - 10.0) * 0.3 - 3.0).clamp(-3.0, 0.5);
+        let nav = level(Vec::new(), height, Vec::new(), Some(0.0));
+        let (a, b) = (Vec3::new(-30.0, 1.5, 0.0), Vec3::new(30.0, 1.5, 0.0));
+        let apc = DriveSpec { class: NavClass::Amphibious, half_width: 1.3, depth: 0.6 };
+        assert_eq!(nav.reaches(&JEEP, a, b, 10.0), None);
+        let _ = nav.find_path(&JEEP, a, b, 5.0, &[]);
+        let _ = nav.find_path(&apc, a, b, 5.0, &[]);
+        assert_eq!(nav.reaches(&JEEP, a, b, 10.0), Some(false));
+        assert_eq!(nav.reaches(&JEEP, a, Vec3::new(-40.0, 0.5, 20.0), 10.0), Some(true));
+        assert_eq!(nav.reaches(&apc, a, b, 10.0), Some(true));
+    }
+
+    #[test]
+    fn boats_land_only_on_their_own_water() {
+        // Two lakes (3 m deep under the water at 0) split by a dry spit at x in [-4, 4].
+        let height = |x: f32, _z: f32| if x.abs() < 4.0 { 1.0 } else { -3.0 };
+        let nav = level(Vec::new(), height, Vec::new(), Some(0.0));
+        let water = nav.water.as_ref().expect("a water grid");
+        let west = water.region_at(Vec3::new(-30.0, 0.0, 0.0), 1.0).unwrap();
+        let east = water.region_at(Vec3::new(30.0, 0.0, 0.0), 1.0).unwrap();
+        assert_ne!(west, east);
+        // A beach on the spit: each boat lands on its own side of it.
+        let beach = Vec3::new(0.0, 1.0, 10.0);
+        let landing = water.landing_near(beach, 20.0, 1.0, west).unwrap();
+        assert!(landing.x < -4.0 && landing.distance(beach) < 12.0, "{landing}");
+        let landing = water.landing_near(beach, 20.0, 1.0, east).unwrap();
+        assert!(landing.x > 4.0, "{landing}");
+        assert!(water.landing_near(Vec3::new(-40.0, 0.0, 0.0), 6.0, 1.0, east).is_none());
     }
 
     /// Like `level`, but the grid is cropped to `bounds` (world XZ), as a level's combat area

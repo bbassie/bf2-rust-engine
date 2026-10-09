@@ -1,0 +1,28 @@
+// A bot driver doesn't sit waiting for riders who are far off (crates/game_server/src/bots/
+// vehicle.rs, `riders_coming`): on Karkand (64) a bot gets the wheel of a Vodnik; squad mates
+// and others on their way in within 30 m are waited for, 7 s at most (it was 14 s for anyone
+// who had claimed a seat, however far away), and the driver leaves with whoever made it:
+// "drives off in jep_vodnik after N s, K of 6 seats taken, M more on the way". Fails if he
+// hasn't left within 12 s. We get out of its way (Kill: a soldier in front holds a driver up)
+// and LogVehicles shows it on the move.
+// client --scenario scenarios/vehicles/driver_short_wait.ron
+(
+    level: "strike_at_karkand",
+    size: 64,
+    team: 1,
+    bots: 24,
+    steps: [
+        WaitReady,
+        ForbidLog("panicked"),
+        WaitBotsDeployed(24, 10.0),
+        NearVehicle("jep_vodnik"),
+        SeatBot("jep_vodnik", 1),
+        LogSeats("jep_vodnik"),
+        Kill,
+        ExpectLog("drives off in jep_vodnik", 12.0),
+        LogSeats("jep_vodnik"),
+        Wait(5.0),
+        LogVehicles("5 s after"),
+        Quit,
+    ],
+)

@@ -49,7 +49,7 @@ pub const TICK_HZ: f64 = 60.0;
 pub const DEFAULT_PORT: u16 = 16567;
 
 /// Bump whenever the wire protocol changes in a way the protocol hash can't detect.
-pub const PROTOCOL_ID: u64 = 0x4246_325f_0006; // "BF2_" + version (6: BF2's world gravity for everything, soldiers standing in crevices)
+pub const PROTOCOL_ID: u64 = 0x4246_325f_0007; // "BF2_" + version (7: the out-of-bounds warning message)
 
 /// Adds everything both client and server need. The messaging backend (renet) is added by
 /// the binaries so a future Steam backend can be swapped in.

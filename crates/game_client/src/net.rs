@@ -1,7 +1,8 @@
 //! Starting, joining and leaving matches, and working out which entities are ours.
 //!
-//! A match comes from the command line or the menu as a [`MatchSetup`]: either the server
-//! runs in this app (singleplayer, listen server) or we connect to one. [`leave_match`]
+//! A match comes from the command line or the menu as a [`MatchSetup`]: either we run the
+//! server (singleplayer, listen server; on its own thread, see `local_server`) or we connect
+//! to one. [`leave_match`]
 //! undoes everything a match brought, so another one can start.
 
 use std::{
@@ -61,7 +62,8 @@ impl Plugin for NetPlugin {
 /// A match to play.
 #[derive(Clone, Debug)]
 pub enum MatchSetup {
-    /// Singleplayer, or a listen server when `network` is set: the server runs in this app.
+    /// Singleplayer, or a listen server when `network` is set: we run the server (on a thread
+    /// of its own, see `local_server`).
     Local(ServerSettings),
     /// Play on a server.
     Join {
@@ -132,7 +134,7 @@ pub fn start_match(world: &mut World, setup: MatchSetup) {
     }
     let result = match &setup {
         MatchSetup::Local(settings) => {
-            world.insert_resource(LocalClientId(PlayerNetId::LOCAL_HOST.0));
+            world.insert_resource(LocalClientId(game_server::embedded::LINK_CLIENT_ID));
             let mut settings = settings.clone();
             // Stats and bans of our own games next to the settings (none in scripted runs).
             if let Some(dir) = world.resource::<SettingsFile>().0.as_ref().and_then(|f| f.parent()) {
@@ -140,7 +142,8 @@ pub fn start_match(world: &mut World, setup: MatchSetup) {
                 admin.stats_file.get_or_insert_with(|| dir.join("stats.ron"));
                 admin.ban_file.get_or_insert_with(|| dir.join("bans.ron"));
             }
-            game_server::start_server(world, settings)
+            // On a thread of its own, linked to us (`local_server`).
+            crate::local_server::start(world, settings)
         }
         // The server's content first (if it shares any), then `connect`.
         MatchSetup::Join { server, .. } => crate::content::begin_join(world, *server),
@@ -169,7 +172,8 @@ pub fn leave_match(world: &mut World) {
         transport.disconnect();
     }
     world.remove_resource::<RenetClient>();
-    game_server::stop_server(world);
+    // Stops our server, if we run one (its thread ends).
+    world.remove_resource::<crate::local_server::LocalServer>();
     // What a remote server replicated, and what the level spawned on our side.
     let entities: Vec<Entity> = world
         .query_filtered::<Entity, Or<(With<Remote>, With<LevelEntity>)>>()
@@ -214,8 +218,8 @@ pub(crate) fn connect(world: &mut World, server: SocketAddr) -> Result<()> {
         ..default()
     });
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    // Never 0, which is reserved for the local host player.
-    let client_id = (current_time.as_nanos() as u64).max(1);
+    // Never 0 or 1, the local host player's and our own server's link client's ids.
+    let client_id = (current_time.as_nanos() as u64).max(2);
     // Loopback servers get a loopback socket: no firewall prompt for local tests.
     let bind_ip: IpAddr = match server.ip() {
         IpAddr::V4(ip) if ip.is_loopback() => Ipv4Addr::LOCALHOST.into(),

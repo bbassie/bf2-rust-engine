@@ -46,12 +46,20 @@ use crate::{
 
 /// How far bots look for a vehicle to take, meters.
 const VEHICLE_SEARCH: f32 = 70.0;
-/// How far squad members go to get into their leader's vehicle, meters.
-const BOARD_DISTANCE: f32 = 90.0;
+/// How far squad members go to get into their leader's vehicle, meters (he doesn't wait for
+/// those further off than [`BOARD_REACH`]).
+const BOARD_DISTANCE: f32 = 40.0;
 /// Objectives closer than this are walked to (per role), meters.
 const MOUNT_DISTANCE: f32 = 160.0;
-/// Seconds a driver waits for his squad to get in.
-const BOARD_WAIT: f32 = 14.0;
+/// Seconds a driver waits at most for riders on their way in (only for those close by: see
+/// [`riders_coming`]); a helicopter's pilot, whose passengers have further to go, a little
+/// longer.
+const BOARD_WAIT: f32 = 7.0;
+const HELI_BOARD_WAIT: f32 = 10.0;
+/// Riders further than this from the vehicle aren't waited for, meters.
+const BOARD_REACH: f32 = 30.0;
+/// Seconds a new driver gives squad mates close by to decide whether they come along.
+const SETTLE_SECONDS: f32 = 2.5;
 /// Seconds a transport pilot back at base waits for passengers before he parks there.
 const BASE_WAIT: f32 = 60.0;
 /// A helicopter this close above the ground (its origin, meters) has touched down.
@@ -61,6 +69,10 @@ const DROP_OFF_WAIT: f32 = 8.0;
 /// Seconds a bot keeps away from vehicles after leaving one (and from that one for longer).
 const VEHICLE_COOLDOWN: f32 = 8.0;
 const ABANDON_COOLDOWN: f32 = 60.0;
+/// Bots whose way to the objective crosses this much deep water (m) go by boat if they can.
+pub(super) const SWIM_CROSSING: f32 = 60.0;
+/// Seconds nobody takes a vehicle a driver got nowhere in.
+const SHUN_SECONDS: f32 = 120.0;
 /// Below this share of its hit points a vehicle is abandoned.
 const BAIL_OUT: f32 = 0.22;
 /// Stuck events (decaying) after which a driver gives up on his vehicle.
@@ -201,6 +213,14 @@ pub(super) struct Ride {
     returning: bool,
     trips: u32,
     base_wait: f32,
+
+    /// What it is doing this tick, for the idle statistics (a driver waiting for riders, at
+    /// its goal, without a route, ...), and where its vehicle was at the last 30 s check.
+    doing: &'static str,
+    idle_anchor: Vec3,
+    idle_timer: f32,
+    /// Done waiting for riders (logged once).
+    departed: bool,
 }
 
 impl Ride {
@@ -256,6 +276,10 @@ impl Ride {
             returning: false,
             trips: 0,
             base_wait: 0.0,
+            doing: "",
+            idle_anchor: position,
+            idle_timer: 30.0,
+            departed: false,
         }
     }
 
@@ -286,7 +310,7 @@ impl Ride {
         self.stuck = 0.0;
         self.reverse = 0.0;
         // Nobody to wait for: it is on its way.
-        self.waited = BOARD_WAIT;
+        self.waited = HELI_BOARD_WAIT.max(BOARD_WAIT);
         if profile.role.flies() {
             let height = w.height_above_ground(motion.position, 400.0, seen.entity);
             if height > LANDED_HEIGHT || speed > 5.0 {
@@ -386,6 +410,80 @@ impl Senses<'_, '_> {
     }
 }
 
+/// Meters of water too deep to wade along the straight line from `from` to `to` (by the
+/// terrain: a bridge or pier over it doesn't count as dry).
+pub(super) fn swim_distance(w: &Senses, from: Vec3, to: Vec3) -> f32 {
+    let (Some(heights), Some(water)) = (w.level.heightmap.as_ref(), w.level.desc.water.as_ref()) else {
+        return 0.0;
+    };
+    const STEP: f32 = 4.0;
+    let length = flat(to - from).length();
+    let steps = (length / STEP).ceil() as usize;
+    (1..steps)
+        .filter(|&i| {
+            let p = from.lerp(to, i as f32 / steps as f32);
+            water.height - heights.height_at(p.x, p.z) > 1.5
+        })
+        .count() as f32
+        * STEP
+}
+
+/// Where a bot cut off from its objective waits for a ride: by the nearest boat or
+/// helicopter of its side (or nobody's) whose door it can walk to from its region. `None`:
+/// nothing there yet; it waits where it is (a returning helicopter lands by the carrier's
+/// spawns, and `vehicle_options` looks further out for bots cut off).
+pub(super) fn ride_point(w: &Senses, me: &Me, region: Option<u16>) -> Option<Vec3> {
+    let nav = w.nav()?;
+    let region = region?;
+    let position = me.motion.position;
+    let mut best: Option<(f32, Vec3)> = None;
+    for (entity, vehicle, data, motion, _, health, _) in &w.rides {
+        if health.is_some_and(|h| h.wrecked() || h.current < h.max * 0.5) {
+            continue;
+        }
+        let Some(profile) = w.profile(&vehicle.template) else {
+            continue;
+        };
+        if !matches!(profile.role, Role::Boat | Role::TransportHeli) {
+            continue;
+        }
+        if equipment::crew_team(w, entity).is_some_and(|t| t != me.team) {
+            continue;
+        }
+        let transform = motion.transform();
+        let door = data
+            .0
+            .desc
+            .entry_points
+            .iter()
+            .map(|e| (transform.transform_point(Vec3::from_array(e.position)), e.radius))
+            .filter(|(at, radius)| nav.locate(*at, radius + 1.5, Some(region)).is_some())
+            .map(|(at, _)| at)
+            .min_by(|a, b| a.distance(position).total_cmp(&b.distance(position)));
+        // On dry ground by it: a boat's door is at the waterline, and waiting there was
+        // swimming (in a carrier's well deck, for good).
+        let Some(door) = door else {
+            continue;
+        };
+        let surface = w.level.desc.water.as_ref().map_or(f32::MIN, |w| w.height);
+        let dry = nav
+            .cells_near(door.xz(), 10.0)
+            .filter(|c| {
+                let cell = nav.cell(*c);
+                cell.region == region && cell.y > surface - SHORE_DEPTH && (cell.y - door.y).abs() < 4.0
+            })
+            .map(|c| nav.position(c))
+            .min_by(|a, b| a.distance_squared(door).total_cmp(&b.distance_squared(door)));
+        if let Some(at) = dry {
+            let d = at.distance(position);
+            if best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, at));
+            }
+        }
+    }
+    best.map(|(_, at)| at)
+}
+
 /// Whether a jet has a runway in front of it: ground at its level and nothing in the way for
 /// a few hundred meters (not a carrier deck: jump jets don't hover yet).
 fn runway_ahead(w: &Senses, motion: &VehicleMotion, jet: Entity) -> bool {
@@ -450,7 +548,18 @@ impl BotBrain {
             let template = w.vehicle(ride.vehicle).map_or("a wreck", |v| v.template);
             info!("{} got out of {template} ({reason}) after {:.0} s", w.name(me.player), ride.time);
             stats.vehicle_exits += 1;
-            if ride.strikes >= GIVE_UP_STRIKES || reason == "stuck" || reason == "damaged" {
+            // Landed by a boat: not back into it (it would take them back out to sea).
+            let landed = matches!(reason, "arrived" | "dropped off" | "as close as it gets")
+                && w.vehicle(ride.vehicle).and_then(|v| w.profile(v.template)).is_some_and(|p| p.role == Role::Boat);
+            // Stuck without getting anywhere (a boat aground at its spawn): not for anyone.
+            if reason == "stuck"
+                && ride.purpose == Purpose::Drive
+                && w.vehicle(ride.vehicle).is_some_and(|v| flat(v.motion.position - ride.home).length() < 8.0)
+            {
+                info!("{} gives up on {template}: it went nowhere", w.name(me.player));
+                claims.shun(ride.vehicle, SHUN_SECONDS);
+            }
+            if ride.strikes >= GIVE_UP_STRIKES || reason == "stuck" || reason == "damaged" || landed {
                 self.left_vehicle = Some((ride.vehicle, ABANDON_COOLDOWN));
             } else {
                 self.left_vehicle = Some((ride.vehicle, 20.0));
@@ -490,12 +599,22 @@ impl BotBrain {
         let objective = order.map(|(_, a)| w.map.areas[a].position);
         let far = objective.map_or(0.0, |o| o.xz().distance(position.xz()));
         let attacking = order.is_some_and(|(k, _)| k == OrderKind::Attack);
+        // Already where riders get out (see `ride_along`): no use getting into a transport here.
+        let at_objective = order.is_some_and(|(_, a)| {
+            let area = &w.map.areas[a];
+            area.position.xz().distance(position.xz()) < area.radius + 45.0
+        });
         let skill = self.personality.skill(&w.settings, me.team).0;
         // Cut off: walking can't get to the objective from here (a carrier, an island).
         let here = self
             .region
             .or_else(|| w.nav().and_then(|nav| nav.locate(position, 2.0, None)).map(|c| w.nav().unwrap().cell(c).region));
+        // ... or only by swimming a long way (Leviathan's strike point: the grid joins the
+        // islands along the bottom of the channel): boats first, and only land vehicles that
+        // get there.
+        let crossing = objective.is_some_and(|o| swim_distance(w, position, o) > SWIM_CROSSING);
         let cut_off = self.stranded > 0.0
+            || crossing
             || order.is_some_and(|(_, area)| {
                 let goal = w.map.walk_regions.get(area).copied().flatten();
                 goal.is_some() && here.is_some() && goal != here
@@ -517,6 +636,20 @@ impl BotBrain {
             })
         };
 
+        // Cut off: only vehicles that can get it there (an island's jeeps can't, an amphibious
+        // APC can; unknown until the vehicle's kind planned a path, then they're tried).
+        let gets_there = |profile: &VehicleProfile, motion: &VehicleMotion| {
+            let (Some(spec), Some(objective), Some(nav)) = (profile.spec, objective, w.vehicle_nav()) else {
+                return true;
+            };
+            use crate::nav::vehicle::NavClass;
+            match nav.reaches(&spec, motion.position, objective, 60.0) {
+                _ if spec.class == NavClass::Boat => true,
+                Some(reaches) => reaches,
+                // Across water, cars and tanks are only taken once it's known they get there.
+                None => spec.class == NavClass::Amphibious || !crossing,
+            }
+        };
         let offer = |best: &mut (f32, Activity), utility: f32, vehicle: Entity, wish: SeatWish| {
             if utility > best.0 {
                 *best = (utility, Activity::Mount { vehicle, wish, time: 0.0 });
@@ -532,7 +665,7 @@ impl BotBrain {
             if distance > search.max(35.0) || health.is_some_and(|h| h.wrecked() || h.current < h.max * 0.5) {
                 continue;
             }
-            if self.left_vehicle.is_some_and(|(v, _)| v == entity) {
+            if self.left_vehicle.is_some_and(|(v, _)| v == entity) || vcx.claims.shunned(entity) {
                 continue;
             }
             let Some(profile) = w.profile(&vehicle.template) else {
@@ -563,6 +696,7 @@ impl BotBrain {
                 && crew.iter().any(|c| c.player == leader)
                 && room
                 && speed < 6.0
+                && (!at_objective || profile.role.fights())
                 && !profile.role.flies() | (motion.position.y - position.y < 4.0)
             {
                 let wish = if free_gunner { SeatWish::Gunner } else { SeatWish::Passenger };
@@ -570,7 +704,7 @@ impl BotBrain {
                 continue;
             }
             // Cut off: any teammate's vehicle with room that's about to go somewhere.
-            if cut_off && driven && room && profile.role != Role::Stationary && speed < 4.0 {
+            if cut_off && driven && room && profile.role != Role::Stationary && speed < 4.0 && gets_there(profile, motion) {
                 let wish = if free_gunner { SeatWish::Gunner } else { SeatWish::Passenger };
                 offer(best, 5.5, entity, wish);
                 continue;
@@ -608,7 +742,7 @@ impl BotBrain {
                 continue;
             }
             // A gunner's seat in a teammate's vehicle.
-            if driven && free_gunner && !profile.role.flies() && distance < 40.0 && speed < 4.0 {
+            if driven && free_gunner && !profile.role.flies() && distance < 40.0 && speed < 4.0 && (!at_objective || profile.role.fights()) {
                 offer(best, 4.0 + self.personality.teamwork, entity, SeatWish::Gunner);
                 continue;
             }
@@ -633,6 +767,9 @@ impl BotBrain {
             // Cut off (a carrier, an island): anything that gets it off.
             let worth = worth || (cut_off && profile.role != Role::Stationary && (profile.role != Role::Jet || runway_ahead(w, motion, entity)));
             if !worth || (profile.role == Role::Boat && w.vehicle_nav().is_none_or(|n| n.water.is_none())) {
+                continue;
+            }
+            if cut_off && !gets_there(profile, motion) {
                 continue;
             }
             // Nearer ones first; squads want room for everyone.
@@ -774,13 +911,16 @@ impl BotBrain {
                 _ => Purpose::Ride,
             };
             info!(
-                "{} got into {} ({}) seat {} to {:?}",
+                "{} got into {} ({}) seat {} to {:?}{}",
                 w.name(me.player),
                 seen.template,
                 profile.role.name(),
                 seated.seat,
-                ride.purpose
+                ride.purpose,
+                if self.awaiting_ride { " (cut off: a ride)" } else { "" }
             );
+            stats.cut_off_rides += u32::from(self.awaiting_ride);
+            self.awaiting_ride = false;
             stats.vehicle_entries += 1;
             team_stats.mounts += 1;
             if profile.role == Role::Stationary {
@@ -889,6 +1029,23 @@ impl BotBrain {
                 self.look_around(&mut ride, &seen, &mut frame, dt);
                 self.ride_along(w, me, &mut ride, &seen, profile, order, crew, vcx.claims);
             }
+        }
+
+        // Idle statistics: a vehicle that went nowhere in 30 s, by what its bot was doing.
+        ride.idle_timer -= dt;
+        if ride.idle_timer <= 0.0 {
+            ride.idle_timer = 30.0;
+            if profile.role != Role::Stationary && flat(seen.motion.position - ride.idle_anchor).length() < 2.0 {
+                let reason = match ride.purpose {
+                    Purpose::Drive if ride.doing.is_empty() => "driver",
+                    Purpose::Drive => ride.doing,
+                    _ if driver.is_none() => "riding, no driver",
+                    Purpose::Gun => "gunner",
+                    Purpose::Ride => "passenger",
+                };
+                *stats.seated_idle_by.entry(reason).or_default() += 1;
+            }
+            ride.idle_anchor = seen.motion.position;
         }
 
         // Flares or smoke when an enemy rocket or missile is coming at the vehicle.
@@ -1279,7 +1436,8 @@ impl BotBrain {
             Role::Boat => {
                 let nav = w.vehicle_nav()?;
                 let water = nav.water.as_ref()?;
-                let landing = water.landing(target, 400.0, profile.spec.map_or(1.0, |s| s.depth))?;
+                let draft = profile.spec.map_or(1.0, |s| s.depth);
+                let landing = boat_landing(w, water, position, index, draft).or_else(|| water.landing(target, 400.0, draft))?;
                 Some((landing, 12.0))
             }
             Role::Tank | Role::Apc | Role::AntiAir => {
@@ -1379,16 +1537,30 @@ impl BotBrain {
             ride.leave("stuck");
         }
 
-        // Riders on their way in: wait for them.
-        let pending = vcx.claims.pending(seen.entity);
-        if pending > 0 && ride.waited < BOARD_WAIT && ride.time < BOARD_WAIT + 5.0 {
+        // Riders on their way in: wait for them, if they're close.
+        ride.doing = "driving";
+        if ride.waited < BOARD_WAIT && ride.time < BOARD_WAIT + 5.0 && riders_coming(w, me, vcx, seen, ride.time, BOARD_REACH) {
+            ride.doing = "waiting for riders";
             ride.waited += dt;
             frame.buttons |= Buttons::JUMP;
             return;
         }
+        if !ride.departed {
+            ride.departed = true;
+            let aboard = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());
+            info!(
+                "{} drives off in {} after {:.1} s, {aboard} of {} seats taken, {} more on the way",
+                w.name(me.player),
+                seen.template,
+                ride.time,
+                profile.seats,
+                vcx.claims.pending(seen.entity),
+            );
+        }
 
         let goal = self.drive_goal(w, me, seen, profile, order, ride.hold);
         let Some((goal, arrive)) = goal else {
+            ride.doing = "no goal";
             frame.buttons |= Buttons::JUMP;
             return;
         };
@@ -1402,7 +1574,13 @@ impl BotBrain {
         });
         let at_goal = flat(goal - position).length() < arrive.max(8.0) || (path_done && ride.path_goal == Some(goal));
         if at_goal {
+            ride.doing = "at its goal";
             ride.arrived += dt;
+            // Boats land everyone aboard where they are (the landing may be well short of the
+            // area: riders wouldn't think themselves there yet).
+            if profile.role == Role::Boat && speed.abs() < 3.0 {
+                vcx.claims.drop_off(seen.entity);
+            }
             // Transports drop their riders and the driver gets out too.
             if !profile.role.fights() && speed.abs() < 3.0 {
                 if ride.time < 3.0 {
@@ -1545,6 +1723,9 @@ impl BotBrain {
                 ride.repath_cooldown = ride.repath_cooldown.max(10.0);
             }
         }
+        if ride.path_task.is_none() && ride.path.as_ref().is_none_or(|p| p.points.len() < 2) {
+            ride.doing = "no route";
+        }
         let to = target - position;
         let alpha = bearing(motion.rotation, to);
 
@@ -1570,7 +1751,10 @@ impl BotBrain {
         if fighting && let Some(aim) = ride.aim {
             let close = aim.position.distance(position);
             wanted = match (profile.role, aim.vehicle) {
-                (Role::Tank, true) if close < 300.0 => 0.0,
+                (Role::Tank, true) if close < 300.0 => {
+                    ride.doing = "fighting";
+                    0.0
+                }
                 (Role::Tank | Role::Apc | Role::AntiAir, _) => wanted.min(5.0),
                 _ => wanted,
             };
@@ -1614,6 +1798,7 @@ impl BotBrain {
         // Stuck: pushing without moving. Back up, turning the other way, then find a new path.
         let pushing = wanted > 1.0 && (!obstructed || ride.obstructed > 6.0);
         if ride.reverse > 0.0 {
+            ride.doing = "backing up";
             ride.reverse -= dt;
             frame.set_movement(Vec2::new(ride.reverse_steer, -1.0));
             if ride.reverse <= 0.0 {
@@ -1629,6 +1814,7 @@ impl BotBrain {
         }
         if ride.stuck > 2.0 && boat && remaining < 60.0 {
             // Aground by the landing: close enough to wade ashore.
+            vcx.claims.drop_off(seen.entity);
             ride.leave("arrived");
         }
         if ride.stuck > 2.0 {
@@ -1818,13 +2004,14 @@ impl BotBrain {
         };
         let pending = vcx.claims.pending(seen.entity);
         let spun_up = seen.state.engine > 0.95;
+        ride.doing = "flying";
         let riders = vcx.crews.get(&seen.entity).map_or(0, |c| c.len());
         if riders > 1 && ride.flight != Flight::Ground {
             ride.carried = true;
         }
         match ride.flight {
             Flight::Ground => {
-                let waiting = !attack && pending > 0 && ride.waited < BOARD_WAIT;
+                let waiting = !attack && ride.waited < HELI_BOARD_WAIT && riders_coming(w, me, vcx, seen, ride.waited, BOARD_REACH * 1.5);
                 if waiting {
                     ride.waited += dt;
                 }
@@ -1832,6 +2019,12 @@ impl BotBrain {
                 // members respawning on their leader, bots cut off on a carrier), and park it
                 // there if none come. It only takes off again with someone aboard.
                 let empty = !attack && ride.trips > 0 && riders <= 1;
+                ride.doing = match (waiting, empty, destination.is_some()) {
+                    (true, ..) => "waiting for riders",
+                    (_, true, _) => "waiting at base",
+                    (.., false) => "no goal",
+                    _ => "taking off",
+                };
                 if empty {
                     ride.base_wait += dt;
                     if ride.base_wait > BASE_WAIT {
@@ -1839,6 +2032,13 @@ impl BotBrain {
                     }
                 } else if spun_up && !waiting && destination.is_some() {
                     ride.flight = Flight::Climb;
+                    info!(
+                        "{} takes off in {} after {:.1} s on the ground, {riders} of {} seats taken, {pending} more on the way",
+                        w.name(me.player),
+                        seen.template,
+                        ride.time,
+                        profile.seats,
+                    );
                 }
             }
             Flight::Climb if height > 12.0 => ride.flight = Flight::Cruise,
@@ -2045,6 +2245,7 @@ impl BotBrain {
         let stall = seen.data.0.desc.aero.as_ref().map_or(15.0, |a| a.stall_angle);
         let _ = stall;
         let nav = w.vehicle_nav();
+        ride.doing = if ride.flight == Flight::Ground { "taking off" } else { "flying" };
         // Takeoff roll: full throttle, wings level, straight on, then pull up.
         if ride.flight == Flight::Ground {
             let rotate = profile.top_speed * 0.45;
@@ -2138,6 +2339,93 @@ impl BotBrain {
         }
         let _ = (me, dt);
     }
+}
+
+/// Where a boat sets its riders down for an area: by a beach (walkable ground at the water's
+/// edge, not a quay wall too high to climb out at) that walking connects to the area, on the
+/// boat's own stretch of water, as close to the area as it gets. The water cell nearest the
+/// area (what boats made for before) was often below a quay or in a narrow slip between piers,
+/// and the riders swam about looking for a way up.
+fn boat_landing(w: &Senses, water: &crate::nav::vehicle::WaterGrid, from: Vec3, area: usize, draft: f32) -> Option<Vec3> {
+    let nav = w.nav()?;
+    let surface = w.level.desc.water.as_ref()?.height;
+    let region = water.region_at(from, draft)?;
+    let target = w.map.areas.get(area)?.position;
+    let goal_region = w.map.walk_regions.get(area).copied().flatten();
+    let started = Instant::now();
+    let mut best: Option<(f32, Vec3)> = None;
+    for radius in [120.0, 260.0, 450.0] {
+        for c in nav.cells_near(target.xz(), radius) {
+            // Every third cell is enough to find the beaches.
+            if c.x % 3 != 0 || c.z % 3 != 0 {
+                continue;
+            }
+            let cell = nav.cell(c);
+            if cell.region == 0
+                || goal_region.is_some_and(|r| r != cell.region)
+                || surface - cell.y > SHORE_DEPTH + 0.3
+                || cell.y - surface > 1.0
+            {
+                continue;
+            }
+            let beach = nav.position(c);
+            // The walk from the beach counts; the boat's trip a little (it is quicker).
+            let walk = beach.xz().distance(target.xz());
+            if best.is_some_and(|(b, _)| walk >= b) {
+                continue;
+            }
+            if let Some(landing) = water.landing_near(beach, 10.0, draft, region) {
+                let score = walk + 0.15 * landing.xz().distance(from.xz());
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, landing));
+                }
+            }
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+    info!(
+        "boat landing for {} from {from:.0}: {:?} in {:.1} ms",
+        w.map.areas[area].name,
+        best.map(|(_, at)| at),
+        started.elapsed().as_secs_f32() * 1000.0
+    );
+    best.map(|(_, at)| at)
+}
+
+/// Whether someone on the way into the driver's vehicle is close enough to be worth waiting
+/// for: within [`BOARD_REACH`] of it (a squad mate 80 m off, or a bot of another squad walking
+/// up for a passenger seat, kept a squad sitting in its jeep for 14 s).
+///
+/// In its first seconds aboard it also waits for teammates on foot close by who haven't decided
+/// yet (at a spawn everyone gets going at once: drivers left before anyone had claimed a seat,
+/// the rest ran after the jeep, and Leviathan's only RIB crossed with its driver alone).
+fn riders_coming(w: &Senses, me: &Me, vcx: &VehicleCx, seen: &Seen, time: f32, reach: f32) -> bool {
+    let Some(team) = me.team_index() else {
+        return false;
+    };
+    let at = seen.motion.position;
+    let close = |player: Entity| {
+        w.snapshot.soldiers[team]
+            .iter()
+            .find(|s| s.player == player)
+            .is_some_and(|s| s.position.distance(at) < reach)
+    };
+    if vcx.claims.claimants(seen.entity).any(close) {
+        return true;
+    }
+    if time > SETTLE_SECONDS {
+        return false;
+    }
+    // Teammates on foot close by (squad mates, bots waiting for a ride off an island).
+    w.soldiers.iter().any(|(_, motion, controlled_by, _, _, _, _, seated, downed)| {
+        controlled_by.0 != me.player
+            && seated.is_none()
+            && !downed
+            && motion.position.distance(at) < reach
+            && w.teams.get(controlled_by.0).is_ok_and(|t| *t == me.team)
+    })
 }
 
 /// Whether `period` seconds went by at `time` (seconds, advancing by `dt`).
