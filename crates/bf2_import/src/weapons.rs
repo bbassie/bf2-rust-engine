@@ -602,7 +602,10 @@ fn mesh_bounds(converter: &MeshConverter, path: &str) -> Option<([f32; 3], [f32;
 fn rope_projectile(converter: &MeshConverter, projectile: &mut ProjectileDesc, rope: RopeDesc) {
     match rope.kind {
         RopeKind::Grapple => {
-            projectile.velocity = 20.0;
+            // Tuned for the old (wrong) 9.81 gravity; scaled by sqrt(14.73 / 9.81) so the
+            // hook's arc keeps the same shape under the corrected `WORLD_GRAVITY` (same reach
+            // and height, just covered a bit faster).
+            projectile.velocity = 24.5;
             projectile.gravity = 1.0;
             projectile.impact = Impact::Stick { max_angle: 60.0 };
             let hook = format!("{ROPE_OBJECTS}/xp1_grapplinghook/meshes/xp1_grapplinghook.staticmesh");

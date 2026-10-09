@@ -7,6 +7,9 @@
     level: "strike_at_karkand",
     bots: 0,
     team: 1,
+    // The default fast deploy (0.5 s) auto-spawns before the kit/loadout picking below is
+    // done; give it enough time on the deploy screen to pick a kit, a loadout and flip tabs.
+    respawn_time: Some(8.0),
     steps: [
         WaitReady,
         // Vanilla level: the AIX 2 and sample mods' weapons stay out of the pools.
