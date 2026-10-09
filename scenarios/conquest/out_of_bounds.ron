@@ -29,6 +29,7 @@
         // Out again, and left there this time: dies when the countdown runs out.
         Teleport((-40.0, 157.0, -93.0), 0.0, 0.0),
         ExpectLog("is out of bounds, 10 s to return", 2.0),
+        Wait(0.5),
         Screenshot("warning_again"),
         ExpectLog("died: out of bounds", 11.0),
         Wait(0.5),
