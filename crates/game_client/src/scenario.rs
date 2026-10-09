@@ -120,6 +120,11 @@ pub struct Scenario {
     /// for a scenario that checks the deploy countdown itself, its text or a screenshot timed
     /// from it; other scenarios should wait on `WaitSpawned` instead of a fixed `Wait`.
     pub respawn_time: Option<f32>,
+    /// Disables the out-of-bounds countdown (`main::Cli::out_of_bounds`) for a scenario
+    /// whose test positions fall outside a level's combat area for reasons that have nothing
+    /// to do with what it checks (e.g. a firing range beyond the playable area), rather than
+    /// what it should actually catch at `scenarios/conquest/out_of_bounds.ron`.
+    pub out_of_bounds: Option<bool>,
     pub steps: Vec<Step>,
 }
 
@@ -549,6 +554,9 @@ impl Scenario {
         }
         if let Some(respawn_time) = self.respawn_time {
             cli.respawn_time = Some(respawn_time);
+        }
+        if let Some(out_of_bounds) = self.out_of_bounds {
+            cli.out_of_bounds = Some(out_of_bounds);
         }
     }
 

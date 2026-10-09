@@ -850,13 +850,17 @@ impl ShadowQuality {
         Self::ALL.into_iter().find(|v| v.label().eq_ignore_ascii_case(name))
     }
 
-    /// Cascades (perspective-aliasing bands); unused when `Off`.
+    /// Cascades (perspective-aliasing bands); unused when `Off`. Every cascade draws all the
+    /// shadow casters inside it again: High's two instead of three take about half a
+    /// millisecond off the render thread (Karkand), and look nearly the same (the second
+    /// cascade is a little softer 15 to 40 m away). `BF2_PERF_EXP=cascades3` gives High three.
     pub fn cascades(self) -> usize {
         match self {
             ShadowQuality::Off | ShadowQuality::Low => 1,
             ShadowQuality::Medium => 2,
-            ShadowQuality::High => 3,
-            ShadowQuality::Ultra => 4,
+            ShadowQuality::High if crate::perf_experiment("cascades3") => 3,
+            ShadowQuality::High => 2,
+            ShadowQuality::Ultra => 3,
         }
     }
 

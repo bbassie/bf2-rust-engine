@@ -10,6 +10,7 @@ mod flags;
 pub mod materials;
 mod hitzones;
 pub mod lamps;
+mod light_clusters;
 mod perf_stats;
 mod projectiles;
 mod props;
@@ -21,6 +22,7 @@ mod static_lightmaps;
 pub(crate) mod soldiers;
 mod statics;
 mod terrain;
+mod transform_propagation;
 mod unit_lods;
 mod vegetation;
 mod vehicles;
@@ -51,6 +53,8 @@ impl Plugin for RenderPlugin {
             static_lightmaps::StaticLightmapsPlugin,
             unit_lods::UnitLodPlugin,
             lamps::LampsPlugin,
+            light_clusters::LightClustersPlugin,
+            transform_propagation::TransformPropagationPlugin,
             perf_stats::PerfStatsPlugin,
         ));
     }

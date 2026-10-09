@@ -174,6 +174,12 @@ pub struct Cli {
     /// affect `--host`/singleplayer outside a scenario (the server's own default, 10 s).
     #[arg(long, hide = true)]
     respawn_time: Option<f32>,
+    /// Disables the out-of-bounds countdown for a scripted run's own local server
+    /// (overridable per scenario with its `out_of_bounds` field): for a scenario whose test
+    /// positions sit outside a level's combat area for reasons unrelated to what it checks
+    /// (e.g. a firing range south of Karkand's playable area).
+    #[arg(long, hide = true)]
+    out_of_bounds: Option<bool>,
     /// Your team (1 or 2) when hosting or in singleplayer.
     #[arg(long, default_value_t = 1)]
     team: u8,
@@ -251,6 +257,7 @@ impl Cli {
                 respawn_seconds: self
                     .respawn_time
                     .unwrap_or(if scripted { FAST_DEPLOY_SECONDS } else { ServerSettings::default().respawn_seconds }),
+                out_of_bounds: self.out_of_bounds.unwrap_or(ServerSettings::default().out_of_bounds),
                 coop: game_server::coop::CoopSettings {
                     human_team: self.team,
                     ..default()
@@ -320,6 +327,13 @@ fn main() -> AppExit {
             })
             .set(ImagePlugin {
                 default_sampler: render::materials::default_sampler(),
+            })
+            // `BF2_PERF_EXP=cpubatch`: Bevy's CPU-built instance buffers instead of its GPU mesh
+            // preprocessing. Recording the draws gets about 1.5 ms cheaper, but preparing the
+            // buffers costs 9 ms (Karkand, October 2026), so not by default.
+            .set(bevy::pbr::PbrPlugin {
+                use_gpu_instance_buffer_builder: !perf_experiment("cpubatch"),
+                ..default()
             })
             // Captures log lines for scenario assertions (`ExpectLog`, `ForbidLog`).
             .set(bevy::log::LogPlugin {

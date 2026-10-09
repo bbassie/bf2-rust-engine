@@ -12,6 +12,10 @@
     size: 64,
     team: 2,
     bots: 0,
+    // This stretch of the southern road sits outside size 64's combat area polygon (it's a
+    // firing range for arcs and drops, not a check of staying in bounds); the out-of-bounds
+    // countdown would otherwise kill the soldier mid-sequence.
+    out_of_bounds: Some(false),
     steps: [
         WaitReady,
         ForbidLog("panicked"),

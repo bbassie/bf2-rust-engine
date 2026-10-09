@@ -875,6 +875,25 @@ What a frame with 63 bots costs, and the rules that keep it low (see `render::pe
   `left`/`top`: a changed `Node` lays out its whole UI tree again.
 - Mesh entities nobody sees (other LODs, culled by their `VisibilityRange`) cost little: 4,800
   more on Karkand added about 0.15 ms. What costs is what each view draws.
+- Light clustering runs on the CPU, and only while a point or spot light could be seen
+  (`render::light_clusters`): Bevy 0.19's GPU clustering spends buffers, bind groups and compute
+  passes on every view every frame, lamps or not; day levels mostly have none (Karkand, no bots:
+  render thread 5.1 -> 4.6 ms with the next item). `BF2_PERF_EXP=gpuclusters`, `=clusters`.
+- The High shadow preset draws two cascades, Ultra three (`settings::ShadowQuality::cascades`):
+  each cascade redraws every caster in it, about half a millisecond of the render thread for
+  the third; side by side the difference is hard to find. `BF2_PERF_EXP=cascades3`.
+- Soldiers further than 30 m (by distance over zoom) are posed 45, 30 or 20 times a second, and
+  those only their shadow shows 15 (`soldiers::pose_period`): on the frames between, the player
+  gets a copy of the soldier's graph with nothing linked, so Bevy advances his clips but poses
+  no bone (`animate_targets` 0.65 -> 0.5 ms in a 63 bot fight). `BF2_PERF_EXP=animall`.
+- Transform propagation is serial (`render::transform_propagation`, in `PostUpdate` and before
+  avian's step): Bevy's spreads a few thousand bone transforms over the compute pool and spins
+  until all its threads came round, which the render thread keeps busy (63 bots: main thread
+  about 0.25 ms less). `BF2_PERF_EXP=parprop`.
+- Tried and dropped (October 2026): leaving small casters out of the far cascades (only a
+  tenth of them are small; no measurable change), alpha-masked bullet holes (no measurable
+  change), Bevy's CPU-built instance buffers (`BF2_PERF_EXP=cpubatch`: recording 1.5 ms cheaper,
+  preparing 9 ms dearer), other compute pool sizes (no change).
 - Measuring: `client --scenario scenarios/perf/perf_karkand.ron --bots 63` (median and p95 per
   view in `report.txt`); `BF2_PERF_STATS=1` logs the main world's time a frame (by schedule),
   how long it waits for the render world and extracts, the render thread's time by render

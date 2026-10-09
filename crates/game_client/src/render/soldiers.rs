@@ -500,6 +500,8 @@ struct SoldierAnimator {
     sleeping: Option<Handle<AnimationGraph>>,
     /// The soldier's own copy of the team graph (see [`OwnGraph`]).
     own: Option<OwnGraph>,
+    /// Seconds since the skeleton was last posed (see [`pose_period`]).
+    since_pose: f32,
 }
 
 /// A soldier's own copy of its team's animation graph, with the same nodes (so the team
@@ -510,6 +512,10 @@ struct SoldierAnimator {
 /// linked when it starts and posed from the next frame on (clips start faded out anyway).
 struct OwnGraph {
     handle: Handle<AnimationGraph>,
+    /// The same nodes with nothing linked, given to the player on the frames a distant soldier
+    /// isn't posed (see [`pose_interval`]): Bevy still advances every playing clip (it ticks
+    /// all of a graph's nodes) but evaluates no bone.
+    idle: Handle<AnimationGraph>,
     /// Clips linked to the root, sorted.
     linked: Vec<AnimationNodeIndex>,
 }
@@ -519,6 +525,7 @@ impl OwnGraph {
     fn new(mut graph: AnimationGraph, graphs: &mut Assets<AnimationGraph>) -> Self {
         graph.graph.clear_edges();
         Self {
+            idle: graphs.add(graph.clone()),
             handle: graphs.add(graph),
             linked: Vec::new(),
         }
@@ -541,6 +548,13 @@ impl OwnGraph {
             .unwrap_or_default();
         if playing == self.linked && added.is_empty() {
             return;
+        }
+        if !added.is_empty()
+            && let Some(mut idle) = graphs.get_mut(&self.idle)
+        {
+            for node in &added {
+                idle.graph.add_node(node.clone());
+            }
         }
         let Some(mut graph) = graphs.get_mut(&self.handle) else {
             return;
@@ -1573,14 +1587,19 @@ fn animate(
     )>,
     vehicles: Query<&VehicleData>,
     canopies: Query<&Canopy>,
-    mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator)>,
-    mut players: Query<&mut AnimationPlayer>,
+    mut visuals: Query<(&SoldierVisual, &AttachedBody, &ModelRig, &mut SoldierAnimator, &GlobalTransform)>,
+    mut players: Query<(&mut AnimationPlayer, Option<&mut AnimationGraphHandle>)>,
+    (camera, mut throttle): (
+        Option<Single<(&GlobalTransform, &Projection, &bevy::camera::primitives::Frustum), With<crate::camera::PlayerCamera>>>,
+        Local<Option<bool>>,
+    ),
 ) {
+    let throttle = *throttle.get_or_insert_with(|| !crate::perf_experiment("animall"));
     // Throws and placed charges animate from the wind-up releasing, not from the moment the
     // projectile actually appears (`ShotFired`, which for these is delayed by
     // `fire.fireLaunchDelay` and would otherwise restart the arm swing mid-air).
     let released: Vec<Entity> = throws.read().map(|t| t.soldier).collect();
-    for (visual, body, rig, mut animator) in &mut visuals {
+    for (visual, body, rig, mut animator, place) in &mut visuals {
         let (Ok((render, loadout, inventory, local, downed, seated, shot)), Some(body_name)) =
             (soldiers.get(visual.soldier), body.0.as_deref())
         else {
@@ -1618,7 +1637,7 @@ fn animate(
             }
         }
         let animations = body_animations(&mut models, body_name, set, &asset_server, &gltfs, &clip_assets, &mut graphs);
-        let (Some(animations), Ok(mut player)) = (animations, players.get_mut(rig.player)) else {
+        let (Some(animations), Ok((mut player, graph_handle))) = (animations, players.get_mut(rig.player)) else {
             animator.hand = None;
             continue;
         };
@@ -1632,6 +1651,8 @@ fn animate(
             *animator = SoldierAnimator {
                 graph: Some(animations.graph.id()),
                 own: Some(own),
+                // Spreads the throttled soldiers' poses over the frames.
+                since_pose: fastrand::f32() * 0.1,
                 ..default()
             };
         }
@@ -1682,10 +1703,59 @@ fn animate(
         // Unseen: posed again once seen (the animation picks up from where it is then).
         if animator.sleeping.is_none() {
             animator.update(&mut player, animations, &cues, time.delta_secs());
+            let animator = &mut *animator;
             if let Some(own) = &mut animator.own {
                 own.sync(&player, Some(&animations.graph), &mut graphs);
+                // Distant soldiers are posed a few times a second only; in between their clips
+                // advance without posing a bone.
+                let period = match (&camera, throttle && !local) {
+                    (Some(camera), true) => pose_period(&camera, place.translation()),
+                    _ => 0.0,
+                };
+                animator.since_pose += time.delta_secs();
+                let pose = animator.since_pose >= period;
+                if pose {
+                    // Late by less than a frame: kept, so the rate holds on average.
+                    animator.since_pose = (animator.since_pose - period).min(period).min(0.05);
+                }
+                let wanted = if pose { &own.handle } else { &own.idle };
+                if let Some(mut handle) = graph_handle
+                    && handle.0.id() != wanted.id()
+                {
+                    handle.0 = wanted.clone();
+                }
             }
         }
+    }
+}
+
+/// Seconds between poses of a soldier other than ours: every frame up close, less often the
+/// smaller he is on screen (the distance over the zoom), 15 times a second when only his
+/// shadow can be seen. His clips play on in between, and the skeleton moves with him every
+/// frame; only the limbs' pose waits. A skipped pose also spares moving his bones'
+/// transforms and skinning matrices. `BF2_PERF_EXP=animall` poses everyone every frame.
+fn pose_period(camera: &(&GlobalTransform, &Projection, &bevy::camera::primitives::Frustum), at: Vec3) -> f32 {
+    let (eye, projection, frustum) = *camera;
+    let center = at + SOLDIER_CENTER;
+    let sphere = bevy::camera::primitives::Sphere {
+        center: center.into(),
+        radius: SOLDIER_HEIGHT,
+    };
+    if !frustum.intersects_sphere(&sphere, false) {
+        return 1.0 / 15.0;
+    }
+    // Distance as seen through a 75 degree field of view (zoomed in, things look closer).
+    let fov = match projection {
+        Projection::Perspective(p) => p.fov,
+        _ => 75f32.to_radians(),
+    };
+    let zoom = (fov * 0.5).tan() / (75f32.to_radians() * 0.5).tan();
+    let distance = eye.translation().distance(center) * zoom;
+    match distance {
+        d if d < 30.0 => 0.0,
+        d if d < 60.0 => 1.0 / 45.0,
+        d if d < 120.0 => 1.0 / 30.0,
+        _ => 1.0 / 20.0,
     }
 }
 
@@ -1714,6 +1784,7 @@ fn sleep_unseen(
             }
             (false, Some(graph)) => animator.sleeping = Some(graph),
             (true, Some(graph)) => {
+                let graph = animator.own.as_ref().map_or(graph, |own| own.handle.clone());
                 commands.entity(rig.player).insert(AnimationGraphHandle(graph));
             }
             (true, None) => {}
