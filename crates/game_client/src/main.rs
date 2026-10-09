@@ -57,6 +57,7 @@ mod audio;
 mod bigmap;
 mod camera;
 mod chat;
+mod client_physics;
 mod combat;
 mod commander;
 mod conquest_hud;
@@ -320,11 +321,6 @@ fn main() -> AppExit {
             .set(ImagePlugin {
                 default_sampler: render::materials::default_sampler(),
             })
-            // --- Frame time experiments (`BF2_PERF_EXP=cpubatch`: mesh uniforms built on the CPU) ---
-            .set(bevy::pbr::PbrPlugin {
-                use_gpu_instance_buffer_builder: !perf_experiment("cpubatch"),
-                ..default()
-            })
             // Captures log lines for scenario assertions (`ExpectLog`, `ForbidLog`).
             .set(bevy::log::LogPlugin {
                 custom_layer: scenario::log_capture_layer,
@@ -421,13 +417,8 @@ fn main() -> AppExit {
     app.insert_resource(camera::ThirdPerson(cli.third_person));
     app.insert_resource(cli);
     single_threaded_schedules(&mut app);
-    // --- Frame time ---
-    // The client's physics only places colliders for its queries (prediction, the camera, hit
-    // checks): it has no dynamic bodies (the server simulates), so one solver substep is plenty
-    // where six only cost time every tick. `BF2_PERF_EXP=substeps` keeps avian's default.
-    if !perf_experiment("substeps") {
-        app.insert_resource(avian3d::prelude::SubstepCount(1));
-    }
+    // --- Frame time: the client's physics does only what its queries need ---
+    app.add_plugins(client_physics::ClientPhysicsPlugin);
     app.run()
 }
 

@@ -410,6 +410,61 @@ impl Senses<'_, '_> {
     }
 }
 
+/// Whether a swimmer at `from` gets to `to` swimming straight at the surface: nothing of the
+/// level in the way of its body just under the water's surface `water`, or of its head above.
+pub(super) fn swim_clear(w: &Senses, from: Vec3, to: Vec3, water: f32) -> bool {
+    let filter = SpatialQueryFilter::from_mask(game_shared::physics::GameLayer::World);
+    // The body above a shallow bottom it may be making for (a well deck's floor is 0.4 m under
+    // the water), and the head.
+    [-0.2, 0.3].into_iter().all(|height| {
+        let a = Vec3::new(from.x, water + height, from.z);
+        let d = Vec3::new(to.x, water + height, to.z) - a;
+        Dir3::new(d).map_or(true, |dir| w.spatial.cast_ray(a, dir, d.length(), true, &filter).is_none())
+    })
+}
+
+/// Where a swimmer at `from` swims first on its way to `to` round one or two corners (out from
+/// behind a well deck's wall and back in to the ladder): the first point of the shortest such
+/// way through points around it; `None` if there's none close by.
+pub(super) fn swim_detour(w: &Senses, from: Vec3, to: Vec3, water: f32) -> Option<Vec3> {
+    let points: Vec<Vec3> = [5.0f32, 10.0, 18.0]
+        .into_iter()
+        .flat_map(|radius| (0..16).map(move |i| (radius, i as f32 * TAU / 16.0)))
+        .map(|(radius, angle)| from + Vec3::new(angle.cos(), 0.0, angle.sin()) * radius)
+        .collect();
+    let reach: Vec<bool> = points.iter().map(|p| swim_clear(w, from, *p, water)).collect();
+    let to_goal: Vec<bool> = points.iter().map(|p| swim_clear(w, *p, to, water)).collect();
+    let length = |path: &[Vec3]| {
+        let mut at = from;
+        let mut sum = 0.0;
+        for p in path.iter().chain(std::iter::once(&to)) {
+            sum += flat(*p - at).length();
+            at = *p;
+        }
+        sum
+    };
+    // One corner.
+    let one = (0..points.len())
+        .filter(|&i| reach[i] && to_goal[i])
+        .min_by(|&a, &b| length(&points[a..=a]).total_cmp(&length(&points[b..=b])));
+    if let Some(i) = one {
+        return Some(points[i]);
+    }
+    // Two: the shortest pairs first, until one is clear between its points.
+    let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+    for i in (0..points.len()).filter(|&i| reach[i]) {
+        for j in (0..points.len()).filter(|&j| to_goal[j] && j != i) {
+            pairs.push((length(&[points[i], points[j]]), i, j));
+        }
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pairs
+        .into_iter()
+        .take(200)
+        .find(|&(_, i, j)| swim_clear(w, points[i], points[j], water))
+        .map(|(_, i, _)| points[i])
+}
+
 /// Meters of water too deep to wade along the straight line from `from` to `to` (by the
 /// terrain: a bridge or pier over it doesn't count as dry).
 pub(super) fn swim_distance(w: &Senses, from: Vec3, to: Vec3) -> f32 {
@@ -470,7 +525,12 @@ pub(super) fn ride_point(w: &Senses, me: &Me, region: Option<u16>) -> Option<Vec
             .cells_near(door.xz(), 10.0)
             .filter(|c| {
                 let cell = nav.cell(*c);
-                cell.region == region && cell.y > surface - SHORE_DEPTH && (cell.y - door.y).abs() < 4.0
+                // Not at the edge (a well deck's walkway: bots waiting there were pushed off
+                // into the water).
+                cell.region == region
+                    && cell.y > surface - SHORE_DEPTH
+                    && (cell.y - door.y).abs() < 4.0
+                    && cell.dist as f32 * nav.cell_size(*c) * 0.5 > 1.0
             })
             .map(|c| nav.position(c))
             .min_by(|a, b| a.distance_squared(door).total_cmp(&b.distance_squared(door)));
@@ -690,6 +750,11 @@ impl BotBrain {
                 > claimed.iter().filter(|c| **c == SeatWish::Gunner).count();
             let room = free > claimed.len();
             let speed = motion.velocity.length();
+            // (vehicles) Not after a boat under way: chasing one swam riders out of a carrier's
+            // well deck into the open sea, where nothing gets them out of the water.
+            if profile.role == Role::Boat && speed > 1.0 {
+                continue;
+            }
 
             // Into the leader's vehicle.
             if let Some(leader) = leader_player
@@ -797,7 +862,10 @@ impl BotBrain {
         let far = seen.as_ref().map_or(0.0, |v| v.motion.position.distance(me.motion.position));
         // It leaves without us, walking can't get there, or we keep getting stuck at the
         // door (parked against a wall): give up on it for a while.
-        let leaving = seen.as_ref().is_some_and(|v| v.motion.velocity.length() > 5.0 && far > 20.0);
+        let boat = seen.as_ref().and_then(|v| w.profile(v.template)).is_some_and(|p| p.role == Role::Boat);
+        let leaving = seen
+            .as_ref()
+            .is_some_and(|v| v.motion.velocity.length() > 5.0 && far > 20.0 || boat && v.motion.velocity.length() > 2.0 && far > 5.0);
         let blocked = self.stranded > 0.0 || (self.stuck_strikes > 2.5 && far < 25.0);
         if leaving || blocked {
             if let Some(v) = &seen {
@@ -1039,7 +1107,7 @@ impl BotBrain {
                 let reason = match ride.purpose {
                     Purpose::Drive if ride.doing.is_empty() => "driver",
                     Purpose::Drive => ride.doing,
-                    _ if driver.is_none() => "riding, no driver",
+                    _ if driver.is_none() => "riding without a driver",
                     Purpose::Gun => "gunner",
                     Purpose::Ride => "passenger",
                 };
@@ -2352,26 +2420,36 @@ fn boat_landing(w: &Senses, water: &crate::nav::vehicle::WaterGrid, from: Vec3, 
     let region = water.region_at(from, draft)?;
     let target = w.map.areas.get(area)?.position;
     let goal_region = w.map.walk_regions.get(area).copied().flatten();
+    // Inside the soldiers' combat area (riders landed outside it were out of bounds).
+    let allowed = w.vehicle_nav().and_then(|n| n.soldier_area());
     let started = Instant::now();
     let mut best: Option<(f32, Vec3)> = None;
     for radius in [120.0, 260.0, 450.0] {
-        for c in nav.cells_near(target.xz(), radius) {
+        let mut beaches: Vec<(f32, Vec3)> = nav
+            .cells_near(target.xz(), radius)
             // Every third cell is enough to find the beaches.
-            if c.x % 3 != 0 || c.z % 3 != 0 {
-                continue;
-            }
-            let cell = nav.cell(c);
-            if cell.region == 0
-                || goal_region.is_some_and(|r| r != cell.region)
-                || surface - cell.y > SHORE_DEPTH + 0.3
-                || cell.y - surface > 1.0
-            {
-                continue;
-            }
-            let beach = nav.position(c);
+            .filter(|c| c.x % 3 == 0 && c.z % 3 == 0)
+            .filter(|c| {
+                let cell = nav.cell(*c);
+                cell.region != 0
+                    && goal_region.is_none_or(|r| r == cell.region)
+                    && allowed.is_none_or(|a| a.inside_polygons(nav.position(*c).xz()))
+                    && surface - cell.y < SHORE_DEPTH + 0.3
+                    && cell.y - surface < 1.0
+            })
+            .map(|c| {
+                let beach = nav.position(c);
+                (beach.xz().distance(target.xz()), beach)
+            })
+            .collect();
+        beaches.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (walk, beach) in beaches.into_iter().take(1500) {
             // The walk from the beach counts; the boat's trip a little (it is quicker).
-            let walk = beach.xz().distance(target.xz());
             if best.is_some_and(|(b, _)| walk >= b) {
+                break;
+            }
+            // Riders wade ashore there: not a quay's edge over deep water.
+            if !super::wadeable(nav, beach, surface) {
                 continue;
             }
             if let Some(landing) = water.landing_near(beach, 10.0, draft, region) {

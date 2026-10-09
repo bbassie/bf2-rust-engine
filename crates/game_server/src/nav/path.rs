@@ -45,6 +45,12 @@ const SWIM_NAV_DEPTH: f32 = 0.5;
 /// `setVehicleMaterialCost Infantry DeepWater 6`): paths prefer land and boats but can still
 /// swim when that's the only or the much shorter way.
 const SWIM_COST: f32 = 6.0;
+/// (vehicles) Swimming within this of a wall or ledge (m) costs [`SWIM_WALL_COST`] times the
+/// distance instead.
+const SWIM_WALL_CLEARANCE: f32 = 1.0;
+const SWIM_WALL_COST: f32 = 40.0;
+/// (vehicles) Extra cost of dropping into water too deep to stand in, in meters of walking.
+const SWIM_DROP_COST: f32 = 80.0;
 
 /// A path for a soldier to walk.
 #[derive(Clone, Debug)]
@@ -249,13 +255,23 @@ impl NavGrid {
             let from = self.position(here);
             // Cells deep enough underwater cost much more to cross: paths prefer dry land
             // and boats but can still swim across when nothing else gets there.
-            let water_cost = |height: f32| match self.params.water_height {
-                Some(w) if w - height > SWIM_NAV_DEPTH => SWIM_COST,
-                _ => 1.0,
+            // (vehicles) ... and much more along walls: a swimmer floats at the surface, where a
+            // hull or a quay above a ledge under the water keeps him from the cells beside it (bots
+            // swam out of a carrier's well deck along such a ledge and stayed against the hull).
+            // Not at the foot of a ladder, the way out.
+            let water_cost = |to: CellRef| {
+                let b = self.cell(to);
+                match self.params.water_height {
+                    Some(w) if w - b.y > SWIM_NAV_DEPTH => {
+                        let near_wall = b.dist as f32 * self.cell_size(to) * 0.5 < SWIM_WALL_CLEARANCE;
+                        if near_wall && self.ladders_at(to.index).next().is_none() { SWIM_WALL_COST } else { SWIM_COST }
+                    }
+                    _ => 1.0,
+                }
             };
             let portals = self.portals_at(index).iter().map(|&to| {
                 let b = self.cell(to);
-                let mut cost = self.position(to).xz().distance(from.xz()).max(0.1) * water_cost(b.y);
+                let mut cost = self.position(to).xz().distance(from.xz()).max(0.1) * water_cost(to);
                 let dy = b.y - a.y;
                 if dy.abs() > self.walk_climb(&a, b) {
                     cost += if dy > 0.0 { JUMP_COST } else { DROP_COST };
@@ -265,10 +281,15 @@ impl NavGrid {
             let walks = moves.into_iter().filter_map(|(to, length)| {
                 let to = to?;
                 let b = self.cell(to);
-                let mut cost = length * cell * wall_penalty(b, dist_scale) * water_cost(b.y);
+                let mut cost = length * cell * wall_penalty(b, dist_scale) * water_cost(to);
                 let dy = b.y - a.y;
                 if dy.abs() > self.walk_climb(&a, b) {
                     cost += if dy > 0.0 { JUMP_COST } else { DROP_COST };
+                    // (vehicles) Down into water too deep to stand in: often no way back out
+                    // (off a carrier's walkway into the water behind its stern).
+                    if dy < 0.0 && self.params.water_height.is_some_and(|w| w - b.y > SWIM_NAV_DEPTH) {
+                        cost += SWIM_DROP_COST;
+                    }
                 }
                 Some((to, cost))
             });

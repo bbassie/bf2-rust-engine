@@ -244,7 +244,9 @@ pub struct AppliedInput(pub InputFrame);
 #[derive(Component)]
 pub struct RespawnTimer(pub Timer);
 
-/// The local user's player on a listen server or in singleplayer.
+/// A player playing in the server's own world, without a client (`ClientId::Server`). The
+/// client no longer plays that way: hosting and singleplayer run the server on a thread of its
+/// own and play through a link client (`embedded`), so this is only set by tests.
 #[derive(Resource)]
 pub struct HostPlayer(pub Entity);
 
@@ -260,6 +262,9 @@ pub struct InputBuffer {
     /// how far into it we are (see [`Self::drain`]).
     lowest: Option<usize>,
     window: f32,
+    /// The player of this process (`embedded`): his frames come without loss and with little
+    /// jitter, so his queue keeps less slack.
+    pub linked: bool,
 }
 
 impl InputBuffer {
@@ -275,6 +280,9 @@ impl InputBuffer {
     const RESYNC_AFTER: u32 = 60;
     /// Frames a remote client's queue keeps beyond the ticks about to run, against jitter.
     const SLACK: usize = 2;
+    /// The same for the client of this process: one frame, against our ticks and its
+    /// drifting apart.
+    const LINK_SLACK: usize = 1;
     /// Seconds a queue must have held more than that before it is drained.
     const DRAIN_WINDOW: f32 = 1.0;
 
@@ -321,8 +329,9 @@ impl InputBuffer {
         self.lowest = Some(lowest);
         self.window += dt;
         if self.window >= Self::DRAIN_WINDOW {
-            if lowest > Self::SLACK {
-                let keep = self.queue.len() - (lowest - Self::SLACK);
+            let slack = if self.linked { Self::LINK_SLACK } else { Self::SLACK };
+            if lowest > slack {
+                let keep = self.queue.len() - (lowest - slack);
                 self.keep_newest(keep);
             }
             self.window = 0.0;
@@ -502,11 +511,18 @@ fn create_client_player(
             Player { name, is_bot: false },
             PlayerNetId(network_id.get()),
             team,
-            InputBuffer::default(),
+            InputBuffer {
+                linked: link.is_some(),
+                ..default()
+            },
             PlayerClient(add.entity),
             Replicated,
         ))
         .id();
+    // The player of this process runs the server: its admin, as the host always was.
+    if link.is_some() {
+        commands.entity(player).insert(admin::Admin);
+    }
     if let Some(account) = account {
         commands.entity(player).insert(game_shared::join::AccountBadge {
             rank: account.0.rank,

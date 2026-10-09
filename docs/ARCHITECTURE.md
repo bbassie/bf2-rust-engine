@@ -45,16 +45,27 @@
 | `game_auth` | client, servers, master | identity keys, signed account tokens, the master's API types, ranks (no engine) |
 | `master_server` | an optional web server | server list, accounts, stats, ranks, quick join, web pages (no engine) |
 
-The dedicated server binary uses an explicit headless plugin list (no window, no renderer).
-The client links `game_server` too, so "host" and "singleplayer" are the same code path as a
-dedicated server with a local player (replicon's "listen server" model: server logic runs
-when `ClientState::Disconnected`).
+The dedicated server binary uses an explicit headless plugin list (no window, no renderer,
+`game_server::embedded::add_headless_plugins`). The client links `game_server` too: "host" and
+"singleplayer" run that same headless server app on a thread of its own, with its own world
+(`game_server::embedded`, started by the client's `local_server`), and the client plays on it
+through an in-memory link like any client on the network: the same replication, prediction
+and lag compensation as a remote player, and the server's rules, bots and physics no longer
+cost the client's frame. Server logic in shared code still runs when
+`ClientState::Disconnected`, which the client never is in a match.
 
 ### Networking
 
 - [bevy_replicon](https://github.com/simgine/bevy_replicon) for server-authoritative
   replication, [renet](https://github.com/lucaspoffo/renet) (netcode) over UDP as transport.
-  Port 16567 by default.
+  Port 16567 by default. On the server `game_server::transport` is replicon's backend: renet
+  for clients on the network, and channels for the client of the same process (its
+  `LinkClient`; `local_server` is that client's backend). The link client needs no join
+  handshake and gets the player name and team the menu or command line chose.
+- Tools that need the server's world from the client (scenario steps that move soldiers,
+  seat bots or damage vehicles, `--debug-nav`) send it closures
+  (`local_server::LocalServer::run`/`query`), run on the server thread between two updates;
+  entities map with replicon's `ServerEntityMap`.
 - The protocol (replicated components, messages) is registered in one place,
   `game_shared::protocol::ProtocolPlugin`, so client and server always agree; the join
   handshake checks the protocol hash.
@@ -169,7 +180,12 @@ sequence number):
 3. The client runs the same `step_soldier` for its own soldier immediately (prediction).
    When a server state arrives it rewinds to it, replays unacknowledged inputs, and blends
    out any difference visually.
-4. Other soldiers are shown ~100 ms in the past, interpolated between received states.
+4. Other soldiers (and vehicles) are shown a little in the past, interpolated between received
+   states on the server's timeline: states are stamped with the server tick they came with
+   (`ServerClock`), not their arrival time, and drawn `delay` behind the newest
+   (`prediction::ServerTimeline`: 100 ms on the network, 50 ms linked to our own server).
+   Inputs carry the tick of the picture on screen when they were made (`ViewTick::shown`, the
+   last frame's), which the server rewinds to for hits.
 
 `step_soldier` is a kinematic move-and-slide (avian3d) against the world collision, so it
 is deterministic enough that corrections are normally exactly zero. Surfaces steeper than
@@ -549,9 +565,20 @@ big map the nearest cell may be behind a thin wall, in a closed room of a house)
 paths, spots, cover and bounds start there (`NavGrid::find_path_from`). A swimmer only finds
 its feet where the bottom is within wading depth (0.4 m) of the surface, so a bot swimming
 without getting anywhere (against a hull or a quay) swims straight for the nearest shore
-shallower than that, and another one if that fails too. Swimmers follow paths along the
-bottom by where they go, not their height above it (a carrier's flooded well deck: out by its
-ladders). A bot whose objective walking can't reach (its region isn't the objective's: a
+shallower than that (where the bottom comes up to wading depth: a beach or a ramp, not a
+quay's edge over deep water), or for a ladder whose foot is in the water (a carrier's well
+deck), and another one if that fails too; it swims straight there at the surface when nothing
+is in the way, else round one or two corners first (`bots::vehicle::swim_detour`, rays at the
+surface). Swimming (`soldier::swim`, players too) gets onto a ladder swum into, over a step
+of the bottom up to 0.6 m above the feet, up a ramp rising out of the water (the feet rest on
+the bottom rather than float below it) and onto a ledge at the surface where the water is at
+most wading depth (a carrier's well deck floor, 0.4 m under the water). Swimmers
+follow paths along the bottom by where they go, not their height above it, count as stuck
+when they push without moving (so a ledge under a hull that they can't get to is learned),
+and paths avoid swimming along walls (40 times the walking cost within 1 m of one: a
+swimmer floats at the surface, where the hull or quay above such a ledge is in the way) and
+dropping into water too deep to stand in (80 m extra: often there is no way back out). A
+bot whose objective walking can't reach (its region isn't the objective's: a
 carrier, an island) doesn't walk towards it (that only led to the deck's edge or into the
 water): it waits for a ride by the nearest boat or transport helicopter of its side whose door
 it can walk to (`bots::vehicle::ride_point`), and takes it (see "Bots in vehicles").
@@ -635,10 +662,16 @@ use button, the seat keys and ordinary `InputFrame`s like players:
   progress, stuck) and gives up after repeated failures. Transports stop short of the flag and
   everyone gets out; tanks and APCs hold an open spot by the flag (never indoors) and stop or
   slow down to fight. Boats land their riders by a beach: walkable ground at the water's edge
-  (not a quay wall too high to climb out at) in the objective's walkable region, next to water
+  where the bottom comes up to wading depth (not a quay's edge), inside the soldiers' combat
+  area, in the objective's walkable region, next to water
   of the boat's own connected stretch (`WaterGrid::region_at`, `landing_near`), the walk from
   it counting more than the boat's trip; everyone aboard gets out there
-  (`VehicleClaims::drop_off`) and doesn't take the boat back.
+  (`VehicleClaims::drop_off`) and doesn't take the boat back. Bots don't go for a boat
+  under way (chasing one swam them out of a carrier's well deck), and a vehicle a driver gave
+  up on without getting 8 m (a boat that won't move) is left alone by every bot for 120 s
+  (`VehicleClaims::shun`). Bots whose objective is across more than 60 m of deep water (by the
+  heightmap; Leviathan's strike point) treat it like being cut off when choosing a vehicle,
+  and wait up to 45 s by a boat within 80 m before they swim.
 - *Gunners* (and tank drivers) aim through their view with lead for the round's flight time
   and drop, main guns and missiles at vehicles and groups, machine guns at soldiers, and fire
   once the turret, which turns at its own speed, is on target; heat seekers wait for a lock.
@@ -806,6 +839,16 @@ What a frame with 63 bots costs, and the rules that keep it low (see `render::pe
 - Each soldier plays its own copy of the team's animation graph with only the clips it is
   playing linked to the root (`soldiers::OwnGraph`): Bevy evaluates every linked node for
   every bone, and the team graph holds hundreds of clips.
+- The server runs on a thread of its own when hosting or offline (`game_server::embedded`, see
+  "Crates"): Karkand with 63 bots, main thread 7.8 -> 6.5 ms a frame (the fixed tick 3.1 ->
+  1.4 ms, now only prediction and the client's physics), and the server's spikes (a bot
+  replanning, a nav query) stay off the frame.
+- The client's physics only places colliders for its own queries (it simulates no dynamic
+  body): one solver substep instead of avian's six (`BF2_PERF_EXP=substeps` for the default).
+- A `Mut<Node>` written through (`&mut node`, even with the same value) lays the whole UI tree
+  out again: compare before writing (`map_markers::apply_map_view`, the vehicle HUD's screen
+  markers; the maps were laid out every frame while hidden). `BF2_PERF_STATS` names the UI
+  nodes that change every frame by their components (with a `game_server/profile` build).
 - The main world's schedules run single-threaded (`main::single_threaded_schedules`, like the
   dedicated server): its systems are tiny, and handing each to a worker cost more than it saved
   while the render thread keeps the workers busy. `BF2_SCHEDULES=parallel` switches back.
@@ -818,7 +861,11 @@ What a frame with 63 bots costs, and the rules that keep it low (see `render::pe
   GPU-driven indirect draws rebuild bin unpacking bind groups and indirect parameters for
   every batch of every view each frame, which costs more CPU here than the draw calls it
   saves (render thread 8.1 -> 7.2 ms on Karkand with 63 bots). `BF2_PERF_EXP=indirect` for
-  comparisons. Most of the render thread's time is wgpu recording and submitting the draws
+  comparisons: it cuts the draws from about 1,300 to 140 multi-draws, yet the render thread
+  stays at about the same time (October 2026: 5.5 direct, 6.0 indirect), so the draws aren't
+  what costs; the passes (three shadow cascades, the SSAO prepass and its compute passes,
+  SMAA, UI) and preparing the buffers are. `--no-shadows` and `--no-ssao` each take about a
+  millisecond off it. Most of the render thread's time is wgpu recording and submitting the draws
   (the time after each camera's schedule in `BF2_PERF_STATS`).
 - Map markers that move every frame (the minimap's) move by their `UiTransform`, not
   `left`/`top`: a changed `Node` lays out its whole UI tree again.

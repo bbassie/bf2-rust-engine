@@ -4,7 +4,7 @@
 // `bots:` idle line) instead of walking to the deck's edge or into the flooded well deck,
 // where they used to swim in place for the rest of the round; the helicopters and boats take
 // them ashore ("(cut off: a ride)" when one gets in). Fails if a bot swims in place for 30 s,
-// or nobody cut off gets a ride, or no transport helicopter drops anyone off. The camera
+// or nobody cut off gets a ride, or no UH-60 drops its passengers off and heads back. The camera
 // looks at the stern (the well deck and its walkways), the flight deck, and chases a UH-60.
 // client --scenario scenarios/ai/carrier_leave_dalian.ron
 (
@@ -27,7 +27,7 @@
         ExpectLog("takes off in usthe_uh60", 40.0),
         ChaseDriven("usthe_uh60", 25.0, 8.0),
         Screenshot("uh60_off"),
-        ExpectLog("got out of usthe_uh60 (dropped off)", 90.0),
+        ExpectLog("with usthe_uh60, flies back to base", 90.0),
         ChaseDriven("usthe_uh60", 18.0, 5.0),
         Screenshot("uh60_dropoff"),
         // A minute and a half in: nobody left in the well deck's water.

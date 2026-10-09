@@ -349,7 +349,7 @@ pub fn build_input(
         pitch: look.pitch,
         weapon: ctx.selection.index,
         seat: ctx.seat.0,
-        view_tick: ctx.view.tick,
+        view_tick: ctx.view.shown,
         ..default()
     };
     history.next_seq = history.next_seq.wrapping_add(1);

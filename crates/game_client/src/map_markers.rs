@@ -121,7 +121,9 @@ impl MapView {
 /// viewport, touching `node` only if something actually moved: an unconditionally-changed
 /// `Node` lays out the whole UI tree again every frame, even while the view never changes
 /// (see `docs/ARCHITECTURE.md`'s performance notes).
-pub fn apply_map_view(node: &mut Node, view: MapView, frame: Vec2) {
+/// Takes the `Mut` so that an unchanged view leaves the node unchanged (a changed `Node` lays
+/// its UI out again; these maps are hidden most of the time).
+pub fn apply_map_view(node: &mut Mut<Node>, view: MapView, frame: Vec2) {
     let (left, size) = view.content_rect(frame);
     let (left, top, width, height) = (px(left.x), px(left.y), px(size.x), px(size.y));
     if node.left != left || node.top != top || node.width != width || node.height != height {

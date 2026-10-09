@@ -493,9 +493,11 @@ pub struct BotBrain {
     idle_timer: f32,
     /// Swimming: the shore it heads for to get out, and seconds before it looks again.
     swim_exit: Option<Vec3>,
-    /// (vehicles) Where to swim to first for `swim_exit` when that is the top of a ladder out
-    /// of the water (a carrier's): its foot.
+    /// (vehicles) The foot of the ladder when `swim_exit` is the top of a ladder out of the
+    /// water (a carrier's well deck): it swims there, then into the ladder.
     swim_via: Option<Vec3>,
+    /// (vehicles) A point to swim to first, round a corner on the way to the exit.
+    swim_detour: Option<Vec3>,
     swim_exit_timer: f32,
     /// Seconds swimming without getting anywhere, and shores that didn't work out.
     swim_stall: f32,
@@ -648,6 +650,7 @@ impl Default for BotBrain {
             idle_timer: 30.0,
             swim_exit: None,
             swim_via: None,
+            swim_detour: None,
             swim_exit_timer: 0.0,
             swim_stall: 0.0,
             failed_exits: Vec::new(),
@@ -1122,7 +1125,13 @@ impl BotBrain {
                             .map_or("-".into(), |w| format!("{:.0}", w.position)),
                         self.stuck_strikes,
                         if me.motion.swimming { ", swimming" } else { "" },
-                        if self.swim_exit.is_some() { ", for the shore" } else { "" },
+                        if self.swim_exit.is_some() {
+                            ", for the shore".to_string()
+                        } else if me.motion.swimming {
+                            format!(", no way out ({:.1} s stalled, {} failed)", self.swim_stall, self.failed_exits.len())
+                        } else {
+                            String::new()
+                        },
                         self.idle_reason(),
                     ));
                 }
@@ -2474,9 +2483,12 @@ impl BotBrain {
         // for the nearest shallow shore, and another one if that doesn't work either.
         self.swim_exit_timer -= dt;
         let mut swim_to = None;
-        if !me.motion.swimming {
+        if me.motion.climbing && self.swim_via.is_some() {
+            // (vehicles) Up the ladder it swam to: kept until off it (see the climbing below).
+        } else if !me.motion.swimming {
             self.swim_exit = None;
             self.swim_via = None;
+            self.swim_detour = None;
             self.swim_stall = 0.0;
             self.failed_exits.clear();
         } else if !matches!(self.activity, Activity::Mount { .. }) {
@@ -2496,6 +2508,7 @@ impl BotBrain {
                 let exit = w.nav().and_then(|nav| nearest_shore(nav, w.blocked(), water, position, &self.failed_exits));
                 self.swim_exit = exit.map(|(at, _)| at);
                 self.swim_via = exit.and_then(|(_, via)| via);
+                self.swim_detour = None;
                 if self.swim_exit.is_some() {
                     self.stranded = 0.0;
                 }
@@ -2506,11 +2519,24 @@ impl BotBrain {
                     tolerance: 2.0,
                     sprint: true,
                 });
-                swim_to = match self.swim_via {
-                    // Straight to the ladder's foot, then up it by the path.
-                    Some(foot) if flat(foot - position).length() > 1.5 => Some(foot),
-                    Some(_) => None,
-                    None => Some(exit),
+                // (vehicles) Straight for it at the surface when nothing is in the way, else
+                // round the corner first (a well deck's wall between a swimmer behind the stern
+                // and the ladder in the deck: the grid's bottom there is a dead end).
+                let water = w.level.desc.water.as_ref().map_or(position.y, |w| w.height);
+                let target = self.swim_via.unwrap_or(exit);
+                if self.swim_detour.is_some_and(|d| flat(d - position).length() < 1.5) {
+                    self.swim_detour = None;
+                }
+                swim_to = if self.swim_via.is_some() && flat(target - position).length() < 1.2 {
+                    // At the ladder's foot: into it (its top is behind it), which gets on it.
+                    Some(exit)
+                } else if vehicle::swim_clear(w, position, target, water) {
+                    Some(target)
+                } else {
+                    if self.swim_detour.is_none() {
+                        self.swim_detour = vehicle::swim_detour(w, position, target, water);
+                    }
+                    Some(self.swim_detour.unwrap_or(target))
                 };
             }
         }
@@ -2620,7 +2646,10 @@ impl BotBrain {
         if intent.goal.is_some() && wants_move && !me.motion.climbing {
             stats.moving_seconds += dt;
             stats.moved += moved;
-            if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && me.motion.grounded && !queued {
+            // (vehicles) Swimmers too: pressed against a hull above a ledge the grid has under
+            // the water, they swam in place for good; stuck there, the ledge is learned
+            // (`StuckCells`) and paths go elsewhere (up a ladder).
+            if moved < 0.5 * dt && self.unstuck_timer <= 0.0 && (me.motion.grounded || me.motion.swimming) && !queued {
                 self.stuck_time += dt;
                 stats.stuck_seconds += dt;
             } else {
@@ -2734,6 +2763,14 @@ impl BotBrain {
                     self.yaw = turn_towards(self.yaw, yaw_to(-step.front), 5.0 * dt);
                     self.pitch = if step.up { 0.1 } else { -0.9 };
                     frame.yaw = self.yaw;
+                    frame.pitch = self.pitch;
+                    frame.buttons.remove(Buttons::JUMP | Buttons::CROUCH | Buttons::PRONE | Buttons::SPRINT);
+                }
+                // (vehicles) The ladder it swam to out of the water (the grid's path may not know
+                // the way onto it from the deep water): up.
+                None if self.swim_via.is_some() => {
+                    movement = Vec2::Y;
+                    self.pitch = 0.1;
                     frame.pitch = self.pitch;
                     frame.buttons.remove(Buttons::JUMP | Buttons::CROUCH | Buttons::PRONE | Buttons::SPRINT);
                 }
@@ -3441,8 +3478,20 @@ const SHORE_DEPTH: f32 = 0.25;
 /// foot is in the water (a carrier's, out of its well deck or the sea), with that foot to
 /// swim to first. Looks up to 160 m out.
 fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>, from: Vec3, failed: &[Vec3]) -> Option<(Vec3, Option<Vec3>)> {
-    let water = water?;
     let region = nav.locate(from, 4.0, None).map(|c| nav.cell(c).region);
+    // (vehicles) A patch of bottom no shore connects to (a ledge below a cliff, a hollow of
+    // the channel): any shore at all, the swimmer is at the surface.
+    shore_in(nav, blocked, water?, from, failed, region).or_else(|| region.and_then(|_| shore_in(nav, blocked, water?, from, failed, None)))
+}
+
+fn shore_in(
+    nav: &NavGrid,
+    blocked: Option<&NavBlocked>,
+    water: f32,
+    from: Vec3,
+    failed: &[Vec3],
+    region: Option<u16>,
+) -> Option<(Vec3, Option<Vec3>)> {
     let ladder = nav
         .ladders()
         .iter()
@@ -3455,7 +3504,7 @@ fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>
         .filter(|(top, _)| failed.iter().all(|f| f.distance(*top) > 2.0))
         .min_by(|a, b| a.1.xz().distance_squared(from.xz()).total_cmp(&b.1.xz().distance_squared(from.xz())));
     for radius in [15.0, 40.0, 80.0, 160.0] {
-        let best = nav
+        let mut shores: Vec<Vec3> = nav
             .cells_near(from.xz(), radius)
             .filter(|c| {
                 let cell = nav.cell(*c);
@@ -3467,7 +3516,11 @@ fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>
             })
             .map(|c| nav.position(c))
             .filter(|p| failed.iter().all(|f| f.distance(*p) > 8.0))
-            .min_by(|a, b| a.xz().distance_squared(from.xz()).total_cmp(&b.xz().distance_squared(from.xz())));
+            .collect();
+        shores.sort_by(|a, b| a.xz().distance_squared(from.xz()).total_cmp(&b.xz().distance_squared(from.xz())));
+        // (vehicles) Where the bottom comes up to wading depth, not a quay's edge over deep
+        // water (bots swam against the harbour's quays for minutes).
+        let best = shores.into_iter().take(200).find(|p| wadeable(nav, *p, water));
         if let Some(best) = best {
             // A ladder closer than the shore goes first.
             return Some(match ladder {
@@ -3477,6 +3530,14 @@ fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>
         }
     }
     ladder.map(|(top, foot)| (top, Some(foot)))
+}
+
+/// (vehicles) Whether a swimmer gets out of the water at `p` (a cell at the water's edge): the
+/// bottom close by is within wading depth somewhere, as on a beach or a ramp, not only deep
+/// water below a quay.
+pub(crate) fn wadeable(nav: &NavGrid, p: Vec3, water: f32) -> bool {
+    water - p.y > 0.0 && water - p.y < SHORE_DEPTH + 0.35
+        || nav.cells_near(p.xz(), 2.5).any(|c| (0.05..SHORE_DEPTH + 0.35).contains(&(water - nav.cell(c).y)))
 }
 
 /// Whether a soldier's main weapons are down to their last magazine.

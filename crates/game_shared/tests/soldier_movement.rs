@@ -717,6 +717,70 @@ fn ladder_world() -> App {
     ready(app)
 }
 
+/// A swimmer pulls himself onto a ledge at the surface: a carrier's well deck floor, 0.4 m
+/// under the water, seen from the deep water behind its stern.
+#[test]
+fn swims_onto_shallow_ledges() {
+    let tuning = SoldierTuning::default();
+    let water = 1.5;
+    // 1.5 m of water over the ground, 0.4 m over a ledge whose edge is at z = -2.
+    let mut app = world(&[block([-5.0, 0.0, -10.0], [10.0, water - tuning.wade_depth, 8.0])], true);
+    let start = SoldierMotion::at(Vec3::new(0.0, 0.0, 2.0), 0.0);
+    let trace = simulate_water(&mut app, start, vec![input(0.0, 1.0, Buttons::empty()); 300], Some(water));
+    assert!(trace.iter().any(|t| t.swimming), "never swam");
+    let up = trace
+        .iter()
+        .find(|t| !t.swimming && t.grounded)
+        .expect("never got out of the water onto the ledge");
+    assert!(up.position.z < -1.5 && (up.position.y - (water - tuning.wade_depth)).abs() < 0.05, "{up:?}");
+}
+
+/// A swimmer gets over a submerged step a little above his feet (the ledge a carrier's well
+/// deck ladder stands on, 1.2 m under the water) and onto the ladder on it.
+#[test]
+fn swims_over_submerged_steps_to_ladders() {
+    let tuning = SoldierTuning::default();
+    // The building and ladder of `ladder_world` stand on a 0.8 m step whose edge is 2 m in
+    // front of the ladder; the water is 2 m deep over the step, 2.8 m in front of it.
+    let mut app = world(
+        &[
+            block([-5.0, 0.0, -10.0], [10.0, 0.8, 12.0]),
+            block([-5.0, 0.8, -10.0], [10.0, 4.0, 8.0]),
+        ],
+        true,
+    );
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(0.52, 4.3, 0.03),
+        Transform::from_xyz(0.0, 0.8 + 1.85, -1.5),
+        CollisionLayers::new(GameLayer::World, LayerMask::ALL),
+        LadderPart,
+    ));
+    let mut app = ready(app);
+    let water = 0.8 + 1.2;
+    assert!(water - tuning.swim_float_depth < 0.8, "the step is above a floating swimmer's feet");
+    let start = SoldierMotion::at(Vec3::new(0.1, 0.0, 6.0), 0.0);
+    let trace = simulate_water(&mut app, start, vec![input(0.0, 1.0, Buttons::empty()); 600], Some(water));
+    assert!(trace.iter().any(|t| t.swimming), "never swam");
+    assert!(trace.iter().any(|t| t.climbing), "never got on the ladder: {:?}", trace.last().unwrap());
+}
+
+/// Swimming into a ladder gets on it, like walking into one (a carrier's well deck: its
+/// ladders start in the water).
+#[test]
+fn swims_onto_ladders() {
+    let mut app = ladder_world();
+    let water = 2.5;
+    let start = SoldierMotion::at(Vec3::new(0.1, water - 1.0, 3.0), 0.0);
+    let trace = simulate_water(&mut app, start, vec![input(0.0, 1.0, Buttons::empty()); 420], Some(water));
+    assert!(trace.iter().any(|t| t.swimming), "never swam");
+    let mounted = trace.iter().position(|t| t.climbing).expect("never got on the ladder from the water");
+    let last = trace.last().unwrap();
+    println!("mounted at {mounted}: {:?}
+{last:?}", trace[mounted]);
+    assert!(last.grounded && (last.position.y - 4.01).abs() < 0.05 && !last.swimming, "{last:?}");
+}
+
 #[test]
 fn climbs_ladders() {
     let tuning = SoldierTuning::default();

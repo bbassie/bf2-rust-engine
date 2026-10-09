@@ -216,6 +216,8 @@ pub struct VehicleAreas {
     pub boats: Option<PlayArea>,
     pub helicopters: Option<PlayArea>,
     pub jets: Option<PlayArea>,
+    /// (vehicles) Where soldiers may be: boats land their riders inside it.
+    pub soldiers: Option<PlayArea>,
 }
 
 /// Builds the land grid (or takes a cached one) and the water grid and air map.
@@ -1224,6 +1226,11 @@ impl VehicleNavGrid {
     }
 
     /// The highest obstacle within `radius` of `p`, for aircraft.
+    /// Where soldiers may go (the level's combat area for them), if it has one.
+    pub fn soldier_area(&self) -> Option<&PlayArea> {
+        self.air_areas.soldiers.as_ref()
+    }
+
     pub fn flight_floor(&self, p: Vec3, radius: f32) -> Option<f32> {
         self.air.as_ref().map(|air| air.floor(p, radius))
     }

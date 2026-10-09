@@ -59,7 +59,8 @@ impl Plugin for PerfStatsPlugin {
             .add_systems(UpdateDone, |start: Option<Res<FrameStart>>| mark(start, &UPDATE_END))
             .add_systems(PostUpdateDone, |start: Option<Res<FrameStart>>| mark(start, &POST_UPDATE_END))
             .init_resource::<UiChanges>()
-            .add_systems(Last, (count_frame, count_ui_changes, log_stats, end_frame).chain());
+            .init_resource::<UiSamplesToDescribe>()
+            .add_systems(Last, (count_frame, count_ui_changes, log_stats, describe_ui_samples, end_frame).chain());
             // Marks between the frame's schedules.
             let mut order = app.world_mut().resource_mut::<MainScheduleOrder>();
             order.insert_after(Update, UpdateDone);
@@ -300,7 +301,11 @@ fn log_stats(
     players: Query<(), With<AnimationGraphHandle>>,
     materials: Res<Assets<Bf2Material>>,
     (standard_materials, images): (Res<Assets<StandardMaterial>>, Res<Assets<Image>>),
-    (ui_nodes, mut ui_changes): (Query<(Option<&ChildOf>, Has<Text>), With<Node>>, ResMut<UiChanges>),
+    (ui_nodes, mut ui_changes, mut ui_samples): (
+        Query<(Option<&ChildOf>, Has<Text>), With<Node>>,
+        ResMut<UiChanges>,
+        ResMut<UiSamplesToDescribe>,
+    ),
     bodies: Query<(&avian3d::prelude::RigidBody, Has<avian3d::prelude::Sleeping>)>,
     colliders: Query<(), With<avian3d::prelude::Collider>>,
     kinds: MeshKinds,
@@ -381,6 +386,11 @@ fn log_stats(
         .take(6)
         .map(|(e, n, t)| {
             let sample = changes.samples.get(e).map_or("", String::as_str);
+            if *n as f32 / ui_frames >= 0.9
+                && let Some(entity) = changes.sample_entities.get(e)
+            {
+                ui_samples.0.push(*entity);
+            }
             format!("{e:?} ({sample}): nodes {:.1}, texts {:.1}", *n as f32 / ui_frames, *t as f32 / ui_frames)
         })
         .collect();
@@ -453,6 +463,8 @@ struct MeshKinds<'w, 's> {
         ),
     >,
     statics: Query<'w, 's, (), With<game_shared::statics::StaticMesh>>,
+    /// Unnamed meshes go by their file.
+    asset_server: Res<'w, AssetServer>,
 }
 
 impl MeshKinds<'_, '_> {
@@ -472,7 +484,10 @@ impl MeshKinds<'_, '_> {
                 Ok((_, true, ..)) => "vehicle".to_string(),
                 Ok((.., true, _)) => "static".to_string(),
                 Ok((.., Some(name))) => format!("'{}'", name.as_str().chars().take(24).collect::<String>()),
-                _ => "other".to_string(),
+                _ => match self.asset_server.get_path(mesh.id()) {
+                    Some(path) => format!("other {}", path.path().file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned())),
+                    None => "other".to_string(),
+                },
             };
             let row = rows.entry(kind).or_default();
             row.0 += 1;
@@ -666,6 +681,30 @@ struct UiChanges {
     texts: HashMap<Entity, u32>,
     /// By root: the nearest name above the last node seen changing, and how far up it is.
     samples: HashMap<Entity, String>,
+    /// By root: the last node seen changing, to describe by its components.
+    sample_entities: HashMap<Entity, Entity>,
+}
+
+/// Unnamed UI nodes that changed, described by their components after the report.
+#[derive(Resource, Default)]
+struct UiSamplesToDescribe(Vec<Entity>);
+
+fn describe_ui_samples(world: &mut World) {
+    let entities = std::mem::take(&mut world.resource_mut::<UiSamplesToDescribe>().0);
+    for entity in entities {
+        let Ok(components) = world.inspect_entity(entity) else {
+            continue;
+        };
+        let names: Vec<String> = components
+            .map(|info| {
+                let name = info.name().to_string();
+                let outer = name.split('<').next().unwrap_or(&name);
+                outer.rsplit("::").next().unwrap_or(outer).to_string()
+            })
+            .filter(|n| !matches!(n.as_str(), "Node" | "ComputedNode" | "ChildOf" | "Children" | "Visibility" | "InheritedVisibility" | "ViewVisibility" | "Transform" | "GlobalTransform" | "UiGlobalTransform" | "ZIndex" | "ComputedUiTargetCamera" | "ComputedUiRenderTargetInfo" | "BackgroundColor" | "BorderColor" | "FocusPolicy" | "UiTransform"))
+            .collect();
+        info!("perf stats: UI node {entity:?} that changes every frame has {}", names.join(", "));
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -699,6 +738,7 @@ fn count_ui_changes(
         let root = root(entity);
         *changes.nodes.entry(root).or_default() += 1;
         changes.samples.insert(root, named(entity));
+        changes.sample_entities.insert(root, entity);
     }
     for entity in &texts {
         *changes.texts.entry(root(entity)).or_default() += 1;

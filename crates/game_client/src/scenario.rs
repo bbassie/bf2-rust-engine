@@ -745,6 +745,12 @@ struct Vehicles<'w, 's> {
 }
 
 impl Vehicles<'_, '_> {
+    /// The vehicle's latest replicated placement (what is drawn is a moment older).
+    fn latest(&self, vehicle: Entity) -> Option<Transform> {
+        let motion = self.motions.get(vehicle).ok()?;
+        Some(Transform::from_translation(motion.position).with_rotation(motion.rotation))
+    }
+
     /// `label t: at (x, y, z) 320 km/h, 85 m up (climb 3.2 m/s), heading 12, pitch 4, roll -30, engine 0.8`
     fn flight_line(&self, label: &str, elapsed: f32) -> String {
         let Some((view, state, ack)) = self.seated.single().ok().and_then(|s| {
@@ -871,6 +877,28 @@ fn place_us(server: &ServerSide, step: &str, position: Vec3) {
             motion.velocity = Vec3::ZERO;
             motion.mantle = 0.0;
         })
+    });
+}
+
+/// Puts our soldier's feet at `local` in a vehicle's frame (ours: `vehicle`), where the
+/// server has the vehicle now, standing still.
+fn place_us_at_vehicle(server: &ServerSide, step: &str, vehicle: Entity, local: Vec3) {
+    let Some(theirs) = server.entity(vehicle) else {
+        warn!("scenario: {step}: {vehicle} isn't the server's");
+        return;
+    };
+    server.run(step, move |world| {
+        use avian3d::prelude::{Position, Rotation};
+        let (Some(position), Some(rotation)) = (world.get::<Position>(theirs).copied(), world.get::<Rotation>(theirs).copied()) else {
+            warn!("scenario: vehicle {theirs} is gone on the server");
+            return;
+        };
+        let target = position.0 + rotation.0 * local;
+        move_us(world, |motion| {
+            motion.position = target;
+            motion.velocity = Vec3::ZERO;
+            motion.mantle = 0.0;
+        });
     });
 }
 
@@ -1309,16 +1337,10 @@ fn run_scenario(
             }
             Step::NearVehicle(template) => {
                 let origin = soldier.single().map(|(m, _)| m.position).unwrap_or_default();
-                let nearest = vehicles
-                    .vehicles
-                    .iter()
-                    .filter(|(v, ..)| v.template == *template)
-                    .min_by(|a, b| {
-                        let d = |v: &VehicleView| v.transform.translation.distance(origin);
-                        d(a.1).total_cmp(&d(b.1))
-                    });
+                let nearest = nearest_vehicle(&vehicles, template, origin)
+                    .and_then(|(e, view)| Some((e, view, vehicles.vehicles.get(e).ok()?.2)));
                 match (nearest, soldier.single()) {
-                    (Some((_, view, data)), Ok(_)) => {
+                    (Some((vehicle, view, data)), Ok(_)) => {
                         let desc = &data.0.desc;
                         // Beside the door, outside the hull, within reach of the entry point.
                         let local = match desc.entry_points.first() {
@@ -1328,9 +1350,10 @@ fn run_scenario(
                             }
                             None => Vec3::new(desc.physics.bounds[0][0] - 0.8, 0.0, 0.0),
                         };
-                        let target = view.transform.transform_point(local);
-                        place_us(&server, "NearVehicle", target);
-                        let to = view.transform.translation - target;
+                        // Where the server has it now: what is drawn here is a moment old.
+                        place_us_at_vehicle(&server, "NearVehicle", vehicle, local);
+                        let at = vehicles.latest(vehicle).unwrap_or(view.transform);
+                        let to = at.translation - at.transform_point(local);
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = -0.2;
                     }
@@ -1427,13 +1450,14 @@ fn run_scenario(
                         let (da, db) = (d(a), d(b));
                         da.0.cmp(&db.0).then(da.1.total_cmp(&db.1))
                     })
-                    .and_then(|(e, ..)| vehicles.vehicles.get(e).ok());
+                    .and_then(|(e, ..)| Some((e, vehicles.vehicles.get(e).ok()?)));
                 match (nearest, soldier.single()) {
-                    (Some((_, view, data)), Ok(_)) => {
+                    (Some((vehicle, (_, view, data))), Ok(_)) => {
                         let front = data.0.desc.physics.bounds[0][2];
-                        let target = view.transform.transform_point(Vec3::new(0.0, 0.5, front - distance));
-                        place_us(&server, "InFrontOf", target);
-                        let to = view.transform.translation - target;
+                        let local = Vec3::new(0.0, 0.5, front - distance);
+                        place_us_at_vehicle(&server, "InFrontOf", vehicle, local);
+                        let at = vehicles.latest(vehicle).unwrap_or(view.transform);
+                        let to = at.translation - at.transform_point(local);
                         look.yaw = (-to.x).atan2(-to.z);
                         look.pitch = -0.1;
                     }

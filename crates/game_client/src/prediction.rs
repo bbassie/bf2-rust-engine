@@ -26,8 +26,15 @@ use crate::{
     net::LocalSoldier,
 };
 
-/// How far in the past remote soldiers are shown, to always have two states to blend.
+/// How far behind the newest state remote soldiers and vehicles are shown, to always have two
+/// states to blend: a network's jitter and a lost packet or two.
 pub(crate) const INTERPOLATION_DELAY: f64 = 0.1;
+/// The same, linked to our own server (`local_server`): its states come every tick, in order,
+/// only a frame late at most.
+const LINK_INTERPOLATION_DELAY: f64 = 0.05;
+/// How quickly [`ServerTimeline`]'s offset may grow, seconds per second: it follows the quickest
+/// arrivals, and creeps up so that a lasting rise of the latency is followed too.
+const OFFSET_CREEP: f64 = 0.01;
 /// How quickly prediction corrections are blended out (per second).
 const ERROR_DECAY: f32 = 12.0;
 
@@ -36,11 +43,19 @@ pub struct PredictionPlugin;
 impl Plugin for PredictionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PredictionStats>()
+            .init_resource::<ServerTimeline>()
             .add_observer(add_render_state)
             .add_systems(
                 PreUpdate,
-                (reconcile, record_snapshots)
+                track_server_clock
+                    .in_set(ServerTimelineSystems)
                     .after(ClientSystems::Receive)
+                    .run_if(in_state(ClientState::Connected)),
+            )
+            .add_systems(
+                PreUpdate,
+                (reconcile, record_snapshots)
+                    .after(ServerTimelineSystems)
                     .run_if(in_state(ClientState::Connected)),
             )
             .add_systems(
@@ -60,6 +75,65 @@ impl Plugin for PredictionPlugin {
                     .before(TransformSystems::Propagate),
             );
     }
+}
+
+/// Updates [`ServerTimeline`] in `PreUpdate`, after receiving.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServerTimelineSystems;
+
+/// Connected: the server's clock as seen here. Remote soldiers and vehicles are drawn on the
+/// server's timeline (its tick, `ServerClock`), a little behind its newest state, not by when
+/// their states arrived: arrival times jitter with our frames and the network, and drawing by
+/// them put moving soldiers a few centimetres from where the server had them at the tick we
+/// tell it we saw (lag compensation then judged them there).
+#[derive(Resource, Default)]
+pub struct ServerTimeline {
+    /// The newest server tick received.
+    pub tick: u32,
+    /// Local time minus server time (`tick / TICK_HZ`) for the quickest arrivals, and when it
+    /// was last updated.
+    offset: Option<(f64, f64)>,
+    /// Seconds things are drawn behind the newest state.
+    delay: f64,
+}
+
+impl ServerTimeline {
+    /// The server time (seconds of ticks) drawn at local time `now`.
+    pub fn render_time(&self, now: f64) -> Option<f64> {
+        self.offset.map(|(offset, _)| now - offset - self.delay)
+    }
+
+    /// The server time of the newest state.
+    pub fn latest(&self) -> f64 {
+        self.tick as f64 / game_shared::TICK_HZ
+    }
+}
+
+fn track_server_clock(
+    real: Res<Time<Real>>,
+    clocks: Query<&game_shared::hitzones::ServerClock, With<bevy_replicon::client::confirm_history::ConfirmHistory>>,
+    local: Option<Res<crate::local_server::LocalServer>>,
+    mut timeline: ResMut<ServerTimeline>,
+) {
+    timeline.delay = if local.is_some() { LINK_INTERPOLATION_DELAY } else { INTERPOLATION_DELAY };
+    let Some(clock) = clocks.iter().next() else {
+        return;
+    };
+    let now = real.elapsed_secs_f64();
+    // A new match counts from the start again.
+    if clock.0 < timeline.tick {
+        timeline.offset = None;
+    }
+    if clock.0 == timeline.tick && timeline.offset.is_some() {
+        return;
+    }
+    timeline.tick = clock.0;
+    let sample = now - timeline.latest();
+    let offset = match timeline.offset {
+        Some((offset, at)) => (offset + (now - at) * OFFSET_CREEP).min(sample),
+        None => sample,
+    };
+    timeline.offset = Some((offset, now));
 }
 
 /// Computes [`SoldierRender`] in `PostUpdate`. Anything drawing soldiers runs after it.
@@ -130,7 +204,7 @@ impl Predicted {
     }
 }
 
-/// Received states of a remote soldier, by local receive time.
+/// Received states of a remote soldier, by server time (see [`ServerTimeline`]).
 #[derive(Component, Default)]
 struct Snapshots(VecDeque<(f64, SoldierMotion)>);
 
@@ -253,13 +327,14 @@ fn reconcile(
     }
 }
 
-fn record_snapshots(
-    time: Res<Time<Real>>,
-    mut soldiers: Query<(Ref<SoldierMotion>, &mut Snapshots), Without<LocalSoldier>>,
-) {
-    let now = time.elapsed_secs_f64();
+fn record_snapshots(timeline: Res<ServerTimeline>, mut soldiers: Query<(Ref<SoldierMotion>, &mut Snapshots), Without<LocalSoldier>>) {
+    let now = timeline.latest();
     for (motion, mut snapshots) in &mut soldiers {
         if motion.is_changed() {
+            // Two changes in one frame (two ticks arrived at once): the newer one counts.
+            if snapshots.0.back().is_some_and(|(t, _)| *t >= now) {
+                snapshots.0.pop_back();
+            }
             snapshots.0.push_back((now, *motion));
         }
         while snapshots.0.len() > 2 && snapshots.0[1].0 < now - 1.0 {
@@ -280,6 +355,7 @@ fn update_render_state(
     real: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     state: Res<State<ClientState>>,
+    timeline: Res<ServerTimeline>,
     mut soldiers: Query<(
         &SoldierMotion,
         &mut SoldierRender,
@@ -290,7 +366,7 @@ fn update_render_state(
 ) {
     let alpha = fixed.overstep_fraction();
     let connected = *state.get() == ClientState::Connected;
-    let render_time = real.elapsed_secs_f64() - INTERPOLATION_DELAY;
+    let render_time = timeline.render_time(real.elapsed_secs_f64()).unwrap_or(f64::INFINITY);
 
     for (motion, mut render, predicted, snapshots, ticks) in &mut soldiers {
         let (from, to, t) = if let Some(mut predicted) = predicted {

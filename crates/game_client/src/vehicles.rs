@@ -23,9 +23,6 @@ use crate::{
     vehicle_prediction::PredictedVehicle,
 };
 
-/// How far in the past vehicles are shown when connected to a remote server.
-const INTERPOLATION_DELAY: f64 = 0.1;
-
 pub struct ClientVehiclesPlugin;
 
 impl Plugin for ClientVehiclesPlugin {
@@ -37,7 +34,7 @@ impl Plugin for ClientVehiclesPlugin {
             .add_systems(
                 PreUpdate,
                 record_snapshots
-                    .after(ClientSystems::Receive)
+                    .after(crate::prediction::ServerTimelineSystems)
                     .run_if(in_state(ClientState::Connected)),
             )
             .init_resource::<VehicleSight>()
@@ -76,7 +73,7 @@ pub struct VehicleView {
     pub boost: f32,
 }
 
-/// Received states, by local receive time.
+/// Received states, by server time (see `prediction::ServerTimeline`).
 #[derive(Component, Default)]
 struct Snapshots(VecDeque<(f64, VehicleMotion, VehicleState)>);
 
@@ -110,12 +107,16 @@ fn remember_joints(mut vehicles: Query<(&VehicleState, &mut PreviousJoints)>) {
 }
 
 fn record_snapshots(
-    time: Res<Time<Real>>,
+    timeline: Res<crate::prediction::ServerTimeline>,
     mut vehicles: Query<(Ref<VehicleMotion>, Ref<VehicleState>, &mut Snapshots)>,
 ) {
-    let now = time.elapsed_secs_f64();
+    let now = timeline.latest();
     for (motion, state, mut snapshots) in &mut vehicles {
         if motion.is_changed() || state.is_changed() {
+            // Two ticks arrived at once: the newer one counts.
+            if snapshots.0.back().is_some_and(|(t, ..)| *t >= now) {
+                snapshots.0.pop_back();
+            }
             snapshots.0.push_back((now, *motion, (*state).clone()));
         }
         while snapshots.0.len() > 2 && snapshots.0[1].0 < now - 1.0 {
@@ -130,6 +131,7 @@ fn place_vehicles(
     real: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     state: Res<State<ClientState>>,
+    timeline: Res<crate::prediction::ServerTimeline>,
     mut vehicles: Query<(
         &VehicleMotion,
         &VehicleState,
@@ -141,7 +143,7 @@ fn place_vehicles(
     )>,
 ) {
     let connected = *state.get() == ClientState::Connected;
-    let at = real.elapsed_secs_f64() - INTERPOLATION_DELAY;
+    let at = timeline.render_time(real.elapsed_secs_f64()).unwrap_or(f64::INFINITY);
     let alpha = fixed.overstep_fraction();
     for (motion, current, snapshots, predicted, previous, mut view, mut transform) in &mut vehicles {
         if let Some(mut predicted) = predicted {

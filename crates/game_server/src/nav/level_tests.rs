@@ -146,6 +146,24 @@ fn carriers_on_levels() {
             );
         }
 
+        // (vehicles) Ladders with their foot in the water near the patches (out of a well deck,
+        // down a hull's side), and how deep the water is over their bottom cell.
+        if let Some(water) = level.desc.water.as_ref().map(|w| w.height) {
+            for l in grid.ladders() {
+                let bottom = grid.cell(l.bottom);
+                let near = grid.patches().iter().any(|p| p.frame.center.distance(l.foot.xz()) < 160.0);
+                if near && water - l.foot.y > -1.5 {
+                    println!(
+                        "  ladder foot {:.1} top {:.1}: {:.1} m of water over its bottom cell, {:.1} m from a wall",
+                        l.foot,
+                        grid.position(l.top),
+                        water - bottom.y,
+                        bottom.dist as f32 * grid.cell_size(l.bottom) * 0.5
+                    );
+                }
+            }
+        }
+
         let check = SpawnCheck {
             spawns: layout
                 .spawn_points

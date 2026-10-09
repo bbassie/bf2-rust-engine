@@ -1192,6 +1192,20 @@ fn swim(
     // BF2 lets a soldier sprint-swim; it costs stamina like sprinting on land.
     let wants_sprint = input.pressed(Buttons::SPRINT) && intent.y > 0.5;
     update_stamina(m, tuning, wants_sprint, dt);
+    // Swimming into a ladder gets on it, as walking into one does: the ladders out of a
+    // carrier's well deck start in the water (bots and players swam there with no way out).
+    if wish != Vec3::ZERO
+        && let Some(ladder) = world.ladder(m.position, shapes)
+        && let Some(feet) = mount(m, &ladder, wish)
+    {
+        m.position = feet;
+        m.velocity = Vec3::ZERO;
+        m.swimming = false;
+        m.climbing = true;
+        m.on_rope = ladder.rope;
+        m.sprinting = false;
+        return;
+    }
     let speed = if m.sprinting { tuning.swim_sprint_speed } else { tuning.swim_speed };
     let target = wish * speed;
     let mut horizontal = Vec3::new(m.velocity.x, 0.0, m.velocity.z);
@@ -1210,8 +1224,23 @@ fn swim(
     m.position = moved.center - center;
     horizontal = Vec3::new(moved.velocity.x, 0.0, moved.velocity.z);
 
-    // Buoyancy: settle towards floating with the head and shoulders above the surface.
-    let target_y = water_height - tuning.swim_float_depth;
+    // Buoyancy: settle towards floating with the head and shoulders above the surface, but
+    // not lower than the bottom under the feet: over a ramp rising out of the water (a well
+    // deck's stern gate) the swimmer's feet rest on it and he goes up it, instead of being
+    // held down against it.
+    let below = world.ground(shape, m.position + center, tuning.swim_float_depth + 0.5);
+    let mut target_y = (water_height - tuning.swim_float_depth).max(below.map_or(f32::MIN, |g| g.height));
+    // A step of the bottom just ahead a little above the feet (a submerged ledge with a
+    // ladder on it): up over it rather than stopped by its edge.
+    if wish != Vec3::ZERO {
+        let ahead = m.position + wish.normalize() * (SOLDIER_RADIUS + 0.25);
+        if let Some(step) = world.ground(shape, ahead + center + Vec3::Y * SWIM_STEP, tuning.swim_float_depth + 0.5 + SWIM_STEP)
+            && step.height > target_y
+            && step.height < m.position.y + SWIM_STEP
+        {
+            target_y = step.height;
+        }
+    }
     let blend = 1.0 - (-tuning.swim_buoyancy * dt).exp();
     m.position.y += (target_y - m.position.y) * blend;
     m.velocity = horizontal;
@@ -1219,14 +1248,41 @@ fn swim(
     // Climbing out: close enough to a standable bottom (or a beach sloping up) that a
     // soldier stopping there wouldn't be over swimming depth.
     if let Some(ground) = world.ground(shape, m.position + center, tuning.swim_float_depth + 0.5)
-        && water_height - ground.height < tuning.wade_depth
+        && water_height - ground.height < tuning.wade_depth + CLIMB_OUT_SLACK
     {
         m.position.y = ground.height;
         m.grounded = true;
         m.swimming = false;
         m.velocity = along_ground(horizontal, ground.normal);
+        return;
+    }
+    // ... or onto a ledge just ahead at the surface, as a swimmer pulls himself up: a carrier's
+    // well deck floor 0.4 m under the water seen from the deep water behind its stern, a low
+    // quay. Its edge stops a floating body (its feet are 1.55 m down), so the ground below
+    // never comes in reach.
+    if wish != Vec3::ZERO {
+        let ahead = m.position + wish.normalize() * (SOLDIER_RADIUS + 0.35);
+        let from = Vec3::new(ahead.x, water_height + 1.0, ahead.z) + center;
+        let reach = center.y + 1.0 + tuning.wade_depth + 0.3;
+        if let Some(ground) = world.ground(shape, from, reach)
+            && water_height - ground.height < tuning.wade_depth + CLIMB_OUT_SLACK
+            && ground.height - water_height < 0.6
+            && world.ground(shape, Vec3::new(ahead.x, ground.height, ahead.z) + center + Vec3::Y * 0.05, 0.2).is_some()
+        {
+            m.position = Vec3::new(ahead.x, ground.height, ahead.z);
+            m.grounded = true;
+            m.swimming = false;
+            m.velocity = Vec3::ZERO;
+        }
     }
 }
+
+/// How far above his feet a swimmer gets over a step of the bottom ahead, meters.
+const SWIM_STEP: f32 = 0.6;
+
+/// How much deeper than [`SoldierTuning::wade_depth`] the water may be where a swimmer finds
+/// his feet (a carrier's well deck floor is exactly that deep).
+const CLIMB_OUT_SLACK: f32 = 0.04;
 
 /// Distance of a climbing soldier's axis from the ladder's center plane.
 fn ladder_hold(ladder: &Ladder) -> f32 {

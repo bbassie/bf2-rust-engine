@@ -487,7 +487,7 @@ fn run_task(
                     zone(seen),
                     zone(judged),
                     miss_by,
-                    view.tick,
+                    view.shown,
                     target.clearance(point),
                     target.entity,
                     if occluded(shot.origin, point) { " occluded" } else { "" },

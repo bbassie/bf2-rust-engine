@@ -3,8 +3,9 @@
 // Their RIB's driver sails to a landing by a beach that walking connects to the stage's charge
 // ("boat landing for ..."), not the water nearest the charge (under a quay or in a slip
 // between the piers), everyone gets out there ("got out of boat_rib (dropped off)") and goes
-// inland. The camera chases the RIB on the way and at the landing. Fails if nobody takes the
-// RIB or nobody is landed in time.
+// inland. The landing is inside the soldiers' combat area. The camera chases the RIB on the
+// way. Fails if nobody takes the RIB, nobody is landed in time, or a bot swims in place
+// afterwards (a landing they can't wade ashore from).
 // client --scenario scenarios/ai/boat_landing_leviathan.ron
 (
     level: "leviathan",
@@ -24,11 +25,10 @@
         ChaseDriven("boat_rib", 20.0, 7.0),
         Screenshot("rib_crossing"),
         ExpectLog("got out of boat_rib (dropped off)", 90.0),
-        ChaseDriven("boat_rib", 16.0, 6.0),
-        Screenshot("rib_landed"),
-        Wait(10.0),
-        ChaseDriven("boat_rib", 26.0, 12.0),
-        Screenshot("rib_inland"),
+        // Nobody left standing in the boat at the landing: the riders wade ashore.
+        ForbidLog("swimming in place"),
+        // Past a `bots:` idle line (one a minute).
+        Wait(62.0),
         LogVehicles("after the landing"),
         Quit,
     ],

@@ -912,6 +912,8 @@ fn vehicle_geometry(
         boats: layout.and_then(boat_area),
         helicopters: air(Traveller::Helicopter),
         jets: air(Traveller::Jet),
+        // (vehicles) For where boats land soldiers.
+        soldiers: air(Traveller::Soldier),
     };
     (geometry, areas)
 }

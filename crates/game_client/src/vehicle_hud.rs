@@ -788,18 +788,21 @@ fn update_markers(
     let (camera, eye) = *camera;
     let eye_global = GlobalTransform::from(*eye);
     let centre = camera.logical_viewport_size().unwrap_or_default() * 0.5;
-    let place = |node: &mut Node, visibility: &mut Visibility, point: Option<Vec3>, size: f32, min_offset: f32| {
+    // Written only when they change: a changed `Node` lays the whole HUD out again, and these
+    // are hidden nearly all the time.
+    let place = |node: &mut Mut<Node>, visibility: &mut Mut<Visibility>, point: Option<Vec3>, size: f32, min_offset: f32| {
         let at = point
             .filter(|p| (*p - eye.translation).dot(eye.forward().as_vec3()) > 0.0)
             .and_then(|p| camera.world_to_viewport(&eye_global, p).ok())
             .filter(|at| at.distance(centre) >= min_offset);
         match at {
             Some(at) => {
-                node.left = px(at.x - size * 0.5);
-                node.top = px(at.y - size * 0.5);
-                *visibility = Visibility::Inherited;
+                move_marker(node, at - Vec2::splat(size * 0.5));
+                visibility.set_if_neq(Visibility::Inherited);
             }
-            None => *visibility = Visibility::Hidden,
+            None => {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
         }
     };
     let inside = seated.single().ok().and_then(|s| vehicles.get(s.vehicle).ok().map(|(v, d)| (s, v, d)));
@@ -866,10 +869,20 @@ fn update_markers(
         Some(at) => {
             let edge = Vec2::splat(BOMB_MARKER_EDGE);
             let at = at.clamp(edge, (size - edge).max(edge));
-            node.left = px(at.x - BOMB_MARKER_SIZE * 0.5);
-            node.top = px(at.y - BOMB_MARKER_SIZE * 0.5);
-            **visibility = Visibility::Inherited;
+            move_marker(node, at - Vec2::splat(BOMB_MARKER_SIZE * 0.5));
+            visibility.set_if_neq(Visibility::Inherited);
         }
-        None => **visibility = Visibility::Hidden,
+        None => {
+            visibility.set_if_neq(Visibility::Hidden);
+        }
+    }
+}
+
+/// Puts a screen marker's top left corner at `at` (logical pixels), if it isn't there.
+fn move_marker(node: &mut Mut<Node>, at: Vec2) {
+    let (left, top) = (px(at.x), px(at.y));
+    if node.left != left || node.top != top {
+        node.left = left;
+        node.top = top;
     }
 }

@@ -27,7 +27,7 @@ use crate::{
     effects::{EffectLibrary, SpawnDecal, SpawnEffect, SurfaceQuery, decals::Decals},
     local_input::{InputHistory, LocalInputSystems, LookState},
     net::{LocalPlayer, LocalSoldier},
-    prediction::{INTERPOLATION_DELAY, Predicted, SoldierRender},
+    prediction::{Predicted, ServerTimeline, SoldierRender},
     render::scope::{WeaponPart, Zoom},
 };
 
@@ -39,7 +39,7 @@ impl Plugin for ClientCombatPlugin {
             .init_resource::<CombatFeedback>()
             .init_resource::<ViewTick>()
             .add_systems(Startup, simulated_input_delay)
-            .add_systems(PreUpdate, track_view_tick.after(ClientSystems::Receive))
+            .add_systems(PreUpdate, track_view_tick.after(crate::prediction::ServerTimelineSystems))
             .add_systems(PostUpdate, record_drawn_anim.after(crate::prediction::RenderStateSystems))
             .add_systems(PostUpdate, delay_inputs.before(ClientSystems::Send))
             .add_message::<LocalShot>()
@@ -59,21 +59,23 @@ impl Plugin for ClientCombatPlugin {
     }
 }
 
-/// The server tick of the world we see (other soldiers are shown
-/// [`INTERPOLATION_DELAY`] behind the latest state received), sent with every input so the
-/// server judges our hits against it. Hosting, the world drawn is between the last two ticks
-/// simulated, and our input reaches the server a tick or two later: it is judged against the
-/// tick drawn too. 0 without a server clock.
+/// The server tick of the world we draw this frame (other soldiers are shown a little behind
+/// the latest state received, see `prediction::ServerTimeline`); [`Self::shown`] goes with
+/// every input so the server judges our hits against it. Hosting, the world drawn is between
+/// the last two ticks simulated, and our input reaches the server a tick or two later: it is
+/// judged against the tick drawn too. 0 without a server clock.
 #[derive(Resource, Default)]
 pub struct ViewTick {
     pub tick: u32,
+    /// The tick of the picture on screen while this frame's input is made: the last frame's
+    /// (aim was taken at what it showed; sending this frame's tick judged shots at moving
+    /// soldiers a frame ahead of where they were seen).
+    pub shown: u32,
     /// The same, with the fraction of a tick: seconds on the server clock (for the idle
     /// animations, which run on it).
     pub seconds: f64,
     /// The latest server tick we know of (the state just received, or simulated).
     pub latest_tick: u32,
-    latest: u32,
-    received: f64,
 }
 
 fn track_view_tick(
@@ -82,6 +84,7 @@ fn track_view_tick(
     state: Res<State<ClientState>>,
     local: Query<&ServerClock, Without<ConfirmHistory>>,
     remote: Query<&ServerClock, With<ConfirmHistory>>,
+    timeline: Res<ServerTimeline>,
     mut view: ResMut<ViewTick>,
 ) {
     // Connected, the clock the server replicates: the idle in-process server may have made
@@ -94,20 +97,18 @@ fn track_view_tick(
         return;
     };
     let tick = if connected {
+        // What is on screen: the moment of the server's timeline remote soldiers are drawn at
+        // (`prediction::ServerTimeline`), never ahead of the latest state.
         let now = real.elapsed_secs_f64();
-        if clock.0 != view.latest {
-            view.latest = clock.0;
-            view.received = now;
-        }
-        // What is on screen is from a moment before the latest state (which the server sent a
-        // little after the tick it counted).
-        let seconds = (now - view.received).min(0.05) - INTERPOLATION_DELAY;
-        clock.0 as f64 + seconds * game_shared::TICK_HZ
+        let latest = clock.0 as f64;
+        timeline.render_time(now).map_or(latest, |t| (t * game_shared::TICK_HZ).min(latest))
     } else {
         // Hosting: drawn between the last two ticks (see `prediction`).
         clock.0 as f64 - 1.0 + fixed.overstep_fraction() as f64
     };
+    let previous = view.tick;
     view.tick = (tick.round() as i64).max(1) as u32;
+    view.shown = if connected && previous > 0 && previous <= view.tick { previous } else { view.tick };
     view.seconds = tick / game_shared::TICK_HZ;
     view.latest_tick = clock.0;
 }

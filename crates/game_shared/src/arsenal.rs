@@ -64,12 +64,32 @@ impl Default for LoadoutRules {
 }
 
 /// A player's weapons for one kit class; `None` keeps the kit's own.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClassPick {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub primary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub sidearm: Option<String>,
+}
+
+/// Settings files (human readable) leave a `None` out; on the network (postcard, no field
+/// names) both are always there: a field left out made the reader run off the end of a
+/// [`LoadoutRequest`] with only a primary picked, and the server dropped it.
+impl Serialize for ClassPick {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let human = serializer.is_human_readable();
+        let fields = if human { usize::from(self.primary.is_some()) + usize::from(self.sidearm.is_some()) } else { 2 };
+        let mut state = serializer.serialize_struct("ClassPick", fields)?;
+        for (name, value) in [("primary", &self.primary), ("sidearm", &self.sidearm)] {
+            if human && value.is_none() {
+                state.skip_field(name)?;
+            } else {
+                state.serialize_field(name, value)?;
+            }
+        }
+        state.end()
+    }
 }
 
 impl ClassPick {
