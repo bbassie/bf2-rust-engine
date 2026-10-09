@@ -780,7 +780,14 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
         .filter_map(|(i, n)| {
             let t = world.template(&n.template)?;
             let offset = Vec3::from(coords::position(t.get_vec3("setpositionoffset").unwrap_or([0.0; 3])));
-            let landing_flap = t.get_f32("setliftregulated").unwrap_or(0.0) != 0.0;
+            // "Lift regulated" is BF2's flag for a jet's landing flaps, which deploy below a
+            // jet's landing speed (`flight::FLAP_SPEEDS`, tens of m/s) and fold away above it.
+            // The jet ski's rear wing sets it too (steadying it at speed, not "landing" in any
+            // sense a boat has): at its 0..7 m/s the flap curve reads as permanently fully
+            // deployed, so its flap_lift (tuned for that curve, to look right folded away at a
+            // jet's cruising speed) adds a lift, and so an induced drag, far too big for a
+            // boat's own low speeds. Boats don't land: never read the flag for one.
+            let landing_flap = category != VehicleCategory::Sea && t.get_f32("setliftregulated").unwrap_or(0.0) != 0.0;
             let share = match category {
                 VehicleCategory::Helicopter => HELICOPTER_WING_SHARE,
                 _ if landing_flap => LANDING_FLAP_SHARE,
@@ -810,8 +817,16 @@ fn build(interp: &Interpreter, converter: &MeshConverter, name: &str) -> Option<
                 position: hull.translation.to_array(),
                 direction: hull.transform_vector3(Vec3::NEG_Z).normalize_or(Vec3::NEG_Z).to_array(),
                 acceleration: thrust(power),
-                // Amphibious vehicles' water jets don't say: they paddle along slowly.
-                max_speed: t.get_f32("nopropellereffectatspeed").unwrap_or(if ty == "c_etship" { 7.0 } else { 150.0 }),
+                // Amphibious land vehicles' water jets don't say: they paddle along slowly.
+                // A ship's own engine with nothing stated is a real boat (the jet ski has no
+                // `nopropellereffectatspeed` either, same as most of its other engine numbers
+                // being left at their defaults): let drag set its top speed, same as the RIB's
+                // explicit 150.
+                max_speed: t.get_f32("nopropellereffectatspeed").unwrap_or(match (ty.as_str(), category) {
+                    ("c_etship", VehicleCategory::Sea) => 150.0,
+                    ("c_etship", _) => 7.0,
+                    _ => 150.0,
+                }),
                 reverse: if max > 0.0 { (-min / max).clamp(0.0, 1.0) } else { 0.0 },
                 water: ty == "c_etship",
             }
@@ -1018,8 +1033,21 @@ fn aero_desc(category: VehicleCategory, drag: f32) -> AeroDesc {
             speed_damping: [0.0; 3],
             water_drag: [2.0, 2.0, 1.0],
         },
-        // Boats and amphibious vehicles: a keel against sliding sideways, a hull that damps
-        // bobbing, little drag forwards.
+        // Boats: a keel against sliding sideways, a hull that damps bobbing, little drag
+        // forwards. BF2's `drag` spans a much wider range here than for any other category
+        // (the RIB's 1 to the jet ski's 4.5) for craft that aren't actually that different in
+        // top speed (a jet ski is one of the fastest boats, not a third of the RIB's speed);
+        // sqrt keeps them closer, as for the two helicopter weights above.
+        VehicleCategory::Sea => AeroDesc {
+            drag: drag.sqrt() * DRAG_PER_DRAG,
+            stall_angle: 25.0,
+            max_load: 40.0,
+            angular_damping: [0.5, 0.5, 0.5],
+            speed_damping: [0.0; 3],
+            water_drag: [1.5, 2.0, 0.08],
+        },
+        // Amphibious land vehicles paddling in water, and anything stationary that still
+        // wants the keel/bobbing damping above (a buoy-mounted gun, say).
         _ => AeroDesc {
             drag: drag * DRAG_PER_DRAG,
             stall_angle: 25.0,
