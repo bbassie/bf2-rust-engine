@@ -466,7 +466,7 @@ fn update_markers(
     downed: Query<(Entity, &SoldierRender, &ControlledBy, &Downed), Without<LocalSoldier>>,
     teams: Query<&Team>,
     root: Single<Entity, With<MarkerRoot>>,
-    mut markers: Query<(Entity, &Marker, &mut Node, &mut Visibility, &Children)>,
+    mut markers: Query<(Entity, &Marker, &mut UiTransform, &mut Visibility, &Children)>,
     mut texts: Query<&mut Text, With<MarkerText>>,
 ) {
     let (camera, view) = *camera;
@@ -487,14 +487,17 @@ fn update_markers(
             wanted.push((soldier, at, distance, state.left));
         }
     }
-    for (entity, marker, mut node, mut visibility, children) in &mut markers {
+    for (entity, marker, mut transform, mut visibility, children) in &mut markers {
         let Some(index) = wanted.iter().position(|w| w.0 == marker.0) else {
             commands.entity(entity).despawn();
             continue;
         };
         let (_, at, distance, left) = wanted.swap_remove(index);
-        node.left = px(at.x - MARKER_WIDTH / 2.0);
-        node.top = px(at.y - 14.0);
+        // Moved by its `UiTransform`: a changed `Node` would lay the HUD out again every frame.
+        let translation = Val2::px(at.x - MARKER_WIDTH / 2.0, at.y - 14.0);
+        if transform.translation != translation {
+            transform.translation = translation;
+        }
         visibility.set_if_neq(Visibility::Inherited);
         for child in children.iter() {
             if let Ok(mut text) = texts.get_mut(child) {
@@ -508,10 +511,11 @@ fn update_markers(
     for (soldier, at, ..) in wanted {
         commands.entity(*root).with_child((
             Marker(soldier),
+            UiTransform::from_translation(Val2::px(at.x - MARKER_WIDTH / 2.0, at.y - 14.0)),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(at.x - MARKER_WIDTH / 2.0),
-                top: px(at.y - 14.0),
+                left: px(0),
+                top: px(0),
                 width: px(MARKER_WIDTH),
                 justify_content: JustifyContent::Center,
                 ..default()

@@ -100,7 +100,7 @@ fn update_markers(
     vehicles: Query<(), With<VehicleView>>,
     camera: Single<(&Camera, &GlobalTransform), With<PlayerCamera>>,
     root: Single<Entity, With<MarkerRoot>>,
-    mut markers: Query<(Entity, &Marker, &mut Node, &Children)>,
+    mut markers: Query<(Entity, &Marker, &mut UiTransform, &Children)>,
     mut texts: Query<&mut Text, With<MarkerText>>,
 ) {
     // Settings: "Enemy spot markers" on/off (a small hook for `nametags`, which owns the rest
@@ -122,14 +122,17 @@ fn update_markers(
             Some((entity, at, point.distance(view.translation())))
         })
         .collect();
-    for (marker_entity, marker, mut node, children) in &mut markers {
+    for (marker_entity, marker, mut transform, children) in &mut markers {
         let Some(index) = wanted.iter().position(|w| w.0 == marker.0) else {
             commands.entity(marker_entity).despawn();
             continue;
         };
         let (_, at, distance) = wanted.swap_remove(index);
-        node.left = px(at.x - 30.0);
-        node.top = px(at.y - 8.0);
+        // Moved by its `UiTransform`: a changed `Node` would lay the HUD out again every frame.
+        let translation = Val2::px(at.x - 30.0, at.y - 8.0);
+        if transform.translation != translation {
+            transform.translation = translation;
+        }
         for child in children.iter() {
             if let Ok(mut text) = texts.get_mut(child) {
                 let line = format!("{distance:.0} m");
@@ -142,10 +145,11 @@ fn update_markers(
     for (entity, at, distance) in wanted {
         commands.entity(*root).with_child((
             Marker(entity),
+            UiTransform::from_translation(Val2::px(at.x - 30.0, at.y - 8.0)),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(at.x - 30.0),
-                top: px(at.y - 8.0),
+                left: px(0),
+                top: px(0),
                 width: px(60),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,

@@ -844,11 +844,15 @@ What a frame with 63 bots costs, and the rules that keep it low (see `render::pe
   1.4 ms, now only prediction and the client's physics), and the server's spikes (a bot
   replanning, a nav query) stay off the frame.
 - The client's physics only places colliders for its own queries (it simulates no dynamic
-  body): one solver substep instead of avian's six (`BF2_PERF_EXP=substeps` for the default).
+  body; `client_physics`): one solver substep instead of avian's six, and colliders synced
+  from transforms that moved instead of every body's every tick (the level's statics never
+  move): the client's fixed tick on Archipelago 2.0 -> 1.6 ms. `BF2_PERF_EXP=clientphysics`
+  for avian's defaults.
 - A `Mut<Node>` written through (`&mut node`, even with the same value) lays the whole UI tree
   out again: compare before writing (`map_markers::apply_map_view`, the vehicle HUD's screen
-  markers; the maps were laid out every frame while hidden). `BF2_PERF_STATS` names the UI
-  nodes that change every frame by their components (with a `game_server/profile` build).
+  markers; the maps were laid out every frame while hidden), and move screen markers by their
+  `UiTransform` (name tags, spotted enemies, the wounded). `BF2_PERF_STATS` names the UI nodes
+  that change every frame by their components (with a `game_server/profile` build).
 - The main world's schedules run single-threaded (`main::single_threaded_schedules`, like the
   dedicated server): its systems are tiny, and handing each to a worker cost more than it saved
   while the render thread keeps the workers busy. `BF2_SCHEDULES=parallel` switches back.
