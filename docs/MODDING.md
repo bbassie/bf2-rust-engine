@@ -18,7 +18,8 @@ Play it with `client --level sample_valley --team 2`, or pick it in the menu.
 ## Where mods live
 
 ```text
-mods/                        --mods <dir> or $GAME_MODS_DIR (default: ./mods)
+mods/                        --mods <dir> or $GAME_MODS_DIR (default: mods/ in the data folder:
+                             ./mods in a checkout, else %LOCALAPPDATA%\bf2-rust-engine\mods)
   my_mod/
     mod.ron                  (name: "My mod", description: "...", priority: 0, enabled: true)
     levels/my_level/...      new levels

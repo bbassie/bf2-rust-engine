@@ -16,6 +16,7 @@ pub mod level;
 pub mod material;
 pub mod modes;
 pub mod object;
+pub mod paths;
 pub mod soldier;
 pub mod sound;
 pub mod ui;

@@ -133,10 +133,17 @@ struct Cli {
     /// Region for the master's server list and quick join (`eu`, `us-east`, ...).
     #[arg(long)]
     region: Option<String>,
-    /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
+    /// Data folder holding `imported/` and `mods/` (default: the working directory when it
+    /// has them, else the per-user data folder, or $BF2_DATA_DIR; see docs/ARCHITECTURE.md,
+    /// "Packaging").
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Folder with converted assets (default: `imported` in the data folder, or
+    /// $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
-    /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
+    /// Folder with mods (default: `mods` in the data folder, or $GAME_MODS_DIR); see
+    /// docs/MODDING.md.
     #[arg(long)]
     mods: Option<PathBuf>,
     /// Folder for generated data kept between runs: bots' navigation grids (default: the
@@ -194,6 +201,8 @@ enum Command {
         #[arg(long, default_value = "mods")]
         content: ContentMode,
         #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
         imported: Option<PathBuf>,
         #[arg(long)]
         mods: Option<PathBuf>,
@@ -202,8 +211,8 @@ enum Command {
 
 fn main() -> AppExit {
     let cli = Cli::parse();
-    if let Some(Command::ExportContent { out, content, imported, mods }) = &cli.command {
-        let paths = GamePaths::resolve_with_mods(imported.clone(), mods.clone());
+    if let Some(Command::ExportContent { out, content, data_dir, imported, mods }) = &cli.command {
+        let paths = GamePaths::resolve_in(data_dir.clone(), imported.clone(), mods.clone());
         return match game_server::content::export(&paths, *content, out) {
             Ok((files, bytes)) => {
                 println!("{files} files ({}) written to {}", game_shared::content::format_bytes(bytes), out.display());
@@ -232,7 +241,7 @@ fn main() -> AppExit {
     }
     let cache = game_shared::cache::Cache::resolve(cli.cache_dir.clone(), cli.cache_limit_gb);
     if cli.clear_cache {
-        let paths = GamePaths::resolve_with_mods(cli.imported.clone(), cli.mods.clone());
+        let paths = GamePaths::resolve_in(cli.data_dir.clone(), cli.imported.clone(), cli.mods.clone());
         let roots: Vec<PathBuf> = paths.roots().into_iter().map(PathBuf::from).collect();
         let legacy = game_shared::cache::remove_legacy(&roots, &paths.imported);
         if legacy.files > 0 {
@@ -344,7 +353,7 @@ fn main() -> AppExit {
     settings.mantle &= !cli.no_mantle;
     settings.loadouts.faction_locked |= cli.faction_locked_weapons;
 
-    let paths = GamePaths::resolve_with_mods(cli.imported, cli.mods);
+    let paths = GamePaths::resolve_in(cli.data_dir, cli.imported, cli.mods);
     let mut app = App::new();
     app.add_plugins((
         ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / (TICK_HZ * 2.0))),

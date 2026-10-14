@@ -808,7 +808,7 @@ Generated data that is slow to make is kept between runs in one cache folder
 deleting it only costs rebuild time: bots' navigation grids (`nav/<level>/infantry-<key>.bin`,
 `vehicle-<key>.bin`, 0.7-3 s to build) and the tactical map's base picture
 (`tactical/<level>/base-<key>.bin`, 2-3 s). The folder is `--cache-dir` (client and server),
-else `$BF2_CACHE_DIR`, else `%LOCALAPPDATA%f2-rust-engine\cache`, `~/.cache/bf2-rust-engine`
+else `$BF2_CACHE_DIR`, else `%LOCALAPPDATA%\bf2-rust-engine\cache`, `~/.cache/bf2-rust-engine`
 (`$XDG_CACHE_HOME`) or `~/Library/Caches/bf2-rust-engine`; a client and a local dedicated
 server share it safely.
 
@@ -920,6 +920,50 @@ sun) as ambient occlusion on statics and terrain.
 - Night versions of day levels (setting `time_of_day`, or `BF2_LIGHT=night=1`) replace the
   level's light with the Special Forces night levels' and light its lamps.
 - `BF2_LIGHT=key=value,...` overrides the tuning constants (see `render::environment`).
+
+## Packaging
+
+A release is a zip anyone can unpack anywhere: `scripts/package.ps1` builds `client.exe`,
+`server.exe` and `bf2-import.exe` (`--release`, each package on its own so the server keeps
+its own Bevy features; `-CargoProfile dist` for thin LTO) and writes
+`dist/bf2-rust-engine-<version>-windows.zip` with them, a player README
+(`scripts/package/README.txt`), `LICENSE.txt` and `THIRD-PARTY-NOTICES.txt` (every crate in
+the three binaries with its license, from `cargo metadata`). `scripts/package.sh` makes the
+Linux server package (`server`, `bf2-import`; run it with `scripts/remote.sh bash
+scripts/package.sh`). The version is `[workspace.package]` in `Cargo.toml`; `dist/` is
+ignored. Both scripts **fail if anything but those files gets in**, or any file looks like
+`bf2-import` output (its file types, its README marker): no BF2 content is ever packaged.
+
+Release builds are self-contained: shaders are embedded (`embedded_shader!` reads the `.wgsl`
+sources only in dev builds), nothing is read relative to the repository, and the scenario and
+debug flags do nothing unless given.
+
+**Where data lives** (`game_data::paths`, shared by client, server and importer): the data
+root holds `imported/` and `mods/` and is `--data-dir` (`$BF2_DATA_DIR`), else the working
+directory when it has `imported/` or `mods/` (a checkout, which ships `mods/`: development
+works exactly as before), else the executable's folder when it has `imported/` (portable),
+else the per-user data folder: `%LOCALAPPDATA%\bf2-rust-engine` on Windows,
+`$XDG_DATA_HOME/bf2-rust-engine` (`~/.local/share/...`) on Linux. `--imported`/`--mods` and
+their variables still override one folder. Settings (`%APPDATA%\bf2-rust-engine`) and caches
+(see Caches) have their own folders.
+
+**First run** (`client::menu::setup`): at the main menu, when `imported/` has no level (or
+with `--setup`), a welcome page finds the BF2 install (`$BF2_DIR`, the EA and BF2Hub registry
+keys via `reg query`, the usual folders on every drive, Wine prefixes), lets the player type
+another, and lists its mods with `bf2-import list --json`. Import runs the bundled
+`bf2-import` (next to the client, or `$BF2_IMPORT_EXE`) in a subprocess with
+`--progress-json`, which prints one JSON object per line (`plan`, `stage`, `level`,
+`level_done`, `done`, `error`; see `bf2_import`'s module doc); the game never parses BF2 files
+itself. Steps: `level --base-game` (bf2 + xpack) into `imported/`, `kits` for each base mod,
+and each chosen BF2 mod with `--all --bf2-mod <mod> --namespace <ns> --mod-title <title>` into
+`mods/<ns>` (the importer writes its `mod.ron`). "Quick start" imports two levels. The page
+shows levels done of total, the current level, elapsed and estimated time, and errors; the
+importer's log goes to `import.log` in the data root. Cancel kills the subprocess; every run
+passes `--resume`, which skips levels listed in `<out>/import-state.json`, so the next import
+continues where it stopped. When it finishes the client reloads its paths, asset layers,
+startup libraries and level list (as `content` does when mounting a server's content), so no
+restart is needed. Settings > Game > BF2 content opens the same page later.
+`scenarios/menu/first_run.ron` drives it against an empty `--data-dir`.
 
 ## Coordinate conventions
 

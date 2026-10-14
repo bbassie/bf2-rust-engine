@@ -258,6 +258,8 @@ impl ContentStore {
                 links.push((self.file(&file.hash), target));
             }
             link_all(&links)?;
+            // A server that shares no layer (no mods: any fresh install) made no folder yet.
+            std::fs::create_dir_all(&base)?;
             std::fs::write(base.join("view.txt"), &listing)?;
         }
         self.touch(sorted.iter().map(|(_, f)| f.hash.as_str()));
@@ -530,6 +532,9 @@ mod tests {
         // A path leaving the view is refused.
         let evil = vec![(0, FileEntry { path: "../evil.ron".into(), ..entries[0].clone() })];
         assert!(store.build_view("evil", &manifest, &evil, &[]).is_err());
+        // A server sharing nothing (no mods) still mounts.
+        let empty = Manifest { version: MANIFEST_VERSION, server_name: "bare".into(), ..Default::default() };
+        assert!(store.build_view("127.0.0.1-2", &empty, &[], &["x".into()]).unwrap().layers.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -77,13 +77,27 @@ makes the fully optimized shipping build.
 
 ### Importing BF2 content
 
+A packaged game imports on its first start (a welcome page finds your install and runs the
+bundled importer). From a checkout:
+
 ```sh
-cargo run -p bf2_import -- --bf2 "C:\Program Files (x86)\EA Games\Battlefield 2" level --all
+cargo run -p bf2_import -- --bf2 "C:\Program Files (x86)\EA Games\Battlefield 2" level --base-game
 ```
 
-This converts every level of every installed mod (a few minutes) into `./imported` (override
-with `--out`, and point the game at it with `--imported` or `GAME_IMPORTED_DIR`). `level
-<name>...` imports single levels; `list` shows what is installed.
+This converts every level of the base game and Special Forces (a few minutes) into
+`./imported` (the working directory's when it has `imported/` or `mods/`, as a checkout does;
+else the per-user data folder; override with `--data-dir` or `--out`, and point the game at it
+with `--data-dir`, `--imported` or `GAME_IMPORTED_DIR`). `level <name>...` imports single
+levels, `level --all` every installed mod's, `list` shows what is installed; a BF2 mod such as
+AIX 2 goes into a mod folder of its own (see [docs/MODDING.md](docs/MODDING.md#importing-a-bf2-mod-aix-2-and-similar)).
+
+### Release package
+
+`powershell -File scripts\package.ps1` builds the release binaries and writes
+`dist/bf2-rust-engine-<version>-windows.zip` (client, server, importer, a player README and
+third-party notices; never any BF2 content). `scripts/package.sh` makes the Linux server
+package. Players unzip it anywhere and run `client.exe`; imported content goes to
+`%LOCALAPPDATA%\bf2-rust-engine`. See "Packaging" in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Legal
 

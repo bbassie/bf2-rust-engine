@@ -10,10 +10,14 @@
     level: "strike_at_karkand",
     size: 64,
     team: 2,
-    bots: 12,
+    bots: 8,
     steps: [
         WaitReady,
         ForbidLog("panicked"),
+        // Off the spawn point and away from the frontline before anything else: the
+        // commander/squad UI steps below take several seconds with the player standing
+        // still, long enough for a bot to wander up and kill them before the vehicle step.
+        Teleport((-184.0, 157.0, -85.0), 30.0, 0.0),
         Setting("map_style", "tactical"),
         // Our squad and an order for it (given as commander, who then resigns).
         Commander(Apply),

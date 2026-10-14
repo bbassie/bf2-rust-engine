@@ -8,9 +8,35 @@
 //! bf2-import --bf2 ... light --all     # only the world lighting and lamps of imported levels
 //! bf2-import --bf2 ... kits --bf2-mod bf2   # every kit, its unlocks and their weapons
 //! bf2-import --bf2 ... check          # parse every mesh and collision mesh, report failures
+//! bf2-import --bf2 ... --progress-json level --base-game --resume   # what the game's first-run screen runs
 //! ```
+//!
+//! Without `--out` the output goes where the game looks: `imported/` in the data folder
+//! (`game_data::paths`: the working directory of a checkout, else the per-user data folder, or
+//! `--data-dir`).
+//!
+//! `--progress-json` prints one JSON object per line on standard output for a front end (the
+//! game's first-run screen runs this program rather than reading BF2 files itself); logs stay
+//! on standard error:
+//!
+//! ```text
+//! {"event":"plan","total":15,"skipped":2,"levels":[{"name":"Strike_at_Karkand","mod":"bf2"},...]}
+//! {"event":"stage","stage":"soldiers"}
+//! {"event":"level","index":0,"total":15,"name":"Strike_at_Karkand","mod":"bf2"}
+//! {"event":"level_done","index":0,"name":"Strike_at_Karkand","ok":true,"seconds":21.3,"warnings":0,"error":null}
+//! {"event":"done","ok":13,"failed":0,"skipped":2,"seconds":300.1}
+//! {"event":"error","message":"..."}       (the run failed as a whole; exit code 1)
+//! ```
+//!
+//! `level --resume` skips levels a previous run into the same `--out` finished (listed in
+//! `<out>/import-state.json`), so a cancelled import continues where it stopped.
 
-use std::{path::PathBuf, time::Instant};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use bf2_formats::{
@@ -52,9 +78,16 @@ struct Cli {
     /// Battlefield 2 installation folder (or set BF2_DIR).
     #[arg(long, env = "BF2_DIR")]
     bf2: PathBuf,
-    /// Output folder for converted assets.
-    #[arg(long, default_value = "imported")]
-    out: PathBuf,
+    /// Output folder for converted assets (default: `imported` in the data folder).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// The game's data folder, holding `imported/` and `mods/` (default: the working
+    /// directory when it has them, else the per-user data folder, or $BF2_DATA_DIR).
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Print progress as JSON lines on standard output (see the module doc).
+    #[arg(long, global = true)]
+    progress_json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -62,7 +95,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// List installed mods and levels.
-    List,
+    List {
+        /// As one JSON object: `{"root","mods":[{"name","title","base","levels":[...]}]}`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Import levels (terrain, static objects, game mode layouts and the meshes they use).
     Level {
         /// Level folder names (case-insensitive).
@@ -70,6 +107,13 @@ enum Command {
         /// Import every level of every installed mod, or (with `--bf2-mod`) of just that one.
         #[arg(long)]
         all: bool,
+        /// Import every level of the base game (`bf2` and `xpack`, Special Forces).
+        #[arg(long, conflicts_with = "all")]
+        base_game: bool,
+        /// Skip levels a previous run into the same `--out` finished
+        /// (`<out>/import-state.json`).
+        #[arg(long)]
+        resume: bool,
         /// Only look at this installed BF2 mod's levels (e.g. `AIX2`). Also scopes the
         /// soldier bodies this run imports, so a mod's own soldiers don't get duplicated into
         /// a namespaced `--out` alongside every other installed mod's.
@@ -128,33 +172,95 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
+/// `--progress-json` is on.
+static PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Prints a progress event (with `--progress-json`). A front end that went away (closed
+/// pipe) ends the import.
+fn progress(event: serde_json::Value) {
+    if !PROGRESS.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut out = std::io::stdout().lock();
+    if writeln!(out, "{event}").and_then(|()| out.flush()).is_err() {
+        std::process::exit(1);
+    }
+}
+
+fn main() -> std::process::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+    PROGRESS.store(cli.progress_json, Ordering::Relaxed);
+    match run(cli) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            log::error!("{err:#}");
+            progress(serde_json::json!({ "event": "error", "message": format!("{err:#}") }));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     let install = Bf2Install::open(&cli.bf2)?;
+    let out_dir = cli
+        .out
+        .clone()
+        .unwrap_or_else(|| game_data::paths::DataDirs::resolve(cli.data_dir.clone(), None, None).imported);
+    let started_run = Instant::now();
 
     match cli.command {
-        Command::List => {
-            for mod_name in install.mods() {
-                println!("{mod_name}");
-                for level in install.levels(&mod_name) {
-                    println!("  {}", level.name);
+        Command::List { json } => {
+            if json {
+                let mods: Vec<serde_json::Value> = install
+                    .mods()
+                    .into_iter()
+                    .map(|m| {
+                        let levels: Vec<String> = install.levels(&m).into_iter().map(|l| l.name).collect();
+                        serde_json::json!({
+                            "name": m,
+                            "title": mod_title_of(&install, &m),
+                            "base": Bf2Install::is_base_mod(&m),
+                            "levels": levels,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::json!({ "root": install.root(), "mods": mods }));
+            } else {
+                for mod_name in install.mods() {
+                    println!("{mod_name}");
+                    for level in install.levels(&mod_name) {
+                        println!("  {}", level.name);
+                    }
                 }
             }
         }
         Command::Level {
             names,
             all,
+            base_game,
+            resume,
             bf2_mod,
             namespace,
             mod_title,
         } => {
             let mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| install.mods());
-            let levels = if all {
+            let levels: Vec<bf2_formats::LevelInfo> = if all {
                 mods.iter().flat_map(|m| install.levels(m)).collect()
+            } else if base_game {
+                // `bf2` first: a level both ship comes from the base game once.
+                let mut base: Vec<String> = install.mods().into_iter().filter(|m| Bf2Install::is_base_mod(m)).collect();
+                base.sort_by_key(|m| !m.eq_ignore_ascii_case("bf2"));
+                let mut levels: Vec<bf2_formats::LevelInfo> = Vec::new();
+                for level in base.iter().flat_map(|m| install.levels(m)) {
+                    if !levels.iter().any(|l| l.name.eq_ignore_ascii_case(&level.name)) {
+                        levels.push(level);
+                    }
+                }
+                levels
             } else {
                 if names.is_empty() {
-                    bail!("name at least one level, or pass --all");
+                    bail!("name at least one level, or pass --all or --base-game");
                 }
                 names
                     .iter()
@@ -170,17 +276,62 @@ fn main() -> Result<()> {
                     );
                 }
             }
-            std::fs::create_dir_all(&cli.out)?;
-            write_readme(&cli.out)?;
-            let soldier_mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| default_soldier_mods(&install));
-            import_soldiers(&install, &cli.out, &soldier_mods);
+            let out = out_dir.as_path();
+            std::fs::create_dir_all(out)?;
+            write_readme(out)?;
+            let mut state = ImportState::load(out);
+            let all_count = levels.len();
+            let levels: Vec<_> = if resume {
+                levels.into_iter().filter(|l| !state.is_done(l)).collect()
+            } else {
+                levels
+            };
+            let skipped = all_count - levels.len();
+            progress(serde_json::json!({
+                "event": "plan",
+                "total": levels.len(),
+                "skipped": skipped,
+                "levels": levels.iter().map(|l| serde_json::json!({ "name": l.name, "mod": l.mod_name })).collect::<Vec<_>>(),
+            }));
+            if let Some(namespace) = &namespace {
+                write_mod_ron(out, namespace, mod_title.as_deref(), bf2_mod.as_deref())?;
+            }
+            let (mut ok, mut failed) = (0, 0);
+            if !levels.is_empty() {
+                progress(serde_json::json!({ "event": "stage", "stage": "soldiers" }));
+                let soldier_mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| default_soldier_mods(&install));
+                import_soldiers(&install, out, &soldier_mods);
+            }
             let localization = Localization::load(&install, "english");
             log::info!("{} localized strings", localization.len());
             let mod_title = mod_title.as_deref().or(namespace.as_deref());
-            for level in levels {
+            let total = levels.len();
+            for (index, level) in levels.into_iter().enumerate() {
                 let started = Instant::now();
                 log::info!("importing {} ({})", level.name, level.mod_name);
-                match level::import_level(&install, &level, &localization, &cli.out, namespace.as_deref(), mod_title) {
+                progress(serde_json::json!({
+                    "event": "level", "index": index, "total": total, "name": level.name, "mod": level.mod_name,
+                }));
+                let result = level::import_level(&install, &level, &localization, out, namespace.as_deref(), mod_title);
+                let seconds = started.elapsed().as_secs_f32();
+                match &result {
+                    Ok(report) => {
+                        ok += 1;
+                        state.mark_done(out, &level);
+                        progress(serde_json::json!({
+                            "event": "level_done", "index": index, "name": level.name, "ok": true,
+                            "seconds": seconds, "warnings": report.failed_meshes.len(), "error": null,
+                        }));
+                    }
+                    Err(err) => {
+                        failed += 1;
+                        progress(serde_json::json!({
+                            "event": "level_done", "index": index, "name": level.name, "ok": false,
+                            "seconds": seconds, "warnings": 0, "error": format!("{err:#}"),
+                        }));
+                    }
+                }
+                match result {
                     Ok(report) => {
                         log::info!(
                             "{}: {} statics, {} roads, {} kits, {} weapons, {} vehicles, {} templates, {} mesh files, modes [{}] in {:.1}s",
@@ -205,10 +356,14 @@ fn main() -> Result<()> {
                     Err(err) => log::error!("{}: {err:#}", level.name),
                 }
             }
+            progress(serde_json::json!({
+                "event": "done", "ok": ok, "failed": failed, "skipped": skipped,
+                "seconds": started_run.elapsed().as_secs_f32(),
+            }));
         }
         Command::Soldiers { bf2_mod } => {
             let mods = bf2_mod.map(|m| vec![m]).unwrap_or_else(|| default_soldier_mods(&install));
-            import_soldiers(&install, &cli.out, &mods)
+            import_soldiers(&install, &out_dir, &mods)
         }
         Command::Ai { names, all, bf2_mod } => {
             let mods = bf2_mod.clone().map(|m| vec![m]).unwrap_or_else(|| install.mods());
@@ -221,7 +376,7 @@ fn main() -> Result<()> {
                     .collect::<Result<Vec<_>, _>>()?
             };
             for level in levels {
-                match ai::import_only(&install, &level, &cli.out) {
+                match ai::import_only(&install, &level, &out_dir) {
                     Ok((areas, weapons)) => log::info!("{}: {areas} strategic areas, {weapons} weapon templates", level.name),
                     Err(err) => log::warn!("{}: {err:#}", level.name),
                 }
@@ -241,7 +396,7 @@ fn main() -> Result<()> {
                     .collect::<Result<Vec<_>, _>>()?
             };
             for level in levels {
-                match lighting::import_only(&install, &level, &cli.out) {
+                match lighting::import_only(&install, &level, &out_dir) {
                     Ok(Some(l)) => log::info!(
                         "{}: static sky {:?} sun {:?}, terrain GI {:?} sun {:?} (lightmap sun x{:.2}){}",
                         level.name,
@@ -257,7 +412,13 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Kits { bf2_mod } => import_kits(&install, &cli.out, &bf2_mod)?,
+        Command::Kits { bf2_mod } => {
+            progress(serde_json::json!({ "event": "stage", "stage": format!("kits ({bf2_mod})") }));
+            import_kits(&install, &out_dir, &bf2_mod)?;
+            progress(serde_json::json!({
+                "event": "done", "ok": 0, "failed": 0, "skipped": 0, "seconds": started_run.elapsed().as_secs_f32(),
+            }));
+        }
         Command::Check { r#mod } => check(&install, &r#mod)?,
     }
     Ok(())
@@ -398,4 +559,80 @@ fn write_readme(out: &std::path::Path) -> Result<()> {
          Do not commit, upload or redistribute these files.\n",
     )?;
     Ok(())
+}
+
+/// The title in a BF2 mod's `Mod.desc` (`<title> Allied Intent Xtended 2.0 </title>`), else
+/// the folder name.
+fn mod_title_of(install: &Bf2Install, mod_name: &str) -> String {
+    let dir = install.mod_dir(mod_name);
+    let text = std::fs::read(dir.join("Mod.desc"))
+        .or_else(|_| std::fs::read(dir.join("mod.desc")))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let lower = text.to_ascii_lowercase();
+    lower
+        .find("<title>")
+        .and_then(|start| {
+            let start = start + "<title>".len();
+            let end = start + lower[start..].find("</title>")?;
+            Some(text[start..end].trim().to_string())
+        })
+        // The base game's are localization keys (`MODDESC_BF2_TITLE`).
+        .filter(|t| !t.is_empty() && !t.starts_with("MODDESC_"))
+        .unwrap_or_else(|| mod_name.to_string())
+}
+
+/// A namespaced import is a mod of the game: gives its folder a `mod.ron` (unless it has one)
+/// so the game finds it (`game_shared::mods`).
+fn write_mod_ron(out: &Path, namespace: &str, title: Option<&str>, bf2_mod: Option<&str>) -> Result<()> {
+    let path = out.join("mod.ron");
+    if path.exists() {
+        return Ok(());
+    }
+    let name = title.unwrap_or(namespace);
+    let source = bf2_mod.map_or(String::new(), |m| format!(" from the BF2 mod `mods/{m}`"));
+    let description = format!(
+        "Imported{source} by bf2-import: its levels are namespaced `{namespace}_*`. Converted from a local BF2 installation: personal use only, do not redistribute."
+    );
+    std::fs::write(&path, format!("(\n    name: {name:?},\n    description: {description:?},\n    priority: 10,\n)\n"))?;
+    Ok(())
+}
+
+/// Levels finished in an output folder, for `level --resume`: `<out>/import-state.json`.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ImportState {
+    /// `<bf2 mod>/<level folder>`, lowercase.
+    done: Vec<String>,
+}
+
+impl ImportState {
+    const FILE: &str = "import-state.json";
+
+    fn load(out: &Path) -> Self {
+        std::fs::read(out.join(Self::FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn key(level: &bf2_formats::LevelInfo) -> String {
+        format!("{}/{}", level.mod_name, level.name).to_lowercase()
+    }
+
+    fn is_done(&self, level: &bf2_formats::LevelInfo) -> bool {
+        self.done.contains(&Self::key(level))
+    }
+
+    fn mark_done(&mut self, out: &Path, level: &bf2_formats::LevelInfo) {
+        let key = Self::key(level);
+        if !self.done.contains(&key) {
+            self.done.push(key);
+        }
+        let write = serde_json::to_vec_pretty(self)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Ok(std::fs::write(out.join(Self::FILE), bytes)?));
+        if let Err(err) = write {
+            log::warn!("{}: {err:#}", out.join(Self::FILE).display());
+        }
+    }
 }

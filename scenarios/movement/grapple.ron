@@ -9,6 +9,9 @@
     level: "warlord",
     team: 2,
     bots: 0,
+    // Not what this checks, and the toolshed teleport sits close enough to the map's edge
+    // for the countdown to kill the player before the rope settles.
+    out_of_bounds: Some(false),
     steps: [
         WaitReady,
         ForbidLog("panicked"),
@@ -107,7 +110,12 @@
         Wait(1.0),
         Screenshot("sloped_swing"),
         ExpectLog("grapple rope settled", 8.0),
-        ViewRope(6.0, 60.0),
+        // `ViewRope` places the camera off `Rope::out()`, the horizontal anchor-to-top
+        // direction; caught over a ridge rather than a wall ledge, this rope's anchor and top
+        // are nearly the same point, so that direction is near-degenerate and put the camera
+        // in the eave. A plain `Teleport` to a known-clear spot (north of the eave, matching
+        // the clearance east of it the throw itself used) stands in for it here.
+        Teleport((-93.3, 100.5, 105.6), 20.0, 10.0),
         Wait(1.0),
         Screenshot("sloped"),
 

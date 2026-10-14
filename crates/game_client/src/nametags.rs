@@ -42,6 +42,7 @@ use game_shared::{
 
 use crate::{
     camera::PlayerCamera,
+    combat::DrawnTargets,
     conquest_hud::{ENEMY, FRIENDLY, SQUAD},
     deploy::DeployScreen,
     menu::{Menu, Screen},
@@ -144,28 +145,37 @@ fn spawn_root(mut commands: Commands) {
     ));
 }
 
-/// Resolves the child hitbox collider a ray hit back to the soldier entity it belongs to.
-fn soldier_of(hit: Entity, parents: &Query<&ChildOf>, soldiers: &Query<(), With<Soldier>>) -> Option<Entity> {
-    let root = parents.get(hit).map(|c| c.parent()).unwrap_or(hit);
-    soldiers.contains(root).then_some(root)
-}
-
-/// What the crosshair is on, and how long it's been there.
+/// What the crosshair is on, and how long it's been there. Tested against soldiers' hit
+/// zones as drawn ([`DrawnTargets`], the same geometry bullets are checked against), not the
+/// old movement capsule: that collider's `Transform` is never kept in sync client-side for
+/// anyone but the local player, so every other soldier's hitbox used to sit at the world
+/// origin here.
 fn update_aim(
     time: Res<Time>,
     camera: Single<&GlobalTransform, With<PlayerCamera>>,
     spatial: SpatialQuery,
-    local_hitbox: Query<&Hitbox, With<LocalSoldier>>,
-    parents: Query<&ChildOf>,
-    soldiers: Query<(), With<Soldier>>,
+    local_soldier: Query<Entity, With<LocalSoldier>>,
+    drawn: DrawnTargets,
     mut aim: ResMut<AimState>,
 ) {
     let dt = time.delta_secs();
     let camera = *camera;
-    let excluded: Vec<Entity> = local_hitbox.iter().map(|h| h.entity).collect();
-    let filter = SpatialQueryFilter::from_mask([GameLayer::World, GameLayer::Soldier]).with_excluded_entities(excluded);
-    let hit = spatial.cast_ray(camera.translation(), camera.forward(), AIM_MAX_RANGE, true, &filter);
-    aim.raw = hit.and_then(|hit| soldier_of(hit.entity, &parents, &soldiers));
+    let origin = camera.translation();
+    let direction = camera.forward();
+    // A wall (not another soldier) stops the ray first: through-wall reveals would defeat the
+    // point of this.
+    let world_filter = SpatialQueryFilter::from_mask(GameLayer::World);
+    let max = spatial
+        .cast_ray(origin, direction, AIM_MAX_RANGE, true, &world_filter)
+        .map_or(AIM_MAX_RANGE, |hit| hit.distance);
+    let me = local_soldier.iter().next();
+    let targets = drawn.collect();
+    let hit = targets
+        .iter()
+        .filter(|target| Some(target.entity) != me)
+        .filter_map(|target| Some((target.entity, drawn.ray(target, origin, *direction, max)?)))
+        .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance));
+    aim.raw = hit.map(|(entity, _)| entity);
     match aim.raw {
         Some(entity) => {
             if aim.target != Some(entity) {
@@ -174,7 +184,7 @@ fn update_aim(
             } else {
                 aim.dwell += dt;
             }
-            aim.distance = hit.map_or(0.0, |h| h.distance);
+            aim.distance = hit.map_or(0.0, |(_, h)| h.distance);
             aim.since_lost = 0.0;
         }
         None => {

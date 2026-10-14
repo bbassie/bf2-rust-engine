@@ -15,6 +15,9 @@ mod levels;
 mod loading;
 mod pages;
 mod preview;
+// --- First run / BF2 content import (see setup.rs) ---
+pub mod setup;
+// --- end first run ---
 pub mod text_input;
 mod voice;
 mod widgets;
@@ -82,6 +85,7 @@ impl Plugin for MenuPlugin {
                 account::AccountUiPlugin,
                 voice::VoiceUiPlugin,
                 text_input::TextInputPlugin,
+                setup::SetupUiPlugin, // --- First run ---
             ))
             .insert_state(self.start)
             .init_resource::<Menu>()

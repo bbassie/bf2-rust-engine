@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
+pub use game_data::paths::DataDirs;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::mods::{self, Mod};
@@ -19,29 +20,33 @@ pub struct GamePaths {
 
 impl GamePaths {
     /// Environment variable that overrides the imported assets folder.
-    pub const IMPORTED_ENV: &str = "GAME_IMPORTED_DIR";
+    pub const IMPORTED_ENV: &str = game_data::paths::IMPORTED_ENV;
     /// Environment variable that overrides the mods folder.
-    pub const MODS_ENV: &str = "GAME_MODS_DIR";
+    pub const MODS_ENV: &str = game_data::paths::MODS_ENV;
 
     /// Resolves paths from an optional CLI override, then the environment, then the default
-    /// (`imported/` and `mods/` in the working directory).
+    /// data root (see [`game_data::paths`]: `imported/` and `mods/` in the working directory
+    /// of a checkout, else the per-user data folder).
     pub fn resolve(cli_imported: Option<PathBuf>) -> Self {
         Self::resolve_with_mods(cli_imported, None)
     }
 
     /// Like [`Self::resolve`], with an optional CLI override of the mods folder.
     pub fn resolve_with_mods(cli_imported: Option<PathBuf>, cli_mods: Option<PathBuf>) -> Self {
-        let absolute = |path: PathBuf| std::path::absolute(&path).unwrap_or(path);
-        let imported = cli_imported
-            .or_else(|| std::env::var_os(Self::IMPORTED_ENV).map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("imported"));
-        let mods_dir = cli_mods
-            .or_else(|| std::env::var_os(Self::MODS_ENV).map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("mods"));
-        // Absolute, so asset sources don't resolve them relative to the executable.
+        Self::from_dirs(&DataDirs::resolve(None, cli_imported, cli_mods))
+    }
+
+    /// Like [`Self::resolve_with_mods`], with `--data-dir` too.
+    pub fn resolve_in(data_dir: Option<PathBuf>, cli_imported: Option<PathBuf>, cli_mods: Option<PathBuf>) -> Self {
+        Self::from_dirs(&DataDirs::resolve(data_dir, cli_imported, cli_mods))
+    }
+
+    /// The imported folder and the mods found in the mods folder of `dirs`. Absolute, so
+    /// asset sources don't resolve them relative to the executable.
+    pub fn from_dirs(dirs: &DataDirs) -> Self {
         Self {
-            imported: absolute(imported),
-            mods: mods::discover(&absolute(mods_dir)),
+            imported: dirs.imported.clone(),
+            mods: mods::discover(&dirs.mods),
         }
     }
 
@@ -94,6 +99,9 @@ impl GamePaths {
 
 /// Says which mods are on.
 pub fn log_mods(paths: Option<Res<GamePaths>>) {
+    if let Some(paths) = &paths {
+        info!("content: imported assets in {}", paths.imported.display());
+    }
     for m in paths.iter().flat_map(|p| &p.mods) {
         info!("mod `{}` (priority {}) from {}", m.info.name, m.info.priority, m.dir.display());
     }

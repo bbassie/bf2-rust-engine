@@ -6,7 +6,7 @@
 // client --scenario scenarios/conquest/nametags.ron --out target/scenarios/nametags
 (
     level: "strike_at_karkand",
-    bots: 16,
+    bots: 8,
     team: 2,
     steps: [
         WaitReady,
@@ -38,11 +38,13 @@
         Radio(Spotted),
         Wait(0.5),
         Screenshot("enemy_spotted"),
-        // Aim at a close enemy: the name flashes up in red, briefly.
+        // Aim at a close enemy: the name flashes up in red, briefly. `TrackEnemy` keeps the
+        // crosshair on his torso every frame instead of guessing a fixed `Look` pitch, whose
+        // few-degree margin for error at 8 m made this miss (low, into his legs' hit zone's
+        // edge) as often as it hit.
         Log("aim reveal"),
         SummonEnemy(8.0),
-        Look(180.0, -6.0),
-        Wait(0.5),
+        TrackEnemy(0.6, 1.0),
         ExpectLog("nametag: aim reveal on", 2.0),
         Screenshot("enemy_aim_reveal"),
         // Looking away again: the reveal should lapse.

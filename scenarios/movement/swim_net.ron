@@ -3,8 +3,14 @@
 // it, and swims for a while. Traces the prediction correction the whole time: it should stay
 // ~0 (`step_soldier` is deterministic, so the client's own swim prediction should match the
 // server's exactly, same as walking).
-// server --level gulf_of_oman --bots 0
-// client --connect 127.0.0.1 --scenario scenarios/movement/swim_net.ron --out target/scenarios/swim/net
+// The only boats on this map's 64-size layout sit by the US Carrier and River Fortification,
+// both team 2 bases; team 1's bases (the default for a lone joiner: `conquest::balance_team`
+// picks the team with no more players, which is a tie's winner) are all 600+ m from the
+// nearest one, well past what `WalkToVehicle` will walk. The scenario's own `team` field is a
+// no-op here (`Cli::team` only applies when hosting, per its doc comment) so one throwaway bot
+// tips the balance onto team 2 for us instead.
+// server --level gulf_of_oman --bots 1 --port 16601
+// client --connect 127.0.0.1 --port 16601 --scenario scenarios/movement/swim_net.ron --out target/scenarios/swim/net
 (
     steps: [
         WaitReady,

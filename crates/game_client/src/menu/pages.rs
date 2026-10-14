@@ -663,6 +663,7 @@ fn settings_tab_content(
                 switch(c, Toggle::ColorblindTeamColors);
                 c.spawn(text("not yet wired to an engine hook", 12.0, DIM));
             });
+            setup::settings_row(p); // --- First run: BF2 content import ---
             caches::settings_row(p);
             download::settings_row(p);
         }

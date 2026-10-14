@@ -134,12 +134,23 @@ pub struct Cli {
     /// Number of bots when hosting or in singleplayer.
     #[arg(long, default_value_t = 7)]
     bots: u32,
-    /// Folder with converted assets (default: ./imported or $GAME_IMPORTED_DIR).
+    /// Data folder holding `imported/` and `mods/` (default: the working directory when it
+    /// has them, else the per-user data folder, or $BF2_DATA_DIR; see docs/ARCHITECTURE.md,
+    /// "Packaging").
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    /// Folder with converted assets (default: `imported` in the data folder, or
+    /// $GAME_IMPORTED_DIR).
     #[arg(long)]
     imported: Option<PathBuf>,
-    /// Folder with mods (default: ./mods or $GAME_MODS_DIR); see docs/MODDING.md.
+    /// Folder with mods (default: `mods` in the data folder, or $GAME_MODS_DIR); see
+    /// docs/MODDING.md.
     #[arg(long)]
     mods: Option<PathBuf>,
+    /// Open the BF2 content import page at the main menu even when content is imported
+    /// (it opens by itself when there is none).
+    #[arg(long)]
+    setup: bool,
     /// Downloading a server's content when joining: ask, always or never (default: the
     /// setting; scenarios and screenshots: always).
     #[arg(long)]
@@ -301,7 +312,8 @@ fn main() -> AppExit {
     if let Some((scenario, _)) = &scenario {
         scenario.apply(&mut cli);
     }
-    let paths = GamePaths::resolve_with_mods(cli.imported.clone(), cli.mods.clone());
+    let data_dirs = game_shared::config::DataDirs::resolve(cli.data_dir.clone(), cli.imported.clone(), cli.mods.clone());
+    let paths = GamePaths::from_dirs(&data_dirs);
     let settings_file = SettingsFile::locate(cli.settings.clone(), scenario.is_some());
     let settings = settings_file.load();
     let menu_scenario = scenario.as_ref().is_some_and(|(s, _)| s.menu);
@@ -408,6 +420,7 @@ fn main() -> AppExit {
         app.insert_resource(cache);
     }
     app.insert_resource(paths);
+    app.insert_resource(menu::setup::DataLocation(data_dirs));
 
     if cli.diagnostics {
         app.add_plugins((

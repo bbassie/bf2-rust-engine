@@ -484,7 +484,7 @@ fn unmount(world: &mut World) {
 }
 
 /// What the game loaded from disk at startup comes from the other layers now.
-fn reload_libraries(world: &mut World) {
+pub(crate) fn reload_libraries(world: &mut World) {
     let _ = world.run_system_cached(crate::audio::load_library);
     let _ = world.run_system_cached(crate::effects::load_library);
     let _ = world.run_system_cached(crate::gadgets::load_assets);
