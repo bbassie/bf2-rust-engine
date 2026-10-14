@@ -2191,8 +2191,12 @@ impl BotBrain {
         }
         let ride = self.ride_spot;
         let swim = !cut_off && self.ride_swim && self.ride_wait < RIDE_WAIT && ride.is_some_and(|at| flat(at - position).length() < 80.0);
-        self.awaiting_ride = cut_off || swim;
-        if swim {
+        // A ride that never comes (none nearby, or a pocket nobody can reach) must not leave
+        // it treading water forever: cut off gets the same time limit a long swim does, and
+        // then falls through to the rest of this (which, swimming, means the swim-exit code
+        // in `act` takes over and looks for somewhere to climb or wade out).
+        self.awaiting_ride = (cut_off || swim) && self.ride_wait < RIDE_WAIT;
+        if cut_off || swim {
             self.ride_wait += dt;
         }
         if self.awaiting_ride {
@@ -3484,9 +3488,20 @@ const SHORE_DEPTH: f32 = 0.25;
 /// swim to first. Looks up to 160 m out.
 fn nearest_shore(nav: &NavGrid, blocked: Option<&NavBlocked>, water: Option<f32>, from: Vec3, failed: &[Vec3]) -> Option<(Vec3, Option<Vec3>)> {
     let region = nav.locate(from, 4.0, None).map(|c| nav.cell(c).region);
+    let water = water?;
     // (vehicles) A patch of bottom no shore connects to (a ledge below a cliff, a hollow of
     // the channel): any shore at all, the swimmer is at the surface.
-    shore_in(nav, blocked, water?, from, failed, region).or_else(|| region.and_then(|_| shore_in(nav, blocked, water?, from, failed, None)))
+    shore_in(nav, blocked, water, from, failed, region)
+        .or_else(|| region.and_then(|_| shore_in(nav, blocked, water, from, failed, None)))
+        // A small pocket (a carrier's stern behind a bulkhead) may have only one or two ways
+        // out at all; once both are `failed` (the swim there keeps stalling, maybe just from
+        // crowding or a `swim_detour` that didn't find its way round that time) there is
+        // nothing left to try and it would otherwise tread water for good. Give the ones it
+        // already tried another go rather than none: `act`'s swim code retries the vehicle
+        // nav each time anyway, so a repeat is still better than giving up on swimming
+        // entirely (the lead to a ride, if any, is unaffected by this).
+        .or_else(|| shore_in(nav, blocked, water, from, &[], region))
+        .or_else(|| shore_in(nav, blocked, water, from, &[], None))
 }
 
 fn shore_in(
